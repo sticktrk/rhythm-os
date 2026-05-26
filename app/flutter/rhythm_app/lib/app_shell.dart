@@ -199,9 +199,17 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      // Clear any nested-tab navigation pushed on top of the home tab so the
-      // user lands back on the room grid.
-      _navKeys[MainNavTab.home]?.currentState?.popUntil((route) => route.isFirst);
+      // A removed server hub means the LightBox pairing is gone. Collapse any
+      // nested tab stacks and send the user back to Home, where the hardware
+      // onboarding gate is shown when there are no rooms.
+      for (final navKey in _navKeys.values) {
+        navKey.currentState?.popUntil((route) => route.isFirst);
+      }
+      setState(() {
+        _tabIndex = _tabs.indexOf(MainNavTab.home);
+        _builtTabs.add(MainNavTab.home);
+        _serverLostConnection = false;
+      });
       _serverRemovalCleanupPending = false;
     });
   }
@@ -410,7 +418,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       ),
     );
   }
-
 
   /// Bottom-nav tab visibility — all five tabs are always rendered so the
   /// navbar shape stays stable. Tabs whose dependencies aren't met get

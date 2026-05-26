@@ -779,6 +779,24 @@ class _DefaultTransitionEditorScreenState
     _lastButtonBindingSignature = _serverSync.daySleepToggleBindingSignature;
   }
 
+  void _clearButton() {
+    unawaited(_serverSync.unbindDaySleepToggleButton().then((ok) {
+      if (!mounted) return;
+      if (!ok) {
+        _showSaveFeedback('Could not clear Button trigger.', error: true);
+        return;
+      }
+      setState(() {
+        _buttonEnabled = false;
+        _toggleButtonDeviceId = null;
+        _pendingButton = null;
+        _bindState = _ButtonBindState.idle;
+      });
+      _lastButtonBindingSignature =
+          _serverSync.daySleepToggleBindingSignature;
+    }));
+  }
+
   _MockButtonDevice _simulateServerForwardedPress() {
     final pool =
         _buttonDevices.where((d) => d.id != _toggleButtonDeviceId).toList();
@@ -1302,36 +1320,19 @@ class _DefaultTransitionEditorScreenState
   }
 
   Widget _buildButtonSectionBody() {
-    final dayColor = widget.profileColors[RhythmMode.day] ??
-        _fallbackModeColor(RhythmMode.day);
-    final sleepColor = widget.profileColors[RhythmMode.sleep] ??
-        _fallbackModeColor(RhythmMode.sleep);
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 4, 10, 14),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
-            child: _ButtonToggleBridgeChip(
-              dayColor: dayColor,
-              sleepColor: sleepColor,
-              deviceName: _resolveButtonDevice(_toggleButtonDeviceId)?.name ??
-                  _pendingButton?.name,
-            ),
-          ),
-          _ButtonListenStage(
-            bindState: _bindState,
-            pulse: _listenPulseController,
-            accent: _chromeAccent,
-            boundDevice: _resolveButtonDevice(_toggleButtonDeviceId),
-            pendingDevice: _pendingButton,
-            onListen: _startListening,
-            onCancel: _cancelListening,
-            onRetry: _startListening,
-            onConfirm: _confirmDetected,
-          ),
-        ],
+      child: _ButtonListenStage(
+        bindState: _bindState,
+        pulse: _listenPulseController,
+        accent: _chromeAccent,
+        boundDevice: _resolveButtonDevice(_toggleButtonDeviceId),
+        pendingDevice: _pendingButton,
+        onListen: _startListening,
+        onCancel: _cancelListening,
+        onRetry: _startListening,
+        onConfirm: _confirmDetected,
+        onClear: _clearButton,
       ),
     );
   }
@@ -1388,8 +1389,7 @@ class _DefaultTransitionEditorScreenState
   }
 
   /// Pair of summary chips for the TIME source, rendered inside the time
-  /// accordion. The BUTTON source uses [_ButtonToggleBridgeChip] instead
-  /// because a single button drives both directions.
+  /// accordion.
   Widget _buildSourceSummaryChips({
     required Color dayColor,
     required Color sleepColor,
@@ -2578,252 +2578,6 @@ class _CelestialSwitch extends StatelessWidget {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Button toggle bridge chip
-//
-// Replaces the paired Day Start / Sleep Start chips inside the Button source
-// accordion. A single button is wired to toggle BOTH starts, so showing two
-// separate chips here implies two distinct triggers and misleads. Instead,
-// this widget renders one card with Day Start on the left, Sleep Start on
-// the right, and an explicit `⇄` bridge between them carrying the device
-// name — visually communicating "one press flips Day ⇄ Sleep".
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class _ButtonToggleBridgeChip extends StatelessWidget {
-  final Color dayColor;
-  final Color sleepColor;
-  final String? deviceName;
-
-  const _ButtonToggleBridgeChip({
-    required this.dayColor,
-    required this.sleepColor,
-    required this.deviceName,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final bound = deviceName != null && deviceName!.trim().isNotEmpty;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(4, 10, 4, 10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        // The horizontal gradient is the load-bearing visual cue: a tinted
-        // wash flowing day → sleep makes the card read as one continuous
-        // surface that *both* modes share, instead of two halves sitting
-        // next to each other.
-        gradient: LinearGradient(
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-          colors: [
-            dayColor.withValues(alpha: 0.10),
-            Color.lerp(dayColor, sleepColor, 0.5)!.withValues(alpha: 0.05),
-            sleepColor.withValues(alpha: 0.10),
-          ],
-          stops: const [0.0, 0.5, 1.0],
-        ),
-        border: Border.all(
-          color: Color.lerp(dayColor, sleepColor, 0.5)!.withValues(alpha: 0.22),
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                child: _BridgeEnd(
-                  mode: RhythmMode.day,
-                  color: dayColor,
-                  alignEnd: false,
-                ),
-              ),
-              _BridgeConnector(
-                dayColor: dayColor,
-                sleepColor: sleepColor,
-              ),
-              Expanded(
-                child: _BridgeEnd(
-                  mode: RhythmMode.sleep,
-                  color: sleepColor,
-                  alignEnd: true,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // When a button is bound, surface its name in a plate centered
-          // under the connector. When unbound, drop the plate entirely (it
-          // read as a tappable target) and replace it with a non-interactive
-          // caption pointing at the Listen action right below.
-          if (bound)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(10, 5, 10, 6),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.04),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: Color.lerp(dayColor, sleepColor, 0.5)!
-                        .withValues(alpha: 0.28),
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.radio_button_checked_rounded,
-                      size: 12,
-                      color: Color.lerp(dayColor, sleepColor, 0.5)!
-                          .withValues(alpha: 0.85),
-                    ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        deviceName!.trim(),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: CelestialColors.textPrimary
-                              .withValues(alpha: 0.92),
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.1,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          if (bound) const SizedBox(height: 4),
-          // Footer doubles as the prompt-to-act when unbound; once bound it
-          // reverts to describing the toggle behavior.
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (!bound) ...[
-                Icon(
-                  Icons.south_rounded,
-                  size: 11,
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
-                ),
-                const SizedBox(width: 5),
-              ],
-              Text(
-                bound
-                    ? 'One press toggles Day ⇄ Sleep'
-                    : 'Listen below to bind a button',
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// One end of the bridge — Day on the left, Sleep on the right. Renders the
-/// mode icon + `MODE START` label in the mode's accent color so the chip's
-/// edges still telegraph which mode they correspond to.
-class _BridgeEnd extends StatelessWidget {
-  final RhythmMode mode;
-  final Color color;
-  final bool alignEnd;
-
-  const _BridgeEnd({
-    required this.mode,
-    required this.color,
-    required this.alignEnd,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final children = <Widget>[
-      Icon(_modeIcon(mode), size: 14, color: color),
-      const SizedBox(width: 6),
-      Flexible(
-        child: Text(
-          '${_modeLabel(mode).toUpperCase()} START',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: color,
-            fontSize: 11.5,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 0.6,
-          ),
-        ),
-      ),
-    ];
-    return Padding(
-      padding: alignEnd
-          ? const EdgeInsets.only(right: 10)
-          : const EdgeInsets.only(left: 10),
-      child: Row(
-        mainAxisAlignment:
-            alignEnd ? MainAxisAlignment.end : MainAxisAlignment.start,
-        children: alignEnd ? children.reversed.toList() : children,
-      ),
-    );
-  }
-}
-
-/// Pill in the dead center of the bridge carrying the `⇄` glyph. This is
-/// the visual hinge that says "these two ends share a single trigger".
-class _BridgeConnector extends StatelessWidget {
-  final Color dayColor;
-  final Color sleepColor;
-
-  const _BridgeConnector({
-    required this.dayColor,
-    required this.sleepColor,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final blend = Color.lerp(dayColor, sleepColor, 0.5)!;
-    return Container(
-      width: 30,
-      height: 22,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.rectangle,
-        borderRadius: BorderRadius.circular(11),
-        gradient: LinearGradient(
-          colors: [
-            dayColor.withValues(alpha: 0.22),
-            sleepColor.withValues(alpha: 0.22),
-          ],
-        ),
-        border: Border.all(color: blend.withValues(alpha: 0.40)),
-        boxShadow: [
-          BoxShadow(
-            color: blend.withValues(alpha: 0.18),
-            blurRadius: 10,
-            spreadRadius: -2,
-          ),
-        ],
-      ),
-      child: Icon(
-        Icons.compare_arrows_rounded,
-        size: 14,
-        color: blend.withValues(alpha: 0.95),
-      ),
-    );
-  }
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Listen-flow stage
 //
 // Four states share a single morphing surface: unbound (no button yet),
@@ -2842,6 +2596,7 @@ class _ButtonListenStage extends StatelessWidget {
   final VoidCallback onCancel;
   final VoidCallback onRetry;
   final VoidCallback onConfirm;
+  final VoidCallback onClear;
 
   const _ButtonListenStage({
     required this.bindState,
@@ -2853,6 +2608,7 @@ class _ButtonListenStage extends StatelessWidget {
     required this.onCancel,
     required this.onRetry,
     required this.onConfirm,
+    required this.onClear,
   });
 
   @override
@@ -2907,6 +2663,7 @@ class _ButtonListenStage extends StatelessWidget {
             accent: accent,
             device: bound,
             onListen: onListen,
+            onClear: onClear,
           );
         }
         return _ListenStateUnbound(
@@ -2936,19 +2693,19 @@ class _ListenStateUnbound extends StatelessWidget {
       key: const ValueKey('unbound-col'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        _RadarStage(
-          accent: accent,
-          pulse: null,
-          mode: _RadarStageMode.dormant,
-          diameter: 168,
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text(
+            'Tap Listen, then press a button on your remote.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.2,
+            ),
+          ),
         ),
-        const SizedBox(height: 14),
-        _ListenCaption(
-          accent: accent,
-          title: 'No button bound yet',
-          subtitle: 'Tap Listen, then press a remote.',
-        ),
-        const SizedBox(height: 14),
         _ListenPrimaryCta(
           accent: accent,
           icon: Icons.sensors_rounded,
@@ -2984,16 +2741,16 @@ class _ListenStateListening extends StatelessWidget {
           accent: accent,
           pulse: pulse,
           mode: _RadarStageMode.scanning,
-          diameter: 168,
+          diameter: 140,
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
         _ListenCaption(
           accent: accent,
-          title: 'Listening for a press…',
+          title: 'Listening…',
           subtitle: 'Press any button on your remote.',
           live: true,
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
         _ListenGhostCta(
           accent: accent,
           icon: Icons.close_rounded,
@@ -3027,35 +2784,20 @@ class _ListenStateDetected extends StatelessWidget {
       key: const ValueKey('detected-col'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        _RadarStage(
-          accent: accent,
-          pulse: null,
-          mode: _RadarStageMode.locked,
-          diameter: 132,
-        ),
-        const SizedBox(height: 14),
-        Text(
-          'Got one!',
-          style: TextStyle(
-            color: accent.withValues(alpha: 0.95),
-            fontSize: 13,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 1.6,
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text(
+            'Got one!',
+            style: TextStyle(
+              color: accent.withValues(alpha: 0.95),
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.2,
+            ),
           ),
         ),
-        const SizedBox(height: 10),
         _DetectedDeviceCard(accent: accent, device: device),
-        const SizedBox(height: 8),
-        Text(
-          'Is this the right button?',
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.2,
-          ),
-        ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Row(
           children: [
             Expanded(
@@ -3088,12 +2830,14 @@ class _ListenStateBound extends StatelessWidget {
   final Color accent;
   final _MockButtonDevice device;
   final VoidCallback onListen;
+  final VoidCallback onClear;
 
   const _ListenStateBound({
     super.key,
     required this.accent,
     required this.device,
     required this.onListen,
+    required this.onClear,
   });
 
   @override
@@ -3103,37 +2847,30 @@ class _ListenStateBound extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          padding: const EdgeInsets.fromLTRB(12, 12, 14, 12),
+          padding: const EdgeInsets.fromLTRB(12, 10, 14, 10),
           decoration: BoxDecoration(
-            color: accent.withValues(alpha: 0.06),
+            color: accent.withValues(alpha: 0.05),
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: accent.withValues(alpha: 0.22)),
+            border: Border.all(color: accent.withValues(alpha: 0.15)),
           ),
           child: Row(
             children: [
               Container(
-                width: 34,
-                height: 34,
+                width: 30,
+                height: 30,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: accent.withValues(alpha: 0.14),
-                  border: Border.all(color: accent.withValues(alpha: 0.42)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: accent.withValues(alpha: 0.18),
-                      blurRadius: 12,
-                      spreadRadius: -3,
-                    ),
-                  ],
+                  color: accent.withValues(alpha: 0.10),
+                  border: Border.all(color: accent.withValues(alpha: 0.30)),
                 ),
                 child: Icon(
                   Icons.check_rounded,
-                  size: 16,
-                  color: accent.withValues(alpha: 0.95),
+                  size: 14,
+                  color: accent.withValues(alpha: 0.85),
                 ),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3144,45 +2881,109 @@ class _ListenStateBound extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color:
-                            CelestialColors.textPrimary.withValues(alpha: 0.95),
-                        fontSize: 13.5,
+                        color: CelestialColors.textPrimary
+                            .withValues(alpha: 0.92),
+                        fontSize: 13,
                         fontWeight: FontWeight.w700,
                         letterSpacing: 0.1,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 1),
                     Text(
-                      device.location ?? 'Paired and ready',
+                      device.location ?? 'Bound',
                       style: TextStyle(
                         color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.65),
+                            .withValues(alpha: 0.55),
                         fontSize: 11,
                         fontWeight: FontWeight.w500,
-                        letterSpacing: 0.2,
                       ),
                     ),
                   ],
                 ),
               ),
-              Text(
-                'BOUND',
-                style: TextStyle(
-                  color: accent.withValues(alpha: 0.72),
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 1.4,
-                ),
-              ),
             ],
           ),
         ),
-        const SizedBox(height: 12),
-        _ListenGhostCta(
-          accent: accent,
-          icon: Icons.sensors_rounded,
-          label: 'Listen for a different button',
-          onTap: onListen,
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: GestureDetector(
+                onTap: onClear,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    color: accent.withValues(alpha: 0.04),
+                    border: Border.all(
+                      color: accent.withValues(alpha: 0.18),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.link_off_rounded,
+                        size: 13,
+                        color: accent.withValues(alpha: 0.6),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        'Unbind',
+                        style: TextStyle(
+                          color: accent.withValues(alpha: 0.6),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: GestureDetector(
+                onTap: onListen,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    color: accent.withValues(alpha: 0.06),
+                    border:
+                        Border.all(color: accent.withValues(alpha: 0.18)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.sensors_rounded,
+                        size: 13,
+                        color: accent.withValues(alpha: 0.7),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        'Rebind',
+                        style: TextStyle(
+                          color: accent.withValues(alpha: 0.7),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );

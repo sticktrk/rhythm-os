@@ -285,6 +285,14 @@ class RoomProvider extends ChangeNotifier {
   /// Get direct color for a room (from direct-color profiles), or null.
   (int r, int g, int b)? getRoomColor(String roomId) => _roomColor[roomId];
 
+  /// Set room color locally with a 3s optimistic lock.
+  void setRoomColorLocal(String roomId, int r, int g, int b) {
+    _roomColor[roomId] = (r, g, b);
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    notifyListeners();
+  }
+
   /// Get the timestamp of the last rhythm tick for a room.
   DateTime? getLastTickTime(String roomId) => _lastTickTime[roomId];
 

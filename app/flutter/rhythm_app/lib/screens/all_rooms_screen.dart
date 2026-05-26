@@ -50,6 +50,31 @@ class AllRoomsScreen extends StatefulWidget {
   State<AllRoomsScreen> createState() => _AllRoomsScreenState();
 }
 
+class _RoomGridItem {
+  const _RoomGridItem.room(this.room, {required this.isHalfWidth})
+      : isPlaceholder = false;
+
+  const _RoomGridItem.placeholder({required this.isHalfWidth})
+      : room = null,
+        isPlaceholder = true;
+
+  final RoomDto? room;
+  final bool isHalfWidth;
+  final bool isPlaceholder;
+}
+
+class _DropTarget {
+  const _DropTarget({
+    required this.index,
+    required this.rect,
+    required this.isHalfWidth,
+  });
+
+  final int index;
+  final Rect rect;
+  final bool isHalfWidth;
+}
+
 class _AllRoomsScreenState extends State<AllRoomsScreen> {
   Timer? _edgeScrollTimer;
   static const _edgeScrollZone = 28.0;
@@ -324,19 +349,87 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         .where((room) => room.id != draggedId)
         .toList();
 
+    final targets = <_DropTarget>[];
     for (var i = 0; i < pageRooms.length; i++) {
       final room = pageRooms[i];
       final key = _cardKeys[room.id];
       final box = key?.currentContext?.findRenderObject() as RenderBox?;
       if (box == null) continue;
-      final cardTop = box.localToGlobal(Offset.zero).dy;
-      final cardHeight = box.size.height;
-      if (_dragPosition.dy < cardTop + cardHeight / 2) {
-        return i;
+      final topLeft = box.localToGlobal(Offset.zero);
+      targets.add(
+        _DropTarget(
+          index: i,
+          rect: topLeft & box.size,
+          isHalfWidth: _isHalfWidthCard(room),
+        ),
+      );
+    }
+
+    if (targets.isEmpty) return pageRooms.length;
+
+    targets.sort(_compareTargetsByPosition);
+    final rows = _groupDropTargetsIntoRows(targets);
+    for (final row in rows) {
+      final rowTop = row.map((target) => target.rect.top).reduce(math.min);
+      final rowBottom =
+          row.map((target) => target.rect.bottom).reduce(math.max);
+
+      if (_dragPosition.dy < rowTop) {
+        return row.map((target) => target.index).reduce(math.min);
+      }
+
+      if (_dragPosition.dy <= rowBottom) {
+        final fullWidthTarget = row.length == 1 && !row.first.isHalfWidth;
+        if (fullWidthTarget) {
+          final target = row.first;
+          return _dragPosition.dy < target.rect.center.dy
+              ? target.index
+              : target.index + 1;
+        }
+
+        final orderedRow = List<_DropTarget>.from(row)
+          ..sort((a, b) => a.rect.left.compareTo(b.rect.left));
+        for (final target in orderedRow) {
+          if (_dragPosition.dx < target.rect.center.dx) {
+            return target.index;
+          }
+        }
+        return orderedRow.last.index + 1;
       }
     }
 
     return pageRooms.length;
+  }
+
+  int _compareTargetsByPosition(_DropTarget a, _DropTarget b) {
+    const rowTolerance = 8.0;
+    final topDelta = a.rect.top - b.rect.top;
+    if (topDelta.abs() > rowTolerance) {
+      return topDelta.sign.toInt();
+    }
+    return a.rect.left.compareTo(b.rect.left);
+  }
+
+  List<List<_DropTarget>> _groupDropTargetsIntoRows(
+    List<_DropTarget> targets,
+  ) {
+    const rowTolerance = 8.0;
+    final rows = <List<_DropTarget>>[];
+    for (final target in targets) {
+      if (rows.isEmpty) {
+        rows.add([target]);
+        continue;
+      }
+
+      final row = rows.last;
+      final rowTop = row.map((entry) => entry.rect.top).reduce(math.min);
+      if ((target.rect.top - rowTop).abs() <= rowTolerance) {
+        row.add(target);
+      } else {
+        rows.add([target]);
+      }
+    }
+    return rows;
   }
 
   void _updateHoverTarget() {
@@ -428,27 +521,34 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
-  bool _isCompactCard(RoomDto room) => room.kind == RoomNodeKind.lightDevice;
+  bool _isHalfWidthCard(RoomDto room) => room.kind.isLightAddressable;
 
-  List<List<RoomDto>> _buildRows(List<RoomDto> rooms) {
-    final rows = <List<RoomDto>>[];
+  List<_RoomGridItem> _roomGridItems(List<RoomDto> rooms) {
+    return [
+      for (final room in rooms)
+        _RoomGridItem.room(room, isHalfWidth: _isHalfWidthCard(room)),
+    ];
+  }
+
+  List<List<_RoomGridItem>> _buildRows(List<_RoomGridItem> items) {
+    final rows = <List<_RoomGridItem>>[];
     var index = 0;
-    while (index < rooms.length) {
-      final room = rooms[index];
-      if (!_isCompactCard(room)) {
-        rows.add([room]);
+    while (index < items.length) {
+      final item = items[index];
+      if (!item.isHalfWidth) {
+        rows.add([item]);
         index++;
         continue;
       }
 
       final nextIndex = index + 1;
-      if (nextIndex < rooms.length && _isCompactCard(rooms[nextIndex])) {
-        rows.add([room, rooms[nextIndex]]);
+      if (nextIndex < items.length && items[nextIndex].isHalfWidth) {
+        rows.add([item, items[nextIndex]]);
         index += 2;
         continue;
       }
 
-      rows.add([room]);
+      rows.add([item]);
       index++;
     }
     return rows;
@@ -462,6 +562,24 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       pageCount: pageProvider.pageCount,
     );
     pageProvider.enterEditMode();
+  }
+
+  void _exitEditMode() {
+    HapticFeedback.lightImpact();
+    final pageProvider = context.read<RoomPageProvider>();
+    pageProvider.exitEditMode();
+    AnalyticsService().logRoomLayoutEditCompleted(
+      roomCount: widget.rooms.length,
+      pageCount: pageProvider.pageCount,
+    );
+  }
+
+  Widget _buildEditModeDismissRegion(Widget child) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onDoubleTap: _exitEditMode,
+      child: child,
+    );
   }
 
   Widget _buildRoomCard({
@@ -490,30 +608,60 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
+  Widget _buildGridItem({
+    required _RoomGridItem item,
+    required bool powerSave,
+    required bool editMode,
+  }) {
+    if (item.isPlaceholder) {
+      return _buildDropPlaceholder();
+    }
+
+    final room = item.room!;
+    final isDraggedRoom =
+        editMode && room.id == _draggingRoomId && _dragSourcePage != null;
+    return _buildRoomCard(
+      room: room,
+      powerSave: powerSave,
+      editMode: editMode,
+      isDragging: isDraggedRoom,
+      collapseWhileDragging: isDraggedRoom,
+    );
+  }
+
   Widget _buildRoomRowsList({
     required List<RoomDto> rooms,
     required bool powerSave,
     required double bottomPad,
     required bool editMode,
   }) {
-    final rows = _buildRows(rooms);
+    return _buildRoomGridList(
+      items: _roomGridItems(rooms),
+      powerSave: powerSave,
+      bottomPad: bottomPad,
+      editMode: editMode,
+    );
+  }
+
+  Widget _buildRoomGridList({
+    required List<_RoomGridItem> items,
+    required bool powerSave,
+    required double bottomPad,
+    required bool editMode,
+  }) {
+    final rows = _buildRows(items);
     return ListView.builder(
       padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
       itemCount: rows.length,
       itemBuilder: (context, index) {
         final row = rows[index];
-        if (row.length == 1 && !_isCompactCard(row.first)) {
-          final room = row.first;
-          final isDraggedRoom =
-              editMode && room.id == _draggingRoomId && _dragSourcePage != null;
+        if (row.length == 1 && !row.first.isHalfWidth) {
           return Padding(
             padding: const EdgeInsets.only(bottom: 12),
-            child: _buildRoomCard(
-              room: room,
+            child: _buildGridItem(
+              item: row.first,
               powerSave: powerSave,
               editMode: editMode,
-              isDragging: isDraggedRoom,
-              collapseWhileDragging: isDraggedRoom,
             ),
           );
         }
@@ -527,16 +675,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                 if (i > 0) const SizedBox(width: 12),
                 Expanded(
                   child: i < row.length
-                      ? _buildRoomCard(
-                          room: row[i],
+                      ? _buildGridItem(
+                          item: row[i],
                           powerSave: powerSave,
                           editMode: editMode,
-                          isDragging: editMode &&
-                              row[i].id == _draggingRoomId &&
-                              _dragSourcePage != null,
-                          collapseWhileDragging: editMode &&
-                              row[i].id == _draggingRoomId &&
-                              _dragSourcePage != null,
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -556,13 +698,15 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     required bool editMode,
   }) {
     if (rooms.isEmpty && editMode && pageIndex != _hoverPage) {
-      return Center(
-        child: Text(
-          'Drag rooms here',
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-            fontSize: 16,
-            fontWeight: FontWeight.w500,
+      return _buildEditModeDismissRegion(
+        Center(
+          child: Text(
+            'Drag rooms here',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       );
@@ -585,65 +729,58 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     }
 
     if (_draggingRoomId == null) {
-      return _buildRoomRowsList(
-        rooms: rooms,
-        powerSave: powerSave,
-        bottomPad: bottomPad,
-        editMode: true,
+      return _buildEditModeDismissRegion(
+        _buildRoomRowsList(
+          rooms: rooms,
+          powerSave: powerSave,
+          bottomPad: bottomPad,
+          editMode: true,
+        ),
       );
     }
 
-    // Edit mode: keep the dragged card mounted so its gesture stream survives,
-    // but collapse it in-place while a separate placeholder marks the drop slot.
-    final draggedIndex = _draggingRoomId == null
-        ? -1
-        : rooms.indexWhere((room) => room.id == _draggingRoomId);
-    final nonDraggedCount =
-        draggedIndex == -1 ? rooms.length : rooms.length - 1;
-    final rawPlaceholderIndex = pageIndex == _hoverPage
+    final visibleRooms = rooms
+        .where((room) => room.id != _draggingRoomId)
+        .toList(growable: false);
+    final nonDraggedCount = visibleRooms.length;
+    final placeholderIndex = pageIndex == _hoverPage
         ? (_hoverIndex ?? nonDraggedCount).clamp(0, nonDraggedCount)
         : null;
-    final placeholderIndex = rawPlaceholderIndex == null
-        ? null
-        : draggedIndex != -1 && rawPlaceholderIndex > draggedIndex
-            ? rawPlaceholderIndex + 1
-            : rawPlaceholderIndex;
 
-    return ListView.builder(
-      padding: EdgeInsets.fromLTRB(16, 4, 16, bottomPad),
-      itemCount: rooms.length + (placeholderIndex == null ? 0 : 1),
-      itemBuilder: (context, index) {
-        if (placeholderIndex != null && index == placeholderIndex) {
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: _buildDropPlaceholder(),
-          );
-        }
-
-        final roomIndex = placeholderIndex != null && index > placeholderIndex
-            ? index - 1
-            : index;
-        final room = rooms[roomIndex];
-        final key = _cardKeys.putIfAbsent(room.id, () => GlobalKey());
-        final isDraggedRoom =
-            room.id == _draggingRoomId && pageIndex == _dragSourcePage;
-        return Padding(
-          key: key,
-          padding: const EdgeInsets.only(bottom: 12),
-          child: EditableRoomCard(
-            roomId: room.id,
-            globalConfig: widget.globalConfig,
-            curveData: widget.curveData,
-            powerSave: powerSave,
-            editMode: true,
-            onEnterEditMode: () {},
-            isDragging: isDraggedRoom,
-            collapseWhileDragging: isDraggedRoom,
-            onDragStart: _onHandleDragStart,
+    final draggedRoom = _roomById(_draggingRoomId);
+    final items = <_RoomGridItem>[];
+    for (var i = 0; i <= visibleRooms.length; i++) {
+      if (placeholderIndex != null && i == placeholderIndex) {
+        items.add(
+          _RoomGridItem.placeholder(
+            isHalfWidth:
+                draggedRoom == null ? true : _isHalfWidthCard(draggedRoom),
           ),
         );
-      },
+      }
+      if (i < visibleRooms.length) {
+        final room = visibleRooms[i];
+        items
+            .add(_RoomGridItem.room(room, isHalfWidth: _isHalfWidthCard(room)));
+      }
+    }
+
+    return _buildEditModeDismissRegion(
+      _buildRoomGridList(
+        items: items,
+        powerSave: powerSave,
+        bottomPad: bottomPad,
+        editMode: true,
+      ),
     );
+  }
+
+  RoomDto? _roomById(String? roomId) {
+    if (roomId == null) return null;
+    for (final room in widget.rooms) {
+      if (room.id == roomId) return room;
+    }
+    return null;
   }
 
   Widget _buildDropPlaceholder() {
@@ -690,15 +827,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               ),
             ),
             GestureDetector(
-              onTap: () {
-                HapticFeedback.lightImpact();
-                final pageProvider = context.read<RoomPageProvider>();
-                pageProvider.exitEditMode();
-                AnalyticsService().logRoomLayoutEditCompleted(
-                  roomCount: widget.rooms.length,
-                  pageCount: pageProvider.pageCount,
-                );
-              },
+              onTap: _exitEditMode,
               child: Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 6),

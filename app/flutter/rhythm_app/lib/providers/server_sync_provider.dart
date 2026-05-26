@@ -54,6 +54,7 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<RhythmMotionTimer>? _motionTimerSub;
   StreamSubscription<RhythmModeResource>? _modeChangedSub;
   StreamSubscription<RhythmSettings>? _settingsChangedSub;
+  StreamSubscription<RhythmLightBreaker>? _lightBreakerChangedSub;
   StreamSubscription<void>? _newNodesSub;
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
@@ -123,6 +124,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether automatic firmware updates are enabled on the server.
   /// Default true to match server contract for new installs / missing field.
   bool _autoUpdate = true;
+
+  /// Whether autonomous global light control is enabled on the server.
+  bool _lightBreakerEnabled = true;
 
   /// Active global mode from the server (`day` / `sleep`).
   RhythmMode? _activeMode;
@@ -204,6 +208,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether automatic firmware updates are enabled on the server.
   bool get autoUpdate => _autoUpdate;
+
+  /// Whether autonomous global light control is enabled on the server.
+  bool get lightBreakerEnabled => _lightBreakerEnabled;
 
   /// Whether sleep mode is active on the server.
   bool get sleepMode => _activeMode == RhythmMode.sleep;
@@ -580,6 +587,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _modeChangedSub = _connection.modeChangedEvents.listen(_onModeChanged);
     _settingsChangedSub =
         _connection.settingsChangedEvents.listen(_onSettingsChanged);
+    _lightBreakerChangedSub =
+        _connection.lightBreakerChangedEvents.listen(_onLightBreakerChanged);
     _newNodesSub = _connection.newNodesDetected.listen(_onNewNodesDetected);
     _triageChangedSub =
         _connection.triageChangedEvents.listen(_onTriageChanged);
@@ -799,6 +808,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _powerSave = hello.settings?.powerSave ?? true;
     _autoUpdate = hello.settings?.autoUpdate ?? true;
+    _lightBreakerEnabled = hello.lightBreaker?.enabled ?? true;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
     _inputBindings = [...hello.inputBindings];
@@ -1051,6 +1061,13 @@ class ServerSyncProvider extends ChangeNotifier {
     _enforcePowerSaveEntitlement();
   }
 
+  /// Handle light-breaker updates so the global control switch stays live.
+  void _onLightBreakerChanged(RhythmLightBreaker lightBreaker) {
+    if (_lightBreakerEnabled == lightBreaker.enabled) return;
+    _lightBreakerEnabled = lightBreaker.enabled;
+    notifyListeners();
+  }
+
   /// Handle new nodes detected in poll — trigger a full re-hello.
   void _onNewNodesDetected(void _) {
     debugPrint('ServerSync: New nodes detected in poll — triggering re-hello');
@@ -1171,6 +1188,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverPlatformContext = 'server';
       _powerSave = true;
       _autoUpdate = true;
+      _lightBreakerEnabled = true;
       _activeMode = null;
       _activeProfileId = null;
       _helloNodes = [];
@@ -1266,6 +1284,29 @@ class ServerSyncProvider extends ChangeNotifier {
 
   bool dispatchBrightness(String roomId, int brightness) =>
       dispatchNodeBrightness(roomId, brightness);
+
+  /// Set a node's direct color (RGB) via the server runtime.
+  ///
+  /// Returns true if dispatched to server, false if not connected.
+  bool dispatchNodeColor(String nodeId, int r, int g, int b) {
+    _roomProvider.setRoomColorLocal(nodeId, r, g, b);
+    if (HueServiceLocator.isDemoMode) {
+      DemoServerApi.instance.updateRoomLightState(
+        nodeId,
+        on: true,
+        brightness: _roomProvider.getBrightness(nodeId),
+        kelvin: null,
+        color: (r, g, b),
+      );
+      return true;
+    }
+    if (!_connection.connected) return false;
+    _connection.api.nodeColor(nodeId: nodeId, r: r, g: g, b: b);
+    return true;
+  }
+
+  bool dispatchRoomColor(String roomId, int r, int g, int b) =>
+      dispatchNodeColor(roomId, r, g, b);
 
   /// Push node preferences to the server (user-state only, no topology).
   void pushNodePreferences(String nodeId,
@@ -1411,6 +1452,27 @@ class ServerSyncProvider extends ChangeNotifier {
     return success;
   }
 
+  /// Set global autonomous light control on the server.
+  Future<bool> setLightBreakerEnabled(bool enabled) async {
+    final previous = _lightBreakerEnabled;
+    if (_lightBreakerEnabled != enabled) {
+      _lightBreakerEnabled = enabled;
+      notifyListeners();
+    }
+
+    final success = HueServiceLocator.isDemoMode
+        ? await DemoServerApi.instance.setLightBreaker(enabled)
+        : _connection.connected
+            ? await api.setLightBreaker(enabled)
+            : false;
+
+    if (!success && _lightBreakerEnabled == enabled) {
+      _lightBreakerEnabled = previous;
+      notifyListeners();
+    }
+    return success;
+  }
+
   /// Replace mode transitions on the server with an optimistic local cache
   /// update. Callers should use this instead of `api.setTransitions` directly
   /// so local transition state cannot drift when a throttled refresh is skipped.
@@ -1535,6 +1597,16 @@ class ServerSyncProvider extends ChangeNotifier {
       binding.copyWith(enabled: enabled),
     );
     if (updated.isEmpty) return false;
+    _inputBindings = updated;
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> unbindDaySleepToggleButton() async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final binding = daySleepToggleInputBinding;
+    if (binding == null) return true;
+    final updated = await api.deleteInputBinding(binding.id);
     _inputBindings = updated;
     notifyListeners();
     return true;
@@ -1912,6 +1984,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final snapshot = DemoServerApi.instance.snapshot();
     final roomDtos = DemoServerApi.instance.buildRoomDtos();
     final settings = await DemoServerApi.instance.getSettings();
+    final lightBreaker = await DemoServerApi.instance.getLightBreaker();
     final mode = await DemoServerApi.instance.getMode();
 
     _firmwareVersion = DemoServerApi.firmwareVersion;
@@ -1919,6 +1992,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformContext = DemoServerApi.serverPlatformContext;
     _powerSave = settings?.powerSave ?? true;
     _autoUpdate = settings?.autoUpdate ?? true;
+    _lightBreakerEnabled = lightBreaker?.enabled ?? true;
     _activeMode = mode?.active;
     _activeProfileId = null;
     _modeTransitions = await DemoServerApi.instance.getTransitions();
@@ -2307,6 +2381,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _motionTimerSub?.cancel();
     _modeChangedSub?.cancel();
     _settingsChangedSub?.cancel();
+    _lightBreakerChangedSub?.cancel();
     _newNodesSub?.cancel();
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();

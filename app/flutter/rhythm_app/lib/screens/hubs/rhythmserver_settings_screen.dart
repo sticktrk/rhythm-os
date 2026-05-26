@@ -28,6 +28,7 @@ import '../../services/device_restart_service.dart';
 import '../../services/ota_service.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
+import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
@@ -310,11 +311,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
   }
 
-  void _openDiagnostics() {
-    AnalyticsService().logRhythmServerLogsOpened();
-    _RhythmServerDiagnosticsScreen.show(context, client: _client);
-  }
-
   // ─── Connection status helpers ───────────────────────────
 
   String _connectionStatusText(RhythmConnectionState state) {
@@ -372,6 +368,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       const SizedBox(height: 8),
                       _buildHeroSection(http),
                       const SizedBox(height: 24),
+                      _buildLightControlSection(),
+                      const SizedBox(height: 16),
                       _buildVersionSection(),
                       if (_supportsDebugBundle) ...[
                         const SizedBox(height: 16),
@@ -379,8 +377,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       ],
                       const SizedBox(height: 24),
                       if (_isBridge) ...[
-                        _buildDiagnosticsButton(),
-                        const SizedBox(height: 12),
                         _buildRebootButton(),
                         const SizedBox(height: 12),
                       ] else if (_supportsRestartEndpoint) ...[
@@ -655,6 +651,103 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   // ─── Sections ──────────────────────────────────────────────
+
+  Widget _buildLightControlSection() {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final connected =
+        syncProvider.connectionState == RhythmConnectionState.connected;
+    final enabled = syncProvider.lightBreakerEnabled;
+    final statusText = connected ? (enabled ? 'Active' : 'Paused') : 'Offline';
+    final statusColor = !connected
+        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
+        : enabled
+            ? const Color(0xFF22C55E)
+            : const Color(0xFFE8A54B);
+
+    return _buildSection(
+      title: 'LIGHT CONTROL',
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: statusColor.withValues(alpha: 0.16),
+                  ),
+                  child: Icon(
+                    Icons.power_settings_new_rounded,
+                    color: statusColor,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Flexible(
+                            child: Text(
+                              'Global Light Control',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: CelestialColors.textPrimary,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          InfoTooltip(
+                            message:
+                                'Pauses any automatic behavior from this LightHub until enabled again.',
+                            iconSize: 13,
+                            accentColor: statusColor,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        statusText,
+                        style: TextStyle(
+                          color: statusColor,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Switch.adaptive(
+                  value: enabled,
+                  activeTrackColor: const Color(0xFF22C55E),
+                  onChanged: connected
+                      ? (next) => unawaited(
+                            syncProvider.setLightBreakerEnabled(next),
+                          )
+                      : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
   Widget _buildVersionSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
@@ -1353,49 +1446,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (remaining.inMinutes < 1) return 'in ${remaining.inSeconds}s';
     if (remaining.inHours < 1) return 'in ${remaining.inMinutes}m';
     return 'in ${remaining.inHours}h';
-  }
-
-  Widget _buildDiagnosticsButton() {
-    return GestureDetector(
-      onTap: _isOnline ? _openDiagnostics : null,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: _isOnline
-              ? Colors.white.withValues(alpha: 0.04)
-              : Colors.white.withValues(alpha: 0.02),
-          border: Border.all(
-            color: _isOnline
-                ? CelestialColors.textSecondary.withValues(alpha: 0.2)
-                : CelestialColors.textSecondary.withValues(alpha: 0.1),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.monitor_heart_outlined,
-              color: _isOnline
-                  ? CelestialColors.textSecondary
-                  : CelestialColors.textSecondary.withValues(alpha: 0.4),
-              size: 18,
-            ),
-            const SizedBox(width: 10),
-            Text(
-              'Diagnostics',
-              style: TextStyle(
-                color: _isOnline
-                    ? CelestialColors.textSecondary
-                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Future<void> _handleReboot() async {
@@ -3252,35 +3302,6 @@ class _RhythmServerDiagnosticsScreen extends StatefulWidget {
   final RhythmDiagnosticsApi client;
 
   const _RhythmServerDiagnosticsScreen({required this.client});
-
-  static Future<void> show(BuildContext context,
-      {required RhythmDiagnosticsApi client}) {
-    return Navigator.of(context).push(
-      PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black54,
-        pageBuilder: (context, animation, secondaryAnimation) {
-          return _RhythmServerDiagnosticsScreen(client: client);
-        },
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final curve = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-            reverseCurve: Curves.easeInCubic,
-          );
-          return SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 1),
-              end: Offset.zero,
-            ).animate(curve),
-            child: child,
-          );
-        },
-        transitionDuration: const Duration(milliseconds: 350),
-        reverseTransitionDuration: const Duration(milliseconds: 300),
-      ),
-    );
-  }
 
   @override
   State<_RhythmServerDiagnosticsScreen> createState() =>

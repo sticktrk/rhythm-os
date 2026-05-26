@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'room_card.dart';
-import 'solar_orbit.dart';
 
 /// Wraps a [RoomCard] with edit-mode behavior: wiggle animation and drag support.
 ///
@@ -112,7 +111,7 @@ class _EditableRoomCardState extends State<EditableRoomCard>
       );
     }
 
-    // Edit mode: wiggle + drag handle
+    // Edit mode: wiggle + full-card drag target.
     final card = AnimatedBuilder(
       animation: _wiggleController,
       builder: (context, child) {
@@ -127,61 +126,41 @@ class _EditableRoomCardState extends State<EditableRoomCard>
         child: Stack(
           children: [
             IgnorePointer(child: _buildCard()),
-            // Drag handle — centered on the card, eagerly claims gesture.
+            // The whole card acts as the drag hit target in edit mode. The
+            // card itself is the affordance, so no separate handle is needed.
             Positioned.fill(
-              child: Align(
-                alignment: Alignment.center,
-                child: Transform.translate(
-                  offset: const Offset(0, -10),
-                  child: RawGestureDetector(
-                    gestures: <Type, GestureRecognizerFactory>{
-                      _EagerPanRecognizer: GestureRecognizerFactoryWithHandlers<
-                          _EagerPanRecognizer>(
-                        () => _EagerPanRecognizer(),
-                        (recognizer) {
-                          recognizer.onStart = (details) {
-                            HapticFeedback.mediumImpact();
-                            final pointer = _dragPointerId;
-                            if (pointer != null) {
-                              widget.onDragStart?.call(
-                                widget.roomId,
-                                pointer,
-                                details.globalPosition,
-                              );
-                            }
-                          };
-                        },
-                      ),
-                    },
-                    child: Listener(
-                      onPointerDown: (event) {
-                        _dragPointerId = event.pointer;
+              child: Listener(
+                onPointerDown: (event) {
+                  _dragPointerId = event.pointer;
+                },
+                onPointerCancel: (_) {
+                  _dragPointerId = null;
+                },
+                onPointerUp: (_) {
+                  _dragPointerId = null;
+                },
+                child: RawGestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  gestures: <Type, GestureRecognizerFactory>{
+                    _EagerPanRecognizer: GestureRecognizerFactoryWithHandlers<
+                        _EagerPanRecognizer>(
+                      () => _EagerPanRecognizer(),
+                      (recognizer) {
+                        recognizer.onStart = (details) {
+                          HapticFeedback.mediumImpact();
+                          final pointer = _dragPointerId;
+                          if (pointer != null) {
+                            widget.onDragStart?.call(
+                              widget.roomId,
+                              pointer,
+                              details.globalPosition,
+                            );
+                          }
+                        };
                       },
-                      onPointerCancel: (_) {
-                        _dragPointerId = null;
-                      },
-                      onPointerUp: (_) {
-                        _dragPointerId = null;
-                      },
-                      child: Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: CelestialColors.backgroundCard.withValues(
-                            alpha: 0.6,
-                          ),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Icon(
-                          Icons.drag_indicator_rounded,
-                          color: CelestialColors.textSecondary.withValues(
-                            alpha: 0.7,
-                          ),
-                          size: 20,
-                        ),
-                      ),
                     ),
-                  ),
+                  },
+                  child: const SizedBox.expand(),
                 ),
               ),
             ),
@@ -207,7 +186,7 @@ class _EditableRoomCardState extends State<EditableRoomCard>
 /// Pan recognizer that immediately wins the gesture arena.
 ///
 /// Prevents the parent [ListView] scroll from claiming drag gestures that
-/// start on the drag handle, while still reporting both horizontal and
+/// start on a card, while still reporting both horizontal and
 /// vertical movement for cross-page dragging.
 class _EagerPanRecognizer extends PanGestureRecognizer {
   @override

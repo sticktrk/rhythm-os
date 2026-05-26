@@ -54,6 +54,7 @@ class DemoServerApi extends RhythmServerApi {
   int _nextRoomOrdinal = 1;
   bool _powerSave = true;
   bool _autoUpdate = true;
+  bool _lightBreakerEnabled = true;
   RhythmMode _activeMode = RhythmMode.day;
 
   Stream<void> get changes => _changes.stream;
@@ -90,6 +91,7 @@ class DemoServerApi extends RhythmServerApi {
     _seeded = true;
     _powerSave = true;
     _autoUpdate = true;
+    _lightBreakerEnabled = true;
     _activeMode = RhythmMode.day;
     _nextRoomOrdinal = 5;
     _nodeStates.clear();
@@ -467,6 +469,7 @@ class DemoServerApi extends RhythmServerApi {
     required bool on,
     int? brightness,
     int? kelvin,
+    (int, int, int)? color,
     RoomModeState? state,
   }) {
     ensureSeeded();
@@ -481,6 +484,9 @@ class DemoServerApi extends RhythmServerApi {
     }
     if (kelvin != null) {
       room['kelvin'] = kelvin;
+    }
+    if (color != null) {
+      room['color'] = {'r': color.$1, 'g': color.$2, 'b': color.$3};
     }
   }
 
@@ -516,6 +522,22 @@ class DemoServerApi extends RhythmServerApi {
       mutated = true;
     }
     if (mutated) {
+      _changes.add(null);
+    }
+    return true;
+  }
+
+  @override
+  Future<RhythmLightBreaker?> getLightBreaker() async {
+    ensureSeeded();
+    return RhythmLightBreaker(enabled: _lightBreakerEnabled);
+  }
+
+  @override
+  Future<bool> setLightBreaker(bool enabled) async {
+    ensureSeeded();
+    if (_lightBreakerEnabled != enabled) {
+      _lightBreakerEnabled = enabled;
       _changes.add(null);
     }
     return true;

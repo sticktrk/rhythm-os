@@ -125,13 +125,12 @@ const _bulb1 = RoomDto(
   brightnessOffset: 0,
 );
 
-const _bulb2 = RoomDto(
-  id: 'bulb-2',
-  name: 'Bulb 2',
+const _room1 = RoomDto(
+  id: 'room-1',
+  name: 'Kitchen',
   source: RoomSourceDto.hue,
-  kind: RoomNodeKind.lightDevice,
-  parentId: 'room-1',
-  deviceIds: ['device-2'],
+  kind: RoomNodeKind.room,
+  deviceIds: ['device-1'],
   rhythmEnabled: true,
   disabled: false,
   lightsOn: true,
@@ -139,8 +138,151 @@ const _bulb2 = RoomDto(
   brightnessOffset: 0,
 );
 
+const _switch1 = RoomDto(
+  id: 'switch-1',
+  name: 'Wall Switch',
+  source: RoomSourceDto.matter,
+  kind: RoomNodeKind.switchDevice,
+  deviceIds: ['switch-device-1'],
+  rhythmEnabled: false,
+  disabled: false,
+  lightsOn: false,
+  timeOffsetMinutes: 0,
+  brightnessOffset: 0,
+);
+
+class _AllRoomsHarness {
+  const _AllRoomsHarness({required this.roomPageProvider});
+
+  final RoomPageProvider roomPageProvider;
+}
+
+Future<_AllRoomsHarness> _pumpAllRooms(
+  WidgetTester tester, {
+  required List<RoomDto> rooms,
+}) async {
+  final roomProvider = RoomProvider();
+  final homeProvider = _FakeHomeProvider();
+  final connection = _TestRhythmConnection();
+  final serverSync = ServerSyncProvider(
+    connection: connection,
+    roomProvider: roomProvider,
+    homeProvider: homeProvider,
+  );
+  final roomPageProvider = RoomPageProvider(
+    layoutStore: _MemoryRoomPageLayoutStore(),
+  );
+  final pageController = PageController();
+
+  addTearDown(roomProvider.dispose);
+  addTearDown(homeProvider.dispose);
+  addTearDown(serverSync.dispose);
+  addTearDown(connection.dispose);
+  addTearDown(roomPageProvider.dispose);
+  addTearDown(pageController.dispose);
+  addTearDown(() => tester.binding.setSurfaceSize(null));
+
+  for (final room in rooms) {
+    await roomProvider.addRoom(room);
+  }
+  await tester.binding.setSurfaceSize(const Size(390, 844));
+
+  await tester.pumpWidget(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+        ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
+        ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ChangeNotifierProvider<RoomPageProvider>.value(
+          value: roomPageProvider,
+        ),
+      ],
+      child: MaterialApp(
+        home: Scaffold(
+          body: AllRoomsScreen(
+            rooms: rooms,
+            globalConfig: defaultCurveConfig,
+            pageController: pageController,
+            onPageChanged: (_) {},
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+
+  return _AllRoomsHarness(roomPageProvider: roomPageProvider);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('room cards show the default room icon', (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    final roomPageProvider = RoomPageProvider(
+      layoutStore: _MemoryRoomPageLayoutStore(),
+    );
+
+    addTearDown(roomProvider.dispose);
+    addTearDown(homeProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(roomPageProvider.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await roomProvider.addRoom(_room1);
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+          ChangeNotifierProvider<RoomPageProvider>.value(
+              value: roomPageProvider),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: AllRoomsScreen(
+              rooms: const [_room1],
+              globalConfig: defaultCurveConfig,
+              pageController: PageController(),
+              onPageChanged: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.byIcon(Icons.meeting_room_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
+  });
+
+  testWidgets('rooms and bulbs share the half-width grid', (tester) async {
+    await _pumpAllRooms(
+      tester,
+      rooms: const [_bulb1, _room1, _switch1],
+    );
+
+    final bulb = tester.getRect(_roomCardContainer('bulb-1'));
+    final room = tester.getRect(_roomCardContainer('room-1'));
+    final fullWidth = tester.getRect(_roomCardContainer('switch-1'));
+
+    expect(bulb.top, closeTo(room.top, 0.1));
+    expect(bulb.width, closeTo(room.width, 0.1));
+    expect(fullWidth.width, greaterThan(bulb.width * 1.8));
+    expect(fullWidth.left, closeTo(bulb.left, 0.1));
+  });
 
   testWidgets('idle compact bulb cards do not show the mood pill',
       (tester) async {
@@ -195,7 +337,7 @@ void main() {
   });
 
   testWidgets(
-      'compact bulb cards stay compact when long-press enters edit mode',
+      'half-width room and bulb cards stay compact when long-press enters edit mode',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
@@ -217,7 +359,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await roomProvider.addRoom(_bulb1);
-    await roomProvider.addRoom(_bulb2);
+    await roomProvider.addRoom(_room1);
     await tester.binding.setSurfaceSize(const Size(390, 844));
 
     await tester.pumpWidget(
@@ -232,7 +374,7 @@ void main() {
         child: MaterialApp(
           home: Scaffold(
             body: AllRoomsScreen(
-              rooms: const [_bulb1, _bulb2],
+              rooms: const [_bulb1, _room1],
               globalConfig: defaultCurveConfig,
               pageController: PageController(),
               onPageChanged: (_) {},
@@ -244,21 +386,78 @@ void main() {
     await tester.pump();
 
     final beforeBulb1 = tester.getRect(_roomCardContainer('bulb-1'));
-    final beforeBulb2 = tester.getRect(_roomCardContainer('bulb-2'));
+    final beforeRoom1 = tester.getRect(_roomCardContainer('room-1'));
 
-    expect(beforeBulb1.width, closeTo(beforeBulb2.width, 0.1));
+    expect(beforeBulb1.width, closeTo(beforeRoom1.width, 0.1));
 
     await tester.longPress(find.text('Bulb 1'));
     await tester.pump();
 
     expect(find.text('Edit Rooms'), findsOneWidget);
+    expect(find.byIcon(Icons.drag_indicator_rounded), findsNothing);
 
     final afterBulb1 = tester.getRect(_roomCardContainer('bulb-1'));
-    final afterBulb2 = tester.getRect(_roomCardContainer('bulb-2'));
+    final afterRoom1 = tester.getRect(_roomCardContainer('room-1'));
 
     expect(afterBulb1.width, closeTo(beforeBulb1.width, 0.1));
-    expect(afterBulb2.width, closeTo(beforeBulb2.width, 0.1));
-    expect(afterBulb1.top, closeTo(afterBulb2.top, 0.1));
+    expect(afterRoom1.width, closeTo(beforeRoom1.width, 0.1));
+    expect(afterBulb1.top, closeTo(afterRoom1.top, 0.1));
+  });
+
+  testWidgets('edit-mode drag reorders half-width tiles', (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_bulb1, _room1],
+    );
+
+    await tester.longPress(find.text('Bulb 1'));
+    await tester.pump();
+
+    expect(find.text('Edit Rooms'), findsOneWidget);
+    expect(
+      harness.roomPageProvider
+          .getRoomsForPage(0, const [_bulb1, _room1]).map((room) => room.id),
+      ['bulb-1', 'room-1'],
+    );
+
+    final bulb = tester.getRect(_roomCardContainer('bulb-1'));
+    final room = tester.getRect(_roomCardContainer('room-1'));
+    final gesture = await tester.startGesture(bulb.center);
+    await tester.pump(const Duration(milliseconds: 20));
+    await gesture.moveBy(const Offset(24, 0));
+    await tester.pump(const Duration(milliseconds: 20));
+    await gesture.moveTo(Offset(room.right - 2, room.center.dy));
+    await tester.pump(const Duration(milliseconds: 20));
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(
+      harness.roomPageProvider
+          .getRoomsForPage(0, const [_bulb1, _room1]).map((room) => room.id),
+      ['room-1', 'bulb-1'],
+    );
+  });
+
+  testWidgets('double tapping outside tiles exits edit mode', (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_bulb1, _room1],
+    );
+
+    await tester.longPress(find.text('Bulb 1'));
+    await tester.pump();
+
+    expect(find.text('Edit Rooms'), findsOneWidget);
+    expect(harness.roomPageProvider.editMode, isTrue);
+
+    const emptySpace = Offset(195, 760);
+    await tester.tapAt(emptySpace);
+    await tester.pump(const Duration(milliseconds: 40));
+    await tester.tapAt(emptySpace);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('Edit Rooms'), findsNothing);
+    expect(harness.roomPageProvider.editMode, isFalse);
   });
 
   testWidgets('double tapping the active mode toggle requests a reapply',

@@ -76,6 +76,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   List<RhythmModeTransitionConfig>? lastSetTransitions;
   int setTransitionsCalls = 0;
   bool setTransitionsResult = true;
+  bool lightBreakerEnabled = true;
+  bool setLightBreakerResult = true;
+  int setLightBreakerCalls = 0;
+  bool? lastLightBreakerEnabled;
 
   @override
   Future<void> hubCredentials({
@@ -112,6 +116,19 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   @override
   Future<List<RhythmModeTransitionConfig>> getTransitions() async =>
       List<RhythmModeTransitionConfig>.unmodifiable(transitions);
+
+  @override
+  Future<RhythmLightBreaker?> getLightBreaker() async =>
+      RhythmLightBreaker(enabled: lightBreakerEnabled);
+
+  @override
+  Future<bool> setLightBreaker(bool enabled) async {
+    setLightBreakerCalls++;
+    lastLightBreakerEnabled = enabled;
+    if (!setLightBreakerResult) return false;
+    lightBreakerEnabled = enabled;
+    return true;
+  }
 
   @override
   Future<bool> setTransitions(
@@ -250,6 +267,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       StreamController<RhythmMotionTimer>.broadcast();
   final _modeChangedController =
       StreamController<RhythmModeResource>.broadcast();
+  final _lightBreakerChangedController =
+      StreamController<RhythmLightBreaker>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
 
@@ -271,6 +290,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   @override
   Stream<RhythmModeResource> get modeChangedEvents =>
       _modeChangedController.stream;
+
+  @override
+  Stream<RhythmLightBreaker> get lightBreakerChangedEvents =>
+      _lightBreakerChangedController.stream;
 
   @override
   Stream<void> get newNodesDetected => const Stream<void>.empty();
@@ -311,6 +334,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _modeChangedController.add(mode);
   }
 
+  void emitLightBreakerChanged(RhythmLightBreaker lightBreaker) {
+    _lightBreakerChangedController.add(lightBreaker);
+  }
+
   @override
   void dispose() {
     _helloController.close();
@@ -318,6 +345,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _hubEventController.close();
     _motionTimerController.close();
     _modeChangedController.close();
+    _lightBreakerChangedController.close();
     _connectionStateController.close();
     super.dispose();
   }
@@ -1234,6 +1262,65 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(provider.activeMode, RhythmMode.sleep);
+    });
+
+    test('applies light breaker state from hello and SSE', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'light_breaker': {'enabled': false},
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.lightBreakerEnabled, isFalse);
+
+      connection.emitLightBreakerChanged(
+        const RhythmLightBreaker(enabled: true),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.lightBreakerEnabled, isTrue);
+    });
+
+    test('sets light breaker optimistically and rolls back on failure',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'light_breaker': {'enabled': true},
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final success = await provider.setLightBreakerEnabled(false);
+
+      expect(success, isTrue);
+      expect(api.setLightBreakerCalls, 1);
+      expect(api.lastLightBreakerEnabled, isFalse);
+      expect(provider.lightBreakerEnabled, isFalse);
+
+      api.setLightBreakerResult = false;
+      final failed = await provider.setLightBreakerEnabled(true);
+
+      expect(failed, isFalse);
+      expect(provider.lightBreakerEnabled, isFalse);
     });
 
     test('applies motion timer SSE updates to room provider and hello rooms',

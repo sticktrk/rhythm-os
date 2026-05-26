@@ -364,6 +364,14 @@ class CloudBackedServerApi {
     return _delegate.getSettings();
   }
 
+  Future<RhythmLightBreaker?> getLightBreaker() {
+    return _delegate.getLightBreaker();
+  }
+
+  Future<bool> setLightBreaker(bool enabled) {
+    return _delegate.setLightBreaker(enabled);
+  }
+
   Future<void> sleep() {
     return _delegate.sleep();
   }

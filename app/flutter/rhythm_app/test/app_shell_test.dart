@@ -15,6 +15,7 @@ import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
+import 'package:rhythm_app/widgets/main_bottom_nav.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -505,6 +506,43 @@ void main() {
 
     expect(find.text('Pushed route'), findsNothing);
     expect(find.text('Do you have\na LightBox?'), findsOneWidget);
+  });
+
+  testWidgets(
+      'returns to the LightBox onboarding gate when server hub is removed from another tab',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    await tester.tap(find.text('Settings'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Do you have\na LightBox?'), findsNothing);
+
+    await homeProvider.deleteHub('server-1');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Do you have\na LightBox?'), findsOneWidget);
+    expect(find.byType(MainBottomNav), findsNothing);
   });
 
   testWidgets('shows the room grid when the connected server has rooms',
