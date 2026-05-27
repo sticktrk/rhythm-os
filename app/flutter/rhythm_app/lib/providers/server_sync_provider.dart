@@ -679,10 +679,10 @@ class ServerSyncProvider extends ChangeNotifier {
       final pendingHub = serverHub;
       Future.microtask(() async {
         _roomProvider.clearTransientState();
-        final hub = await _claimServerHubIfNeeded(pendingHub);
+        final auth = await _prepareServerHubAuth(pendingHub);
         if (_serverHub?.id != pendingHub.id) return;
-        _serverHub = hub;
-        _connection.connect(host, port: port, authToken: hub.token);
+        _serverHub = auth.hub;
+        _connection.connect(host, port: port, authToken: auth.authToken);
       });
     } else if (_serverHub != null) {
       debugPrint('ServerSync: connectIfAvailable — hub removed, disconnecting');
@@ -694,15 +694,26 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  Future<Hub> _claimServerHubIfNeeded(Hub hub) async {
+  Future<({Hub hub, String? authToken})> _prepareServerHubAuth(Hub hub) async {
     final existingToken = hub.token?.trim();
-    if (existingToken != null && existingToken.isNotEmpty) return hub;
 
     try {
       final authApi = RhythmAuthApi(baseUrl: hub.endpoint.baseUrl);
       final status = await authApi.getStatus();
-      if (!status.requiresAuth || !status.claimAvailable) {
-        return hub;
+      if (!status.requiresAuth) {
+        return (hub: hub, authToken: null);
+      }
+
+      if (existingToken != null && existingToken.isNotEmpty) {
+        return (hub: hub, authToken: existingToken);
+      }
+
+      if (!status.claimAvailable) {
+        debugPrint(
+          'ServerSync: ${hub.endpoint.host}:${hub.endpoint.port} requires '
+          'API auth but no owner token is saved',
+        );
+        return (hub: hub, authToken: null);
       }
 
       final claim = await authApi.claimOwnerToken();
@@ -711,12 +722,17 @@ class ServerSyncProvider extends ChangeNotifier {
       debugPrint(
         'ServerSync: claimed owner token for ${hub.endpoint.host}:${hub.endpoint.port}',
       );
-      return claimedHub;
+      return (hub: claimedHub, authToken: claim.token);
     } catch (error) {
       debugPrint(
-        'ServerSync: unable to claim owner token for ${hub.endpoint.host}:${hub.endpoint.port}: $error',
+        'ServerSync: unable to resolve API auth for ${hub.endpoint.host}:${hub.endpoint.port}: $error',
       );
-      return hub;
+      return (
+        hub: hub,
+        authToken: existingToken == null || existingToken.isEmpty
+            ? null
+            : existingToken,
+      );
     }
   }
 

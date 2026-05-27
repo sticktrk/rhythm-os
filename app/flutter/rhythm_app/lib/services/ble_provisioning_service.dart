@@ -9,6 +9,7 @@ class _Uuids {
   static final wifiCommand = Guid('72797468-6d01-1000-8000-00805f9b34fb');
   static final status = Guid('72797468-6d02-1000-8000-00805f9b34fb');
   static final deviceInfo = Guid('72797468-6d03-1000-8000-00805f9b34fb');
+  static final authRequest = Guid('72797468-6d04-1000-8000-00805f9b34fb');
 }
 
 class BleDevice {
@@ -77,6 +78,7 @@ class ProvisioningStatusMessage {
 
 class BleProvisioningService {
   static const _provisioningTimeout = Duration(seconds: 30);
+  static const _authTokenTimeout = Duration(seconds: 20);
   static const _statusPollInterval = Duration(milliseconds: 500);
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
@@ -85,12 +87,13 @@ class BleProvisioningService {
   BluetoothCharacteristic? _wifiCommandChar;
   BluetoothCharacteristic? _statusChar;
   BluetoothCharacteristic? _deviceInfoChar;
+  BluetoothCharacteristic? _authRequestChar;
 
   bool get isConnected =>
       _connectedDevice != null &&
-      _wifiCommandChar != null &&
       _statusChar != null &&
-      _deviceInfoChar != null;
+      _deviceInfoChar != null &&
+      (_wifiCommandChar != null || _authRequestChar != null);
 
   Future<BluetoothAdapterState> _waitForStableAdapterState({
     Duration timeout = const Duration(seconds: 4),
@@ -228,7 +231,27 @@ class BleProvisioningService {
 
     await bluetoothDevice.connect(timeout: const Duration(seconds: 10));
     _connectedDevice = bluetoothDevice;
-    return _setupConnection(bluetoothDevice);
+    return _setupConnection(
+      bluetoothDevice,
+      requireProvisioningReady: true,
+    );
+  }
+
+  Future<BleDeviceInfo> connectForAuth(BleDevice device) async {
+    final bluetoothDevice = device._fbpDevice;
+    if (bluetoothDevice == null) {
+      throw StateError('Invalid Bluetooth device handle');
+    }
+
+    await disconnect();
+    stopScan();
+
+    await bluetoothDevice.connect(timeout: const Duration(seconds: 10));
+    _connectedDevice = bluetoothDevice;
+    return _setupConnection(
+      bluetoothDevice,
+      requireProvisioningReady: false,
+    );
   }
 
   Future<BleDeviceInfo> connectById(String bluetoothId) async {
@@ -238,11 +261,16 @@ class BleProvisioningService {
     final bluetoothDevice = BluetoothDevice.fromId(bluetoothId);
     await bluetoothDevice.connect(timeout: const Duration(seconds: 10));
     _connectedDevice = bluetoothDevice;
-    return _setupConnection(bluetoothDevice);
+    return _setupConnection(
+      bluetoothDevice,
+      requireProvisioningReady: true,
+    );
   }
 
   Future<BleDeviceInfo> _setupConnection(
-      BluetoothDevice bluetoothDevice) async {
+    BluetoothDevice bluetoothDevice, {
+    required bool requireProvisioningReady,
+  }) async {
     final services = await bluetoothDevice.discoverServices();
     final service = services.firstWhere(
       (candidate) => candidate.serviceUuid == _Uuids.service,
@@ -260,17 +288,29 @@ class BleProvisioningService {
     _deviceInfoChar = service.characteristics
         .where((candidate) => candidate.characteristicUuid == _Uuids.deviceInfo)
         .firstOrNull;
+    _authRequestChar = service.characteristics
+        .where(
+            (candidate) => candidate.characteristicUuid == _Uuids.authRequest)
+        .firstOrNull;
 
-    if (_wifiCommandChar == null ||
-        _statusChar == null ||
-        _deviceInfoChar == null) {
+    final missingProvisioningChars = requireProvisioningReady &&
+        (_wifiCommandChar == null ||
+            _statusChar == null ||
+            _deviceInfoChar == null);
+    final missingAuthChars = !requireProvisioningReady &&
+        (_authRequestChar == null ||
+            _statusChar == null ||
+            _deviceInfoChar == null);
+    if (missingProvisioningChars || missingAuthChars) {
       await disconnect();
-      throw StateError(
-          'Device is missing required provisioning characteristics');
+      throw StateError(requireProvisioningReady
+          ? 'Device is missing required provisioning characteristics'
+          : 'Device is missing required auth characteristics');
     }
 
     final initialStatus = await _readStatus(_statusChar!);
-    if (initialStatus.status != 'waiting' &&
+    if (requireProvisioningReady &&
+        initialStatus.status != 'waiting' &&
         initialStatus.status != 'wifi_failed') {
       await disconnect();
       throw StateError(
@@ -279,6 +319,43 @@ class BleProvisioningService {
     }
 
     return _readDeviceInfo(_deviceInfoChar!);
+  }
+
+  Future<String> requestOwnerToken({
+    String label = 'Rhythm app',
+  }) async {
+    final authRequestChar = _authRequestChar;
+    final statusChar = _statusChar;
+    if (authRequestChar == null || statusChar == null) {
+      throw StateError('Not connected to an auth-capable Rhythm device');
+    }
+
+    final trimmedLabel = label.trim();
+    final payload = utf8.encode(
+      json.encode({
+        'label': trimmedLabel.isEmpty ? 'Rhythm app' : trimmedLabel,
+      }),
+    );
+
+    final status = await waitForMatchingProvisioningStatus(
+      enableNotifications: () => statusChar.setNotifyValue(true),
+      writePayload: () => authRequestChar.write(
+        payload,
+        withoutResponse: false,
+      ),
+      statusUpdates: statusChar.onValueReceived.map(_parseStatus),
+      readStatus: () => _readStatus(statusChar),
+      isMatch: (update) => update.status == 'auth_token',
+      timeoutMessage: 'Timed out waiting for owner token',
+      timeout: _authTokenTimeout,
+      pollInterval: _statusPollInterval,
+    );
+
+    final ownerToken = status.ownerToken?.trim();
+    if (ownerToken == null || ownerToken.isEmpty) {
+      throw StateError('Auth token response did not include an owner token');
+    }
+    return ownerToken;
   }
 
   Future<BleProvisioningResult> sendWifiCredentials(
@@ -340,15 +417,35 @@ class BleProvisioningService {
     Duration timeout = _provisioningTimeout,
     Duration pollInterval = _statusPollInterval,
   }) async {
+    return waitForMatchingProvisioningStatus(
+      enableNotifications: enableNotifications,
+      writePayload: writePayload,
+      statusUpdates: statusUpdates,
+      readStatus: readStatus,
+      isMatch: (update) => update.isTerminal,
+      timeoutMessage: 'Timed out waiting for Wi-Fi connection',
+      timeout: timeout,
+      pollInterval: pollInterval,
+    );
+  }
+
+  @visibleForTesting
+  static Future<ProvisioningStatusMessage> waitForMatchingProvisioningStatus({
+    required Future<void> Function() enableNotifications,
+    required Future<void> Function() writePayload,
+    required Stream<ProvisioningStatusMessage> statusUpdates,
+    required Future<ProvisioningStatusMessage> Function() readStatus,
+    required bool Function(ProvisioningStatusMessage update) isMatch,
+    required String timeoutMessage,
+    Duration timeout = _provisioningTimeout,
+    Duration pollInterval = _statusPollInterval,
+  }) async {
     final deadline = DateTime.now().add(timeout);
     Future<ProvisioningStatusMessage>? notificationStatus;
 
     try {
       await enableNotifications();
-      notificationStatus = statusUpdates
-          .where((update) => update.isTerminal)
-          .first
-          .timeout(timeout);
+      notificationStatus = statusUpdates.where(isMatch).first.timeout(timeout);
     } catch (error) {
       debugPrint(
         '[BLE] status notifications unavailable; falling back to polling: '
@@ -358,8 +455,9 @@ class BleProvisioningService {
 
     await writePayload();
 
-    final pollingStatus = _pollTerminalStatus(
+    final pollingStatus = _pollMatchingStatus(
       readStatus: readStatus,
+      isMatch: isMatch,
       deadline: deadline,
       pollInterval: pollInterval,
     );
@@ -376,18 +474,19 @@ class BleProvisioningService {
           ? pollingStatus
           : Future.any([notificationOrPolling, pollingStatus]));
     } on TimeoutException {
-      throw TimeoutException('Timed out waiting for Wi-Fi connection');
+      throw TimeoutException(timeoutMessage);
     }
   }
 
-  static Future<ProvisioningStatusMessage> _pollTerminalStatus({
+  static Future<ProvisioningStatusMessage> _pollMatchingStatus({
     required Future<ProvisioningStatusMessage> Function() readStatus,
+    required bool Function(ProvisioningStatusMessage update) isMatch,
     required DateTime deadline,
     required Duration pollInterval,
   }) async {
     while (DateTime.now().isBefore(deadline)) {
       final status = await readStatus();
-      if (status.isTerminal) {
+      if (isMatch(status)) {
         return status;
       }
       final remaining = deadline.difference(DateTime.now());
@@ -396,7 +495,7 @@ class BleProvisioningService {
         remaining < pollInterval ? remaining : pollInterval,
       );
     }
-    throw TimeoutException('Timed out waiting for Wi-Fi connection');
+    throw TimeoutException('Timed out waiting for matching status');
   }
 
   Future<void> disconnect() async {
@@ -404,6 +503,7 @@ class BleProvisioningService {
     _wifiCommandChar = null;
     _statusChar = null;
     _deviceInfoChar = null;
+    _authRequestChar = null;
 
     try {
       if (statusChar?.isNotifying == true) {

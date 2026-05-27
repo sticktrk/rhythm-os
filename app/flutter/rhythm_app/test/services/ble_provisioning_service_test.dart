@@ -72,5 +72,33 @@ void main() {
       expect(status.status, 'connected');
       expect(status.ip, '192.168.1.153');
     });
+
+    test('can wait for auth token status', () async {
+      var wrotePayload = false;
+
+      final status =
+          await BleProvisioningService.waitForMatchingProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {
+          wrotePayload = true;
+        },
+        statusUpdates: Stream<ProvisioningStatusMessage>.value(
+          const ProvisioningStatusMessage(
+            status: 'auth_token',
+            ownerToken: 'rhythm_owner_test',
+          ),
+        ),
+        readStatus: () async =>
+            const ProvisioningStatusMessage(status: 'waiting'),
+        isMatch: (update) => update.status == 'auth_token',
+        timeoutMessage: 'Timed out waiting for owner token',
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 50),
+      );
+
+      expect(wrotePayload, isTrue);
+      expect(status.status, 'auth_token');
+      expect(status.ownerToken, 'rhythm_owner_test');
+    });
   });
 }

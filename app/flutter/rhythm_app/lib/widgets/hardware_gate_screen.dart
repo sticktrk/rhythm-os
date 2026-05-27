@@ -41,6 +41,7 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
     AnalyticsService().logEvent('onboarding_hardware_choice', {
       'choice': 'has_hardware',
     });
+    AnalyticsService().logScreenView('connect_hub');
     setState(() => _step = _GateStep.connect);
   }
 
@@ -59,65 +60,60 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 380),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      transitionBuilder: (child, anim) {
-        return FadeTransition(
-          opacity: anim,
-          child: SlideTransition(
-            position: Tween<Offset>(
-              begin: const Offset(0, 0.04),
-              end: Offset.zero,
-            ).animate(anim),
-            child: child,
-          ),
-        );
-      },
-      child: switch (_step) {
-        _GateStep.gate => _HardwareGateScreen(
-            key: const ValueKey('gate'),
-            onYes: _toConnect,
-            onNo: _toUpsell,
-          ),
-        _GateStep.upsell => _GetLightBoxScreen(
-            key: const ValueKey('upsell'),
-            onBack: _backToGate,
-            onIHaveOne: _toConnect,
-          ),
-        _GateStep.connect => _ConnectStep(
-            key: const ValueKey('connect'),
-            mode: widget.mode,
-            onBack: _backToGate,
-          ),
-      },
-    );
-  }
-}
-
-/// Wraps [ConnectHubScreen] with a back chevron overlay so a misclick on
-/// "I have one" can be undone without rebooting onboarding.
-class _ConnectStep extends StatelessWidget {
-  final ConnectHubMode mode;
-  final VoidCallback onBack;
-
-  const _ConnectStep({
-    super.key,
-    required this.mode,
-    required this.onBack,
-  });
-
-  @override
-  Widget build(BuildContext context) {
     return Stack(
+      fit: StackFit.expand,
       children: [
-        ConnectHubScreen(mode: mode),
-        Positioned(
-          top: 8,
-          left: 8,
-          child: _BackChevron(onTap: onBack),
+        Positioned.fill(
+          child: TickerMode(
+            enabled: _step == _GateStep.connect,
+            child: Offstage(
+              offstage: _step != _GateStep.connect,
+              child: ConnectHubScreen(
+                mode: widget.mode,
+                trackScreenView: false,
+              ),
+            ),
+          ),
         ),
+        if (_step != _GateStep.connect)
+          Positioned.fill(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 380),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, anim) {
+                return FadeTransition(
+                  opacity: anim,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.04),
+                      end: Offset.zero,
+                    ).animate(anim),
+                    child: child,
+                  ),
+                );
+              },
+              child: switch (_step) {
+                _GateStep.gate => _HardwareGateScreen(
+                    key: const ValueKey('gate'),
+                    onYes: _toConnect,
+                    onNo: _toUpsell,
+                  ),
+                _GateStep.upsell => _GetLightBoxScreen(
+                    key: const ValueKey('upsell'),
+                    onBack: _backToGate,
+                    onIHaveOne: _toConnect,
+                  ),
+                _GateStep.connect => const SizedBox.shrink(),
+              },
+            ),
+          ),
+        if (_step == _GateStep.connect)
+          Positioned(
+            top: 8,
+            left: 8,
+            child: _BackChevron(onTap: _backToGate),
+          ),
       ],
     );
   }
@@ -863,8 +859,7 @@ class _GetLightBoxScreenState extends State<_GetLightBoxScreen>
                           child: const _FeatureRow(
                             glyph: _FeatureGlyph.local,
                             title: '100% local',
-                            body:
-                                'Runs on your network.',
+                            body: 'Runs on your network.',
                           ),
                         ),
                         const SizedBox(height: 28),

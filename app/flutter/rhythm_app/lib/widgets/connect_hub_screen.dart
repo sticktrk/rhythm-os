@@ -12,17 +12,23 @@ import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/providers/hub_discovery.dart' show DiscoveredHub;
-import 'package:rhythm_core/models/hub.dart' show HubType;
+import 'package:rhythm_core/models/hub.dart' show Hub, HubType;
 import 'solar_orbit.dart'; // For CelestialColors
 import 'success_modal.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConfigApi, RhythmDiagnosticsApi;
+    show
+        RhythmApiException,
+        RhythmAuthApi,
+        RhythmConfigApi,
+        RhythmDiagnosticsApi;
 import '../providers/home_provider.dart';
 import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../services/analytics_service.dart';
+import '../services/ble_provisioning_service.dart';
 
 /// Which empty-state variant to show.
 enum ConnectHubMode { rhythmServer, hue }
@@ -137,11 +143,13 @@ class ConnectHubScreen extends StatefulWidget {
 
   /// Whether this screen is shown as a modal (with close button) vs inline.
   final bool isModal;
+  final bool trackScreenView;
 
   const ConnectHubScreen(
       {super.key,
       this.mode = ConnectHubMode.rhythmServer,
-      this.isModal = false});
+      this.isModal = false,
+      this.trackScreenView = true});
 
   /// Show as a full-screen modal with slide-up transition and close button.
   static Future<void> show(BuildContext context,
@@ -209,10 +217,16 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   // mDNS discovery state (rhythmServer mode only)
   List<DiscoveredHub> _discoveredDevices = [];
+  final List<BleDevice> _bleDevices = [];
   bool _isScanning = false;
+  bool _isBleScanning = false;
   bool _isConnecting = false;
   String? _connectError;
+  String? _connectErrorMessage;
+  String? _bleScanError;
   BonsoirDiscovery? _bonsoirDiscovery;
+  final _bleService = BleProvisioningService();
+  StreamSubscription<BleDevice>? _bleScanSubscription;
 
   // Manual IP state (inline field)
   final _manualIpController = TextEditingController();
@@ -269,14 +283,16 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       curve: Curves.easeOut,
     );
 
-    AnalyticsService().logScreenView('connect_hub');
+    if (widget.trackScreenView) {
+      AnalyticsService().logScreenView('connect_hub');
+    }
 
     // Rebuild when focus state changes so the IP field border reflects it.
     _manualIpFocus.addListener(_onManualIpFocusChanged);
 
     // Auto-start mDNS scanning in rhythmServer mode
     if (widget.mode == ConnectHubMode.rhythmServer) {
-      _scanForDevices();
+      unawaited(_scanForAllDevices());
     }
   }
 
@@ -287,6 +303,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   @override
   void dispose() {
     _bonsoirDiscovery?.stop();
+    _bleScanSubscription?.cancel();
+    _bleService.dispose();
     _manualIpFocus.removeListener(_onManualIpFocusChanged);
     _manualIpController.dispose();
     _manualIpFocus.dispose();
@@ -295,10 +313,24 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     super.dispose();
   }
 
+  Future<void> _scanForAllDevices() async {
+    if (widget.mode != ConnectHubMode.rhythmServer) return;
+    await Future.wait([
+      _scanForDevices().catchError((Object error, StackTrace stackTrace) {
+        debugPrint('mDNS scan failed: $error');
+      }),
+      _scanForBleDevices().catchError((Object error, StackTrace stackTrace) {
+        debugPrint('BLE scan failed: $error');
+      }),
+    ]);
+  }
+
   Future<void> _scanForDevices() async {
     setState(() {
       _isScanning = true;
       _discoveredDevices = [];
+      _connectError = null;
+      _connectErrorMessage = null;
     });
 
     final found = <DiscoveredHub>[];
@@ -315,6 +347,108 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         _isScanning = false;
       });
     }
+  }
+
+  Future<void> _scanForBleDevices() async {
+    if (!_supportsBleDiscovery) return;
+
+    await _bleScanSubscription?.cancel();
+    _bleService.stopScan();
+
+    final granted = await _ensureBluetoothPermissionForDiscovery();
+    if (!granted || !mounted) return;
+
+    if (!Platform.isIOS) {
+      final bluetoothOn = await _bleService.isBluetoothOn();
+      if (!mounted) return;
+      if (!bluetoothOn) {
+        setState(() {
+          _isBleScanning = false;
+          _bleScanError = 'Bluetooth is off';
+        });
+        return;
+      }
+    }
+
+    setState(() {
+      _isBleScanning = true;
+      _bleScanError = null;
+      _bleDevices.clear();
+    });
+
+    _bleScanSubscription = _bleService.scanForDevices().listen(
+      (device) {
+        if (!mounted) return;
+        final exists =
+            _bleDevices.any((candidate) => candidate.id == device.id);
+        if (exists) return;
+        setState(() {
+          _bleDevices.add(device);
+        });
+      },
+      onError: (error) {
+        if (!mounted) return;
+        setState(() {
+          _isBleScanning = false;
+          _bleScanError = _bleDiscoveryErrorMessage(error);
+        });
+      },
+    );
+
+    try {
+      await _bleService.waitForScanToFinish();
+    } catch (_) {
+      // Scan lifecycle errors are surfaced through the stream when actionable.
+    }
+    if (!mounted) return;
+    setState(() {
+      _isBleScanning = false;
+    });
+  }
+
+  bool get _supportsBleDiscovery => !kIsWeb;
+
+  Future<bool> _ensureBluetoothPermissionForDiscovery() async {
+    if (kIsWeb || Platform.isMacOS || Platform.isIOS) return true;
+
+    final permissions = <Permission>[];
+    if (Platform.isAndroid) {
+      permissions.addAll([
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.locationWhenInUse,
+      ]);
+    }
+    if (permissions.isEmpty) return true;
+
+    final statuses = await permissions.request();
+    final denied =
+        statuses.entries.where((entry) => !entry.value.isGranted).toList();
+    if (denied.isEmpty) return true;
+
+    if (mounted) {
+      setState(() {
+        _isBleScanning = false;
+        _bleScanError = 'Bluetooth permission needed';
+      });
+    }
+    return false;
+  }
+
+  String _bleDiscoveryErrorMessage(Object error) {
+    final message = '$error';
+    if (message.contains('PoweredOff') ||
+        message.contains('BluetoothAdapterState.off')) {
+      return 'Bluetooth is off';
+    }
+    if (message.contains('Unauthorized') ||
+        message.contains('BluetoothAdapterState.unauthorized')) {
+      return 'Bluetooth permission needed';
+    }
+    if (message.contains('BluetoothAdapterState.unavailable')) {
+      return 'Bluetooth unavailable';
+    }
+    return 'Bluetooth scan failed';
   }
 
   /// Web: call GET api/discover on the same origin (rhythm-server / addon ingress).
@@ -632,19 +766,42 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     setState(() {
       _isConnecting = true;
       _connectError = null;
+      _connectErrorMessage = null;
     });
 
-    final client = RhythmDiagnosticsApi(host: hub.address, port: hub.port);
+    String? authToken;
+    try {
+      authToken = await _resolveAuthTokenForDiscoveredHub(hub);
+    } on _AuthTokenRequiredException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectError = hub.address;
+        _connectErrorMessage = error.message;
+      });
+      return;
+    } catch (error) {
+      debugPrint('Auth resolution failed for ${hub.address}: $error');
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectError = hub.address;
+        _connectErrorMessage = 'Could not authorize this Box';
+      });
+      return;
+    }
+
+    final client = RhythmDiagnosticsApi(
+      host: hub.address,
+      port: hub.port,
+      authToken: authToken,
+    );
     final isHealthy = await client.healthCheck();
 
     if (!mounted) return;
 
     if (isHealthy) {
-      final result = await context.read<HomeProvider>().addServerHub(
-            name: hub.name ?? 'RhythmServer',
-            host: hub.address,
-            port: hub.port,
-          );
+      final result = await _persistDiscoveredServerHub(hub, authToken);
 
       if (!mounted) return;
 
@@ -652,6 +809,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         setState(() {
           _isConnecting = false;
           _connectError = hub.address;
+          _connectErrorMessage = 'Could not save this Box';
         });
         return;
       }
@@ -670,8 +828,143 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       setState(() {
         _isConnecting = false;
         _connectError = hub.address;
+        _connectErrorMessage = 'Could not reach this Box';
       });
     }
+  }
+
+  Future<Hub?> _persistDiscoveredServerHub(
+    DiscoveredHub discovered,
+    String? authToken,
+  ) async {
+    final homeProvider = context.read<HomeProvider>();
+    for (final savedHub in homeProvider.currentHomeHubs) {
+      final matches = savedHub.type == HubType.server &&
+          savedHub.endpoint.host == discovered.address &&
+          savedHub.endpoint.port == discovered.port;
+      if (!matches) continue;
+
+      final token = authToken?.trim();
+      if (token != null &&
+          token.isNotEmpty &&
+          savedHub.token?.trim() != token) {
+        final updatedHub = savedHub.copyWith(token: token);
+        final updated = await homeProvider.updateHub(updatedHub);
+        return updated ? updatedHub : null;
+      }
+      return savedHub;
+    }
+
+    return homeProvider.addServerHub(
+      name: discovered.name ?? 'RhythmServer',
+      host: discovered.address,
+      port: discovered.port,
+      token: authToken,
+    );
+  }
+
+  Future<String?> _resolveAuthTokenForDiscoveredHub(DiscoveredHub hub) async {
+    final baseUrl = 'http://${hub.address}:${hub.port}';
+    final requiresAuth = await _serverRequiresAuth(baseUrl, hub.address);
+    if (!requiresAuth) return null;
+
+    final storedToken = _storedServerTokenFor(hub);
+    if (storedToken != null) {
+      try {
+        await RhythmConfigApi(
+          baseUrl: '$baseUrl/',
+          authToken: storedToken,
+        ).getState().timeout(const Duration(seconds: 4));
+        return storedToken;
+      } on RhythmApiException catch (error) {
+        if (error.statusCode != HttpStatus.unauthorized) {
+          rethrow;
+        }
+      }
+    }
+
+    return _requestOwnerTokenViaBle(hub);
+  }
+
+  Future<bool> _serverRequiresAuth(String baseUrl, String address) async {
+    try {
+      final status = await RhythmAuthApi(baseUrl: baseUrl).getStatus();
+      return status.requiresAuth;
+    } catch (error) {
+      debugPrint('Auth status unavailable for $address: $error');
+      return false;
+    }
+  }
+
+  String? _storedServerTokenFor(DiscoveredHub hub) {
+    for (final savedHub in context.read<HomeProvider>().currentHomeHubs) {
+      if (savedHub.type != HubType.server) continue;
+      if (savedHub.endpoint.host != hub.address ||
+          savedHub.endpoint.port != hub.port) {
+        continue;
+      }
+      final token = savedHub.token?.trim();
+      if (token != null && token.isNotEmpty) return token;
+    }
+    return null;
+  }
+
+  Future<String> _requestOwnerTokenViaBle(DiscoveredHub hub) async {
+    var device = _matchingBleDeviceFor(hub);
+    if (device == null && !_isBleScanning) {
+      await _scanForBleDevices().timeout(
+        const Duration(seconds: 6),
+        onTimeout: () {},
+      );
+      device = _matchingBleDeviceFor(hub);
+    }
+
+    if (device == null) {
+      throw const _AuthTokenRequiredException('Bluetooth auth needed');
+    }
+
+    setState(() {
+      _isBleScanning = false;
+      _bleScanError = null;
+    });
+
+    try {
+      await _bleService.connectForAuth(device);
+      return await _bleService.requestOwnerToken(label: 'Rhythm app');
+    } finally {
+      await _bleService.disconnect();
+    }
+  }
+
+  BleDevice? _matchingBleDeviceFor(DiscoveredHub hub) {
+    if (_bleDevices.isEmpty) return null;
+    final hubTokens = _normalizedDiscoveryTokens([
+      hub.name,
+      hub.host,
+      hub.address,
+    ]);
+    for (final device in _bleDevices) {
+      final deviceTokens = _normalizedDiscoveryTokens([device.name]);
+      if (hubTokens.intersection(deviceTokens).isNotEmpty) return device;
+    }
+    if (_bleDevices.length == 1) return _bleDevices.single;
+    return null;
+  }
+
+  Set<String> _normalizedDiscoveryTokens(Iterable<String?> values) {
+    final tokens = <String>{};
+    for (final value in values) {
+      final normalized = value
+          ?.toLowerCase()
+          .replaceAll('.local', '')
+          .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+          .trim();
+      if (normalized == null || normalized.isEmpty) continue;
+      tokens.addAll(normalized.split(' ').where((token) => token.length >= 4));
+      tokens.add(normalized.replaceAll(' ', ''));
+    }
+    tokens.removeWhere((token) => token == 'rhythm' || token == 'server');
+    return tokens;
   }
 
   void _openConfigurator() {
@@ -684,10 +977,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
   }
 
-  Future<void> _openBleProvisioning() async {
+  Future<void> _openBleProvisioning([BleDevice? initialDevice]) async {
     AnalyticsService().logRhythmServerSetupTapped('ble');
     HapticFeedback.mediumImpact();
-    await BleProvisioningScreen.show(context);
+    await BleProvisioningScreen.show(context, initialDevice: initialDevice);
   }
 
   @override
@@ -888,19 +1181,28 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   }
 
   Widget _buildScanStatusLine() {
-    final count = _discoveredDevices.length;
+    final existingCount = _discoveredDevices.length;
+    final newCount = _bleDevices.length;
+    final count = existingCount + newCount;
     final b = _breathe.value;
 
     String label;
-    if (_isScanning && count == 0) {
-      label = 'Searching your network\u2026';
+    if ((_isScanning || _isBleScanning) && count == 0) {
+      label = 'Searching network and Bluetooth\u2026';
     } else if (count > 0) {
-      label = count == 1 ? 'Found 1 box nearby' : 'Found $count boxes nearby';
+      final parts = <String>[
+        if (existingCount > 0)
+          '$existingCount existing'
+        else if (newCount == 0)
+          '0 existing',
+        if (newCount > 0) '$newCount new',
+      ];
+      label = 'Found ${parts.join(', ')} nearby';
     } else {
-      label = 'No devices yet';
+      label = _bleScanError ?? 'No boxes yet';
     }
 
-    final isLive = _isScanning || count > 0;
+    final isLive = _isScanning || _isBleScanning || count > 0;
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -912,7 +1214,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           height: 7,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: _isScanning
+            color: (_isScanning || _isBleScanning)
                 ? _teal.withValues(alpha: 0.35 + b * 0.55)
                 : (count > 0
                     ? _teal.withValues(alpha: 0.85)
@@ -948,11 +1250,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   // ── Scan button (prominent primary action) ─────────────────────────────────
 
   Widget _buildScanButton() {
-    final isScanning = _isScanning;
+    final isScanning = _isScanning || _isBleScanning;
 
     return Center(
       child: GestureDetector(
-        onTap: isScanning ? null : _scanForDevices,
+        onTap: isScanning ? null : _scanForAllDevices,
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 220),
@@ -1029,7 +1331,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   // ── Middle: devices list or empty state ────────────────────────────────────
 
   Widget _buildMiddleContent() {
-    if (_discoveredDevices.isNotEmpty) {
+    if (_discoveredDevices.isNotEmpty || _bleDevices.isNotEmpty) {
       return _buildDiscoveredDevices();
     }
 
@@ -1038,9 +1340,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 40),
         child: Text(
-          _isScanning
-              ? 'Keep your Box powered on and\non the same Wi-Fi network'
-              : 'Make sure your Box is powered on\nand connected to Wi-Fi',
+          _isScanning || _isBleScanning
+              ? 'Keep your Box powered on and nearby'
+              : 'Existing Boxes appear over Wi-Fi.\nNew Boxes appear over Bluetooth.',
           textAlign: TextAlign.center,
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.45),
@@ -1054,20 +1356,79 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   }
 
   Widget _buildDiscoveredDevices() {
+    final itemCount =
+        (_discoveredDevices.isEmpty ? 0 : _discoveredDevices.length + 1) +
+            (_bleDevices.isEmpty ? 0 : _bleDevices.length + 1);
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: ListView.separated(
+      child: ListView(
         physics: const BouncingScrollPhysics(),
         padding: EdgeInsets.zero,
-        itemCount: _discoveredDevices.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 8),
-        itemBuilder: (context, index) =>
-            _buildDeviceCard(_discoveredDevices[index]),
+        children: [
+          if (_discoveredDevices.isNotEmpty) ...[
+            _buildDiscoverySectionHeader(
+              'EXISTING BOXES',
+              'Already on Wi-Fi',
+            ),
+            for (final hub in _discoveredDevices) ...[
+              _buildExistingDeviceCard(hub),
+              const SizedBox(height: 8),
+            ],
+          ],
+          if (_bleDevices.isNotEmpty) ...[
+            if (_discoveredDevices.isNotEmpty) const SizedBox(height: 6),
+            _buildDiscoverySectionHeader(
+              'NEW BOXES',
+              'Ready for Bluetooth setup',
+            ),
+            for (final device in _bleDevices) ...[
+              _buildNewDeviceCard(device),
+              const SizedBox(height: 8),
+            ],
+          ],
+          if (itemCount == 0) const SizedBox.shrink(),
+        ],
       ),
     );
   }
 
-  Widget _buildDeviceCard(DiscoveredHub hub) {
+  Widget _buildDiscoverySectionHeader(String title, String subtitle) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, top: 2),
+      child: Row(
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.58),
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.25,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: 0.5,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.12),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            subtitle,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.42),
+              fontSize: 10.5,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExistingDeviceCard(DiscoveredHub hub) {
     final hasError = _connectError == hub.address;
     final isBusy = _isConnecting && !hasError;
     final b = _breathe.value;
@@ -1139,20 +1500,29 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    hub.name ?? 'RhythmServer',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                      letterSpacing: 0.1,
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          hub.name ?? 'RhythmServer',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.1,
+                          ),
+                        ),
+                      ),
+                      _buildDiscoveryBadge('Existing', _teal),
+                    ],
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    hasError ? 'tap to retry' : hub.address,
+                    hasError
+                        ? (_connectErrorMessage ?? 'tap to retry')
+                        : hub.address,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -1161,7 +1531,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                           : CelestialColors.textSecondary
                               .withValues(alpha: 0.55),
                       fontSize: 11.5,
-                      fontFamily: 'monospace',
+                      fontFamily: hasError ? null : 'monospace',
                       letterSpacing: 0.3,
                     ),
                   ),
@@ -1189,6 +1559,111 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 
+  Widget _buildNewDeviceCard(BleDevice device) {
+    return GestureDetector(
+      onTap: _isConnecting ? null : () => _openBleProvisioning(device),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(
+            color: CelestialColors.sunWarm.withValues(alpha: 0.25),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: CelestialColors.sunWarm.withValues(alpha: 0.14),
+              ),
+              child: Icon(
+                Icons.bluetooth_searching_rounded,
+                color: CelestialColors.sunWarm.withValues(alpha: 0.92),
+                size: 17,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          device.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.1,
+                          ),
+                        ),
+                      ),
+                      _buildDiscoveryBadge('New', CelestialColors.sunWarm),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Bluetooth setup • signal ${_signalLabel(device.rssi)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.55),
+                      fontSize: 11.5,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.arrow_forward_rounded,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.7),
+              size: 18,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiscoveryBadge(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        color: color.withValues(alpha: 0.14),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color.withValues(alpha: 0.95),
+          fontSize: 9.5,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.35,
+        ),
+      ),
+    );
+  }
+
+  String _signalLabel(int rssi) {
+    if (rssi >= -55) return 'strong';
+    if (rssi >= -70) return 'good';
+    if (rssi >= -82) return 'fair';
+    return 'weak';
+  }
+
   // ── Bottom: compact secondary actions ──────────────────────────────────────
 
   Widget _buildBottomActions(bool keyboardOpen) {
@@ -1198,116 +1673,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         children: [
           // Manual IP sits with the "find an existing box" family
           _buildCompactManualIp(),
-          if (!keyboardOpen && !kIsWeb) ...[
-            const SizedBox(height: 14),
-            _buildPairSectionDivider(),
-            const SizedBox(height: 10),
-            _buildCompactBleCard(),
-          ],
         ],
-      ),
-    );
-  }
-
-  Widget _buildPairSectionDivider() {
-    return Row(
-      children: [
-        Expanded(
-          child: Container(
-            height: 0.5,
-            color: CelestialColors.textSecondary.withValues(alpha: 0.14),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Text(
-            'FIRST TIME\u2009?',
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.42),
-              fontSize: 9.5,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.5,
-            ),
-          ),
-        ),
-        Expanded(
-          child: Container(
-            height: 0.5,
-            color: CelestialColors.textSecondary.withValues(alpha: 0.14),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCompactBleCard() {
-    return GestureDetector(
-      onTap: _openBleProvisioning,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              _teal.withValues(alpha: 0.12),
-              _tealDeep.withValues(alpha: 0.06),
-            ],
-          ),
-          border: Border.all(color: _teal.withValues(alpha: 0.22)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _teal.withValues(alpha: 0.15),
-                border: Border.all(color: _teal.withValues(alpha: 0.22)),
-              ),
-              child: Icon(
-                Icons.add_rounded,
-                color: _teal.withValues(alpha: 0.92),
-                size: 16,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Set up a new Rhythm Box',
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.1,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Guided setup in a few taps',
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.58),
-                      fontSize: 11,
-                      letterSpacing: 0.1,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(
-              Icons.arrow_forward_rounded,
-              color: _teal.withValues(alpha: 0.6),
-              size: 18,
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -1462,4 +1828,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       ),
     );
   }
+}
+
+class _AuthTokenRequiredException implements Exception {
+  final String message;
+
+  const _AuthTokenRequiredException(this.message);
 }

@@ -7,7 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDiagnosticsApi;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmAuthApi, RhythmDiagnosticsApi;
 
 import '../../providers/home_provider.dart';
 import '../../services/analytics_service.dart';
@@ -25,15 +26,17 @@ enum _ProvisioningPhase {
 }
 
 class BleProvisioningScreen extends StatefulWidget {
-  const BleProvisioningScreen({super.key});
+  const BleProvisioningScreen({super.key, this.initialDevice});
 
-  static Future<void> show(BuildContext context) {
+  final BleDevice? initialDevice;
+
+  static Future<void> show(BuildContext context, {BleDevice? initialDevice}) {
     return Navigator.of(context).push(
       PageRouteBuilder<void>(
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
-          return const BleProvisioningScreen();
+          return BleProvisioningScreen(initialDevice: initialDevice);
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           final curve = CurvedAnimation(
@@ -126,6 +129,10 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _provisionedIp = null;
         _hasAttemptedScan = false;
       });
+      final initialDevice = widget.initialDevice;
+      if (initialDevice != null) {
+        unawaited(_connectToDevice(initialDevice));
+      }
     });
   }
 
@@ -451,10 +458,10 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         return;
       }
 
-      final ownerToken = result.ownerToken ?? _existingServerOwnerToken();
-      if (ownerToken == null || ownerToken.isEmpty) {
-        throw StateError('Provisioning succeeded without an owner token');
-      }
+      final ownerToken = await _resolveOwnerTokenAfterProvisioning(
+        ip,
+        result.ownerToken,
+      );
       await _persistServerHub(ip, ownerToken);
       if (!mounted) return;
 
@@ -503,15 +510,46 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     return false;
   }
 
-  Future<void> _persistServerHub(String ip, String ownerToken) async {
+  Future<String?> _resolveOwnerTokenAfterProvisioning(
+    String ip,
+    String? provisionedOwnerToken,
+  ) async {
+    final provisioned = provisionedOwnerToken?.trim();
+    if (provisioned != null && provisioned.isNotEmpty) return provisioned;
+
+    try {
+      final status = await RhythmAuthApi(
+        baseUrl: 'http://$ip:54448',
+      ).getStatus();
+      if (!status.requiresAuth) {
+        return null;
+      }
+    } catch (error) {
+      debugPrint('[BLE] auth status after provisioning failed: $error');
+    }
+
+    if (!_bleService.isConnected) {
+      throw StateError('Server requires API auth, but Bluetooth disconnected.');
+    }
+
+    return _bleService.requestOwnerToken(label: 'Rhythm app');
+  }
+
+  Future<void> _persistServerHub(String ip, String? ownerToken) async {
     final homeProvider = context.read<HomeProvider>();
-    final exists = homeProvider.currentHomeHubs.any(
-      (hub) =>
-          hub.type == HubType.server &&
+    for (final hub in homeProvider.currentHomeHubs) {
+      final matches = hub.type == HubType.server &&
           hub.endpoint.host == ip &&
-          hub.endpoint.port == 54448,
-    );
-    if (exists) return;
+          hub.endpoint.port == 54448;
+      if (!matches) continue;
+
+      final token = ownerToken?.trim();
+      final hasSavedToken = hub.token?.trim().isNotEmpty == true;
+      if (token != null && token.isNotEmpty && !hasSavedToken) {
+        await homeProvider.updateHub(hub.copyWith(token: token));
+      }
+      return;
+    }
 
     await homeProvider.addServerHub(
       name: _deviceInfo?.name ?? 'RhythmServer',
@@ -519,15 +557,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       port: 54448,
       token: ownerToken,
     );
-  }
-
-  String? _existingServerOwnerToken() {
-    for (final hub in context.read<HomeProvider>().currentHomeHubs) {
-      if (hub.type != HubType.server) continue;
-      final token = hub.token?.trim();
-      if (token != null && token.isNotEmpty) return token;
-    }
-    return null;
   }
 
   Future<void> _startOver() async {
@@ -627,9 +656,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     final title = switch (_phase) {
       _ProvisioningPhase.scanning => 'Looking for your Rhythm Box',
       _ProvisioningPhase.devices => _devices.isEmpty
-          ? (_hasAttemptedScan
-              ? 'No devices found'
-              : 'Set Up Your Rhythm Box')
+          ? (_hasAttemptedScan ? 'No devices found' : 'Set Up Your Rhythm Box')
           : 'Choose your Rhythm Box',
       _ProvisioningPhase.connecting => 'Connecting to $_selectedDeviceName',
       _ProvisioningPhase.credentials => 'Connect to Wi-Fi',
