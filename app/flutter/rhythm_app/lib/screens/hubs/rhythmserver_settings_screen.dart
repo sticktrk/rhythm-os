@@ -129,7 +129,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       _serverContext == 'embedded' ||
       _serverContext == 'rpiz';
   bool get _isHaAddon => _serverContext == 'ha_addon';
-  bool get _supportsDebugBundle => !_isBridge;
+  bool get _supportsDebugBundle => true;
   bool get _supportsRestartEndpoint => !_isBridge && !_isHaAddon;
 
   String get _headerTitle =>
