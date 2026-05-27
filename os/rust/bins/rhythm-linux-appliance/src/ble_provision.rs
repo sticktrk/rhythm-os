@@ -353,8 +353,8 @@ mod bluez {
 
     use super::{
         ProvisioningDeviceInfo, ProvisioningEvent, ProvisioningFrontend, ProvisioningStatus,
-        Sender as StdSender, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
-        PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
+        Sender as StdSender, PROVISIONING_AUTH_CMD_UUID, PROVISIONING_DEVICE_INFO_UUID,
+        PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
     };
     pub(super) struct BluezFrontend {
         runtime: Runtime,
