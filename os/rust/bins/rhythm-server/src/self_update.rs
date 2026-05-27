@@ -10,7 +10,10 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -34,6 +37,7 @@ const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 const APPLIANCE_BOOT_STATE_BACKUP_PATH: &str = "/boot/rhythm-bootstate.env.bak";
 const APPLIANCE_BOOT_STATE_MIRROR_PATH: &str = "/data/ota/bootstate.env";
 const APPLIANCE_REBOOT_FALLBACK_SECS: u64 = 30;
+const APPLIANCE_ROOTFS_APPLY_GUARD_SECS: u64 = 10 * 60;
 
 static APPLY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1221,7 +1225,11 @@ fn apply_appliance_image_blocking(
         None => None,
     };
 
-    if let Err(error) = (|| {
+    let apply_guard = ApplianceApplyGuard::arm(
+        "rootfs slot apply",
+        Duration::from_secs(APPLIANCE_ROOTFS_APPLY_GUARD_SECS),
+    );
+    let apply_result = (|| {
         progress(UpdateProgress::stage(
             OtaUpdateStage::Installing,
             format!(
@@ -1248,7 +1256,10 @@ fn apply_appliance_image_blocking(
             write_appliance_idle_boot_state,
         )?;
         Ok::<(), String>(())
-    })() {
+    })();
+    apply_guard.disarm();
+
+    if let Err(error) = apply_result {
         remove_if_exists(&download_path);
         return Err(error);
     }
@@ -1620,6 +1631,81 @@ pub fn persist_before_restart(state: &rhythm_os::state::SharedState) {
         );
     }
     rhythm_os::commands::persist_state(state);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ApplianceApplyGuardOutcome {
+    Completed,
+    DryRunSkipped,
+}
+
+struct ApplianceApplyGuard {
+    completed: Arc<AtomicBool>,
+    handle: Option<JoinHandle<ApplianceApplyGuardOutcome>>,
+}
+
+impl ApplianceApplyGuard {
+    fn arm(reason: &'static str, timeout: Duration) -> Self {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_thread = completed.clone();
+        let handle = std::thread::Builder::new()
+            .name("ota-apply-guard".to_string())
+            .spawn(move || {
+                std::thread::sleep(timeout);
+                if completed_for_thread.load(Ordering::Acquire) {
+                    return ApplianceApplyGuardOutcome::Completed;
+                }
+
+                log::error!(
+                    target: "sys",
+                    "Appliance OTA {} still running after {}s before slot switch; forcing reboot back to current slot",
+                    reason,
+                    timeout.as_secs()
+                );
+                if std::env::var_os("RHYTHM_RESTART_DRY_RUN").is_some() {
+                    log::info!(
+                        target: "sys",
+                        "Restart dry-run ({} guard); skipping forced reboot",
+                        reason
+                    );
+                    return ApplianceApplyGuardOutcome::DryRunSkipped;
+                }
+
+                force_appliance_reboot_or_exit(reason);
+            });
+
+        if let Err(error) = &handle {
+            log::error!(
+                target: "sys",
+                "Failed to spawn appliance OTA apply guard: {}",
+                error
+            );
+        }
+
+        Self {
+            completed,
+            handle: handle.ok(),
+        }
+    }
+
+    fn disarm(&self) {
+        self.completed.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn join_for_test(mut self) -> ApplianceApplyGuardOutcome {
+        self.handle
+            .take()
+            .expect("guard thread should be present")
+            .join()
+            .expect("guard thread should not panic")
+    }
+}
+
+impl Drop for ApplianceApplyGuard {
+    fn drop(&mut self) {
+        let _ = self.handle.take();
+    }
 }
 
 pub fn appliance_rollback_version_matches(version: &str) -> bool {
@@ -2524,6 +2610,26 @@ mod tests {
         let missing = dir.join("nonexistent");
         cleanup_stale_downloads(&missing);
         // Must not panic or error.
+    }
+
+    #[test]
+    fn appliance_apply_guard_exits_cleanly_after_disarm() {
+        let guard = ApplianceApplyGuard::arm("test apply", Duration::from_millis(1));
+        guard.disarm();
+
+        assert_eq!(guard.join_for_test(), ApplianceApplyGuardOutcome::Completed);
+    }
+
+    #[test]
+    fn appliance_apply_guard_would_force_reboot_when_apply_stalls() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_RESTART_DRY_RUN", "1");
+
+        let guard = ApplianceApplyGuard::arm("test apply", Duration::from_millis(1));
+        let outcome = guard.join_for_test();
+
+        std::env::remove_var("RHYTHM_RESTART_DRY_RUN");
+        assert_eq!(outcome, ApplianceApplyGuardOutcome::DryRunSkipped);
     }
 
     #[test]
