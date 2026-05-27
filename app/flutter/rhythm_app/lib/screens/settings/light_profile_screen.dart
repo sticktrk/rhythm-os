@@ -1289,9 +1289,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
-            color: active
-                ? color.withValues(alpha: 0.14)
-                : Colors.transparent,
+            color: active ? color.withValues(alpha: 0.14) : Colors.transparent,
             borderRadius: BorderRadius.circular(6),
             border: Border.all(
               color: active
@@ -1401,8 +1399,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     const amber = _Palette.amber;
     final isCustom = _sleepCustomBri;
     final autoValue = _wakeMinBrightness;
-    final displayValue =
-        isCustom ? _sleepBrightness.round() : autoValue;
+    final displayValue = isCustom ? _sleepBrightness.round() : autoValue;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
@@ -1526,9 +1523,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         color: _Palette.card,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: isCustom
-              ? swatch.withValues(alpha: 0.30)
-              : _Palette.border,
+          color: isCustom ? swatch.withValues(alpha: 0.30) : _Palette.border,
         ),
       ),
       child: Column(
@@ -2266,10 +2261,10 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                         maxThumbMin: 20,
                         tint: color,
                         divisions: 99,
-                        onMinChanged: (v) => _onPreviewRangeChanged(
-                            () => _minBrightness = v),
-                        onMaxChanged: (v) => _onPreviewRangeChanged(
-                            () => _maxBrightness = v),
+                        onMinChanged: (v) =>
+                            _onPreviewRangeChanged(() => _minBrightness = v),
+                        onMaxChanged: (v) =>
+                            _onPreviewRangeChanged(() => _maxBrightness = v),
                       ),
                     )
                   : const SizedBox.shrink(),
@@ -2979,8 +2974,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     final effectiveMotionSecs =
         (_serverSync.effectiveMotionTimeoutSecs ?? _motionTimeoutSecs)
             .toDouble();
-    final effectiveFadeMs =
-        _serverSync.effectiveFadeMs?.toDouble() ?? _fadeMs;
+    final effectiveFadeMs = _serverSync.effectiveFadeMs?.toDouble() ?? _fadeMs;
     final effectiveIntervalSecs = _serverSync.rhythmIntervalSecs.toDouble();
 
     final divider = Padding(
@@ -3070,8 +3064,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             sliderMax: 300,
             divisions: 27,
             format: _formatInterval,
-            tooltip:
-                'How often the lights update their color and brightness '
+            tooltip: 'How often the lights update their color and brightness '
                 'throughout the day and night.',
             onSliderChanged: (v) => setState(() {
               _intervalSecs = v;
@@ -3540,8 +3533,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                           ),
                           const SizedBox(width: 4),
                           InfoTooltip(
-                            message:
-                                'Override the default state for each room '
+                            message: 'Override the default state for each room '
                                 'while this profile is active. Useful for '
                                 'keeping certain rooms always on, off, or in '
                                 'mood regardless of the curve.',
@@ -4075,7 +4067,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     if (confirmed != true || !mounted) return;
     await _resetToDefaults();
   }
-
 }
 
 // -----------------------------------------------------------------------------
@@ -4443,7 +4434,7 @@ enum _RoomDefaultMode { none, off, idle, active }
 class _RoomDefaultCard extends StatelessWidget {
   final String roomId;
   final String roomName;
-  final String? state; // null = no override, "active", "idle", "hard_off"
+  final String? state; // null = no override, "active", "mood", "hard_off"
   final bool canUseStandby;
   final ValueChanged<String?> onStateChanged;
 
@@ -4458,14 +4449,14 @@ class _RoomDefaultCard extends StatelessWidget {
 
   _RoomDefaultMode get _mode => switch (state) {
         'active' => _RoomDefaultMode.active,
-        'idle' => _RoomDefaultMode.idle,
+        'mood' || 'idle' || 'standby' => _RoomDefaultMode.idle,
         'hard_off' => _RoomDefaultMode.off,
         _ => _RoomDefaultMode.none,
       };
 
   String? _stateFromMode(_RoomDefaultMode mode) => switch (mode) {
         _RoomDefaultMode.active => 'active',
-        _RoomDefaultMode.idle => 'idle',
+        _RoomDefaultMode.idle => 'mood',
         _RoomDefaultMode.off => 'hard_off',
         _RoomDefaultMode.none => null,
       };
@@ -4539,9 +4530,8 @@ class _RoomDefaultCard extends StatelessWidget {
                     child: _RoomDefaultMotionIndicator(
                       info: motionTimer,
                       color: indicatorColor,
-                      onExpired: () => context
-                          .read<RoomProvider>()
-                          .clearMotionTimer(roomId),
+                      onExpired: () =>
+                          context.read<RoomProvider>().clearMotionTimer(roomId),
                     ),
                   )
                 else if (hasSensor)
@@ -5195,8 +5185,8 @@ class _LockedCardState extends State<_LockedCard>
               bottom: 10,
               child: Center(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.38),
                     borderRadius: BorderRadius.circular(999),

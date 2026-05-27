@@ -174,6 +174,12 @@ class RoomProvider extends ChangeNotifier {
   /// Per-room direct color from server (for direct-color profiles like idle).
   final Map<String, (int r, int g, int b)> _roomColor = {};
 
+  /// Whether Mood lighting is enabled for this room.
+  final Map<String, bool> _roomMoodEnabled = {};
+
+  /// Whether this room is currently in its Mood state.
+  final Map<String, bool> _roomMoodActive = {};
+
   /// Per-room timestamp of the last rhythm tick from the server.
   final Map<String, DateTime> _lastTickTime = {};
 
@@ -214,6 +220,13 @@ class RoomProvider extends ChangeNotifier {
 
   /// Whether a room is in idle mode.
   bool isRoomIdle(String roomId) => getRoomState(roomId) == RoomModeState.idle;
+
+  /// Whether a room has per-room Mood lighting enabled.
+  bool isMoodEnabled(String roomId) => _roomMoodEnabled[roomId] ?? false;
+
+  /// Whether a room is actively showing Mood lighting.
+  bool isMoodActive(String roomId) =>
+      _roomMoodActive[roomId] ?? getRoomState(roomId) == RoomModeState.idle;
 
   /// Latest live mode for a room from SSE, when available.
   RhythmMode? getRoomMode(String roomId) => _roomModes[roomId];
@@ -290,6 +303,13 @@ class RoomProvider extends ChangeNotifier {
     _roomColor[roomId] = (r, g, b);
     _roomStateLockedUntil[roomId] =
         DateTime.now().add(const Duration(seconds: 3));
+    notifyListeners();
+  }
+
+  /// Set Mood enablement locally for optimistic UI.
+  void setMoodEnabledLocal(String roomId, bool enabled) {
+    if (_roomMoodEnabled[roomId] == enabled) return;
+    _roomMoodEnabled[roomId] = enabled;
     notifyListeners();
   }
 
@@ -584,6 +604,8 @@ class RoomProvider extends ChangeNotifier {
     int? brightness,
     int? kelvin,
     (int r, int g, int b)? color,
+    bool? moodEnabled,
+    bool? moodActive,
     bool tick = false,
   }) async {
     bool changed = false;
@@ -651,6 +673,14 @@ class RoomProvider extends ChangeNotifier {
       // Clear direct color when receiving a real kelvin value.
       if (_roomColor.remove(roomId) != null) changed = true;
     }
+    if (moodEnabled != null && _roomMoodEnabled[roomId] != moodEnabled) {
+      _roomMoodEnabled[roomId] = moodEnabled;
+      changed = true;
+    }
+    if (moodActive != null && _roomMoodActive[roomId] != moodActive) {
+      _roomMoodActive[roomId] = moodActive;
+      changed = true;
+    }
     if (changed) {
       await _save();
       notifyListeners();
@@ -669,6 +699,8 @@ class RoomProvider extends ChangeNotifier {
     int? brightness,
     int? kelvin,
     (int r, int g, int b)? color,
+    bool? moodEnabled,
+    bool? moodActive,
     bool tick = false,
   }) {
     return applyServerRoomState(
@@ -683,6 +715,8 @@ class RoomProvider extends ChangeNotifier {
       brightness: brightness,
       kelvin: kelvin,
       color: color,
+      moodEnabled: moodEnabled,
+      moodActive: moodActive,
       tick: tick,
     );
   }
@@ -858,6 +892,8 @@ class RoomProvider extends ChangeNotifier {
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
+    _roomMoodEnabled.clear();
+    _roomMoodActive.clear();
     _lastTickTime.clear();
     notifyListeners();
   }
@@ -884,6 +920,8 @@ class RoomProvider extends ChangeNotifier {
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
+    _roomMoodEnabled.clear();
+    _roomMoodActive.clear();
     _lastTickTime.clear();
     await _save();
     // Update room count analytics property

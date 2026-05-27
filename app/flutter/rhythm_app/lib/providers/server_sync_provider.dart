@@ -15,10 +15,8 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
-import '../models/plan_tier.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
-import '../services/entitlements_service.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import 'home_provider.dart';
@@ -59,7 +57,6 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
   StreamSubscription<void>? _demoChangeSub;
-  StreamSubscription<PlanTier>? _entitlementsSub;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -605,33 +602,6 @@ class ServerSyncProvider extends ChangeNotifier {
       if (!HueServiceLocator.isDemoMode) return;
       unawaited(_refreshDemoState());
     });
-
-    // Entitlement enforcement: Power Save is derived from tier, not user UI.
-    // Free => powerSave=true (no standby). Pro => powerSave=false.
-    try {
-      _entitlementsSub = EntitlementsService.instance.tierChanges.listen(
-        (_) => _enforcePowerSaveEntitlement(),
-      );
-    } catch (_) {
-      // EntitlementsService not bootstrapped (test / non-app entry).
-    }
-  }
-
-  /// Keep server Power Save aligned with the current tier.
-  void _enforcePowerSaveEntitlement() {
-    EntitlementsService service;
-    try {
-      service = EntitlementsService.instance;
-    } catch (_) {
-      return;
-    }
-    final desiredPowerSave = !service.has(Entitlement.standby);
-    if (_powerSave == desiredPowerSave) return;
-    if (!synced) return; // Wait for a server connection.
-    debugPrint(
-      'ServerSync: enforcing powerSave=$desiredPowerSave from entitlements',
-    );
-    unawaited(setPowerSave(desiredPowerSave));
   }
 
   /// Connect to server if a hub is available.
@@ -886,7 +856,6 @@ class ServerSyncProvider extends ChangeNotifier {
     _refreshTopologyNodes();
 
     notifyListeners();
-    _enforcePowerSaveEntitlement();
   }
 
   /// Accept light-addressable nodes from the server as the authoritative source.
@@ -973,6 +942,8 @@ class ServerSyncProvider extends ChangeNotifier {
             lightsOn: sr.lightsOn,
             brightness: sr.brightness,
             kelvin: sr.kelvin,
+            moodEnabled: sr.moodEnabled,
+            moodActive: sr.moodActive,
           );
         }
       }
@@ -1017,6 +988,8 @@ class ServerSyncProvider extends ChangeNotifier {
         color: state.color != null
             ? (state.color!.r, state.color!.g, state.color!.b)
             : null,
+        moodEnabled: state.moodEnabled,
+        moodActive: state.moodActive,
         tick: state.tick,
       );
       helloChanged = _updateHelloNodeFromRhythmState(state);
@@ -1074,7 +1047,6 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     if (!changed) return;
     notifyListeners();
-    _enforcePowerSaveEntitlement();
   }
 
   /// Handle light-breaker updates so the global control switch stays live.
@@ -1275,21 +1247,26 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Returns true if dispatched to server, false if not connected.
   bool dispatchNodeBrightness(String nodeId, int brightness) {
     if (HueServiceLocator.isDemoMode) {
+      final currentState = _roomProvider.getRoomState(nodeId);
+      final moodActive = currentState == RoomModeState.idle;
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
         on: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(nodeId),
+        state: moodActive ? RoomModeState.idle : RoomModeState.active,
       );
       _roomProvider.applyServerNodeState(
         nodeId,
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
-        state: RoomModeState.active,
+        state: moodActive ? RoomModeState.idle : RoomModeState.active,
         lightsOn: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(nodeId),
+        moodEnabled: moodActive ? true : _roomProvider.isMoodEnabled(nodeId),
+        moodActive: moodActive,
       );
       return true;
     }
@@ -1304,20 +1281,41 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Set a node's direct color (RGB) via the server runtime.
   ///
   /// Returns true if dispatched to server, false if not connected.
-  bool dispatchNodeColor(String nodeId, int r, int g, int b) {
+  bool dispatchNodeColor(
+    String nodeId,
+    int r,
+    int g,
+    int b, {
+    String? scope,
+    int? brightness,
+    int? transitionMs,
+  }) {
     _roomProvider.setRoomColorLocal(nodeId, r, g, b);
+    final persistAsMood = scope == 'mood';
+    if (persistAsMood) {
+      _roomProvider.setMoodEnabledLocal(nodeId, true);
+    }
     if (HueServiceLocator.isDemoMode) {
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
         on: true,
-        brightness: _roomProvider.getBrightness(nodeId),
+        brightness: brightness ?? _roomProvider.getBrightness(nodeId),
         kelvin: null,
         color: (r, g, b),
+        state: persistAsMood ? RoomModeState.idle : null,
       );
       return true;
     }
     if (!_connection.connected) return false;
-    _connection.api.nodeColor(nodeId: nodeId, r: r, g: g, b: b);
+    _connection.api.nodeColor(
+      nodeId: nodeId,
+      r: r,
+      g: g,
+      b: b,
+      brightness: brightness,
+      transitionMs: transitionMs,
+      scope: scope,
+    );
     return true;
   }
 
@@ -2036,7 +2034,6 @@ class ServerSyncProvider extends ChangeNotifier {
     if (hasListeners) {
       notifyListeners();
     }
-    _enforcePowerSaveEntitlement();
   }
 
   void _syncHelloMotionState(Iterable<RhythmRoom> nodes) {
@@ -2105,6 +2102,8 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: state.profileSettings ?? previous.profileSettings,
+      moodEnabled: state.moodEnabled ?? previous.moodEnabled,
+      moodActive: state.moodActive ?? previous.moodActive,
       lightsOn: state.lightsOn ?? previous.lightsOn,
       brightness: state.brightness ?? previous.brightness,
       kelvin: state.kelvin ?? previous.kelvin,
@@ -2148,6 +2147,8 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: previous.profileSettings,
+      moodEnabled: previous.moodEnabled,
+      moodActive: previous.moodActive,
       lightsOn: previous.lightsOn,
       brightness: previous.brightness,
       kelvin: previous.kelvin,
@@ -2187,6 +2188,8 @@ class ServerSyncProvider extends ChangeNotifier {
         left.model != right.model ||
         left.profileSettings?.toJson().toString() !=
             right.profileSettings?.toJson().toString() ||
+        left.moodEnabled != right.moodEnabled ||
+        left.moodActive != right.moodActive ||
         left.lightsOn != right.lightsOn ||
         left.brightness != right.brightness ||
         left.kelvin != right.kelvin ||
@@ -2264,6 +2267,8 @@ class ServerSyncProvider extends ChangeNotifier {
             .toList(),
         devices: devices,
         profileSettings: state?.profileSettings,
+        moodEnabled: state?.moodEnabled ?? false,
+        moodActive: state?.moodActive ?? false,
         lightsOn: state?.lightsOn,
         brightness: state?.brightness,
         kelvin: state?.kelvin,
@@ -2402,7 +2407,6 @@ class ServerSyncProvider extends ChangeNotifier {
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
     _demoChangeSub?.cancel();
-    _entitlementsSub?.cancel();
     super.dispose();
   }
 }

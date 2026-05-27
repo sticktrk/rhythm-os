@@ -479,6 +479,15 @@ class DemoServerApi extends RhythmServerApi {
     room['state'] =
         (state ?? (on ? RoomModeState.active : RoomModeState.hardOff))
             .wireValue;
+    final effectiveState =
+        state ?? (on ? RoomModeState.active : RoomModeState.hardOff);
+    room['mood_enabled'] = (room['mood_enabled'] as bool? ?? false) ||
+        effectiveState == RoomModeState.idle;
+    room['mood_active'] = effectiveState == RoomModeState.idle;
+    final profileSettings = Map<String, dynamic>.from(
+        (room['profile_settings'] as Map?) ?? const {});
+    profileSettings['mood_enabled'] = room['mood_enabled'];
+    room['profile_settings'] = profileSettings;
     if (brightness != null) {
       room['brightness'] = brightness;
     }
@@ -854,6 +863,9 @@ class DemoServerApi extends RhythmServerApi {
       'lights_on': true,
       'brightness': brightness,
       'kelvin': kelvin,
+      'mood_enabled': false,
+      'mood_active': false,
+      'profile_settings': const {'mood_enabled': false},
     };
   }
 

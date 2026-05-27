@@ -22,14 +22,12 @@ class RoomCard extends StatefulWidget {
   final String roomId;
   final CurveConfigDto globalConfig;
   final CurveData? curveData;
-  final bool powerSave;
 
   const RoomCard({
     super.key,
     required this.roomId,
     required this.globalConfig,
     this.curveData,
-    this.powerSave = false,
   });
 
   @override
@@ -48,10 +46,11 @@ class _RoomCardState extends State<RoomCard> {
   String _analyticsModeForState(RoomModeState state) {
     final mode = switch (state) {
       RoomModeState.hardOff => RoomMode.off,
-      RoomModeState.idle ||
-      RoomModeState.warning =>
-        widget.powerSave ? RoomMode.off : RoomMode.idle,
-      RoomModeState.wake || RoomModeState.active => RoomMode.on,
+      RoomModeState.idle => RoomMode.idle,
+      RoomModeState.warning ||
+      RoomModeState.wake ||
+      RoomModeState.active =>
+        RoomMode.on,
     };
     return mode.name;
   }
@@ -78,6 +77,7 @@ class _RoomCardState extends State<RoomCard> {
         HapticFeedback.lightImpact();
         roomProvider.setRoomLightsOnLocal(widget.roomId, true);
         roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+        roomProvider.setMoodEnabledLocal(widget.roomId, true);
         roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.idle);
       case RoomMode.off:
         HapticFeedback.heavyImpact();
@@ -97,10 +97,8 @@ class _RoomCardState extends State<RoomCard> {
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.idle,
+          profileSettings: const {'mood_enabled': true},
         );
-      // Mood color picking is intentionally hidden for now; leave the helper
-      // below intact so we can re-enable it without rebuilding the flow.
-      // _showMoodColorPicker(roomProvider);
       case RoomMode.off:
         serverSync.pushNodePreferences(
           widget.roomId,
@@ -140,6 +138,7 @@ class _RoomCardState extends State<RoomCard> {
               r,
               g,
               b,
+              scope: 'mood',
             );
       },
     );
@@ -220,6 +219,7 @@ class _RoomCardState extends State<RoomCard> {
           isTransitioning
         ) = data;
         if (room == null) return const SizedBox.shrink();
+        final roomProvider = context.read<RoomProvider>();
 
         // Check if this room's hub is reachable.
         final hubConnected = context.select<ServerSyncProvider, bool>(
@@ -234,10 +234,11 @@ class _RoomCardState extends State<RoomCard> {
 
         final mode = switch (roomState) {
           RoomModeState.hardOff => RoomMode.off,
-          RoomModeState.idle ||
-          RoomModeState.warning =>
-            widget.powerSave ? RoomMode.off : RoomMode.idle,
-          RoomModeState.wake || RoomModeState.active => RoomMode.on,
+          RoomModeState.idle => RoomMode.idle,
+          RoomModeState.warning ||
+          RoomModeState.wake ||
+          RoomModeState.active =>
+            RoomMode.on,
         };
 
         // Use server-provided brightness and kelvin
@@ -462,188 +463,186 @@ class _RoomCardState extends State<RoomCard> {
                           child: _SegmentedToggle(
                             mode: mode,
                             onModeChanged: _onModeChanged,
-                            powerSave: widget.powerSave,
                             offCurve: offCurve,
                             cctColor: cctColor,
                             enabled: !isTransitioning,
                           ),
                         ),
-                        if (mode == RoomMode.on)
+                        if (mode == RoomMode.on || mode == RoomMode.idle)
                           GestureDetector(
                             onLongPress: () {},
                             child: Padding(
-                            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-                            child: Row(
-                              children: [
-                                // Mode toggle button
-                                GestureDetector(
-                                  onTap: sliderActive
-                                      ? _toggleSliderMode
-                                      : null,
-                                  child: AnimatedContainer(
-                                    duration:
-                                        const Duration(milliseconds: 220),
-                                    width: 32,
-                                    height: 32,
-                                    decoration: BoxDecoration(
-                                      borderRadius:
-                                          BorderRadius.circular(10),
-                                      color: _cctMode
-                                          ? ColorUtils.cctToColor(
-                                                  (_sliderKelvin ?? kelvin)
-                                                      .clamp(_minKelvin,
-                                                          _maxKelvin))
-                                              .withValues(alpha: 0.20)
-                                          : Colors.white
-                                              .withValues(alpha: 0.07),
-                                      border: Border.all(
+                              padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                              child: Row(
+                                children: [
+                                  // Mode toggle button
+                                  GestureDetector(
+                                    onTap: sliderActive
+                                        ? () {
+                                            if (mode == RoomMode.idle) {
+                                              _showMoodColorPicker(
+                                                  roomProvider);
+                                            } else {
+                                              _toggleSliderMode();
+                                            }
+                                          }
+                                        : null,
+                                    child: AnimatedContainer(
+                                      duration:
+                                          const Duration(milliseconds: 220),
+                                      width: 32,
+                                      height: 32,
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(10),
                                         color: _cctMode
                                             ? ColorUtils.cctToColor(
-                                                    (_sliderKelvin ??
-                                                            kelvin)
-                                                        .clamp(
-                                                            _minKelvin,
+                                                    (_sliderKelvin ?? kelvin)
+                                                        .clamp(_minKelvin,
                                                             _maxKelvin))
-                                                .withValues(alpha: 0.35)
-                                            : Colors.white.withValues(
-                                                alpha: 0.12),
-                                        width: 1,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.black
-                                              .withValues(alpha: 0.35),
-                                          blurRadius: 4,
-                                          offset: const Offset(0, 2),
-                                        ),
-                                      ],
-                                    ),
-                                    child: Center(
-                                      child: AnimatedSwitcher(
-                                        duration: const Duration(
-                                            milliseconds: 220),
-                                        transitionBuilder:
-                                            (child, anim) =>
-                                                ScaleTransition(
-                                          scale: anim,
-                                          child: FadeTransition(
-                                            opacity: anim,
-                                            child: child,
-                                          ),
-                                        ),
-                                        child: Icon(
-                                          _cctMode
-                                              ? Icons
-                                                  .contrast_rounded
-                                              : Icons
-                                                  .wb_sunny_rounded,
-                                          key: ValueKey(_cctMode),
-                                          size: 18,
+                                                .withValues(alpha: 0.20)
+                                            : Colors.white
+                                                .withValues(alpha: 0.07),
+                                        border: Border.all(
                                           color: _cctMode
                                               ? ColorUtils.cctToColor(
-                                                  (_sliderKelvin ??
-                                                          kelvin)
-                                                      .clamp(
-                                                          _minKelvin,
-                                                          _maxKelvin))
-                                              : iconColor.withValues(
-                                                  alpha: 0.7),
+                                                      (_sliderKelvin ?? kelvin)
+                                                          .clamp(_minKelvin,
+                                                              _maxKelvin))
+                                                  .withValues(alpha: 0.35)
+                                              : Colors.white
+                                                  .withValues(alpha: 0.12),
+                                          width: 1,
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black
+                                                .withValues(alpha: 0.35),
+                                            blurRadius: 4,
+                                            offset: const Offset(0, 2),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Center(
+                                        child: AnimatedSwitcher(
+                                          duration:
+                                              const Duration(milliseconds: 220),
+                                          transitionBuilder: (child, anim) =>
+                                              ScaleTransition(
+                                            scale: anim,
+                                            child: FadeTransition(
+                                              opacity: anim,
+                                              child: child,
+                                            ),
+                                          ),
+                                          child: Icon(
+                                            mode == RoomMode.idle
+                                                ? Icons.palette_rounded
+                                                : _cctMode
+                                                    ? Icons.contrast_rounded
+                                                    : Icons.wb_sunny_rounded,
+                                            key: ValueKey('$mode-$_cctMode'),
+                                            size: 18,
+                                            color: _cctMode
+                                                ? ColorUtils.cctToColor(
+                                                    (_sliderKelvin ?? kelvin)
+                                                        .clamp(_minKelvin,
+                                                            _maxKelvin))
+                                                : iconColor.withValues(
+                                                    alpha: 0.7),
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                ),
-                                const SizedBox(width: 4),
-                                // Slider fills remaining space
-                                Expanded(
-                                  child: SliderTheme(
-                                    data: SliderThemeData(
-                                      trackHeight: 14,
-                                      thumbShape: _SunSliderThumbShape(
-                                        icon: _cctMode
-                                            ? Icons.contrast_rounded
-                                            : Icons.wb_sunny_rounded,
+                                  const SizedBox(width: 4),
+                                  // Slider fills remaining space
+                                  Expanded(
+                                    child: SliderTheme(
+                                      data: SliderThemeData(
+                                        trackHeight: 14,
+                                        thumbShape: _SunSliderThumbShape(
+                                          icon: _cctMode
+                                              ? Icons.contrast_rounded
+                                              : Icons.wb_sunny_rounded,
+                                        ),
+                                        overlayShape:
+                                            const RoundSliderOverlayShape(
+                                          overlayRadius: 28,
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal:
+                                              _SunSliderThumbShape.radius + 2,
+                                          vertical: 10,
+                                        ),
+                                        trackShape: _cctMode
+                                            ? const _CCTGradientTrackShape()
+                                            : const RoundedRectSliderTrackShape(),
+                                        activeTrackColor:
+                                            sliderActiveTrackColor,
+                                        inactiveTrackColor:
+                                            sliderInactiveTrackColor,
+                                        thumbColor: sliderThumbColor,
+                                        overlayColor: sliderOverlayColor,
+                                        disabledActiveTrackColor: mode ==
+                                                RoomMode.idle
+                                            ? cctColor.withValues(alpha: 0.30)
+                                            : CelestialColors.orbitRing
+                                                .withValues(alpha: 0.35),
+                                        disabledInactiveTrackColor:
+                                            mode == RoomMode.idle
+                                                ? Colors.black
+                                                    .withValues(alpha: 0.15)
+                                                : CelestialColors.orbitRing
+                                                    .withValues(alpha: 0.18),
+                                        disabledThumbColor: mode ==
+                                                RoomMode.idle
+                                            ? Color.lerp(
+                                                Colors.white, cctColor, 0.25)!
+                                            : CelestialColors.textSecondary
+                                                .withValues(alpha: 0.55),
                                       ),
-                                      overlayShape:
-                                          const RoundSliderOverlayShape(
-                                        overlayRadius: 28,
-                                      ),
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal:
-                                            _SunSliderThumbShape.radius + 2,
-                                        vertical: 10,
-                                      ),
-                                      trackShape: _cctMode
-                                          ? const _CCTGradientTrackShape()
-                                          : const RoundedRectSliderTrackShape(),
-                                      activeTrackColor:
-                                          sliderActiveTrackColor,
-                                      inactiveTrackColor:
-                                          sliderInactiveTrackColor,
-                                      thumbColor: sliderThumbColor,
-                                      overlayColor: sliderOverlayColor,
-                                      disabledActiveTrackColor:
-                                          mode == RoomMode.idle
-                                              ? cctColor.withValues(
-                                                  alpha: 0.30)
-                                              : CelestialColors.orbitRing
-                                                  .withValues(alpha: 0.35),
-                                      disabledInactiveTrackColor:
-                                          mode == RoomMode.idle
-                                              ? Colors.black.withValues(
-                                                  alpha: 0.15)
-                                              : CelestialColors.orbitRing
-                                                  .withValues(alpha: 0.18),
-                                      disabledThumbColor:
-                                          mode == RoomMode.idle
-                                              ? Color.lerp(Colors.white,
-                                                  cctColor, 0.25)!
-                                              : CelestialColors.textSecondary
-                                                  .withValues(alpha: 0.55),
-                                    ),
-                                    child: Slider(
-                                      value: _cctMode
-                                          ? (_sliderKelvin ?? kelvin)
-                                              .toDouble()
-                                              .clamp(
-                                                  _minKelvin.toDouble(),
-                                                  _maxKelvin.toDouble())
-                                          : displayBrightness
-                                              .toDouble()
-                                              .clamp(1, 100),
-                                      min: _cctMode
-                                          ? _minKelvin.toDouble()
-                                          : 1,
-                                      max: _cctMode
-                                          ? _maxKelvin.toDouble()
-                                          : 100,
-                                      onChanged: sliderActive
-                                          ? (v) {
-                                              setState(() {
-                                                if (_cctMode) {
-                                                  _sliderKelvin = v.round();
-                                                } else {
-                                                  _sliderBrightness =
-                                                      v.round();
-                                                }
-                                              });
-                                            }
-                                          : null,
-                                      onChangeEnd: sliderActive
-                                          ? (_) {
-                                              if (_cctMode) {
-                                                _onKelvinSliderEnd();
-                                              } else {
-                                                _onBrightnessSliderEnd();
+                                      child: Slider(
+                                        value: _cctMode
+                                            ? (_sliderKelvin ?? kelvin)
+                                                .toDouble()
+                                                .clamp(_minKelvin.toDouble(),
+                                                    _maxKelvin.toDouble())
+                                            : displayBrightness
+                                                .toDouble()
+                                                .clamp(1, 100),
+                                        min: _cctMode
+                                            ? _minKelvin.toDouble()
+                                            : 1,
+                                        max: _cctMode
+                                            ? _maxKelvin.toDouble()
+                                            : 100,
+                                        onChanged: sliderActive
+                                            ? (v) {
+                                                setState(() {
+                                                  if (_cctMode) {
+                                                    _sliderKelvin = v.round();
+                                                  } else {
+                                                    _sliderBrightness =
+                                                        v.round();
+                                                  }
+                                                });
                                               }
-                                            }
-                                          : null,
+                                            : null,
+                                        onChangeEnd: sliderActive
+                                            ? (_) {
+                                                if (_cctMode) {
+                                                  _onKelvinSliderEnd();
+                                                } else {
+                                                  _onBrightnessSliderEnd();
+                                                }
+                                              }
+                                            : null,
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
-                          ),
                           )
                         else
                           const SizedBox(height: 14),
@@ -827,7 +826,7 @@ class _CCTGradientTrackShape extends SliderTrackShape
   }
 }
 
-/// Big segmented power control: Mood | Off | On (or Off | On in power save).
+/// Big segmented power control: Mood | Off | On.
 ///
 /// Each segment is a discrete tap target with a stacked icon + label, so
 /// every state is visible and discoverable — no hidden long-press. A
@@ -836,7 +835,6 @@ class _CCTGradientTrackShape extends SliderTrackShape
 class _SegmentedToggle extends StatefulWidget {
   final RoomMode mode;
   final ValueChanged<RoomMode> onModeChanged;
-  final bool powerSave;
   final bool offCurve;
   final Color cctColor;
   final bool enabled;
@@ -845,7 +843,6 @@ class _SegmentedToggle extends StatefulWidget {
     required this.mode,
     required this.onModeChanged,
     required this.cctColor,
-    this.powerSave = false,
     this.offCurve = false,
     this.enabled = true,
   });
@@ -868,20 +865,15 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
     _SegmentSpec(RoomMode.on, Icons.lightbulb_rounded, 'On'),
   ];
-  static const List<_SegmentSpec> _twoState = [
-    _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
-    _SegmentSpec(RoomMode.on, Icons.lightbulb_rounded, 'On'),
-  ];
 
-  List<_SegmentSpec> get _segments =>
-      widget.powerSave ? _twoState : _threeState;
+  List<_SegmentSpec> get _segments => _threeState;
 
   int _indexFor(RoomMode m) {
     final segs = _segments;
     for (var i = 0; i < segs.length; i++) {
       if (segs[i].mode == m) return i;
     }
-    return widget.powerSave ? 0 : 1;
+    return 1;
   }
 
   int _indexAtX(double x, double trackWidth) {

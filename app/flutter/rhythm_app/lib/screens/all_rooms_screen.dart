@@ -473,32 +473,26 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               _buildHeader(isLandscape, pageProvider.editMode),
               if (!pageProvider.editMode) const HubConnectionBanner(),
               Expanded(
-                child: Selector<ServerSyncProvider, bool>(
-                  selector: (_, p) => p.powerSave,
-                  builder: (context, powerSave, _) {
-                    return PageView.builder(
-                      controller: widget.pageController,
-                      onPageChanged: (page) {
-                        setState(() => _currentPage = page);
-                        widget.onPageChanged?.call(page);
-                      },
-                      physics: _draggingRoomId != null
-                          ? const NeverScrollableScrollPhysics()
-                          : null,
-                      itemCount: pageCount,
-                      itemBuilder: (context, pageIndex) {
-                        final pageRooms = pageProvider.getRoomsForPage(
-                          pageIndex,
-                          widget.rooms,
-                        );
-                        return _buildPageContent(
-                          pageIndex: pageIndex,
-                          rooms: pageRooms,
-                          powerSave: powerSave,
-                          bottomPad: bottomPad,
-                          editMode: pageProvider.editMode,
-                        );
-                      },
+                child: PageView.builder(
+                  controller: widget.pageController,
+                  onPageChanged: (page) {
+                    setState(() => _currentPage = page);
+                    widget.onPageChanged?.call(page);
+                  },
+                  physics: _draggingRoomId != null
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
+                  itemCount: pageCount,
+                  itemBuilder: (context, pageIndex) {
+                    final pageRooms = pageProvider.getRoomsForPage(
+                      pageIndex,
+                      widget.rooms,
+                    );
+                    return _buildPageContent(
+                      pageIndex: pageIndex,
+                      rooms: pageRooms,
+                      bottomPad: bottomPad,
+                      editMode: pageProvider.editMode,
                     );
                   },
                 ),
@@ -584,7 +578,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Widget _buildRoomCard({
     required RoomDto room,
-    required bool powerSave,
     required bool editMode,
     bool isDragging = false,
     bool collapseWhileDragging = false,
@@ -598,7 +591,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         roomId: room.id,
         globalConfig: widget.globalConfig,
         curveData: widget.curveData,
-        powerSave: powerSave,
         editMode: editMode,
         onEnterEditMode: editMode ? () {} : _enterEditMode,
         isDragging: isDragging,
@@ -610,7 +602,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Widget _buildGridItem({
     required _RoomGridItem item,
-    required bool powerSave,
     required bool editMode,
   }) {
     if (item.isPlaceholder) {
@@ -622,7 +613,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         editMode && room.id == _draggingRoomId && _dragSourcePage != null;
     return _buildRoomCard(
       room: room,
-      powerSave: powerSave,
       editMode: editMode,
       isDragging: isDraggedRoom,
       collapseWhileDragging: isDraggedRoom,
@@ -631,13 +621,11 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Widget _buildRoomRowsList({
     required List<RoomDto> rooms,
-    required bool powerSave,
     required double bottomPad,
     required bool editMode,
   }) {
     return _buildRoomGridList(
       items: _roomGridItems(rooms),
-      powerSave: powerSave,
       bottomPad: bottomPad,
       editMode: editMode,
     );
@@ -645,7 +633,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Widget _buildRoomGridList({
     required List<_RoomGridItem> items,
-    required bool powerSave,
     required double bottomPad,
     required bool editMode,
   }) {
@@ -660,7 +647,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
             padding: const EdgeInsets.only(bottom: 12),
             child: _buildGridItem(
               item: row.first,
-              powerSave: powerSave,
               editMode: editMode,
             ),
           );
@@ -677,7 +663,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                   child: i < row.length
                       ? _buildGridItem(
                           item: row[i],
-                          powerSave: powerSave,
                           editMode: editMode,
                         )
                       : const SizedBox.shrink(),
@@ -693,7 +678,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   Widget _buildPageContent({
     required int pageIndex,
     required List<RoomDto> rooms,
-    required bool powerSave,
     required double bottomPad,
     required bool editMode,
   }) {
@@ -721,7 +705,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         backgroundColor: const Color(0xFF1A2E45),
         child: _buildRoomRowsList(
           rooms: rooms,
-          powerSave: powerSave,
           bottomPad: bottomPad,
           editMode: false,
         ),
@@ -732,7 +715,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       return _buildEditModeDismissRegion(
         _buildRoomRowsList(
           rooms: rooms,
-          powerSave: powerSave,
           bottomPad: bottomPad,
           editMode: true,
         ),
@@ -768,7 +750,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     return _buildEditModeDismissRegion(
       _buildRoomGridList(
         items: items,
-        powerSave: powerSave,
         bottomPad: bottomPad,
         editMode: true,
       ),

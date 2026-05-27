@@ -14,7 +14,6 @@ class EditableRoomCard extends StatefulWidget {
   final String roomId;
   final CurveConfigDto globalConfig;
   final CurveData? curveData;
-  final bool powerSave;
   final bool editMode;
   final VoidCallback onEnterEditMode;
 
@@ -38,7 +37,6 @@ class EditableRoomCard extends StatefulWidget {
     required this.roomId,
     required this.globalConfig,
     this.curveData,
-    this.powerSave = false,
     required this.editMode,
     required this.onEnterEditMode,
     this.onDragStart,
@@ -94,7 +92,6 @@ class _EditableRoomCardState extends State<EditableRoomCard>
       roomId: widget.roomId,
       globalConfig: widget.globalConfig,
       curveData: widget.curveData,
-      powerSave: widget.powerSave,
     );
   }
 

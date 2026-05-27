@@ -284,7 +284,7 @@ void main() {
     expect(fullWidth.left, closeTo(bulb.left, 0.1));
   });
 
-  testWidgets('idle compact bulb cards do not show the mood pill',
+  testWidgets('compact bulb cards expose mood as a first-class mode',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
@@ -333,7 +333,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Bulb 1'), findsOneWidget);
-    expect(find.text('Mood'), findsNothing);
+    expect(find.text('Mood'), findsOneWidget);
   });
 
   testWidgets(
