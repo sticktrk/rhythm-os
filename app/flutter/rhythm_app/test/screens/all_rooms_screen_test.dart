@@ -284,8 +284,7 @@ void main() {
     expect(fullWidth.left, closeTo(bulb.left, 0.1));
   });
 
-  testWidgets('compact bulb cards expose mood as a first-class mode',
-      (tester) async {
+  testWidgets('compact bulb cards collapse legacy idle to off', (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
@@ -333,7 +332,8 @@ void main() {
     await tester.pump();
 
     expect(find.text('Bulb 1'), findsOneWidget);
-    expect(find.text('Mood'), findsOneWidget);
+    expect(find.text('Off'), findsOneWidget);
+    expect(find.text('Mood'), findsNothing);
   });
 
   testWidgets(

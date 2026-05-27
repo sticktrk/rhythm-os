@@ -1343,7 +1343,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     final canUseSleepPrimary =
         subscription.has(Entitlement.sleepPrimarySettings);
     final canUseAdvancedDay = subscription.has(Entitlement.advancedDayControls);
-    final canUseStandby = subscription.has(Entitlement.standby);
     final canUseTimeSimulator = subscription.has(Entitlement.timeSimulator);
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
@@ -1364,13 +1363,12 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             const SizedBox(height: 24),
           ],
           if (_isSleepProfile)
-            _buildSleepSceneSection(canUseStandby: canUseStandby)
+            _buildSleepSceneSection()
           else
-            _buildRoomDefaultsSection(canUseStandby: canUseStandby),
+            _buildRoomDefaultsSection(),
           const SizedBox(height: 14),
           _buildAdvancedSection(
             canUseAdvancedDay: canUseAdvancedDay,
-            canUseStandby: canUseStandby,
             canUseSleepPrimary: canUseSleepPrimary,
           ),
           if (_curveConfigDirty || _isSaving) ...[
@@ -1611,6 +1609,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   // Idle Section — folded into day/sleep profiles
   // ---------------------------------------------------------------------------
 
+  // ignore: unused_element
   Widget _buildIdleSection() {
     final isDefault = !_idleCustomBri && !_idleCustomColor;
     final briColor = _idleCustomBri ? _Palette.amber : _Palette.idle;
@@ -3349,7 +3348,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   /// Framed as a "stage cue": when Sleep is activated, each room takes its
   /// mark below. The amber crescent + kerned eyebrow + italic stage-direction
   /// body explain cause-and-effect without burying it behind a collapsible.
-  Widget _buildSleepSceneSection({required bool canUseStandby}) {
+  Widget _buildSleepSceneSection() {
     return Selector<RoomProvider, List<RoomDto>>(
       selector: (_, provider) =>
           provider.rooms.where(showsInAllRooms).toList(growable: false),
@@ -3455,7 +3454,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 roomId: rooms[i].id,
                 roomName: rooms[i].name,
                 state: defaults[rooms[i].id],
-                canUseStandby: canUseStandby,
                 onStateChanged: (newState) =>
                     _onRoomDefaultChanged(rooms[i].id, newState),
               ),
@@ -3466,7 +3464,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  Widget _buildRoomDefaultsSection({required bool canUseStandby}) {
+  Widget _buildRoomDefaultsSection() {
     return Selector<RoomProvider, List<RoomDto>>(
       selector: (_, provider) =>
           provider.rooms.where(showsInAllRooms).toList(growable: false),
@@ -3535,8 +3533,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                           InfoTooltip(
                             message: 'Override the default state for each room '
                                 'while this profile is active. Useful for '
-                                'keeping certain rooms always on, off, or in '
-                                'mood regardless of the curve.',
+                                'keeping certain rooms always on or off '
+                                'regardless of the curve.',
                             iconSize: 13,
                           ),
                         ],
@@ -3609,7 +3607,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                 roomId: rooms[i].id,
                                 roomName: rooms[i].name,
                                 state: defaults[rooms[i].id],
-                                canUseStandby: canUseStandby,
                                 onStateChanged: (newState) =>
                                     _onRoomDefaultChanged(
                                         rooms[i].id, newState),
@@ -3636,13 +3633,12 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   Widget _buildAdvancedSection({
     required bool canUseAdvancedDay,
-    required bool canUseStandby,
     required bool canUseSleepPrimary,
   }) {
     final expanded = _advancedExpanded;
     final lockedCount = _isSleepProfile
-        ? (canUseSleepPrimary ? 0 : 1) + (canUseStandby ? 0 : 1)
-        : (canUseAdvancedDay ? 0 : 1) + (canUseStandby ? 0 : 1);
+        ? (canUseSleepPrimary ? 0 : 1)
+        : (canUseAdvancedDay ? 0 : 1);
     final allUnlocked = lockedCount == 0;
     const accent = _Palette.amber;
 
@@ -3707,8 +3703,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                       const SizedBox(height: 2),
                       Text(
                         _isSleepProfile
-                            ? 'Custom sleep colors & mood'
-                            : 'Fine-tune timing & mood',
+                            ? 'Custom sleep colors'
+                            : 'Fine-tune timing',
                         style: const TextStyle(
                           color: _Palette.textSecondary,
                           fontSize: 11,
@@ -3764,12 +3760,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                 entitlement: Entitlement.sleepPrimarySettings,
                                 child: _buildTimingCard(),
                               ),
-                              const SizedBox(height: 10),
-                              _ProLockWrap(
-                                unlocked: canUseStandby,
-                                entitlement: Entitlement.standby,
-                                child: _buildIdleSection(),
-                              ),
                             ],
                           )
                         : Column(
@@ -3778,12 +3768,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                                 unlocked: canUseAdvancedDay,
                                 entitlement: Entitlement.advancedDayControls,
                                 child: _buildTimingCard(),
-                              ),
-                              const SizedBox(height: 10),
-                              _ProLockWrap(
-                                unlocked: canUseStandby,
-                                entitlement: Entitlement.standby,
-                                child: _buildIdleSection(),
                               ),
                             ],
                           ),
@@ -3909,8 +3893,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     if (_isSaving) return;
     final config = _buildDraftConfig();
     final serverSync = context.read<ServerSyncProvider>();
-    final canUseStandby =
-        context.read<SubscriptionProvider>().has(Entitlement.standby);
     final api = serverSync.api;
     final activeProfileId = serverSync.activeProfileId;
     setState(() {
@@ -3937,33 +3919,8 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         return;
       }
 
-      // Also save idle config when standby is entitled. Free users keep
-      // Power Save on and detach any custom standby profile on the next save.
-      final idleConfig = canUseStandby ? _buildIdleDraftConfig() : null;
-      bool idleSaved = true;
-      if (idleConfig != null) {
-        idleSaved = await api.configSet(
-          idleConfig,
-          id: idleConfig.id,
-          apply: activeProfileId != null && idleConfig.id == activeProfileId,
-        );
-        if (!mounted) return;
-        if (!idleSaved) {
-          setState(() => _curveConfigDirty = true);
-          AnalyticsService().logLightProfileSaveFailed(
-            _selectedProfileId,
-            stage: 'idle_profile',
-          );
-          _showSaveFeedback(
-            'Saved ${_profileTitle.toLowerCase()}, but failed to save standby settings.',
-            error: true,
-          );
-          return;
-        }
-      }
-
-      final targetIdleProfileId = idleConfig?.id;
       final currentIdleProfileId = _selectedCustomIdleProfileId;
+      const String? targetIdleProfileId = null;
       final shouldUpdateIdleModeConfig =
           currentIdleProfileId != targetIdleProfileId;
       List<sdk.RhythmModeConfig>? updatedModeConfigs;
@@ -3982,9 +3939,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
             stage: 'idle_mode',
           );
           _showSaveFeedback(
-            targetIdleProfileId == null
-                ? 'Saved ${_profileTitle.toLowerCase()}, but failed to disable custom standby.'
-                : 'Saved ${_profileTitle.toLowerCase()}, but failed to attach standby settings.',
+            'Saved ${_profileTitle.toLowerCase()}, but failed to clear legacy standby settings.',
             error: true,
           );
           return;
@@ -3992,18 +3947,11 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       }
 
       _profileConfigs[_selectedProfileId] = config;
-      if (idleConfig != null) {
-        _profileConfigs[idleConfig.id] = idleConfig;
-      }
       if (updatedModeConfigs != null) {
         _modeConfigs = updatedModeConfigs;
       }
       _applyProfileConfig(config);
-      if (idleConfig != null) {
-        _applyIdleConfig(idleConfig);
-      } else {
-        _applyIdleFallback();
-      }
+      _applyIdleFallback();
       await _syncActiveConfigModel(config);
       await _loadCurveData(profileId: _selectedProfileId);
       if (!mounted) return;
@@ -4429,13 +4377,12 @@ class _TimeGradientPainter extends CustomPainter {
 // Room default card
 // -----------------------------------------------------------------------------
 
-enum _RoomDefaultMode { none, off, idle, active }
+enum _RoomDefaultMode { none, off, active }
 
 class _RoomDefaultCard extends StatelessWidget {
   final String roomId;
   final String roomName;
-  final String? state; // null = no override, "active", "mood", "hard_off"
-  final bool canUseStandby;
+  final String? state; // null = no override, "active", "hard_off"
   final ValueChanged<String?> onStateChanged;
 
   const _RoomDefaultCard({
@@ -4443,20 +4390,17 @@ class _RoomDefaultCard extends StatelessWidget {
     required this.roomId,
     required this.roomName,
     required this.state,
-    required this.canUseStandby,
     required this.onStateChanged,
   });
 
   _RoomDefaultMode get _mode => switch (state) {
         'active' => _RoomDefaultMode.active,
-        'mood' || 'idle' || 'standby' => _RoomDefaultMode.idle,
-        'hard_off' => _RoomDefaultMode.off,
+        'mood' || 'idle' || 'standby' || 'hard_off' => _RoomDefaultMode.off,
         _ => _RoomDefaultMode.none,
       };
 
   String? _stateFromMode(_RoomDefaultMode mode) => switch (mode) {
         _RoomDefaultMode.active => 'active',
-        _RoomDefaultMode.idle => 'mood',
         _RoomDefaultMode.off => 'hard_off',
         _RoomDefaultMode.none => null,
       };
@@ -4468,28 +4412,23 @@ class _RoomDefaultCard extends StatelessWidget {
 
     final bgColor = switch (mode) {
       _RoomDefaultMode.active => const Color(0xFF1E1A12),
-      _RoomDefaultMode.idle =>
-        Color.lerp(_Palette.card, const Color(0xFF2E2518), 0.4)!,
       _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.card,
     };
 
     final stateLabel = switch (mode) {
       _RoomDefaultMode.active => 'On',
-      _RoomDefaultMode.idle => 'Mood',
       _RoomDefaultMode.off => 'Off',
       _RoomDefaultMode.none => 'No override',
     };
 
     final stateLabelColor = switch (mode) {
       _RoomDefaultMode.active => const Color(0xFFD4A020),
-      _RoomDefaultMode.idle => _Palette.idle,
       _RoomDefaultMode.off => _Palette.textSecondary,
       _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.4),
     };
 
     final indicatorColor = switch (mode) {
       _RoomDefaultMode.active => const Color(0xFFD4A020),
-      _RoomDefaultMode.idle => const Color(0xFFCDBFAA),
       _RoomDefaultMode.off => _Palette.textSecondary.withValues(alpha: 0.8),
       _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.75),
     };
@@ -4573,7 +4512,6 @@ class _RoomDefaultCard extends StatelessWidget {
                 const SizedBox(width: 10),
                 _DefaultStateToggle(
                   mode: mode,
-                  canUseStandby: canUseStandby,
                   onModeChanged: (newMode) {
                     HapticFeedback.lightImpact();
                     onStateChanged(_stateFromMode(newMode));
@@ -4773,34 +4711,21 @@ class _RoomDefaultMiniCountdownPainter extends CustomPainter {
 }
 
 // ---------------------------------------------------------------------------
-// 3-state toggle matching the CelestialToggle from room_card.dart
+// Room default toggle matching the CelestialToggle from room_card.dart
 // ---------------------------------------------------------------------------
 
 class _DefaultStateToggle extends StatelessWidget {
   final _RoomDefaultMode mode;
-  final bool canUseStandby;
   final ValueChanged<_RoomDefaultMode> onModeChanged;
 
   const _DefaultStateToggle({
     required this.mode,
-    required this.canUseStandby,
     required this.onModeChanged,
   });
 
   void _onTap() {
-    if (!canUseStandby) {
-      // Free tier: active → off → none (no override) → active.
-      onModeChanged(switch (mode) {
-        _RoomDefaultMode.active => _RoomDefaultMode.off,
-        _RoomDefaultMode.off => _RoomDefaultMode.none,
-        _ => _RoomDefaultMode.active,
-      });
-      return;
-    }
-    // Pro tier: active → idle → off → none (no override) → active.
     onModeChanged(switch (mode) {
-      _RoomDefaultMode.active => _RoomDefaultMode.idle,
-      _RoomDefaultMode.idle => _RoomDefaultMode.off,
+      _RoomDefaultMode.active => _RoomDefaultMode.off,
       _RoomDefaultMode.off => _RoomDefaultMode.none,
       _RoomDefaultMode.none => _RoomDefaultMode.active,
     });
@@ -4864,50 +4789,32 @@ class _DefaultStateToggle extends StatelessWidget {
   }
 
   Widget _buildToggle() {
-    // For free tier, legacy `idle` collapses to `off` since standby isn't
-    // available — the thumb only ever sits at left or right.
-    final visualMode = switch (mode) {
-      _RoomDefaultMode.idle when !canUseStandby => _RoomDefaultMode.off,
-      _ => mode,
-    };
-
-    final alignment = switch (visualMode) {
+    final alignment = switch (mode) {
       _RoomDefaultMode.off => Alignment.centerLeft,
-      _RoomDefaultMode.idle => Alignment.center,
       _RoomDefaultMode.active => Alignment.centerRight,
       _RoomDefaultMode.none => Alignment.centerRight, // unreachable
     };
 
-    final trackGradient = switch (visualMode) {
+    final trackGradient = switch (mode) {
       _RoomDefaultMode.off || _RoomDefaultMode.none => const LinearGradient(
           colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
-        ),
-      _RoomDefaultMode.idle => const LinearGradient(
-          colors: [Color(0xFF221C14), Color(0xFF2E2518)],
         ),
       _RoomDefaultMode.active => const LinearGradient(
           colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
         ),
     };
 
-    final thumbColor = switch (visualMode) {
+    final thumbColor = switch (mode) {
       _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.textSecondary,
-      _RoomDefaultMode.idle => const Color(0xFFCDBFAA),
       _RoomDefaultMode.active => Colors.white,
     };
 
-    final thumbShadow = switch (visualMode) {
+    final thumbShadow = switch (mode) {
       _RoomDefaultMode.active => [
           BoxShadow(
             color: _Palette.amber.withValues(alpha: 0.4),
             blurRadius: 8,
             spreadRadius: 1,
-          ),
-        ],
-      _RoomDefaultMode.idle => [
-          BoxShadow(
-            color: const Color(0xFFD4A574).withValues(alpha: 0.2),
-            blurRadius: 6,
           ),
         ],
       _RoomDefaultMode.off || _RoomDefaultMode.none => <BoxShadow>[],

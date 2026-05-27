@@ -1202,7 +1202,7 @@ void main() {
           'name': 'Kitchen Evening',
           'kind': 'room',
           'hub_types': ['hue'],
-          'state': 'idle',
+          'state': 'hard_off',
           'transitioning': true,
           'rhythm_enabled': false,
           'time_offset': 12.0,
@@ -1221,7 +1221,7 @@ void main() {
       final room =
           provider.helloRooms.singleWhere((entry) => entry.id == 'room-1');
       expect(room.name, 'Kitchen Evening');
-      expect(room.state, RoomModeState.idle);
+      expect(room.state, RoomModeState.hardOff);
       expect(room.transitioning, isTrue);
       expect(room.rhythmEnabled, isFalse);
       expect(room.lightsOn, isFalse);

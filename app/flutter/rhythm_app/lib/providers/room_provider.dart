@@ -193,7 +193,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Raw room mode state from the server/local controls.
   ///
-  /// This represents Rhythm's automation intent (`active`, `idle`,
+  /// This represents Rhythm's automation intent (`active`,
   /// `hardOff`, etc.) and may remain `active` even when the physical lights
   /// are currently off due to an external wall switch, dimmer, or hub action.
   ///
@@ -201,6 +201,7 @@ class RoomProvider extends ChangeNotifier {
   /// rather than inferring semantics from observed power alone.
   RoomModeState getRoomState(String roomId) {
     final state = _roomStates[roomId];
+    if (state == RoomModeState.idle) return RoomModeState.hardOff;
     if (state != null) return state;
     return RoomModeState.active;
   }
@@ -218,15 +219,14 @@ class RoomProvider extends ChangeNotifier {
     return state;
   }
 
-  /// Whether a room is in idle mode.
-  bool isRoomIdle(String roomId) => getRoomState(roomId) == RoomModeState.idle;
+  /// Legacy idle state is no longer a power mode.
+  bool isRoomIdle(String roomId) => false;
 
   /// Whether a room has per-room Mood lighting enabled.
   bool isMoodEnabled(String roomId) => _roomMoodEnabled[roomId] ?? false;
 
   /// Whether a room is actively showing Mood lighting.
-  bool isMoodActive(String roomId) =>
-      _roomMoodActive[roomId] ?? getRoomState(roomId) == RoomModeState.idle;
+  bool isMoodActive(String roomId) => _roomMoodActive[roomId] ?? false;
 
   /// Latest live mode for a room from SSE, when available.
   RhythmMode? getRoomMode(String roomId) => _roomModes[roomId];

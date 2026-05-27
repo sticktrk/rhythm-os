@@ -67,7 +67,7 @@ void main() {
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 
-    test('preserves idle display when lights are actually on', () async {
+    test('collapses legacy idle display to hard off', () async {
       await provider.addRoom(
         const RoomDto(
           id: 'room-1',
@@ -91,10 +91,11 @@ void main() {
         lightsOn: true,
       );
 
-      expect(provider.getDisplayRoomState('room-1'), RoomModeState.idle);
+      expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 
-    test('local power toggles do not overwrite semantic idle state', () async {
+    test('local power toggles keep legacy idle collapsed to hard off',
+        () async {
       await provider.addRoom(
         const RoomDto(
           id: 'room-1',
@@ -120,7 +121,7 @@ void main() {
 
       await provider.setRoomLightsOnLocal('room-1', false);
 
-      expect(provider.getRoomState('room-1'), RoomModeState.idle);
+      expect(provider.getRoomState('room-1'), RoomModeState.hardOff);
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 

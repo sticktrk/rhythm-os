@@ -7,8 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDevice, RhythmDeviceType, RoomModeState;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import 'device_detail_sheet.dart';
 import 'light_output_display.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -72,26 +71,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         context.read<ServerSyncProvider>().ensureRoomPreviewStateFresh(room.id),
       );
     });
-  }
-
-  void _setMoodEnabled(bool enabled) {
-    final roomProvider = context.read<RoomProvider>();
-    final serverSync = context.read<ServerSyncProvider>();
-    roomProvider.setMoodEnabledLocal(room.id, enabled);
-
-    RoomModeState? nextState;
-    if (!enabled && roomProvider.getRoomState(room.id) == RoomModeState.idle) {
-      roomProvider.setRoomLightsOnLocal(room.id, false);
-      roomProvider.setRoomStateLocal(room.id, RoomModeState.hardOff);
-      nextState = RoomModeState.hardOff;
-    }
-
-    serverSync.pushNodePreferences(
-      room.id,
-      state: nextState,
-      profileSettings: {'mood_enabled': enabled},
-    );
-    HapticFeedback.selectionClick();
   }
 
   @override
@@ -310,23 +289,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               color: CelestialColors.sunWarm.withValues(alpha: 0.8),
               size: 18,
             ),
-          ),
-        ]),
-        const SizedBox(height: 16),
-        _buildSettingsGroup('Mood', [
-          Selector<RoomProvider, bool>(
-            selector: (_, rp) => rp.isMoodEnabled(room.id),
-            builder: (context, moodEnabled, _) {
-              return _SettingsRow(
-                icon: Icons.spa_outlined,
-                label: 'Mood Lighting',
-                trailing: _ToggleSwitch(
-                  value: moodEnabled,
-                  onChanged: _setMoodEnabled,
-                ),
-                onTap: () => _setMoodEnabled(!moodEnabled),
-              );
-            },
           ),
         ]),
       ],

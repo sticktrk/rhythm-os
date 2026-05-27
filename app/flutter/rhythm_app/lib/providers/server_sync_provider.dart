@@ -1247,26 +1247,24 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Returns true if dispatched to server, false if not connected.
   bool dispatchNodeBrightness(String nodeId, int brightness) {
     if (HueServiceLocator.isDemoMode) {
-      final currentState = _roomProvider.getRoomState(nodeId);
-      final moodActive = currentState == RoomModeState.idle;
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
         on: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(nodeId),
-        state: moodActive ? RoomModeState.idle : RoomModeState.active,
+        state: RoomModeState.active,
       );
       _roomProvider.applyServerNodeState(
         nodeId,
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
-        state: moodActive ? RoomModeState.idle : RoomModeState.active,
+        state: RoomModeState.active,
         lightsOn: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(nodeId),
-        moodEnabled: moodActive ? true : _roomProvider.isMoodEnabled(nodeId),
-        moodActive: moodActive,
+        moodEnabled: _roomProvider.isMoodEnabled(nodeId),
+        moodActive: false,
       );
       return true;
     }
@@ -1291,10 +1289,6 @@ class ServerSyncProvider extends ChangeNotifier {
     int? transitionMs,
   }) {
     _roomProvider.setRoomColorLocal(nodeId, r, g, b);
-    final persistAsMood = scope == 'mood';
-    if (persistAsMood) {
-      _roomProvider.setMoodEnabledLocal(nodeId, true);
-    }
     if (HueServiceLocator.isDemoMode) {
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
@@ -1302,7 +1296,7 @@ class ServerSyncProvider extends ChangeNotifier {
         brightness: brightness ?? _roomProvider.getBrightness(nodeId),
         kelvin: null,
         color: (r, g, b),
-        state: persistAsMood ? RoomModeState.idle : null,
+        state: null,
       );
       return true;
     }
