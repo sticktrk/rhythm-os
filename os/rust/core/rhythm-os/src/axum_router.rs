@@ -59,6 +59,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/health", get(health))
         .route("/api/auth/status", get(get_auth_status))
         .route("/api/auth/claim", post(post_auth_claim))
+        .route("/api/auth/settings", put(put_auth_settings))
         .route("/api/state", get(get_state))
         .route(
             "/api/profile-bundle",
@@ -188,6 +189,13 @@ async fn post_auth_claim(State(state): State<SharedState>, Json(body): Json<Valu
         .filter(|label| !label.is_empty())
         .map(str::to_string);
     crate::auth::handle_claim_owner_token(&state, label)
+}
+
+async fn put_auth_settings(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    crate::auth::handle_put_auth_settings(&state, &body)
 }
 
 async fn get_state(

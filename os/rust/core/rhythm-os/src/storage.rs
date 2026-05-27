@@ -1017,12 +1017,16 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             Ok(Some(auth)) => {
                 let count = auth.tokens.len();
                 let owner_configured = auth.has_owner();
+                if let Some(require_api_auth) = auth.require_api_auth {
+                    s.require_api_auth = require_api_auth;
+                }
                 s.api_auth = auth;
                 info!(
                     target: "sys",
-                    "Loaded API auth state: tokens={}, owner_configured={}",
+                    "Loaded API auth state: tokens={}, owner_configured={}, require_api_auth={}",
                     count,
-                    owner_configured
+                    owner_configured,
+                    s.require_api_auth
                 );
             }
             Ok(None) => {}
@@ -1648,6 +1652,59 @@ mod tests {
             assert_eq!(loaded.profiles.len(), 1);
             assert_eq!(loaded.profiles[0].id, rhythm_core::RHYTHM_PROFILE_ID);
             assert!((loaded.solar_noon_hour - 13.25).abs() < 0.01);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn api_auth_save_load_roundtrip_preserves_policy_override() {
+            let (storage, path) = temp_storage();
+            let auth = crate::auth::StoredApiAuth {
+                require_api_auth: Some(false),
+                ..crate::auth::StoredApiAuth::default()
+            };
+
+            storage.save_api_auth(&auth).unwrap();
+            let loaded = storage.load_api_auth().unwrap().unwrap();
+
+            assert_eq!(loaded.require_api_auth, Some(false));
+            assert_eq!(loaded.tokens.len(), 0);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_applies_api_auth_policy_override() {
+            let (storage, path) = temp_storage();
+            storage
+                .save_api_auth(&crate::auth::StoredApiAuth {
+                    require_api_auth: Some(false),
+                    ..crate::auth::StoredApiAuth::default()
+                })
+                .unwrap();
+
+            let mut app = crate::state::AppState::default();
+            app.require_api_auth = true;
+            app.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+
+            load_persisted_state(&mut app);
+
+            assert!(!app.require_api_auth);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_keeps_platform_default_when_policy_missing() {
+            let (storage, path) = temp_storage();
+            storage
+                .save_api_auth(&crate::auth::StoredApiAuth::default())
+                .unwrap();
+
+            let mut app = crate::state::AppState::default();
+            app.require_api_auth = true;
+            app.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+
+            load_persisted_state(&mut app);
+
+            assert!(app.require_api_auth);
             cleanup(&path);
         }
 

@@ -12,7 +12,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::handlers::ApiResponse;
@@ -25,6 +25,12 @@ const TOKEN_PREFIX: &str = "rhythm_owner_";
 pub struct StoredApiAuth {
     #[serde(default = "default_schema_version")]
     pub schema_version: u8,
+    /// Persisted override for the platform's default auth requirement.
+    ///
+    /// `None` means "use the platform default" so existing appliances keep
+    /// their secure default when this field is absent in older auth files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_api_auth: Option<bool>,
     #[serde(default)]
     pub tokens: Vec<StoredApiToken>,
 }
@@ -37,6 +43,7 @@ impl Default for StoredApiAuth {
     fn default() -> Self {
         Self {
             schema_version: default_schema_version(),
+            require_api_auth: None,
             tokens: Vec::new(),
         }
     }
@@ -88,6 +95,14 @@ pub enum IssueOwnerTokenResult {
     AlreadyConfigured,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiAuthSettingsUpdate {
+    pub require_api_auth: bool,
+    pub owner_configured: bool,
+    pub token_count: usize,
+    pub issued_owner_token: Option<IssuedOwnerToken>,
+}
+
 pub fn issue_owner_token(
     state: &SharedState,
     label: Option<String>,
@@ -119,6 +134,45 @@ pub fn issue_owner_token(
     }))
 }
 
+pub fn set_api_auth_required(
+    state: &SharedState,
+    require_api_auth: bool,
+    label: Option<String>,
+) -> anyhow::Result<ApiAuthSettingsUpdate> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let issued_owner_token = if require_api_auth && !s.api_auth.has_owner() {
+        let token = generate_raw_token();
+        let token_hash = hash_token(&token);
+        let id = token_hash.chars().take(16).collect::<String>();
+
+        s.api_auth.tokens.push(StoredApiToken {
+            id: id.clone(),
+            role: ApiTokenRole::Owner,
+            token_hash,
+            created_at_epoch_ms: current_epoch_ms(),
+            label,
+        });
+
+        Some(IssuedOwnerToken { id, token })
+    } else {
+        None
+    };
+
+    s.require_api_auth = require_api_auth;
+    s.api_auth.require_api_auth = Some(require_api_auth);
+
+    if let Some(storage) = s.storage.as_ref() {
+        storage.save_api_auth(&s.api_auth)?;
+    }
+
+    Ok(ApiAuthSettingsUpdate {
+        require_api_auth: s.require_api_auth,
+        owner_configured: s.api_auth.has_owner(),
+        token_count: s.api_auth.tokens.len(),
+        issued_owner_token,
+    })
+}
+
 pub fn clear_api_auth(state: &SharedState) -> anyhow::Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     s.api_auth = StoredApiAuth::default();
@@ -131,12 +185,11 @@ pub fn clear_api_auth(state: &SharedState) -> anyhow::Result<()> {
 pub fn handle_get_auth_status(state: &SharedState) -> ApiResponse {
     match state.lock() {
         Ok(s) => ApiResponse::json_ok(
-            json!({
-                "requires_auth": s.require_api_auth,
-                "owner_configured": s.api_auth.has_owner(),
-                "token_count": s.api_auth.tokens.len(),
-                "claim_available": s.require_api_auth && !s.api_auth.has_owner(),
-            })
+            auth_status_payload(
+                s.require_api_auth,
+                s.api_auth.has_owner(),
+                s.api_auth.tokens.len(),
+            )
             .to_string(),
         ),
         Err(_) => ApiResponse::server_error("lock"),
@@ -174,6 +227,44 @@ pub fn handle_claim_owner_token(state: &SharedState, label: Option<String>) -> A
     }
 }
 
+pub fn handle_put_auth_settings(state: &SharedState, body: &Value) -> ApiResponse {
+    let require_api_auth = match body
+        .get("require_api_auth")
+        .or_else(|| body.get("requires_auth"))
+        .and_then(Value::as_bool)
+    {
+        Some(value) => value,
+        None => return ApiResponse::bad_request("Missing or invalid require_api_auth boolean"),
+    };
+
+    let label = body
+        .get("label")
+        .or_else(|| body.get("owner_label"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string);
+
+    match set_api_auth_required(state, require_api_auth, label) {
+        Ok(update) => {
+            let mut body = auth_status_payload(
+                update.require_api_auth,
+                update.owner_configured,
+                update.token_count,
+            );
+            if let Some(object) = body.as_object_mut() {
+                object.insert("status".to_string(), json!("ok"));
+                if let Some(issued) = update.issued_owner_token {
+                    object.insert("token_id".to_string(), json!(issued.id));
+                    object.insert("token".to_string(), json!(issued.token));
+                }
+            }
+            ApiResponse::json_ok(body.to_string())
+        }
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub async fn require_api_auth_middleware(
     State(state): State<SharedState>,
     req: Request<Body>,
@@ -201,6 +292,19 @@ pub async fn require_api_auth_middleware(
     }
 
     unauthorized("Invalid bearer token")
+}
+
+fn auth_status_payload(
+    require_api_auth: bool,
+    owner_configured: bool,
+    token_count: usize,
+) -> Value {
+    json!({
+        "requires_auth": require_api_auth,
+        "owner_configured": owner_configured,
+        "token_count": token_count,
+        "claim_available": require_api_auth && !owner_configured,
+    })
 }
 
 fn is_public_request(method: &Method, path: &str) -> bool {
@@ -266,12 +370,32 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use axum::middleware;
+    use tower::util::ServiceExt;
+
+    fn test_state() -> SharedState {
+        Arc::new(Mutex::new(crate::state::AppState::default()))
+    }
+
+    fn auth_test_router(state: SharedState) -> axum::Router {
+        crate::axum_router::api_routes()
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(
+                state,
+                require_api_auth_middleware,
+            ))
+    }
 
     #[test]
     fn stored_auth_verifies_hashed_token_only() {
         let raw = "rhythm_owner_test";
         let stored = StoredApiAuth {
             schema_version: 1,
+            require_api_auth: None,
             tokens: vec![StoredApiToken {
                 id: "owner".into(),
                 role: ApiTokenRole::Owner,
@@ -297,12 +421,155 @@ mod tests {
 
     #[test]
     fn owner_token_can_only_be_issued_once() {
-        let state = std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()));
+        let state = test_state();
 
         let first = issue_owner_token(&state, Some("first".into())).unwrap();
         assert!(matches!(first, IssueOwnerTokenResult::Issued(_)));
 
         let second = issue_owner_token(&state, Some("second".into())).unwrap();
         assert_eq!(second, IssueOwnerTokenResult::AlreadyConfigured);
+    }
+
+    #[test]
+    fn set_api_auth_required_enables_auth_and_issues_first_owner_token() {
+        let state = test_state();
+
+        let update = set_api_auth_required(&state, true, Some("phone".into())).unwrap();
+
+        assert!(update.require_api_auth);
+        assert!(update.owner_configured);
+        assert_eq!(update.token_count, 1);
+        let issued = update
+            .issued_owner_token
+            .expect("first enable should issue token");
+        assert!(issued.token.starts_with(TOKEN_PREFIX));
+
+        let state = state.lock().unwrap();
+        assert!(state.require_api_auth);
+        assert_eq!(state.api_auth.require_api_auth, Some(true));
+        assert!(state.api_auth.verify_token(&issued.token));
+        assert_eq!(state.api_auth.tokens[0].label.as_deref(), Some("phone"));
+    }
+
+    #[test]
+    fn set_api_auth_required_reuses_existing_owner_token() {
+        let state = test_state();
+        let first = set_api_auth_required(&state, true, Some("first".into())).unwrap();
+        assert!(first.issued_owner_token.is_some());
+
+        let second = set_api_auth_required(&state, true, Some("second".into())).unwrap();
+
+        assert!(second.issued_owner_token.is_none());
+        assert_eq!(second.token_count, 1);
+        assert!(second.owner_configured);
+    }
+
+    #[test]
+    fn set_api_auth_required_can_disable_without_deleting_tokens() {
+        let state = test_state();
+        let enabled = set_api_auth_required(&state, true, Some("phone".into())).unwrap();
+        let token = enabled.issued_owner_token.unwrap().token;
+
+        let disabled = set_api_auth_required(&state, false, None).unwrap();
+
+        assert!(!disabled.require_api_auth);
+        assert!(disabled.owner_configured);
+        assert_eq!(disabled.token_count, 1);
+        let state = state.lock().unwrap();
+        assert!(!state.require_api_auth);
+        assert_eq!(state.api_auth.require_api_auth, Some(false));
+        assert!(state.api_auth.verify_token(&token));
+    }
+
+    #[tokio::test]
+    async fn auth_settings_endpoint_enables_auth_and_returns_first_owner_token() {
+        let state = test_state();
+        let app = auth_test_router(state.clone());
+
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/auth/settings")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"require_api_auth": true, "label": "phone"}).to_string(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let token = body["token"]
+            .as_str()
+            .expect("enabling without owner should return token");
+        assert_eq!(body["requires_auth"].as_bool(), Some(true));
+        assert_eq!(body["owner_configured"].as_bool(), Some(true));
+        assert_eq!(body["token_count"].as_u64(), Some(1));
+        assert!(token.starts_with(TOKEN_PREFIX));
+
+        let unauthenticated = Request::builder()
+            .method("GET")
+            .uri("/api/state")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(unauthenticated).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = Request::builder()
+            .method("GET")
+            .uri("/api/state")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(authenticated).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let state = state.lock().unwrap();
+        assert!(state.require_api_auth);
+        assert!(state.api_auth.verify_token(token));
+    }
+
+    #[tokio::test]
+    async fn auth_settings_endpoint_requires_token_to_disable_when_auth_is_on() {
+        let state = test_state();
+        let update = set_api_auth_required(&state, true, Some("phone".into())).unwrap();
+        let token = update.issued_owner_token.unwrap().token;
+        let app = auth_test_router(state.clone());
+
+        let unauthenticated_disable = Request::builder()
+            .method("PUT")
+            .uri("/api/auth/settings")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"require_api_auth": false}).to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(unauthenticated_disable).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(state.lock().unwrap().require_api_auth);
+
+        let authenticated_disable = Request::builder()
+            .method("PUT")
+            .uri("/api/auth/settings")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(json!({"require_api_auth": false}).to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(authenticated_disable).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["requires_auth"].as_bool(), Some(false));
+        assert!(!state.lock().unwrap().require_api_auth);
+
+        let unauthenticated_state = Request::builder()
+            .method("GET")
+            .uri("/api/state")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(unauthenticated_state).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

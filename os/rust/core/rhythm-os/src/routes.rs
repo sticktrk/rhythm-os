@@ -26,6 +26,18 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET"],
     },
     SharedRoute {
+        path: "/api/auth/status",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/auth/claim",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/auth/settings",
+        methods: &["PUT"],
+    },
+    SharedRoute {
         path: "/api/state",
         methods: &["GET"],
     },
