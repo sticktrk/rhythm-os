@@ -17,8 +17,8 @@ use rhythm_os::provisioning::{
 };
 #[cfg(target_os = "linux")]
 use rhythm_os::provisioning::{
-    PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID,
-    PROVISIONING_WIFI_CMD_UUID,
+    PROVISIONING_AUTH_CMD_UUID, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
+    PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
 };
 use rhythm_os::state::SharedState;
 
@@ -50,7 +50,7 @@ impl ProvisioningManager {
     }
 
     pub fn ensure_running_if_needed(&self, reason: &str) -> Result<bool> {
-        if self.force_enabled() || !wifi::has_active_connection() {
+        if self.should_run_for_current_state() {
             return self.ensure_running(reason);
         }
         Ok(false)
@@ -78,17 +78,29 @@ impl ProvisioningManager {
                     reason
                 );
 
-                let result = run_service(&manager.inner.version);
-                match result {
-                    Ok(creds) => {
-                        persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
-                        info!(
-                            target: "sys",
-                            "BLE provisioning completed for SSID '{}'",
-                            creds.ssid
-                        );
+                loop {
+                    let result = run_service(&manager.inner.version, manager.inner.state.clone());
+                    match result {
+                        Ok(creds) => {
+                            persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
+                            info!(
+                                target: "sys",
+                                "BLE provisioning completed for SSID '{}'",
+                                creds.ssid
+                            );
+                        }
+                        Err(e) => warn!(target: "sys", "BLE provisioning stopped: {:#}", e),
                     }
-                    Err(e) => warn!(target: "sys", "BLE provisioning stopped: {:#}", e),
+
+                    if !manager.should_run_for_current_state() {
+                        break;
+                    }
+
+                    thread::sleep(Duration::from_secs(2));
+                    info!(
+                        target: "sys",
+                        "Restarting BLE provisioning sidecar because local provisioning remains available"
+                    );
                 }
 
                 if let Ok(mut running) = manager.inner.running.lock() {
@@ -117,6 +129,18 @@ impl ProvisioningManager {
             Err(_) => false,
         }
     }
+
+    fn should_run_for_current_state(&self) -> bool {
+        self.force_enabled() || self.api_auth_required() || !wifi::has_active_connection()
+    }
+
+    fn api_auth_required(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .map(|state| state.require_api_auth)
+            .unwrap_or(true)
+    }
 }
 
 fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCredentials) {
@@ -140,13 +164,21 @@ fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCrede
     }
 }
 
-fn run_service(version: &str) -> Result<WifiCredentials> {
+fn run_service(version: &str, state: SharedState) -> Result<WifiCredentials> {
     let identity = build_identity(version);
     let mut frontend = BluezFrontend::new()?;
-    let mut backend = LinuxWifiBackend::new(Duration::from_secs(30));
+    let mut backend = LinuxWifiBackend::new(Duration::from_secs(30), state);
     let config = ProvisioningSessionConfig::default();
 
     run_provisioning_session(&mut frontend, &mut backend, &identity, &config)
+}
+
+fn issue_ble_owner_token(state: &SharedState, label: Option<String>) -> Result<String> {
+    let issued = rhythm_os::auth::issue_local_owner_token(
+        state,
+        label.or_else(|| Some("BLE local".to_string())),
+    )?;
+    Ok(issued.token)
 }
 
 fn build_identity(version: &str) -> ProvisioningDeviceInfo {
@@ -169,6 +201,7 @@ fn build_identity(version: &str) -> ProvisioningDeviceInfo {
 }
 
 struct LinuxWifiBackend {
+    state: SharedState,
     result_tx: Sender<(u64, ProvisioningConnectResult)>,
     result_rx: Receiver<(u64, ProvisioningConnectResult)>,
     connect_timeout: Duration,
@@ -177,9 +210,10 @@ struct LinuxWifiBackend {
 }
 
 impl LinuxWifiBackend {
-    fn new(connect_timeout: Duration) -> Self {
+    fn new(connect_timeout: Duration, state: SharedState) -> Self {
         let (result_tx, result_rx) = mpsc::channel();
         Self {
+            state,
             result_tx,
             result_rx,
             connect_timeout,
@@ -197,13 +231,29 @@ impl ProvisioningBackend for LinuxWifiBackend {
 
         let result_tx = self.result_tx.clone();
         let timeout = self.connect_timeout;
+        let state = self.state.clone();
         thread::Builder::new()
             .name(format!("wifi-prov-{}", attempt))
             .spawn(move || {
                 let result = match wifi::connect_with_credentials(&creds, timeout) {
                     Ok(ip) => {
-                        let _ =
-                            result_tx.send((attempt, ProvisioningConnectResult::Connected { ip }));
+                        let owner_token =
+                            match issue_ble_owner_token(&state, Some("BLE Wi-Fi".to_string())) {
+                                Ok(token) => Some(token),
+                                Err(e) => {
+                                    let _ = result_tx.send((
+                                        attempt,
+                                        ProvisioningConnectResult::Failed {
+                                            error: format!("failed to issue owner token: {e}"),
+                                        },
+                                    ));
+                                    return;
+                                }
+                            };
+                        let _ = result_tx.send((
+                            attempt,
+                            ProvisioningConnectResult::Connected { ip, owner_token },
+                        ));
                         sync_clock_after_wifi_connect();
                         return;
                     }
@@ -258,6 +308,10 @@ impl ProvisioningBackend for LinuxWifiBackend {
                 }
             }
         }
+    }
+
+    fn issue_local_owner_token(&mut self, label: Option<String>) -> Result<Option<String>> {
+        issue_ble_owner_token(&self.state, label).map(Some)
     }
 }
 
@@ -412,6 +466,7 @@ mod bluez {
 
         let service_uuid = Uuid::from_u128(PROVISIONING_SERVICE_UUID);
         let wifi_cmd_uuid = Uuid::from_u128(PROVISIONING_WIFI_CMD_UUID);
+        let auth_cmd_uuid = Uuid::from_u128(PROVISIONING_AUTH_CMD_UUID);
         let status_uuid = Uuid::from_u128(PROVISIONING_STATUS_UUID);
         let device_info_uuid = Uuid::from_u128(PROVISIONING_DEVICE_INFO_UUID);
 
@@ -419,6 +474,7 @@ mod bluez {
         let status_notify_tx = status_tx.clone();
         let device_info_bytes = info.json_bytes()?;
         let write_event_tx = event_tx.clone();
+        let auth_event_tx = event_tx.clone();
 
         let app = Application {
             services: vec![Service {
@@ -443,6 +499,40 @@ mod bluez {
                                         Ok(creds) => {
                                             event_tx
                                                 .send(ProvisioningEvent::Credentials(creds))
+                                                .map_err(|_| ReqError::Failed)?;
+                                            Ok(())
+                                        }
+                                        Err(e) => {
+                                            let _ = event_tx
+                                                .send(ProvisioningEvent::Error(e.to_string()));
+                                            Err(ReqError::Failed)
+                                        }
+                                    }
+                                }
+                                .boxed()
+                            })),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Characteristic {
+                        uuid: auth_cmd_uuid,
+                        write: Some(CharacteristicWrite {
+                            write: true,
+                            write_without_response: true,
+                            method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
+                                let event_tx = auth_event_tx.clone();
+                                async move {
+                                    info!(
+                                        "BLE local auth request from {} (mtu={}, len={})",
+                                        req.device_address,
+                                        req.mtu,
+                                        value.len()
+                                    );
+                                    match parse_auth_token_request(&value) {
+                                        Ok(label) => {
+                                            event_tx
+                                                .send(ProvisioningEvent::AuthTokenRequest { label })
                                                 .map_err(|_| ReqError::Failed)?;
                                             Ok(())
                                         }
@@ -585,6 +675,23 @@ mod bluez {
             anyhow::bail!("Missing ssid");
         }
         Ok(creds)
+    }
+
+    fn parse_auth_token_request(bytes: &[u8]) -> Result<Option<String>> {
+        if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+            return Ok(None);
+        }
+
+        let body: serde_json::Value =
+            serde_json::from_slice(bytes).context("parsing BLE auth request JSON")?;
+        let label = body
+            .get("label")
+            .or_else(|| body.get("owner_label"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string);
+        Ok(label)
     }
 }
 

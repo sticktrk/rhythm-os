@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use axum::extract::State;
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -20,6 +21,7 @@ use tower_http::cors::CorsLayer;
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
     let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+    let auth_state = state.clone();
 
     logging::with_http_observability(
         rhythm_os::axum_router::api_routes()
@@ -63,6 +65,10 @@ pub fn create_router(state: SharedState) -> Router {
             )
             .route("/api/restart", post(restart_device))
             .with_state(state)
+            .layer(middleware::from_fn_with_state(
+                auth_state,
+                rhythm_os::auth::require_api_auth_middleware,
+            ))
             .layer(CorsLayer::permissive()),
     )
 }

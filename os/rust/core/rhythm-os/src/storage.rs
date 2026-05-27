@@ -106,13 +106,29 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Load local API auth state. Default: no configured tokens.
+    fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
+        Ok(None)
+    }
+
+    /// Persist local API auth state. Default: no-op.
+    fn save_api_auth(&self, _auth: &crate::auth::StoredApiAuth) -> Result<()> {
+        Ok(())
+    }
+
+    /// Clear local API auth state. Default: no-op.
+    fn clear_api_auth(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Clear all persisted state that should not survive a full factory reset.
     ///
     /// Active desktop/server platforms use this to remove stale keyed hub
     /// registries and any other persisted artifacts that would otherwise be
     /// resurrected after a reset.
     fn clear_factory_reset_state(&self) -> Result<()> {
-        self.clear_commissioning_wifi_credentials()
+        self.clear_commissioning_wifi_credentials()?;
+        self.clear_api_auth()
     }
 }
 
@@ -804,6 +820,35 @@ impl Storage for FileStorage {
         }
     }
 
+    fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
+        let path = self.file_path("auth.json");
+        match self.read_json::<crate::auth::StoredApiAuth>("auth.json") {
+            Ok(auth) => Ok(Some(auth)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load API auth state {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(target: "sys", "No persisted API auth state at {}", path.display());
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_api_auth(&self, auth: &crate::auth::StoredApiAuth) -> Result<()> {
+        let json = serde_json::to_string_pretty(auth)?;
+        self.write_atomic("auth.json", json.as_bytes())
+    }
+
+    fn clear_api_auth(&self) -> Result<()> {
+        self.remove_if_exists("auth.json")
+    }
+
     fn clear_factory_reset_state(&self) -> Result<()> {
         for name in [
             "rooms.json",
@@ -815,6 +860,7 @@ impl Storage for FileStorage {
             "canonical_registry.json",
             "topology.json",
             "commissioning_wifi.json",
+            "auth.json",
         ] {
             self.remove_if_exists(name)?;
         }
@@ -971,6 +1017,30 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             Ok(None) => {}
             Err(e) => {
                 debug!(target: "sys", "No persisted motion timers loaded: {}", e);
+            }
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_api_auth() {
+            Ok(Some(auth)) => {
+                let count = auth.tokens.len();
+                let owner_configured = auth.has_owner();
+                if let Some(require_api_auth) = auth.require_api_auth {
+                    s.require_api_auth = require_api_auth;
+                }
+                s.api_auth = auth;
+                info!(
+                    target: "sys",
+                    "Loaded API auth state: tokens={}, owner_configured={}, require_api_auth={}",
+                    count,
+                    owner_configured,
+                    s.require_api_auth
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(target: "sys", "Failed to load API auth state: {}", e);
             }
         }
     }
@@ -1596,6 +1666,59 @@ mod tests {
             assert_eq!(loaded.profiles.len(), 1);
             assert_eq!(loaded.profiles[0].id, rhythm_core::RHYTHM_PROFILE_ID);
             assert!((loaded.solar_noon_hour - 13.25).abs() < 0.01);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn api_auth_save_load_roundtrip_preserves_policy_override() {
+            let (storage, path) = temp_storage();
+            let auth = crate::auth::StoredApiAuth {
+                require_api_auth: Some(false),
+                ..crate::auth::StoredApiAuth::default()
+            };
+
+            storage.save_api_auth(&auth).unwrap();
+            let loaded = storage.load_api_auth().unwrap().unwrap();
+
+            assert_eq!(loaded.require_api_auth, Some(false));
+            assert_eq!(loaded.tokens.len(), 0);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_applies_api_auth_policy_override() {
+            let (storage, path) = temp_storage();
+            storage
+                .save_api_auth(&crate::auth::StoredApiAuth {
+                    require_api_auth: Some(false),
+                    ..crate::auth::StoredApiAuth::default()
+                })
+                .unwrap();
+
+            let mut app = crate::state::AppState::default();
+            app.require_api_auth = true;
+            app.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+
+            load_persisted_state(&mut app);
+
+            assert!(!app.require_api_auth);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_keeps_platform_default_when_policy_missing() {
+            let (storage, path) = temp_storage();
+            storage
+                .save_api_auth(&crate::auth::StoredApiAuth::default())
+                .unwrap();
+
+            let mut app = crate::state::AppState::default();
+            app.require_api_auth = true;
+            app.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+
+            load_persisted_state(&mut app);
+
+            assert!(app.require_api_auth);
             cleanup(&path);
         }
 

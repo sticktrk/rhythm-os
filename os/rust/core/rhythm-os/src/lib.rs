@@ -7,6 +7,7 @@
 //! transports, and HTTP servers are provided by the consuming binary crate.
 
 pub mod api_types;
+pub mod auth;
 pub mod bundle;
 pub mod button_resolve;
 pub mod canonical;

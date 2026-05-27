@@ -12,6 +12,7 @@ use rhythm_core::{
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
+use crate::auth::StoredApiAuth;
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
 use crate::factory_default_config::{
@@ -400,6 +401,13 @@ pub struct AppState {
     /// auto-applies updates overnight. When false, it polls "beta" and only
     /// updates on an explicit `POST /api/ota/update`.
     pub auto_update: bool,
+
+    // ---- Local API auth ----
+    /// Persisted local API bearer tokens. Raw token material is never stored.
+    pub api_auth: StoredApiAuth,
+    /// Whether HTTP API requests require a local API bearer token.
+    pub require_api_auth: bool,
+
     // ---- Storage ----
     /// Platform-specific storage backend.
     pub storage: Option<Box<dyn Storage>>,
@@ -658,6 +666,8 @@ impl Default for AppState {
             power_save: factory_default_power_save(),
             light_breaker_enabled: true,
             auto_update: factory_default_auto_update(),
+            api_auth: StoredApiAuth::default(),
+            require_api_auth: false,
             storage: None,
             work_tx: None,
             periodic_work_tx: None,
