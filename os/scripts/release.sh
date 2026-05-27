@@ -25,7 +25,7 @@ PROMOTE_STABLE=false
 PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
-WORKSPACE_VERSION_FILES=("Cargo.toml" "install/rpiz/builder-image.lock")
+WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock" "install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="install/rpiz/builder-image.lock"
 SERVER_RELEASES_TO_KEEP=5
 
@@ -399,13 +399,21 @@ update_workspace_version_files() {
     local new_version="$1"
     local current_version="$2"
 
-    if [ "$current_version" = "$new_version" ]; then
-        return 0
+    if [ "$current_version" != "$new_version" ]; then
+        NEW_VERSION="$new_version" perl -0pi -e '
+            s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
+        ' "$PROJECT_ROOT/Cargo.toml"
     fi
 
     NEW_VERSION="$new_version" perl -0pi -e '
-        s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
-    ' "$PROJECT_ROOT/Cargo.toml"
+        s{(\[\[package\]\]\n.*?)(?=\n\[\[package\]\]\n|\z)}{
+            my $block = $1;
+            if ($block =~ /^name = "rhythm-[^"]+"$/m && $block !~ /^source = /m) {
+                $block =~ s/^version = "[^"]+"/version = "$ENV{NEW_VERSION}"/m;
+            }
+            $block;
+        }gse;
+    ' "$PROJECT_ROOT/Cargo.lock"
 }
 
 commit_release_version_update() {
@@ -550,7 +558,7 @@ if [ "$DRY_RUN" = true ]; then
         echo "[dry-run] Would run: scripts/build/refresh-builder-image.sh --push"
     fi
     if [ "$CURRENT_WORKSPACE_VERSION" != "$VERSION" ]; then
-        echo "[dry-run] Would update workspace version files: Cargo.toml"
+        echo "[dry-run] Would update workspace version files: Cargo.toml and Cargo.lock"
     fi
     echo "[dry-run] Would commit any changes to: ${WORKSPACE_VERSION_FILES[*]}"
     echo "[dry-run] Would create annotated tag: git tag -a $TAG -m \"$MESSAGE\""

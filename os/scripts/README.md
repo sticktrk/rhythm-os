@@ -232,7 +232,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 
 **Behavior:**
 - Requires a clean tracked worktree before tagging.
-- Updates the workspace version in `Cargo.toml` before tagging. It does not rewrite `Cargo.lock`, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
+- Updates the workspace version in `Cargo.toml` before tagging and mechanically syncs only local workspace package versions in `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
 - The GitHub Actions CI workflow turns that tag into the GitHub release with the rpiz OTA tarball.
