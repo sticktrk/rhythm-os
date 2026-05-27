@@ -211,12 +211,16 @@ class RhythmServerApi {
     required int r,
     required int g,
     required int b,
+    int? brightness,
+    int? transitionMs,
+    String? scope,
   }) async {
     await _safePut('api/nodes/color', data: {
       'node_id': nodeId,
-      'r': r,
-      'g': g,
-      'b': b,
+      'rgb': {'r': r, 'g': g, 'b': b},
+      if (brightness != null) 'brightness': brightness,
+      if (transitionMs != null) 'transition_ms': transitionMs,
+      if (scope != null) 'scope': scope,
     });
   }
 
@@ -226,8 +230,19 @@ class RhythmServerApi {
     required int r,
     required int g,
     required int b,
+    int? brightness,
+    int? transitionMs,
+    String? scope,
   }) {
-    return nodeColor(nodeId: roomId, r: r, g: g, b: b);
+    return nodeColor(
+      nodeId: roomId,
+      r: r,
+      g: g,
+      b: b,
+      brightness: brightness,
+      transitionMs: transitionMs,
+      scope: scope,
+    );
   }
 
   /// Set brightness for multiple nodes in a single request.

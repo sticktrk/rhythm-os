@@ -1151,6 +1151,39 @@ void main() {
       await api.roomBrightness(roomId: 'r1', brightness: 50);
     });
 
+    test('nodeColor sends normalized rgb payload with mood scope', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/color'),
+            statusCode: 200,
+          ));
+
+      await api.nodeColor(
+        nodeId: 'node-1',
+        r: 255,
+        g: 128,
+        b: 32,
+        brightness: 12,
+        transitionMs: 300,
+        scope: 'mood',
+      );
+
+      verify(() => dio.put(
+            'api/nodes/color',
+            data: {
+              'node_id': 'node-1',
+              'rgb': {'r': 255, 'g': 128, 'b': 32},
+              'brightness': 12,
+              'transition_ms': 300,
+              'scope': 'mood',
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
     test('roomOffset does not throw on DioException', () async {
       when(() => dio.put(
             any(),

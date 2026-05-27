@@ -2,6 +2,15 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('RoomModeState', () {
+    test('emits mood while accepting legacy idle and standby values', () {
+      expect(RoomModeState.idle.wireValue, 'mood');
+      expect(RoomModeState.fromString('mood'), RoomModeState.idle);
+      expect(RoomModeState.fromString('idle'), RoomModeState.idle);
+      expect(RoomModeState.fromString('standby'), RoomModeState.idle);
+    });
+  });
+
   group('RhythmDeviceType', () {
     group('fromString', () {
       test('parses "light" to light', () {
@@ -173,7 +182,11 @@ void main() {
           'lights_on': true,
           'brightness': 80,
           'kelvin': 4000,
+          'mood_enabled': true,
+          'mood_active': true,
           'profile_settings': {
+            'mood_enabled': true,
+            'mood_profile_id': 'room-1_mood',
             'motion_timeout_secs': 123,
           },
         });
@@ -191,6 +204,10 @@ void main() {
         expect(room.lightsOn, true);
         expect(room.brightness, 80);
         expect(room.kelvin, 4000);
+        expect(room.moodEnabled, isTrue);
+        expect(room.moodActive, isTrue);
+        expect(room.profileSettings?.moodEnabled, isTrue);
+        expect(room.profileSettings?.moodProfileId, 'room-1_mood');
         expect(room.profileSettings?.motionTimeoutSecs, 123);
       });
 
@@ -198,12 +215,16 @@ void main() {
         final room = RhythmRoom.fromJson({
           'profile_settings': {
             'profile_id': 'sleep',
+            'mood_enabled': false,
+            'mood_profile_id': 'sleep_mood',
             'fade_ms': {'mode': 'fixed', 'value': 1200},
             'motion_timeout_secs': {'mode': 'fixed', 'value': 300},
           },
         });
 
         expect(room.profileSettings?.profileId, 'sleep');
+        expect(room.profileSettings?.moodEnabled, isFalse);
+        expect(room.profileSettings?.moodProfileId, 'sleep_mood');
         expect(room.profileSettings?.fadeMs, 1200);
         expect(room.profileSettings?.motionTimeoutSecs, 300);
       });
@@ -476,7 +497,13 @@ void main() {
           'lights_on': true,
           'brightness': 75,
           'kelvin': 3500,
-          'profile_settings': {'motion_timeout_secs': 77},
+          'mood_enabled': true,
+          'mood_active': true,
+          'profile_settings': {
+            'mood_enabled': true,
+            'mood_profile_id': 'node-42_mood',
+            'motion_timeout_secs': 77,
+          },
         });
         expect(state.nodeId, 'node-42');
         expect(state.roomId, 'node-42');
@@ -487,6 +514,10 @@ void main() {
         expect(state.lightsOn, true);
         expect(state.brightness, 75);
         expect(state.kelvin, 3500);
+        expect(state.moodEnabled, isTrue);
+        expect(state.moodActive, isTrue);
+        expect(state.profileSettings?.moodEnabled, isTrue);
+        expect(state.profileSettings?.moodProfileId, 'node-42_mood');
         expect(state.profileSettings?.motionTimeoutSecs, 77);
       });
 
@@ -496,12 +527,16 @@ void main() {
           'rhythm_enabled': true,
           'profile_settings': {
             'profile_id': 'sleep',
+            'mood_enabled': true,
+            'mood_profile_id': 'room-1_mood',
             'fade_ms': {'mode': 'fixed', 'value': 900},
             'motion_timeout_secs': {'mode': 'fixed', 'value': 180},
           },
         });
 
         expect(state.profileSettings?.profileId, 'sleep');
+        expect(state.profileSettings?.moodEnabled, isTrue);
+        expect(state.profileSettings?.moodProfileId, 'room-1_mood');
         expect(state.profileSettings?.fadeMs, 900);
         expect(state.profileSettings?.motionTimeoutSecs, 180);
       });

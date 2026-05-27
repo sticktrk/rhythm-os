@@ -26,14 +26,16 @@ enum RoomModeState {
 
   String get wireValue => switch (this) {
         RoomModeState.active => 'active',
-        RoomModeState.idle => 'idle',
+        // The Dart enum keeps the historical `idle` case for source
+        // compatibility, but the public API now names this state Mood.
+        RoomModeState.idle => 'mood',
         RoomModeState.wake => 'wake',
         RoomModeState.warning => 'warning',
         RoomModeState.hardOff => 'hard_off',
       };
 
   static RoomModeState fromString(String? value) => switch (value) {
-        'idle' => RoomModeState.idle,
+        'mood' || 'idle' || 'standby' => RoomModeState.idle,
         'wake' => RoomModeState.wake,
         'warning' => RoomModeState.warning,
         'hard_off' => RoomModeState.hardOff,
@@ -168,12 +170,16 @@ class RhythmHubRoomBinding {
 
 class RhythmNodeProfileSettings {
   final String? profileId;
+  final bool? moodEnabled;
+  final String? moodProfileId;
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
   final Map<String, dynamic> raw;
 
   const RhythmNodeProfileSettings({
     this.profileId,
+    this.moodEnabled,
+    this.moodProfileId,
     this.fadeSetting,
     this.motionTimeoutSetting,
     this.raw = const <String, dynamic>{},
@@ -184,6 +190,8 @@ class RhythmNodeProfileSettings {
 
   bool get isEmpty =>
       profileId == null &&
+      moodEnabled == null &&
+      moodProfileId == null &&
       fadeSetting == null &&
       motionTimeoutSetting == null &&
       raw.isEmpty;
@@ -191,10 +199,18 @@ class RhythmNodeProfileSettings {
   factory RhythmNodeProfileSettings.fromJson(Map<String, dynamic> json) {
     final raw = Map<String, dynamic>.from(json)
       ..remove('profile_id')
+      ..remove('mood_enabled')
+      ..remove('mood_profile_id')
+      ..remove('idle_profile_id')
       ..remove('fade_ms')
       ..remove('motion_timeout_secs');
+    final moodProfileId = json['mood_profile_id'] as String? ??
+        json['idle_profile_id'] as String?;
     return RhythmNodeProfileSettings(
       profileId: json['profile_id'] as String?,
+      moodEnabled: json['mood_enabled'] as bool?,
+      moodProfileId:
+          moodProfileId == null || moodProfileId.isEmpty ? null : moodProfileId,
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
       raw: raw,
@@ -204,6 +220,8 @@ class RhythmNodeProfileSettings {
   Map<String, dynamic> toJson() => {
         ...raw,
         if (profileId != null) 'profile_id': profileId,
+        if (moodEnabled != null) 'mood_enabled': moodEnabled,
+        if (moodProfileId != null) 'mood_profile_id': moodProfileId,
         if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
         if (motionTimeoutSetting != null)
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),
@@ -328,6 +346,8 @@ class RhythmRoom {
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
+  final bool moodEnabled;
+  final bool moodActive;
   final bool? motionActive;
   final bool? motionOwned;
   final int? remainingSecs;
@@ -358,6 +378,8 @@ class RhythmRoom {
     this.lightsOn,
     this.brightness,
     this.kelvin,
+    this.moodEnabled = false,
+    this.moodActive = false,
     this.motionActive,
     this.motionOwned,
     this.remainingSecs,
@@ -431,6 +453,15 @@ class RhythmRoom {
       final legacy = json['hub_type'] as String?;
       if (legacy != null) hubTypes = [legacy];
     }
+    final profileSettings = switch (json['profile_settings']) {
+      Map<String, dynamic> value => RhythmNodeProfileSettings.fromJson(value),
+      _ when json['room_profile'] is Map<String, dynamic> =>
+        RhythmNodeProfileSettings.fromJson(
+          json['room_profile'] as Map<String, dynamic>,
+        ),
+      _ => null,
+    };
+    final state = RoomModeState.fromJson(json);
     return RhythmRoom(
       id: json['id'] as String? ?? json['node_id'] as String? ?? '',
       name: json['name'] as String? ?? '',
@@ -438,7 +469,7 @@ class RhythmRoom {
       parentId: json['parent_id'] as String?,
       placement: RhythmNodePlacement.fromString(json['placement'] as String?),
       groupedLightId: json['grouped_light_id'] as String? ?? '',
-      state: RoomModeState.fromJson(json),
+      state: state,
       transitioning: json['transitioning'] as bool? ?? false,
       rhythmEnabled: json['rhythm_enabled'] as bool? ?? false,
       disabled: json['disabled'] as bool? ?? false,
@@ -463,14 +494,7 @@ class RhythmRoom {
               .map(RhythmDevice.fromJson)
               .toList() ??
           [],
-      profileSettings: switch (json['profile_settings']) {
-        Map<String, dynamic> value => RhythmNodeProfileSettings.fromJson(value),
-        _ when json['room_profile'] is Map<String, dynamic> =>
-          RhythmNodeProfileSettings.fromJson(
-            json['room_profile'] as Map<String, dynamic>,
-          ),
-        _ => null,
-      },
+      profileSettings: profileSettings,
       observedPower: observedPower,
       lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(
@@ -481,6 +505,10 @@ class RhythmRoom {
         json['kelvin'],
         preferredKeys: const ['kelvin', 'color_temp'],
       ),
+      moodEnabled: json['mood_enabled'] as bool? ??
+          profileSettings?.moodEnabled ??
+          state == RoomModeState.idle,
+      moodActive: json['mood_active'] as bool? ?? state == RoomModeState.idle,
       motionActive: json['motion_active'] as bool?,
       motionOwned: json['motion_owned'] as bool?,
       remainingSecs: jsonInt(
@@ -602,6 +630,8 @@ class RhythmRoomState {
   final int? kelvin;
   final RhythmRoomColor? color;
   final RhythmNodeProfileSettings? profileSettings;
+  final bool? moodEnabled;
+  final bool? moodActive;
   final bool? motionActive;
   final bool? motionOwned;
   final int? remainingSecs;
@@ -631,6 +661,8 @@ class RhythmRoomState {
     this.color,
     RhythmNodeProfileSettings? profileSettings,
     RhythmNodeProfileSettings? roomProfile,
+    this.moodEnabled,
+    this.moodActive,
     this.motionActive,
     this.motionOwned,
     this.remainingSecs,
@@ -660,13 +692,22 @@ class RhythmRoomState {
       final legacy = json['hub_type'] as String?;
       if (legacy != null) hubTypes = [legacy];
     }
+    final profileSettings = switch (json['profile_settings']) {
+      Map<String, dynamic> value => RhythmNodeProfileSettings.fromJson(value),
+      _ when json['room_profile'] is Map<String, dynamic> =>
+        RhythmNodeProfileSettings.fromJson(
+          json['room_profile'] as Map<String, dynamic>,
+        ),
+      _ => null,
+    };
+    final state = RoomModeState.fromJson(json);
     return RhythmRoomState(
       nodeId: json['node_id'] as String? ??
           json['room_id'] as String? ??
           json['id'] as String? ??
           '',
       mode: RhythmMode.fromString(json['mode'] as String?),
-      state: RoomModeState.fromJson(json),
+      state: state,
       transitioning: json['transitioning'] as bool? ?? false,
       rhythmEnabled: json['rhythm_enabled'] as bool? ?? false,
       timeOffset: jsonDouble(json['time_offset'],
@@ -699,14 +740,12 @@ class RhythmRoomState {
       color: json['color'] is Map<String, dynamic>
           ? RhythmRoomColor.fromJson(json['color'] as Map<String, dynamic>)
           : null,
-      profileSettings: switch (json['profile_settings']) {
-        Map<String, dynamic> value => RhythmNodeProfileSettings.fromJson(value),
-        _ when json['room_profile'] is Map<String, dynamic> =>
-          RhythmNodeProfileSettings.fromJson(
-            json['room_profile'] as Map<String, dynamic>,
-          ),
-        _ => null,
-      },
+      profileSettings: profileSettings,
+      moodEnabled: json['mood_enabled'] as bool? ??
+          profileSettings?.moodEnabled ??
+          (state == RoomModeState.idle ? true : null),
+      moodActive: json['mood_active'] as bool? ??
+          (state == RoomModeState.idle ? true : null),
       motionActive: json['motion_active'] as bool?,
       motionOwned: json['motion_owned'] as bool?,
       remainingSecs: jsonInt(
