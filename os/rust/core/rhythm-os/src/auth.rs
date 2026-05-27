@@ -95,6 +95,34 @@ pub enum IssueOwnerTokenResult {
     AlreadyConfigured,
 }
 
+/// Issue a new owner token from a trusted local channel such as rpiz BLE.
+///
+/// Unlike the public HTTP claim endpoint, this does not stop after the first
+/// owner token. Physical/local presence is the authorization boundary.
+pub fn issue_local_owner_token(
+    state: &SharedState,
+    label: Option<String>,
+) -> anyhow::Result<IssuedOwnerToken> {
+    let token = generate_raw_token();
+    let token_hash = hash_token(&token);
+    let id = token_hash.chars().take(16).collect::<String>();
+
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    s.api_auth.tokens.push(StoredApiToken {
+        id: id.clone(),
+        role: ApiTokenRole::Owner,
+        token_hash,
+        created_at_epoch_ms: current_epoch_ms(),
+        label,
+    });
+
+    if let Some(storage) = s.storage.as_ref() {
+        storage.save_api_auth(&s.api_auth)?;
+    }
+
+    Ok(IssuedOwnerToken { id, token })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiAuthSettingsUpdate {
     pub require_api_auth: bool,
@@ -428,6 +456,29 @@ mod tests {
 
         let second = issue_owner_token(&state, Some("second".into())).unwrap();
         assert_eq!(second, IssueOwnerTokenResult::AlreadyConfigured);
+    }
+
+    #[test]
+    fn local_owner_tokens_can_be_issued_more_than_once() {
+        let state = test_state();
+
+        let first = issue_local_owner_token(&state, Some("first phone".into())).unwrap();
+        let second = issue_local_owner_token(&state, Some("second phone".into())).unwrap();
+
+        assert_ne!(first.token, second.token);
+        let state = state.lock().unwrap();
+        assert_eq!(state.api_auth.tokens.len(), 2);
+        assert!(state.api_auth.verify_token(&first.token));
+        assert!(state.api_auth.verify_token(&second.token));
+        assert_eq!(
+            state
+                .api_auth
+                .tokens
+                .iter()
+                .map(|token| token.label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("first phone"), Some("second phone")]
+        );
     }
 
     #[test]

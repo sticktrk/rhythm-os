@@ -20,6 +20,8 @@ pub const PROVISIONING_WIFI_CMD_UUID: u128 = 0x72797468_6d01_1000_8000_00805f9b3
 pub const PROVISIONING_STATUS_UUID: u128 = 0x72797468_6d02_1000_8000_00805f9b34fb;
 /// BLE read characteristic UUID for device metadata.
 pub const PROVISIONING_DEVICE_INFO_UUID: u128 = 0x72797468_6d03_1000_8000_00805f9b34fb;
+/// BLE write characteristic UUID for local API token requests.
+pub const PROVISIONING_AUTH_CMD_UUID: u128 = 0x72797468_6d04_1000_8000_00805f9b34fb;
 
 /// Wi-Fi credentials received from a provisioning frontend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,9 @@ pub fn provisioning_device_name(target: &str, id: &str) -> String {
 pub enum ProvisioningStatus {
     Waiting,
     Connecting,
+    AuthToken {
+        owner_token: String,
+    },
     Connected {
         ip: String,
         owner_token: Option<String>,
@@ -105,6 +110,7 @@ impl ProvisioningStatus {
         match self {
             Self::Waiting => "waiting",
             Self::Connecting => "connecting",
+            Self::AuthToken { .. } => "auth_token",
             Self::Connected { .. } => "connected",
             Self::WifiFailed { .. } => "wifi_failed",
             Self::Failed { .. } => "failed",
@@ -123,6 +129,12 @@ impl ProvisioningStatus {
                 status: self.code(),
                 ip: None,
                 owner_token: None,
+                error: None,
+            },
+            Self::AuthToken { owner_token } => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: None,
+                owner_token: Some(owner_token),
                 error: None,
             },
             Self::Connected { ip, owner_token } => ProvisioningStatusPayload {
@@ -147,6 +159,7 @@ impl ProvisioningStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisioningEvent {
     Credentials(WifiCredentials),
+    AuthTokenRequest { label: Option<String> },
     Error(String),
 }
 
@@ -174,6 +187,9 @@ pub trait ProvisioningFrontend {
 pub trait ProvisioningBackend {
     fn begin_connect(&mut self, creds: WifiCredentials) -> Result<()>;
     fn poll_result(&mut self, timeout: Duration) -> Result<Option<ProvisioningConnectResult>>;
+    fn issue_local_owner_token(&mut self, _label: Option<String>) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Runtime tuning for the provisioning session loop.
@@ -250,6 +266,20 @@ where
                                 creds,
                                 deadline: Instant::now() + config.connect_timeout,
                             });
+                        }
+                    }
+                    ProvisioningEvent::AuthTokenRequest { label } => {
+                        match backend.issue_local_owner_token(label)? {
+                            Some(owner_token) => {
+                                frontend.publish_status(&ProvisioningStatus::AuthToken {
+                                    owner_token,
+                                })?;
+                            }
+                            None => {
+                                frontend.publish_status(&ProvisioningStatus::Failed {
+                                    error: "Local auth token issuance is not supported".to_string(),
+                                })?;
+                            }
                         }
                     }
                     ProvisioningEvent::Error(error) => {
@@ -345,6 +375,8 @@ mod tests {
     struct FakeBackend {
         results: VecDeque<Option<ProvisioningConnectResult>>,
         requested: Vec<WifiCredentials>,
+        local_tokens: VecDeque<String>,
+        local_token_labels: Vec<Option<String>>,
     }
 
     impl FakeBackend {
@@ -352,6 +384,20 @@ mod tests {
             Self {
                 results: VecDeque::from(results),
                 requested: Vec::new(),
+                local_tokens: VecDeque::new(),
+                local_token_labels: Vec::new(),
+            }
+        }
+
+        fn with_local_tokens(
+            results: Vec<Option<ProvisioningConnectResult>>,
+            local_tokens: Vec<&str>,
+        ) -> Self {
+            Self {
+                results: VecDeque::from(results),
+                requested: Vec::new(),
+                local_tokens: local_tokens.into_iter().map(str::to_string).collect(),
+                local_token_labels: Vec::new(),
             }
         }
     }
@@ -364,6 +410,11 @@ mod tests {
 
         fn poll_result(&mut self, _timeout: Duration) -> Result<Option<ProvisioningConnectResult>> {
             Ok(self.results.pop_front().flatten())
+        }
+
+        fn issue_local_owner_token(&mut self, label: Option<String>) -> Result<Option<String>> {
+            self.local_token_labels.push(label);
+            Ok(self.local_tokens.pop_front())
         }
     }
 
@@ -412,6 +463,55 @@ mod tests {
                 ProvisioningStatus::Connected {
                     ip: "192.168.1.10".to_string(),
                     owner_token: Some("owner-token".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_session_issues_local_auth_token_before_wifi_success() {
+        let creds = WifiCredentials {
+            ssid: "wifi".to_string(),
+            password: "secret".to_string(),
+        };
+        let mut frontend = FakeFrontend::new(vec![
+            ProvisioningEvent::AuthTokenRequest {
+                label: Some("Tim's phone".to_string()),
+            },
+            ProvisioningEvent::Credentials(creds.clone()),
+        ]);
+        let mut backend = FakeBackend::with_local_tokens(
+            vec![Some(ProvisioningConnectResult::Connected {
+                ip: "192.168.1.10".to_string(),
+                owner_token: None,
+            })],
+            vec!["local-token"],
+        );
+
+        let config = ProvisioningSessionConfig {
+            success_grace_period: Duration::from_millis(0),
+            ..Default::default()
+        };
+
+        let result =
+            run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config).unwrap();
+
+        assert_eq!(result, creds);
+        assert_eq!(
+            backend.local_token_labels,
+            vec![Some("Tim's phone".to_string())]
+        );
+        assert_eq!(
+            frontend.statuses,
+            vec![
+                ProvisioningStatus::Waiting,
+                ProvisioningStatus::AuthToken {
+                    owner_token: "local-token".to_string(),
+                },
+                ProvisioningStatus::Connecting,
+                ProvisioningStatus::Connected {
+                    ip: "192.168.1.10".to_string(),
+                    owner_token: None,
                 },
             ]
         );
