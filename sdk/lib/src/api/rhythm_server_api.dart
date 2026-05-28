@@ -395,11 +395,12 @@ class RhythmServerApi {
     ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
-  /// Push node preferences (rhythm_enabled, disabled, soft_off).
+  /// Push node preferences (rhythm_enabled, disabled, state).
   Future<void> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
+    bool? standbyEnabled,
     RoomModeState? state,
     bool? softOff,
     Map<String, dynamic>? profileSettings,
@@ -407,24 +408,26 @@ class RhythmServerApi {
     final effectiveState = state ??
         (softOff == null
             ? null
-            : (softOff ? RoomModeState.idle : RoomModeState.active));
+            : (softOff ? RoomModeState.standby : RoomModeState.active));
     final normalizedProfileSettings =
         _normalizeProfileSettings(profileSettings);
     await _safePut('api/nodes/preferences', data: {
       'node_id': nodeId,
       if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
       if (disabled != null) 'disabled': disabled,
+      if (standbyEnabled != null) 'standby_enabled': standbyEnabled,
       if (effectiveState != null) 'state': effectiveState.wireValue,
       if (normalizedProfileSettings != null)
         'profile_settings': normalizedProfileSettings,
     });
   }
 
-  /// Push room preferences (rhythm_enabled, disabled, soft_off).
+  /// Push room preferences (rhythm_enabled, disabled, state).
   Future<void> roomPreferencesSet({
     required String roomId,
     bool? rhythmEnabled,
     bool? disabled,
+    bool? standbyEnabled,
     RoomModeState? state,
     bool? softOff,
     Map<String, dynamic>? profileSettings,
@@ -433,6 +436,7 @@ class RhythmServerApi {
       nodeId: roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
+      standbyEnabled: standbyEnabled,
       state: state,
       softOff: softOff,
       profileSettings: profileSettings,
@@ -854,13 +858,15 @@ class RhythmServerApi {
 
   /// Push a partial settings update to the server.
   ///
+  /// [powerSave] is retained for older callers, but the server has removed the
+  /// setting and this client no longer sends it.
+  ///
   /// Returns `true` when the server accepts the update and `false` on failure.
   Future<bool> settingsSet({
     bool? powerSave,
     bool? autoUpdate,
   }) async {
     final data = <String, dynamic>{
-      if (powerSave != null) 'power_save': powerSave,
       if (autoUpdate != null) 'auto_update': autoUpdate,
     };
     if (data.isEmpty) return true;

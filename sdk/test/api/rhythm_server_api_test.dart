@@ -383,6 +383,63 @@ void main() {
           )).called(1);
     });
 
+    test('nodePreferencesSet sends mood state', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 204,
+          ));
+
+      await api.nodePreferencesSet(
+        nodeId: 'node-1',
+        rhythmEnabled: true,
+        state: RoomModeState.mood,
+      );
+
+      verify(() => dio.put(
+            'api/nodes/preferences',
+            data: {
+              'node_id': 'node-1',
+              'rhythm_enabled': true,
+              'state': 'mood',
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
+    test('nodePreferencesSet sends standby for idle compatibility state',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 204,
+          ));
+
+      await api.nodePreferencesSet(
+        nodeId: 'node-1',
+        rhythmEnabled: true,
+        standbyEnabled: true,
+        state: RoomModeState.idle,
+      );
+
+      verify(() => dio.put(
+            'api/nodes/preferences',
+            data: {
+              'node_id': 'node-1',
+              'rhythm_enabled': true,
+              'standby_enabled': true,
+              'state': 'standby',
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
     test('nodePreferencesBatchSet normalizes room_profile to profile_settings',
         () async {
       when(() => dio.put(
@@ -450,7 +507,7 @@ void main() {
       final result = await api.nodePreferencesBatchSetResult(
         [
           {'node_id': 'room-1', 'state': 'active'},
-          {'node_id': 'room-2', 'state': 'idle'},
+          {'node_id': 'room-2', 'state': 'hard_off'},
         ],
         dispatchSpacingMs: 250,
       );
@@ -462,7 +519,7 @@ void main() {
             data: {
               'nodes': [
                 {'node_id': 'room-1', 'state': 'active'},
-                {'node_id': 'room-2', 'state': 'idle'},
+                {'node_id': 'room-2', 'state': 'hard_off'},
               ],
               'dispatch_spacing_ms': 250,
             },
@@ -707,26 +764,15 @@ void main() {
           ));
     });
 
-    test('sends only power_save to /api/settings', () async {
-      when(() => dio.put(
-            any(),
-            data: any(named: 'data'),
-            queryParameters: any(named: 'queryParameters'),
-          )).thenAnswer((_) async => Response(
-            requestOptions: RequestOptions(path: 'api/settings'),
-            statusCode: 200,
-          ));
-
+    test('ignores removed power_save when it is the only setting', () async {
       final saved = await api.settingsSet(powerSave: true);
 
       expect(saved, isTrue);
-      final captured = verify(() => dio.put(
-            'api/settings',
-            data: captureAny(named: 'data'),
-            queryParameters: captureAny(named: 'queryParameters'),
-          )).captured;
-      expect(captured[0], {'power_save': true});
-      expect(captured[1], isNull);
+      verifyNever(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          ));
     });
 
     test('returns false on DioException', () async {
@@ -738,7 +784,7 @@ void main() {
         requestOptions: RequestOptions(path: 'api/settings'),
       ));
 
-      final saved = await api.settingsSet(powerSave: true);
+      final saved = await api.settingsSet(autoUpdate: true);
 
       expect(saved, isFalse);
     });

@@ -19,6 +19,10 @@ enum RhythmMode {
 
 enum RoomModeState {
   active,
+  mood,
+  standby,
+
+  /// Compatibility alias for the old soft-off/idle API name.
   idle,
   wake,
   warning,
@@ -26,16 +30,16 @@ enum RoomModeState {
 
   String get wireValue => switch (this) {
         RoomModeState.active => 'active',
-        // The Dart enum keeps the historical `idle` case for source
-        // compatibility, but the public API now names this state Mood.
-        RoomModeState.idle => 'mood',
+        RoomModeState.mood => 'mood',
+        RoomModeState.standby || RoomModeState.idle => 'standby',
         RoomModeState.wake => 'wake',
         RoomModeState.warning => 'warning',
         RoomModeState.hardOff => 'hard_off',
       };
 
   static RoomModeState fromString(String? value) => switch (value) {
-        'mood' || 'idle' || 'standby' => RoomModeState.idle,
+        'mood' => RoomModeState.mood,
+        'idle' || 'standby' || 'soft_off' => RoomModeState.standby,
         'wake' => RoomModeState.wake,
         'warning' => RoomModeState.warning,
         'hard_off' => RoomModeState.hardOff,
@@ -50,8 +54,14 @@ enum RoomModeState {
     if (json['hard_off'] as bool? ?? false) {
       return RoomModeState.hardOff;
     }
+    if (json['mood_active'] as bool? ?? false) {
+      return RoomModeState.mood;
+    }
     if (json['soft_off'] as bool? ?? false) {
-      return RoomModeState.idle;
+      return RoomModeState.standby;
+    }
+    if (json['standby_active'] as bool? ?? false) {
+      return RoomModeState.standby;
     }
     return RoomModeState.active;
   }
@@ -348,6 +358,8 @@ class RhythmRoom {
   final int? kelvin;
   final bool moodEnabled;
   final bool moodActive;
+  final bool standbyEnabled;
+  final bool standbyActive;
   final bool? motionActive;
   final bool? motionOwned;
   final int? remainingSecs;
@@ -380,6 +392,8 @@ class RhythmRoom {
     this.kelvin,
     this.moodEnabled = false,
     this.moodActive = false,
+    this.standbyEnabled = false,
+    this.standbyActive = false,
     this.motionActive,
     this.motionOwned,
     this.remainingSecs,
@@ -426,7 +440,8 @@ class RhythmRoom {
 
   int get deviceCount => devices.length;
 
-  bool get softOff => state == RoomModeState.idle;
+  bool get softOff =>
+      state == RoomModeState.standby || state == RoomModeState.idle;
 
   String get deviceSummary {
     final parts = <String>[];
@@ -507,8 +522,11 @@ class RhythmRoom {
       ),
       moodEnabled: json['mood_enabled'] as bool? ??
           profileSettings?.moodEnabled ??
-          state == RoomModeState.idle,
-      moodActive: json['mood_active'] as bool? ?? state == RoomModeState.idle,
+          state == RoomModeState.mood,
+      moodActive: json['mood_active'] as bool? ?? state == RoomModeState.mood,
+      standbyEnabled: json['standby_enabled'] as bool? ?? false,
+      standbyActive:
+          json['standby_active'] as bool? ?? state == RoomModeState.standby,
       motionActive: json['motion_active'] as bool?,
       motionOwned: json['motion_owned'] as bool?,
       remainingSecs: jsonInt(
@@ -632,6 +650,8 @@ class RhythmRoomState {
   final RhythmNodeProfileSettings? profileSettings;
   final bool? moodEnabled;
   final bool? moodActive;
+  final bool? standbyEnabled;
+  final bool? standbyActive;
   final bool? motionActive;
   final bool? motionOwned;
   final int? remainingSecs;
@@ -663,6 +683,8 @@ class RhythmRoomState {
     RhythmNodeProfileSettings? roomProfile,
     this.moodEnabled,
     this.moodActive,
+    this.standbyEnabled,
+    this.standbyActive,
     this.motionActive,
     this.motionOwned,
     this.remainingSecs,
@@ -680,7 +702,8 @@ class RhythmRoomState {
 
   String? get powerSource => observedPower?.source;
 
-  bool get softOff => state == RoomModeState.idle;
+  bool get softOff =>
+      state == RoomModeState.standby || state == RoomModeState.idle;
 
   factory RhythmRoomState.fromJson(Map<String, dynamic> json) {
     final observedPower = RhythmObservedPower.maybeFromJson(
@@ -743,9 +766,12 @@ class RhythmRoomState {
       profileSettings: profileSettings,
       moodEnabled: json['mood_enabled'] as bool? ??
           profileSettings?.moodEnabled ??
-          (state == RoomModeState.idle ? true : null),
+          (state == RoomModeState.mood ? true : null),
       moodActive: json['mood_active'] as bool? ??
-          (state == RoomModeState.idle ? true : null),
+          (state == RoomModeState.mood ? true : null),
+      standbyEnabled: json['standby_enabled'] as bool?,
+      standbyActive: json['standby_active'] as bool? ??
+          (state == RoomModeState.standby ? true : null),
       motionActive: json['motion_active'] as bool?,
       motionOwned: json['motion_owned'] as bool?,
       remainingSecs: jsonInt(

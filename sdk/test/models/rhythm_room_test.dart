@@ -3,11 +3,14 @@ import 'package:test/test.dart';
 
 void main() {
   group('RoomModeState', () {
-    test('emits mood while accepting legacy idle and standby values', () {
-      expect(RoomModeState.idle.wireValue, 'mood');
-      expect(RoomModeState.fromString('mood'), RoomModeState.idle);
-      expect(RoomModeState.fromString('idle'), RoomModeState.idle);
-      expect(RoomModeState.fromString('standby'), RoomModeState.idle);
+    test('separates mood from standby while accepting legacy idle', () {
+      expect(RoomModeState.mood.wireValue, 'mood');
+      expect(RoomModeState.standby.wireValue, 'standby');
+      expect(RoomModeState.idle.wireValue, 'standby');
+      expect(RoomModeState.fromString('mood'), RoomModeState.mood);
+      expect(RoomModeState.fromString('idle'), RoomModeState.standby);
+      expect(RoomModeState.fromString('standby'), RoomModeState.standby);
+      expect(RoomModeState.fromString('hard_off'), RoomModeState.hardOff);
     });
   });
 
@@ -171,7 +174,9 @@ void main() {
           'disabled': false,
           'time_offset': 1.5,
           'brightness_offset': -10.0,
-          'soft_off': true,
+          'soft_off': false,
+          'standby_enabled': true,
+          'standby_active': false,
           'hub_type': 'hue',
           'device_ids': ['d1', 'd2', 'd3'],
           'devices': [
@@ -197,7 +202,8 @@ void main() {
         expect(room.disabled, false);
         expect(room.timeOffset, 1.5);
         expect(room.brightnessOffset, -10.0);
-        expect(room.softOff, true);
+        expect(room.state, RoomModeState.mood);
+        expect(room.softOff, false);
         expect(room.hubType, 'hue');
         expect(room.deviceIds, ['d1', 'd2', 'd3']);
         expect(room.devices.length, 3);
@@ -206,6 +212,8 @@ void main() {
         expect(room.kelvin, 4000);
         expect(room.moodEnabled, isTrue);
         expect(room.moodActive, isTrue);
+        expect(room.standbyEnabled, isTrue);
+        expect(room.standbyActive, isFalse);
         expect(room.profileSettings?.moodEnabled, isTrue);
         expect(room.profileSettings?.moodProfileId, 'room-1_mood');
         expect(room.profileSettings?.motionTimeoutSecs, 123);
@@ -494,6 +502,8 @@ void main() {
           'time_offset': 1.0,
           'brightness_offset': -5.0,
           'soft_off': false,
+          'standby_enabled': true,
+          'standby_active': false,
           'lights_on': true,
           'brightness': 75,
           'kelvin': 3500,
@@ -516,6 +526,8 @@ void main() {
         expect(state.kelvin, 3500);
         expect(state.moodEnabled, isTrue);
         expect(state.moodActive, isTrue);
+        expect(state.standbyEnabled, isTrue);
+        expect(state.standbyActive, isFalse);
         expect(state.profileSettings?.moodEnabled, isTrue);
         expect(state.profileSettings?.moodProfileId, 'node-42_mood');
         expect(state.profileSettings?.motionTimeoutSecs, 77);
