@@ -329,6 +329,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       StreamController<RhythmMotionTimer>.broadcast();
   final _modeChangedController =
       StreamController<RhythmModeResource>.broadcast();
+  final _settingsChangedController =
+      StreamController<RhythmSettings>.broadcast();
   final _lightBreakerChangedController =
       StreamController<RhythmLightBreaker>.broadcast();
   final _connectionStateController =
@@ -352,6 +354,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   @override
   Stream<RhythmModeResource> get modeChangedEvents =>
       _modeChangedController.stream;
+
+  @override
+  Stream<RhythmSettings> get settingsChangedEvents =>
+      _settingsChangedController.stream;
 
   @override
   Stream<RhythmLightBreaker> get lightBreakerChangedEvents =>
@@ -396,6 +402,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _modeChangedController.add(mode);
   }
 
+  void emitSettingsChanged(RhythmSettings settings) {
+    _settingsChangedController.add(settings);
+  }
+
   void emitLightBreakerChanged(RhythmLightBreaker lightBreaker) {
     _lightBreakerChangedController.add(lightBreaker);
   }
@@ -407,6 +417,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _hubEventController.close();
     _motionTimerController.close();
     _modeChangedController.close();
+    _settingsChangedController.close();
     _lightBreakerChangedController.close();
     _connectionStateController.close();
     super.dispose();
@@ -1376,6 +1387,53 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(provider.activeMode, RhythmMode.sleep);
+    });
+
+    test('settings_changed without power_save preserves legacy cache',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'settings': {
+            'power_save': false,
+            'auto_update': true,
+          },
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.powerSave, isFalse);
+      expect(provider.autoUpdate, isTrue);
+
+      connection.emitSettingsChanged(
+        RhythmSettings.fromJson({'auto_update': false}),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.powerSave, isFalse);
+      expect(provider.autoUpdate, isFalse);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'settings': {
+            'auto_update': true,
+          },
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.powerSave, isFalse);
+      expect(provider.autoUpdate, isTrue);
     });
 
     test('applies light breaker state from hello and SSE', () async {

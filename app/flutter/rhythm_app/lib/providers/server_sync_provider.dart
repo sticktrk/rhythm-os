@@ -115,7 +115,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Deployment context reported by server ("ha_addon", "server", "rpiz", "bridge", etc.).
   String _serverPlatformContext = 'server';
 
-  /// Whether power-save mode is active on the server.
+  /// Legacy power-save cache for older servers that still report it.
   bool _powerSave = true;
 
   /// Whether automatic firmware updates are enabled on the server.
@@ -200,7 +200,7 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get isBridgeServer =>
       _serverPlatformType == 'bridge' || _serverPlatformType == 'embedded';
 
-  /// Whether power-save mode is active on the server.
+  /// Legacy power-save cache for older servers that still report it.
   bool get powerSave => _powerSave;
 
   /// Whether automatic firmware updates are enabled on the server.
@@ -887,8 +887,11 @@ class ServerSyncProvider extends ChangeNotifier {
         debugPrint('ServerSync: Failed to parse active profile config: $e');
       }
     }
-    _powerSave = hello.settings?.powerSave ?? true;
-    _autoUpdate = hello.settings?.autoUpdate ?? true;
+    final settings = hello.settings;
+    if (settings?.hasPowerSave == true) {
+      _powerSave = settings!.powerSave;
+    }
+    _autoUpdate = settings?.autoUpdate ?? true;
     _lightBreakerEnabled = hello.lightBreaker?.enabled ?? true;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
@@ -1129,11 +1132,11 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  /// Handle settings updates with payloads so power-save UI updates without
-  /// waiting for the compatibility re-hello path.
+  /// Handle settings updates with payloads. Newer servers omit legacy
+  /// power-save, so only treat it as authoritative when present.
   void _onSettingsChanged(RhythmSettings settings) {
     var changed = false;
-    if (_powerSave != settings.powerSave) {
+    if (settings.hasPowerSave && _powerSave != settings.powerSave) {
       _powerSave = settings.powerSave;
       changed = true;
     }
@@ -2115,7 +2118,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _firmwareVersion = DemoServerApi.firmwareVersion;
     _serverPlatformType = DemoServerApi.serverPlatformType;
     _serverPlatformContext = DemoServerApi.serverPlatformContext;
-    _powerSave = settings?.powerSave ?? true;
+    if (settings?.hasPowerSave == true) {
+      _powerSave = settings!.powerSave;
+    }
     _autoUpdate = settings?.autoUpdate ?? true;
     _lightBreakerEnabled = lightBreaker?.enabled ?? true;
     _activeMode = mode?.active;
