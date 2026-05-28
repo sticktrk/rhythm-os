@@ -181,10 +181,11 @@ void main() {
       expect(newNodesDetected, isFalse);
     });
 
-    test('parses settings_changed SSE payload', () async {
+    test('parses settings_changed SSE payload without removed power_save',
+        () async {
       sseEventChunks = [
         'event: settings_changed\n'
-            'data: {"type":"settings_changed","data":{"settings":{"power_save":true}}}\n\n',
+            'data: {"type":"settings_changed","data":{"settings":{"auto_update":false}}}\n\n',
       ];
       sseCloseDelay = const Duration(milliseconds: 100);
 
@@ -199,6 +200,8 @@ void main() {
 
       final settings = await settingsFuture;
       expect(settings.powerSave, isTrue);
+      expect(settings.hasPowerSave, isFalse);
+      expect(settings.autoUpdate, isFalse);
     });
 
     test('parses light_breaker_changed SSE payload', () async {

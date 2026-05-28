@@ -372,17 +372,25 @@ class RhythmModeResource {
 
 /// App-level settings from the Rhythm server.
 class RhythmSettings {
+  /// Legacy setting retained for older servers/callers.
+  ///
+  /// Newer servers no longer include this in settings payloads. Check
+  /// [hasPowerSave] before treating [powerSave] as server-authoritative.
   final bool powerSave;
+  final bool hasPowerSave;
   final bool autoUpdate;
 
   const RhythmSettings({
     required this.powerSave,
+    this.hasPowerSave = true,
     this.autoUpdate = true,
   });
 
   factory RhythmSettings.fromJson(Map<String, dynamic> json) {
+    final hasPowerSave = json.containsKey('power_save');
     return RhythmSettings(
-      powerSave: json['power_save'] as bool? ?? true,
+      powerSave: hasPowerSave ? json['power_save'] as bool? ?? true : true,
+      hasPowerSave: hasPowerSave,
       autoUpdate: json['auto_update'] as bool? ?? true,
     );
   }

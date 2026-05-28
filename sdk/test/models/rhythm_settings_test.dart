@@ -3,13 +3,24 @@ import 'package:test/test.dart';
 
 void main() {
   group('RhythmSettings', () {
-    test('parses the split settings payload', () {
+    test('parses legacy power_save when present', () {
       final settings = RhythmSettings.fromJson({
         'power_save': true,
         'auto_update': false,
       });
 
       expect(settings.powerSave, isTrue);
+      expect(settings.hasPowerSave, isTrue);
+      expect(settings.autoUpdate, isFalse);
+    });
+
+    test('tracks removed power_save as absent', () {
+      final settings = RhythmSettings.fromJson({
+        'auto_update': false,
+      });
+
+      expect(settings.powerSave, isTrue);
+      expect(settings.hasPowerSave, isFalse);
       expect(settings.autoUpdate, isFalse);
     });
 
@@ -17,6 +28,7 @@ void main() {
       final settings = RhythmSettings.fromJson({});
 
       expect(settings.powerSave, isTrue);
+      expect(settings.hasPowerSave, isFalse);
       expect(settings.autoUpdate, isTrue);
     });
   });
