@@ -198,7 +198,7 @@ class _RoomCardState extends State<RoomCard> {
         brightness: _sliderBrightness!,
       );
     } else {
-      serverSync.dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
+      serverSync.dispatchNodeCurveBrightness(widget.roomId, _sliderBrightness!);
     }
     AnalyticsService().logRoomBrightnessAdjusted(
       roomId: widget.roomId,
@@ -229,7 +229,19 @@ class _RoomCardState extends State<RoomCard> {
   }
 
   void _onKelvinSliderEnd() {
-    // TODO: dispatch kelvin to server once endpoint exists
+    if (_sliderKelvin == null) return;
+    context.read<ServerSyncProvider>().dispatchNodeCurveColorTemperature(
+          widget.roomId,
+          _sliderKelvin!,
+          preserveBrightness: true,
+        );
+  }
+
+  double _effectiveCurveHour(RoomDto room) {
+    final now = DateTime.now();
+    final hour =
+        now.hour + (now.minute / 60.0) + (room.timeOffsetMinutes / 60.0);
+    return _CctSideRange.normalizeHour(hour);
   }
 
   @override
@@ -368,6 +380,12 @@ class _RoomCardState extends State<RoomCard> {
         final sliderActive =
             !isTransitioning && (mode == RoomMode.on || mode == RoomMode.mood);
         final sliderInCctMode = _cctMode && mode == RoomMode.on;
+        final cctRange = _CctSideRange.fromCurveData(
+          widget.curveData,
+          effectiveHour: _effectiveCurveHour(room),
+          fallbackMin: _minKelvin,
+          fallbackMax: _maxKelvin,
+        );
         final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
         final glowColor = cctColor;
         final sliderActiveTrackColor =
@@ -545,7 +563,7 @@ class _RoomCardState extends State<RoomCard> {
                             onTap: mode == RoomMode.standby ? () {} : null,
                             onLongPress: () {},
                             child: Padding(
-                              padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
                               child: Row(
                                 children: [
                                   // Mode toggle button
@@ -569,21 +587,21 @@ class _RoomCardState extends State<RoomCard> {
                                       width: 32,
                                       height: 32,
                                       decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(10),
+                                        borderRadius: BorderRadius.circular(14),
                                         color: sliderInCctMode
                                             ? ColorUtils.cctToColor(
-                                                    (_sliderKelvin ?? kelvin)
-                                                        .clamp(_minKelvin,
-                                                            _maxKelvin))
+                                                    cctRange.clampKelvin(
+                                                        _sliderKelvin ??
+                                                            kelvin))
                                                 .withValues(alpha: 0.20)
                                             : Colors.white
                                                 .withValues(alpha: 0.07),
                                         border: Border.all(
                                           color: sliderInCctMode
                                               ? ColorUtils.cctToColor(
-                                                      (_sliderKelvin ?? kelvin)
-                                                          .clamp(_minKelvin,
-                                                              _maxKelvin))
+                                                      cctRange.clampKelvin(
+                                                          _sliderKelvin ??
+                                                              kelvin))
                                                   .withValues(alpha: 0.35)
                                               : Colors.white
                                                   .withValues(alpha: 0.12),
@@ -622,12 +640,12 @@ class _RoomCardState extends State<RoomCard> {
                                                             .wb_sunny_rounded,
                                             key: ValueKey(
                                                 '$mode-$sliderInCctMode'),
-                                            size: 18,
+                                            size: 17,
                                             color: sliderInCctMode
                                                 ? ColorUtils.cctToColor(
-                                                    (_sliderKelvin ?? kelvin)
-                                                        .clamp(_minKelvin,
-                                                            _maxKelvin))
+                                                    cctRange.clampKelvin(
+                                                        _sliderKelvin ??
+                                                            kelvin))
                                                 : iconColor.withValues(
                                                     alpha: 0.7),
                                           ),
@@ -635,12 +653,12 @@ class _RoomCardState extends State<RoomCard> {
                                       ),
                                     ),
                                   ),
-                                  const SizedBox(width: 4),
+                                  const SizedBox(width: 0),
                                   // Slider fills remaining space
                                   Expanded(
                                     child: SliderTheme(
                                       data: SliderThemeData(
-                                        trackHeight: 14,
+                                        trackHeight: 24,
                                         thumbShape: _SunSliderThumbShape(
                                           icon: sliderInCctMode
                                               ? Icons.contrast_rounded
@@ -648,15 +666,18 @@ class _RoomCardState extends State<RoomCard> {
                                         ),
                                         overlayShape:
                                             const RoundSliderOverlayShape(
-                                          overlayRadius: 28,
+                                          overlayRadius: 36,
                                         ),
-                                        padding: const EdgeInsets.symmetric(
+                                        padding: EdgeInsets.symmetric(
                                           horizontal:
-                                              _SunSliderThumbShape.radius + 2,
-                                          vertical: 10,
+                                              _SunSliderThumbShape.radius - 8,
+                                          vertical: 16,
                                         ),
                                         trackShape: sliderInCctMode
-                                            ? const _CCTGradientTrackShape()
+                                            ? _CCTGradientTrackShape(
+                                                minKelvin: cctRange.minKelvin,
+                                                maxKelvin: cctRange.maxKelvin,
+                                              )
                                             : const RoundedRectSliderTrackShape(),
                                         activeTrackColor:
                                             sliderActiveTrackColor,
@@ -683,32 +704,29 @@ class _RoomCardState extends State<RoomCard> {
                                                 : CelestialColors.orbitRing
                                                     .withValues(alpha: 0.18),
                                         disabledThumbColor:
-                                            mode == RoomMode.mood ||
-                                                    mode == RoomMode.standby
+                                            mode == RoomMode.mood
                                                 ? Color.lerp(
                                                     Colors.white,
                                                     cctColor,
-                                                    mode == RoomMode.standby
-                                                        ? 0.45
-                                                        : 0.25,
+                                                    0.25,
                                                   )!
                                                 : CelestialColors.textSecondary
                                                     .withValues(alpha: 0.55),
                                       ),
                                       child: Slider(
                                         value: sliderInCctMode
-                                            ? (_sliderKelvin ?? kelvin)
+                                            ? cctRange
+                                                .clampKelvin(
+                                                    _sliderKelvin ?? kelvin)
                                                 .toDouble()
-                                                .clamp(_minKelvin.toDouble(),
-                                                    _maxKelvin.toDouble())
                                             : displayBrightness
                                                 .toDouble()
                                                 .clamp(1, 100),
                                         min: sliderInCctMode
-                                            ? _minKelvin.toDouble()
+                                            ? cctRange.minKelvin.toDouble()
                                             : 1,
                                         max: sliderInCctMode
-                                            ? _maxKelvin.toDouble()
+                                            ? cctRange.maxKelvin.toDouble()
                                             : 100,
                                         onChanged: sliderActive
                                             ? (v) {
@@ -796,7 +814,7 @@ class _SunSliderThumbShape extends SliderComponentShape {
   const _SunSliderThumbShape({this.icon = Icons.wb_sunny_rounded});
 
   final IconData icon;
-  static const radius = 14.0;
+  static const radius = 18.0;
   static const _elevation = 3.0;
   static const _pressedElevation = 6.0;
 
@@ -855,7 +873,7 @@ class _SunSliderThumbShape extends SliderComponentShape {
           color: sunIconColor,
           fontFamily: icon.fontFamily,
           package: icon.fontPackage,
-          fontSize: 15,
+          fontSize: 19,
         ),
       ),
       textDirection: textDirection,
@@ -868,18 +886,91 @@ class _SunSliderThumbShape extends SliderComponentShape {
   }
 }
 
+class _CctSideRange {
+  const _CctSideRange({
+    required this.minKelvin,
+    required this.maxKelvin,
+  });
+
+  final int minKelvin;
+  final int maxKelvin;
+  static const _sampleCount = 64;
+
+  static _CctSideRange fromCurveData(
+    CurveData? data, {
+    required double effectiveHour,
+    required int fallbackMin,
+    required int fallbackMax,
+  }) {
+    if (data == null || data.hours.isEmpty || data.kelvin.isEmpty) {
+      return _fallback(fallbackMin: fallbackMin, fallbackMax: fallbackMax);
+    }
+
+    final solarNoon = normalizeHour(data.solar.solarNoon);
+    final normalizedHour = normalizeHour(effectiveHour);
+    final onMorningSide = normalizedHour <= solarNoon;
+    final startHour = onMorningSide ? 0.0 : solarNoon;
+    final endHour = onMorningSide ? solarNoon : 24.0;
+
+    if ((endHour - startHour).abs() < 0.25) {
+      return _fallback(fallbackMin: fallbackMin, fallbackMax: fallbackMax);
+    }
+
+    final samples = <int>[];
+    for (var i = 0; i <= _sampleCount; i++) {
+      final t = i / _sampleCount;
+      final hour = startHour + (endHour - startHour) * t;
+      final kelvin = SolarUtils.kelvinAtHour(
+        hour,
+        hours: data.hours,
+        kelvin: data.kelvin,
+      );
+      if (kelvin > 0) {
+        samples.add(kelvin.clamp(fallbackMin, fallbackMax).toInt());
+      }
+    }
+
+    if (samples.length < 2) {
+      return _fallback(fallbackMin: fallbackMin, fallbackMax: fallbackMax);
+    }
+
+    final minKelvin = samples.reduce(math.min);
+    final maxKelvin = samples.reduce(math.max);
+    if (maxKelvin <= minKelvin) {
+      return _fallback(fallbackMin: fallbackMin, fallbackMax: fallbackMax);
+    }
+
+    return _CctSideRange(minKelvin: minKelvin, maxKelvin: maxKelvin);
+  }
+
+  static double normalizeHour(double hour) => ((hour % 24) + 24) % 24;
+
+  static _CctSideRange _fallback({
+    required int fallbackMin,
+    required int fallbackMax,
+  }) =>
+      _CctSideRange(minKelvin: fallbackMin, maxKelvin: fallbackMax);
+
+  int clampKelvin(int kelvin) => kelvin.clamp(minKelvin, maxKelvin).toInt();
+}
+
 /// Warm-to-cool gradient track for CCT slider mode.
 class _CCTGradientTrackShape extends SliderTrackShape
     with BaseSliderTrackShape {
-  const _CCTGradientTrackShape();
+  const _CCTGradientTrackShape({
+    required this.minKelvin,
+    required this.maxKelvin,
+  });
 
-  static final _gradientColors = [
-    ColorUtils.cctToColor(2000),
-    ColorUtils.cctToColor(2700),
-    ColorUtils.cctToColor(4000),
-    ColorUtils.cctToColor(5500),
-    ColorUtils.cctToColor(6500),
-  ];
+  final int minKelvin;
+  final int maxKelvin;
+  static const _gradientSteps = 4;
+
+  // Match RoundedRectSliderTrackShape so the thumb travel is inset from the
+  // rounded caps — otherwise the CCT thumb runs to the very edge while the
+  // brightness thumb stops short.
+  @override
+  bool get isRounded => true;
 
   @override
   void paint(
@@ -894,15 +985,30 @@ class _CCTGradientTrackShape extends SliderTrackShape
     bool isDiscrete = false,
     required TextDirection textDirection,
   }) {
-    final trackRect = getPreferredRect(
+    final baseRect = getPreferredRect(
       parentBox: parentBox,
       offset: offset,
       sliderTheme: sliderTheme,
     );
-    final trackHeight = sliderTheme.trackHeight ?? 14;
-    final radius = Radius.circular(trackHeight / 2);
+    // RoundedRectSliderTrackShape draws its active segment
+    // `additionalActiveTrackHeight` (default 2px) taller than the base track.
+    // Inflate vertically to match the brightness slider's thickness.
+    const additionalActiveTrackHeight = 2.0;
+    final trackRect = Rect.fromLTRB(
+      baseRect.left,
+      baseRect.top - additionalActiveTrackHeight / 2,
+      baseRect.right,
+      baseRect.bottom + additionalActiveTrackHeight / 2,
+    );
+    final radius = Radius.circular(trackRect.height / 2);
     final rrect = RRect.fromRectAndRadius(trackRect, radius);
-    final gradient = LinearGradient(colors: _gradientColors);
+    final colors = [
+      for (var i = 0; i <= _gradientSteps; i++)
+        ColorUtils.curveColorForCCT(
+          (minKelvin + (maxKelvin - minKelvin) * (i / _gradientSteps)).round(),
+        ),
+    ];
+    final gradient = LinearGradient(colors: colors);
 
     final canvas = context.canvas;
     canvas.save();
@@ -1108,11 +1214,20 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
                                       color: i == activeIndex
                                           ? activeText
                                           : inactiveText,
-                                      fontSize: 12,
+                                      // "Standby" is wider than the other
+                                      // labels — shrink long labels so they
+                                      // don't crowd the segment.
+                                      fontSize:
+                                          segments[i].label.length > 5 ? 9.5 : 12,
                                       fontWeight: FontWeight.w600,
                                       letterSpacing: 0.3,
                                     ),
-                                    child: Text(segments[i].label),
+                                    child: Text(
+                                      segments[i].label,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.visible,
+                                      softWrap: false,
+                                    ),
                                   ),
                                 ],
                               ),

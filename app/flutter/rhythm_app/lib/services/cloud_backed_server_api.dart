@@ -75,6 +75,50 @@ class CloudBackedServerApi {
     return _delegate.nodeBrightness(nodeId: nodeId, brightness: brightness);
   }
 
+  Future<RhythmRoomState?> roomCurveBrightness({
+    required String roomId,
+    required int brightness,
+  }) {
+    return _delegate.roomCurveBrightness(
+      roomId: roomId,
+      brightness: brightness,
+    );
+  }
+
+  Future<RhythmRoomState?> nodeCurveBrightness({
+    required String nodeId,
+    required int brightness,
+  }) {
+    return _delegate.nodeCurveBrightness(
+      nodeId: nodeId,
+      brightness: brightness,
+    );
+  }
+
+  Future<RhythmRoomState?> roomCurveColorTemperature({
+    required String roomId,
+    required int kelvin,
+    bool preserveBrightness = true,
+  }) {
+    return _delegate.roomCurveColorTemperature(
+      roomId: roomId,
+      kelvin: kelvin,
+      preserveBrightness: preserveBrightness,
+    );
+  }
+
+  Future<RhythmRoomState?> nodeCurveColorTemperature({
+    required String nodeId,
+    required int kelvin,
+    bool preserveBrightness = true,
+  }) {
+    return _delegate.nodeCurveColorTemperature(
+      nodeId: nodeId,
+      kelvin: kelvin,
+      preserveBrightness: preserveBrightness,
+    );
+  }
+
   Future<List<RhythmRoomState>> roomBrightnessBatch(
       List<({String roomId, int brightness})> items,
       {int? dispatchSpacingMs}) {

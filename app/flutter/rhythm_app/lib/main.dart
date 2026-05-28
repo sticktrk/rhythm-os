@@ -16,6 +16,7 @@ import 'onboarding/onboarding_flow.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
 import 'services/entitlements_service.dart';
+import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/virtual_experience_service.dart';
@@ -55,6 +56,9 @@ void main() async {
   // Initialize SettingsService BEFORE Backend (for onboardingComplete check)
   // This also performs one-time migration from SharedPreferences to Hive
   await SettingsService.instance.initialize();
+  // Local-only recent servers list. Initialized here so the connect screen
+  // can render cached entries before HomeProvider/mDNS come up.
+  await RecentServersService.instance.initialize();
 
   // Initialize Backend (Supabase auth + analytics, or Offline)
   if (caps.hasCloudBackend) {

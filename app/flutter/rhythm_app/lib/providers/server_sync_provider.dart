@@ -1338,10 +1338,10 @@ class ServerSyncProvider extends ChangeNotifier {
     ]);
   }
 
-  /// Set node brightness through the server.
+  /// Apply a brightness curve modifier through the server.
   ///
   /// Returns true if dispatched to server, false if not connected.
-  bool dispatchNodeBrightness(String nodeId, int brightness) {
+  bool dispatchNodeCurveBrightness(String nodeId, int brightness) {
     if (HueServiceLocator.isDemoMode) {
       final currentState = _roomProvider.getRoomState(nodeId);
       final moodActive = currentState == RoomModeState.mood;
@@ -1367,12 +1367,62 @@ class ServerSyncProvider extends ChangeNotifier {
       return true;
     }
     if (!_connection.connected) return false;
-    _connection.api.nodeBrightness(nodeId: nodeId, brightness: brightness);
+    _connection.api
+        .nodeCurveBrightness(nodeId: nodeId, brightness: brightness)
+        .then((serverState) {
+      if (serverState != null) _onRhythmState(serverState);
+    });
     return true;
   }
 
+  bool dispatchNodeBrightness(String nodeId, int brightness) =>
+      dispatchNodeCurveBrightness(nodeId, brightness);
+
   bool dispatchBrightness(String roomId, int brightness) =>
-      dispatchNodeBrightness(roomId, brightness);
+      dispatchNodeCurveBrightness(roomId, brightness);
+
+  /// Move a node along its active curve to a requested color temperature.
+  ///
+  /// This deliberately uses the curve-modifier endpoint rather than a one-shot
+  /// color-temperature write.
+  bool dispatchNodeCurveColorTemperature(
+    String nodeId,
+    int kelvin, {
+    bool preserveBrightness = true,
+  }) {
+    if (HueServiceLocator.isDemoMode) {
+      final brightness = _roomProvider.getBrightness(nodeId);
+      DemoServerApi.instance.updateRoomLightState(
+        nodeId,
+        on: true,
+        brightness: brightness,
+        kelvin: kelvin,
+        state: RoomModeState.active,
+      );
+      _roomProvider.applyServerNodeState(
+        nodeId,
+        rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
+        timeOffset: _roomProvider.getNode(nodeId)?.timeOffsetMinutes ?? 0,
+        brightnessOffset: _roomProvider.getNode(nodeId)?.brightnessOffset ?? 0,
+        state: RoomModeState.active,
+        lightsOn: true,
+        brightness: brightness,
+        kelvin: kelvin,
+      );
+      return true;
+    }
+    if (!_connection.connected) return false;
+    _connection.api
+        .nodeCurveColorTemperature(
+      nodeId: nodeId,
+      kelvin: kelvin,
+      preserveBrightness: preserveBrightness,
+    )
+        .then((serverState) {
+      if (serverState != null) _onRhythmState(serverState);
+    });
+    return true;
+  }
 
   /// Set a node's direct color (RGB) via the server runtime.
   ///

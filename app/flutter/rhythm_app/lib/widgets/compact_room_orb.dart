@@ -163,7 +163,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
   void _onBrightnessChangeEnd() {
     if (_manualBrightness == null) return;
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchNodeBrightness(widget.roomId, _manualBrightness!);
+    serverSync.dispatchNodeCurveBrightness(widget.roomId, _manualBrightness!);
   }
 
   int _getBrightnessAtHour(double hour, CurveData? curveData) {
