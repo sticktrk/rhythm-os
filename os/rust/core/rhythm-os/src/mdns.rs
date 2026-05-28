@@ -7,26 +7,50 @@ pub const MDNS_TXT_VERSION: &str = "version";
 pub const MDNS_TXT_TYPE: &str = "type";
 
 const MDNS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const MDNS_ANNOUNCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocalIpv4Interface {
+    name: String,
+    ip: std::net::Ipv4Addr,
+}
 
 /// Find the first non-loopback IPv4 address on this machine.
 pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
+    local_ipv4_interface().map(|iface| iface.ip)
+}
+
+fn local_ipv4_interface() -> Option<LocalIpv4Interface> {
     use std::net::IpAddr;
     let ifaces = if_addrs::get_if_addrs().ok()?;
+    let candidates = ifaces.into_iter().filter_map(|iface| {
+        if iface.is_loopback() {
+            return None;
+        }
 
+        let IpAddr::V4(ip) = iface.addr.ip() else {
+            return None;
+        };
+
+        Some(LocalIpv4Interface {
+            name: iface.name,
+            ip,
+        })
+    });
+
+    select_local_ipv4_interface(candidates)
+}
+
+fn select_local_ipv4_interface<I>(ifaces: I) -> Option<LocalIpv4Interface>
+where
+    I: IntoIterator<Item = LocalIpv4Interface>,
+{
     let mut preferred = None;
     let mut fallback = None;
 
     for iface in ifaces {
-        if iface.is_loopback() {
-            continue;
-        }
-
-        let IpAddr::V4(ip) = iface.addr.ip() else {
-            continue;
-        };
-
         if iface.name.starts_with("usb") {
-            fallback.get_or_insert(ip);
+            fallback.get_or_insert(iface);
             continue;
         }
 
@@ -35,11 +59,11 @@ pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
             || iface.name.starts_with("eth")
             || iface.name.starts_with("en")
         {
-            preferred.get_or_insert(ip);
+            preferred.get_or_insert(iface);
             continue;
         }
 
-        fallback.get_or_insert(ip);
+        fallback.get_or_insert(iface);
     }
 
     preferred.or(fallback)
@@ -131,20 +155,22 @@ fn run_mdns_registration_loop(
 ) {
     use log::info;
 
-    let mut advertised_ip = None;
+    let mut advertised_interface = None;
     let mut daemon: Option<mdns_sd::ServiceDaemon> = None;
     let mut logged_waiting_for_ip = false;
 
     loop {
-        if let Some(detected_ip) = local_ipv4() {
-            if advertised_ip != Some(detected_ip) || daemon.is_none() {
-                if let Some(old_ip) = advertised_ip {
-                    if old_ip != detected_ip {
+        if let Some(detected_interface) = local_ipv4_interface() {
+            if advertised_interface.as_ref() != Some(&detected_interface) || daemon.is_none() {
+                if let Some(old_interface) = advertised_interface.as_ref() {
+                    if old_interface != &detected_interface {
                         info!(
                             target: "sys",
-                            "mDNS: local IPv4 changed from {} to {}, refreshing advertisement",
-                            old_ip,
-                            detected_ip
+                            "mDNS: local IPv4 interface changed from {} ({}) to {} ({}), refreshing advertisement",
+                            old_interface.ip,
+                            old_interface.name,
+                            detected_interface.ip,
+                            detected_interface.name
                         );
                     }
                 }
@@ -152,22 +178,22 @@ fn run_mdns_registration_loop(
                     let _ = old_daemon.shutdown();
                 }
 
-                match register_mdns_service_for_ip(
+                match register_mdns_service_for_interface(
                     config.port,
                     &config.device_suffix,
                     config.device_id.as_deref(),
                     &config.version,
                     &config.device_type,
-                    detected_ip,
+                    &detected_interface,
                 ) {
                     Some(new_daemon) => {
                         daemon = Some(new_daemon);
-                        advertised_ip = Some(detected_ip);
+                        advertised_interface = Some(detected_interface);
                         logged_waiting_for_ip = false;
                     }
                     None => {
                         daemon = None;
-                        advertised_ip = None;
+                        advertised_interface = None;
                     }
                 }
             }
@@ -183,7 +209,7 @@ fn run_mdns_registration_loop(
             if let Some(old_daemon) = daemon.take() {
                 let _ = old_daemon.shutdown();
             }
-            advertised_ip = None;
+            advertised_interface = None;
         }
 
         match stop_rx.recv_timeout(MDNS_POLL_INTERVAL) {
@@ -197,17 +223,19 @@ fn run_mdns_registration_loop(
     }
 }
 
-fn register_mdns_service_for_ip(
+fn register_mdns_service_for_interface(
     port: u16,
     device_suffix: &str,
     device_id: Option<&str>,
     version: &str,
     device_type: &str,
-    local_ip: std::net::Ipv4Addr,
+    interface: &LocalIpv4Interface,
 ) -> Option<mdns_sd::ServiceDaemon> {
     use log::{info, warn};
+    use std::net::IpAddr;
 
     let service_type = format!("{}.{}.local.", MDNS_SERVICE_TYPE, MDNS_SERVICE_PROTO);
+    let local_ip = interface.ip;
     let hostname = mdns_hostname_with_id(device_suffix, device_id, local_ip);
     let instance_name = format!("{} ({})", MDNS_INSTANCE_NAME, hostname);
 
@@ -219,13 +247,42 @@ fn register_mdns_service_for_ip(
         }
     };
 
-    let service_info = match mdns_sd::ServiceInfo::new(
+    let monitor = match daemon.monitor() {
+        Ok(monitor) => monitor,
+        Err(e) => {
+            warn!(target: "sys", "mDNS: failed to monitor daemon: {:?}", e);
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+
+    // Keep discovery scoped to the chosen LAN IPv4. Otherwise mdns-sd may also
+    // publish on USB, VPN, or other host interfaces that clients cannot use.
+    if let Err(e) = daemon.disable_interface(mdns_sd::IfKind::All) {
+        warn!(target: "sys", "mDNS: failed to disable default interfaces: {:?}", e);
+        let _ = daemon.shutdown();
+        return None;
+    }
+
+    if let Err(e) = daemon.enable_interface(IpAddr::V4(local_ip)) {
+        warn!(
+            target: "sys",
+            "mDNS: failed to enable interface {} ({}): {:?}",
+            interface.name,
+            local_ip,
+            e
+        );
+        let _ = daemon.shutdown();
+        return None;
+    }
+
+    let service_info = match mdns_service_info(
         &service_type,
         &instance_name,
-        &format!("{}.local.", hostname),
-        std::net::IpAddr::V4(local_ip),
+        &hostname,
         port,
-        [(MDNS_TXT_VERSION, version), (MDNS_TXT_TYPE, device_type)].as_slice(),
+        version,
+        device_type,
     ) {
         Ok(info) => info,
         Err(e) => {
@@ -234,6 +291,7 @@ fn register_mdns_service_for_ip(
             return None;
         }
     };
+    let service_fullname = service_info.get_fullname().to_string();
 
     if let Err(e) = daemon.register(service_info) {
         warn!(target: "sys", "mDNS: failed to register service: {:?}", e);
@@ -241,14 +299,77 @@ fn register_mdns_service_for_ip(
         return None;
     }
 
+    // register() only confirms the command was queued. Wait for the daemon's
+    // Announce event so logs and health bundles do not claim LAN visibility
+    // when no multicast socket was actually able to publish.
+    let announced_on = match wait_for_mdns_announcement(&monitor, &service_fullname) {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            warn!(
+                target: "sys",
+                "mDNS: registered {} on {} ({}) but no LAN announcement was observed: {}; retrying",
+                hostname,
+                local_ip,
+                interface.name,
+                e
+            );
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+
     info!(
         target: "sys",
-        "mDNS: advertising as {}.local ({}) on port {}",
+        "mDNS: advertising as {}.local ({}) on {} port {} via {}",
         hostname,
         local_ip,
-        port
+        interface.name,
+        port,
+        announced_on
     );
     Some(daemon)
+}
+
+fn mdns_service_info(
+    service_type: &str,
+    instance_name: &str,
+    hostname: &str,
+    port: u16,
+    version: &str,
+    device_type: &str,
+) -> mdns_sd::Result<mdns_sd::ServiceInfo> {
+    mdns_sd::ServiceInfo::new(
+        service_type,
+        instance_name,
+        &format!("{}.local.", hostname),
+        (),
+        port,
+        [(MDNS_TXT_VERSION, version), (MDNS_TXT_TYPE, device_type)].as_slice(),
+    )
+    .map(mdns_sd::ServiceInfo::enable_addr_auto)
+}
+
+fn wait_for_mdns_announcement(
+    monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>,
+    service_fullname: &str,
+) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + MDNS_ANNOUNCE_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match monitor.recv_timeout(remaining) {
+            Ok(mdns_sd::DaemonEvent::Announce(fullname, addrs)) => {
+                if fullname == service_fullname {
+                    return Ok(addrs);
+                }
+            }
+            Ok(mdns_sd::DaemonEvent::Error(e)) => return Err(format!("{:?}", e)),
+            Ok(mdns_sd::DaemonEvent::IpAdd(_)) | Ok(mdns_sd::DaemonEvent::IpDel(_)) => {}
+            Ok(_) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    Err("timed out waiting for mdns-sd announce event".to_string())
 }
 
 /// Compose the mDNS hostname. When a stable `device_id` is provided
@@ -293,6 +414,66 @@ fn sanitize_device_id_component(raw: &str) -> String {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    fn iface(name: &str, ip: [u8; 4]) -> LocalIpv4Interface {
+        LocalIpv4Interface {
+            name: name.to_string(),
+            ip: Ipv4Addr::from(ip),
+        }
+    }
+
+    #[test]
+    fn local_ipv4_selection_prefers_lan_interfaces_over_usb() {
+        let selected = select_local_ipv4_interface([
+            iface("usb0", [169, 254, 1, 10]),
+            iface("docker0", [172, 17, 0, 1]),
+            iface("wlan0", [192, 168, 0, 13]),
+        ]);
+
+        assert_eq!(selected, Some(iface("wlan0", [192, 168, 0, 13])));
+    }
+
+    #[test]
+    fn local_ipv4_selection_keeps_interface_name_with_ip() {
+        let selected = select_local_ipv4_interface([
+            iface("en0", [192, 168, 0, 214]),
+            iface("wlan0", [192, 168, 0, 13]),
+        ]);
+
+        assert_eq!(selected, Some(iface("en0", [192, 168, 0, 214])));
+    }
+
+    #[test]
+    fn mdns_service_info_uses_addr_auto_for_selected_interface_registration() {
+        let info = mdns_service_info(
+            "_http._tcp.local.",
+            "Rhythm OS (rhythm-server-31810e88)",
+            "rhythm-server-31810e88",
+            54448,
+            "0.4.241-beta",
+            "rhythm-server",
+        )
+        .expect("valid service info");
+
+        assert!(
+            info.is_addr_auto(),
+            "mdns-sd should populate addresses from the selected daemon interface"
+        );
+        assert!(
+            info.get_addresses().is_empty(),
+            "service info must not carry a stale fixed IP before daemon registration"
+        );
+        assert_eq!(info.get_hostname(), "rhythm-server-31810e88.local.");
+        assert_eq!(info.get_port(), 54448);
+        assert_eq!(
+            info.get_property_val_str(MDNS_TXT_VERSION),
+            Some("0.4.241-beta")
+        );
+        assert_eq!(
+            info.get_property_val_str(MDNS_TXT_TYPE),
+            Some("rhythm-server")
+        );
+    }
 
     #[test]
     fn mdns_hostname_uses_suffix_and_last_two_octets() {
