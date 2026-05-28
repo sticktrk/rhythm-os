@@ -2264,6 +2264,37 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 );
             }
         }
+        WorkItem::SetNodeCurveModifier {
+            command_id,
+            node_id,
+            modifier,
+            dispatch_spacing,
+            persist_after,
+        } => {
+            crate::periodic::wait_for_interactive_node_dispatch_slot(
+                state,
+                &command_id,
+                &node_id,
+                dispatch_spacing,
+            );
+            if let Err(e) = crate::commands::do_set_node_curve_modifier(
+                state,
+                &node_id,
+                modifier,
+                persist_after,
+            ) {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "set_node_curve_modifier_failed",
+                    command_id = %command_id,
+                    node_id = %node_id,
+                    modifier = ?modifier,
+                    source = "worker",
+                    error = %e,
+                    "Worker node curve modifier failed"
+                );
+            }
+        }
         WorkItem::SetNodePreferences {
             command_id,
             node_id,

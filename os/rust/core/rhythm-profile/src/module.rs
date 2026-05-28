@@ -7,6 +7,88 @@ use crate::context::CurveContext;
 use crate::steps::{StepAction, StepResult};
 use crate::values::LightingValues;
 
+/// Target output a user wants to reach by moving along a light curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightCurveTarget {
+    /// Target effective brightness percentage.
+    Brightness(u8),
+    /// Target color temperature in Kelvin.
+    ColorTemperature(u16),
+}
+
+/// Curve position selected for a target output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightCurvePosition {
+    /// Offset from the current curve context that reaches the target.
+    pub time_offset_minutes: f32,
+    /// Full profile output at the selected position.
+    pub values: LightingValues,
+    /// Absolute error between target and selected output on the target axis.
+    pub target_error: f32,
+}
+
+impl LightCurveTarget {
+    fn axis_value(self, values: &LightingValues) -> Option<f32> {
+        match self {
+            Self::Brightness(_) => Some(values.brightness as f32),
+            Self::ColorTemperature(_) if values.is_direct_color || values.kelvin == 0 => None,
+            Self::ColorTemperature(_) => Some(values.kelvin as f32),
+        }
+    }
+
+    fn target_value(self) -> f32 {
+        match self {
+            Self::Brightness(value) => value.clamp(1, 100) as f32,
+            Self::ColorTemperature(value) => value as f32,
+        }
+    }
+}
+
+fn normalize_offset_minutes(offset_minutes: f32) -> f32 {
+    (offset_minutes + 720.0).rem_euclid(1440.0) - 720.0
+}
+
+fn sampled_curve_position<M: LightProfileModule + ?Sized>(
+    module: &M,
+    ctx: &CurveContext,
+    target: LightCurveTarget,
+    preferred_offset_minutes: f32,
+) -> Option<LightCurvePosition> {
+    let target_value = target.target_value();
+    let preferred_offset_minutes = normalize_offset_minutes(preferred_offset_minutes);
+    let mut best: Option<(LightCurvePosition, f32)> = None;
+
+    for offset_minutes in -720..=720 {
+        let offset_minutes = offset_minutes as f32;
+        let values = module.calculate_with_offset(ctx, offset_minutes);
+        let Some(axis_value) = target.axis_value(&values) else {
+            continue;
+        };
+        let target_error = (axis_value - target_value).abs();
+        let preferred_distance = (offset_minutes - preferred_offset_minutes).abs();
+        let position = LightCurvePosition {
+            time_offset_minutes: offset_minutes,
+            values,
+            target_error,
+        };
+
+        let replace = match best.as_ref() {
+            None => true,
+            Some((best_position, best_distance)) => {
+                target_error < best_position.target_error - 0.5
+                    || ((target_error - best_position.target_error).abs() <= 0.5
+                        && preferred_distance < *best_distance)
+            }
+        };
+
+        if replace {
+            best = Some((position, preferred_distance));
+        }
+    }
+
+    best.map(|(position, _)| position)
+}
+
 /// Trait for pluggable light profile modules.
 ///
 /// Implement this trait to create a new lighting profile. Each module
@@ -64,6 +146,20 @@ pub trait LightProfileModule: Send + Sync {
     ///
     /// StepResult with target values and time offset.
     fn calculate_step(&self, ctx: &CurveContext, action: StepAction) -> StepResult;
+
+    /// Find a curve position that best matches a target output.
+    ///
+    /// The default implementation samples the profile across a full wrapped
+    /// day at one-minute granularity. Custom profiles can override this with an
+    /// exact inverse when their curve shape supports one.
+    fn find_curve_position(
+        &self,
+        ctx: &CurveContext,
+        target: LightCurveTarget,
+        preferred_offset_minutes: f32,
+    ) -> Option<LightCurvePosition> {
+        sampled_curve_position(self, ctx, target, preferred_offset_minutes)
+    }
 
     /// Check if lighting is at maximum values (on the bright plateau).
     fn is_at_maximum(&self, ctx: &CurveContext) -> bool;
@@ -246,6 +342,23 @@ mod tests {
         // Constant curve always returns same values
         assert_eq!(values.brightness, 80);
         assert_eq!(values.kelvin, 4000);
+    }
+
+    #[test]
+    fn test_default_find_curve_position_prefers_current_offset() {
+        let curve = ConstantCurve {
+            brightness: 80,
+            kelvin: 4000,
+        };
+        let ctx = CurveContext::new(12.0, SolarTime::default(), None);
+
+        let position = curve
+            .find_curve_position(&ctx, LightCurveTarget::ColorTemperature(4000), 45.0)
+            .expect("constant Kelvin should resolve");
+
+        assert_eq!(position.time_offset_minutes, 45.0);
+        assert_eq!(position.values.kelvin, 4000);
+        assert_eq!(position.target_error, 0.0);
     }
 
     #[test]

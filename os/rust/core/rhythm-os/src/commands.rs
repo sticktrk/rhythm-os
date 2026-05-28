@@ -22,12 +22,12 @@ use rhythm_core::{
 use serde_json::Value;
 
 use crate::api_types::{
-    ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, HubCapabilityDto, HubDto,
-    HubStartupRetryDto, InputBindingsDto, LightBreakerDto, LocationDto, ModeLastChangeDto,
-    ModeSettingsDto, ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto,
-    PreferredEndpointDto, ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto,
-    ReviewSummaryDto, RoomPollState, RoomProfileSettingsDto, RoomRhythmState, RoomsPollResponse,
-    SettingsDto, StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
+    ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, CurveModifierDto,
+    HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto, LocationDto,
+    ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, NodeStateDto, NodesPollResponse,
+    ObservedPowerDto, PreferredEndpointDto, ProfilesDto, ReviewCountsDto, ReviewEntryDto,
+    ReviewHubDto, ReviewSummaryDto, RoomPollState, RoomProfileSettingsDto, RoomRhythmState,
+    RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
@@ -51,6 +51,30 @@ use crate::topology::{
 };
 
 pub const DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS: u64 = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeCurveModifier {
+    Brightness(u8),
+    ColorTemperature {
+        kelvin: u16,
+        preserve_brightness: bool,
+    },
+}
+
+impl NodeCurveModifier {
+    fn normalized(self) -> Self {
+        match self {
+            Self::Brightness(brightness) => Self::Brightness(brightness.clamp(1, 100)),
+            Self::ColorTemperature {
+                kelvin,
+                preserve_brightness,
+            } => Self::ColorTemperature {
+                kelvin: kelvin.clamp(500, 25_000),
+                preserve_brightness,
+            },
+        }
+    }
+}
 
 pub fn default_http_batch_dispatch_spacing() -> Duration {
     Duration::from_millis(DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS)
@@ -1649,6 +1673,12 @@ fn build_node_state_dto_from_snapshot_parts(
         disabled: snap.disabled,
         time_offset: snap.time_offset_minutes,
         brightness_offset: snap.brightness_offset,
+        curve_modifier: CurveModifierDto {
+            time_offset_minutes: snap.time_offset_minutes,
+            brightness_offset: snap.brightness_offset,
+            brightness,
+            kelvin,
+        },
         lights_on: observed_power.lights_on,
         observed_power,
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
@@ -6328,9 +6358,14 @@ pub fn queue_node_action(
         (s.hub_runtime(), s.work_tx.clone())
     };
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-    runtime
+    let snapshot = runtime
         .engine_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    if !snapshot.kind.is_light_addressable() {
+        return Err(anyhow::anyhow!(
+            "Curve modifiers can only be set on light-addressable nodes"
+        ));
+    }
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
     tx.try_send(WorkItem::QueuedNodeAction {
@@ -6496,6 +6531,136 @@ pub fn queue_set_node_brightness_batch(
     queue_node_dispatch_batch(
         state,
         "node_brightness_batch",
+        work_items,
+        persist_after,
+        dispatch_spacing,
+    )
+}
+
+/// Apply a live curve modifier to a node.
+///
+/// This is the explicit curve-aware contract behind app sliders. Brightness
+/// computes a persistent brightness offset, while color temperature moves the
+/// room along the active curve and can preserve the current effective brightness.
+pub fn do_set_node_curve_modifier(
+    state: &SharedState,
+    node_id: &str,
+    modifier: NodeCurveModifier,
+    persist: bool,
+) -> Result<String> {
+    let modifier = modifier.normalized();
+    info!(
+        target: "cmd",
+        "set_node_curve_modifier: {} -> {:?}",
+        node_id,
+        modifier
+    );
+
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    if !snapshot.kind.is_light_addressable() {
+        return Err(anyhow::anyhow!(
+            "Curve modifiers can only be set on light-addressable nodes"
+        ));
+    }
+
+    match modifier {
+        NodeCurveModifier::Brightness(brightness) => {
+            runtime.set_room_brightness(node_id, brightness)?;
+        }
+        NodeCurveModifier::ColorTemperature {
+            kelvin,
+            preserve_brightness,
+        } => {
+            runtime.set_room_curve_color_temperature(node_id, kelvin, preserve_brightness)?;
+        }
+    }
+
+    clear_room_mode_transition(state, node_id);
+    update_lights_on_cache_for_runtime_node(state, &runtime, node_id, true);
+    emit_node_state_event_after_apply(state, &runtime, node_id);
+
+    if persist {
+        persist_rooms(state);
+    }
+
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
+}
+
+pub fn queue_set_node_curve_modifier(
+    state: &SharedState,
+    node_id: &str,
+    modifier: NodeCurveModifier,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let modifier = modifier.normalized();
+    let (runtime, tx) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (s.hub_runtime(), s.work_tx.clone())
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
+
+    tx.try_send(WorkItem::SetNodeCurveModifier {
+        command_id: crate::logging::next_command_id("node-curve"),
+        node_id: node_id.to_string(),
+        modifier,
+        dispatch_spacing,
+        persist_after,
+    })
+    .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
+}
+
+pub fn queue_set_node_curve_modifier_batch(
+    state: &SharedState,
+    updates: Vec<(String, NodeCurveModifier)>,
+    persist_after: bool,
+    dispatch_spacing: Duration,
+) -> Result<()> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.work_tx.is_none() {
+            return Err(anyhow::anyhow!("Node dispatch queue unavailable"));
+        }
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    let mut work_items = Vec::with_capacity(updates.len() + usize::from(persist_after));
+    for (node_id, modifier) in updates {
+        let snapshot = runtime
+            .engine_node_snapshot(&node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+        if !snapshot.kind.is_light_addressable() {
+            return Err(anyhow::anyhow!(
+                "Curve modifiers can only be set on light-addressable nodes"
+            ));
+        }
+        work_items.push(WorkItem::SetNodeCurveModifier {
+            command_id: crate::logging::next_command_id("node-curve"),
+            node_id,
+            modifier: modifier.normalized(),
+            dispatch_spacing,
+            persist_after: false,
+        });
+    }
+
+    queue_node_dispatch_batch(
+        state,
+        "node_curve_modifier_batch",
         work_items,
         persist_after,
         dispatch_spacing,

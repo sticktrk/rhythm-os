@@ -49,6 +49,7 @@ pub fn api_routes() -> Router<SharedState> {
     shared_routes()
         .route("/api/nodes/action", put(node_action))
         .route("/api/nodes/brightness", put(set_node_brightness))
+        .route("/api/nodes/curve", put(set_node_curve))
         .route("/api/nodes/color", put(set_node_color))
         .route("/api/nodes/offset", put(set_node_time_offset))
         .route("/api/sync", post(post_sync))
@@ -282,6 +283,10 @@ async fn set_node_brightness(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_set_node_brightness(&state, &body, true)).await
+}
+
+async fn set_node_curve(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_set_node_curve(&state, &body, true)).await
 }
 
 async fn set_node_color(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {

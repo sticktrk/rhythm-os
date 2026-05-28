@@ -115,6 +115,35 @@ fn parse_optional_u8(value: Option<&Value>, key: &str) -> Result<Option<u8>, Str
     Ok(Some(raw.clamp(1, 100) as u8))
 }
 
+fn parse_node_curve_modifier(item: &Value) -> Result<commands::NodeCurveModifier, String> {
+    let brightness = item.get("brightness").and_then(|v| v.as_u64());
+    let color_temperature = item
+        .get("color_temperature")
+        .or_else(|| item.get("color_temp_kelvin"))
+        .or_else(|| item.get("kelvin"))
+        .and_then(|v| v.as_u64());
+
+    match (brightness, color_temperature) {
+        (Some(_), Some(_)) => {
+            Err("Specify exactly one curve modifier: brightness or color_temperature".to_string())
+        }
+        (Some(brightness), None) => Ok(commands::NodeCurveModifier::Brightness(
+            brightness.clamp(1, 100) as u8,
+        )),
+        (None, Some(kelvin)) => {
+            let preserve_brightness = item
+                .get("preserve_brightness")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            Ok(commands::NodeCurveModifier::ColorTemperature {
+                kelvin: kelvin.clamp(500, 25_000) as u16,
+                preserve_brightness,
+            })
+        }
+        (None, None) => Err("Missing curve modifier: brightness or color_temperature".to_string()),
+    }
+}
+
 fn parse_optional_u32(value: Option<&Value>, key: &str) -> Result<Option<u32>, String> {
     let Some(value) = value else {
         return Ok(None);
@@ -1567,6 +1596,70 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
     nodes_response(results, batch, dispatch_spacing)
 }
 
+/// Set live curve modifiers for light-addressable nodes.
+///
+/// Accepts `brightness` or `color_temperature` (Kelvin). Color-temperature
+/// targets move the node along the active curve, not to a one-shot hardware
+/// color state.
+pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+
+    let batch = items.len() > 1;
+    let mut updates = Vec::with_capacity(items.len());
+
+    for item in &items {
+        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let modifier = match parse_node_curve_modifier(item) {
+            Ok(modifier) => modifier,
+            Err(e) => return ApiResponse::bad_request(&e),
+        };
+        updates.push((node_id, modifier));
+    }
+
+    if batch {
+        let mut results = Vec::with_capacity(updates.len());
+        for (node_id, _) in &updates {
+            match commands::build_node_state(state, node_id) {
+                Ok(node) => results.push(node),
+                Err(e) => return ApiResponse::server_error(e),
+            }
+        }
+        if let Err(e) = commands::queue_set_node_curve_modifier_batch(
+            state,
+            updates.clone(),
+            persist,
+            dispatch_spacing,
+        ) {
+            return ApiResponse::server_error(e);
+        }
+        return nodes_response(results, batch, dispatch_spacing);
+    }
+
+    let mut results = Vec::new();
+    for (node_id, modifier) in &updates {
+        if let Err(e) = commands::do_set_node_curve_modifier(state, node_id, *modifier, persist) {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    nodes_response(results, batch, dispatch_spacing)
+}
+
 /// Set node color. `scope=mood` updates this node's Mood profile and enters Mood.
 pub fn handle_set_node_color(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
     let items = match mutation_items(body) {
@@ -2680,6 +2773,51 @@ mod tests {
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodeBrightness { .. }
+        ));
+    }
+
+    #[test]
+    fn node_curve_missing_modifier() {
+        let state = handler_state_with_runtime();
+        let r = handle_set_node_curve(&state, &json!({"node_id": "room1"}), false);
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("curve modifier"));
+    }
+
+    #[test]
+    fn node_curve_rejects_multiple_modifiers() {
+        let state = handler_state_with_runtime();
+        let r = handle_set_node_curve(
+            &state,
+            &json!({"node_id": "room1", "brightness": 50, "color_temperature": 3200}),
+            false,
+        );
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("exactly one"));
+    }
+
+    #[test]
+    fn node_curve_batch_queued() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_set_node_curve(
+            &state,
+            &json!({
+                "dispatch_spacing_ms": 250,
+                "nodes": [
+                    {"node_id": "room1", "brightness": 50},
+                    {"node_id": "room2", "color_temperature": 3200}
+                ]
+            }),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_spacing_ms"], 250);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodeCurveModifier { .. }
         ));
     }
 

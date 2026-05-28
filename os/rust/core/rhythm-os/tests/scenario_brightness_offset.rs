@@ -139,6 +139,105 @@ fn brightness_set_overrides_offset() {
     );
 }
 
+/// The explicit curve modifier brightness path should behave like the legacy
+/// brightness slider: it stores a brightness offset and sends a live command.
+#[test]
+fn curve_brightness_modifier_sets_brightness_offset() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
+    harness.sync();
+
+    harness.action("kitchen", "on").unwrap();
+
+    spy.reset();
+    harness.set_curve_brightness("kitchen", 45);
+
+    let calls = spy.turn_on_calls();
+    assert!(
+        !calls.is_empty(),
+        "curve brightness modifier should dispatch turn_on"
+    );
+    assert_eq!(calls.last().unwrap().1.brightness, 45);
+
+    let snap = harness.snapshot("kitchen").unwrap();
+    assert!(
+        snap.brightness_offset < 0.0,
+        "target below curve brightness should create negative brightness_offset"
+    );
+}
+
+/// Color-temperature curve modifiers move the room along the active curve, then
+/// preserve the current effective brightness with a brightness offset. Periodic
+/// ticks continue from the shifted curve position instead of freezing Kelvin.
+#[test]
+fn color_temperature_curve_modifier_preserves_brightness_and_periodic_continues() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
+    harness.sync();
+
+    harness.action("kitchen", "on").unwrap();
+    let baseline = spy.turn_on_calls().last().unwrap().1.clone();
+
+    spy.reset();
+    harness.set_curve_color_temperature("kitchen", 3200);
+
+    let adjusted = spy
+        .turn_on_calls()
+        .last()
+        .expect("color-temperature modifier should dispatch turn_on")
+        .1
+        .clone();
+    assert!(
+        (adjusted.kelvin as i32 - 3200).abs() <= 75,
+        "expected Kelvin near 3200, got {}",
+        adjusted.kelvin
+    );
+    assert_eq!(
+        adjusted.brightness, baseline.brightness,
+        "color-temperature modifier should preserve effective brightness"
+    );
+
+    let snap = harness.snapshot("kitchen").unwrap();
+    assert!(
+        snap.time_offset_minutes.abs() > 1.0,
+        "color-temperature modifier should store a curve time offset"
+    );
+    assert!(
+        snap.brightness_offset.abs() > 1.0,
+        "brightness_offset should compensate for the shifted curve brightness"
+    );
+
+    spy.set_any_lights_on(true);
+    spy.reset();
+    let runtime = {
+        let s = harness.state.lock().unwrap();
+        s.hub_runtime().expect("runtime should exist")
+    };
+    let resolved = harness.resolve("kitchen");
+    runtime.periodic_tick_room(&resolved, 14.5).unwrap();
+
+    let periodic = spy
+        .turn_on_calls()
+        .last()
+        .expect("periodic tick should dispatch from shifted curve")
+        .1
+        .clone();
+    let after_tick = harness.snapshot("kitchen").unwrap();
+    assert_eq!(
+        after_tick.brightness_offset, snap.brightness_offset,
+        "periodic tick should keep the stored brightness modifier"
+    );
+    assert!(
+        periodic.brightness >= 1 && periodic.brightness <= 100,
+        "periodic brightness should stay in range, got {}",
+        periodic.brightness
+    );
+    assert_ne!(
+        periodic.kelvin, adjusted.kelvin,
+        "periodic tick should keep moving along the shifted curve"
+    );
+}
+
 // ============================================================================
 // Scenario: Reset clears all offsets
 // ============================================================================

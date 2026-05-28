@@ -609,6 +609,33 @@ impl TestHarness {
             .expect("do_set_node_brightness failed");
     }
 
+    /// Set brightness through the explicit curve modifier endpoint semantics.
+    pub fn set_curve_brightness(&self, room_id: &str, brightness: u8) {
+        let resolved = self.resolve(room_id);
+        commands::do_set_node_curve_modifier(
+            &self.state,
+            &resolved,
+            commands::NodeCurveModifier::Brightness(brightness),
+            false,
+        )
+        .expect("do_set_node_curve_modifier brightness failed");
+    }
+
+    /// Move the room along its active curve to the requested color temperature.
+    pub fn set_curve_color_temperature(&self, room_id: &str, kelvin: u16) {
+        let resolved = self.resolve(room_id);
+        commands::do_set_node_curve_modifier(
+            &self.state,
+            &resolved,
+            commands::NodeCurveModifier::ColorTemperature {
+                kelvin,
+                preserve_brightness: true,
+            },
+            false,
+        )
+        .expect("do_set_node_curve_modifier color temperature failed");
+    }
+
     // ========================================================================
     // Settings & config helpers
     // ========================================================================

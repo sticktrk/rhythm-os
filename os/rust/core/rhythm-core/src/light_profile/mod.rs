@@ -29,6 +29,7 @@ pub use registry::LightProfileRegistry;
 
 // Re-export from rhythm-profile
 pub use rhythm_profile::{
-    CommonCurveConfig, CurveContext, HourBreakpoint, LightCurveShape, LightDirectColor,
-    LightPaletteKeyframe, LightProfileConfig, LightProfileModule, TimerSetting,
+    CommonCurveConfig, CurveContext, HourBreakpoint, LightCurvePosition, LightCurveShape,
+    LightCurveTarget, LightDirectColor, LightPaletteKeyframe, LightProfileConfig,
+    LightProfileModule, TimerSetting,
 };

@@ -47,7 +47,7 @@ pub use config::{
 };
 pub use context::CurveContext;
 pub use curve_shape::{LightCurveShape, LightDirectColor, LightPaletteKeyframe};
-pub use module::LightProfileModule;
+pub use module::{LightCurvePosition, LightCurveTarget, LightProfileModule};
 pub use profile_config::{HourBreakpoint, LightProfileConfig, TimerSetting};
 pub use render::{
     generate_curve_data, generate_step_sequences, CurveData, StepPoint, StepSequences,

@@ -71,6 +71,14 @@ pub enum WorkItem {
         dispatch_spacing: Duration,
         persist_after: bool,
     },
+    /// Apply a curve-aware node modifier through the runtime on the dispatch worker.
+    SetNodeCurveModifier {
+        command_id: String,
+        node_id: String,
+        modifier: crate::commands::NodeCurveModifier,
+        dispatch_spacing: Duration,
+        persist_after: bool,
+    },
     /// Apply node preference changes through the dispatch worker.
     SetNodePreferences {
         command_id: String,

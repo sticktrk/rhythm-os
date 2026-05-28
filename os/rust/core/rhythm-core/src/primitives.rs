@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use crate::controller::{LightControlResult, LightController};
 use crate::light_profile::{
-    CurveContext, LightProfileConfig, LightProfileModule, LightProfileRegistry,
+    CurveContext, LightCurveTarget, LightProfileConfig, LightProfileModule, LightProfileRegistry,
 };
 use crate::lighting::LightingCommand;
 use crate::room::{
@@ -619,6 +619,74 @@ impl<C: LightController> RhythmEngine<C> {
 
         let command = Self::build_command(&values, target);
         self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_set_curve_color_temperature(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+        target_kelvin: u16,
+        preserve_brightness: bool,
+    ) -> Result<ManualDispatchPlan, String> {
+        let effective = self.effective_room_state(room_id);
+        let current_time_offset = effective.time_offset_minutes;
+        let current_brightness_offset = effective.brightness_offset;
+        let profile_settings = effective.profile_settings.clone();
+        let ctx = self.create_context(current_hour);
+        let module = self.active_profile_for_settings(Some(&profile_settings));
+
+        let current_values = module.calculate_with_offset(&ctx, current_time_offset);
+        if current_values.is_direct_color {
+            return Err(
+                "Active curve uses direct color; color-temperature modifiers are unavailable"
+                    .to_string(),
+            );
+        }
+
+        let current_brightness =
+            (current_values.brightness as f32 + current_brightness_offset).clamp(1.0, 100.0);
+        let Some(position) = module.find_curve_position(
+            &ctx,
+            LightCurveTarget::ColorTemperature(target_kelvin),
+            current_time_offset,
+        ) else {
+            return Err("Active curve cannot resolve a color-temperature position".to_string());
+        };
+
+        if position.values.is_direct_color || position.values.kelvin == 0 {
+            return Err(
+                "Active curve uses direct color; color-temperature modifiers are unavailable"
+                    .to_string(),
+            );
+        }
+
+        let (inherited_time_offset, inherited_brightness_offset) =
+            if let Some(local) = self.rooms.get(room_id) {
+                (
+                    current_time_offset - local.time_offset_minutes,
+                    current_brightness_offset - local.brightness_offset,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.clear_off_states();
+            room.time_offset_minutes = position.time_offset_minutes - inherited_time_offset;
+            if preserve_brightness {
+                room.brightness_offset = (current_brightness
+                    - inherited_brightness_offset
+                    - position.values.brightness as f32)
+                    .clamp(-100.0, 100.0);
+            }
+        }
+
+        let brightness_offset = self.effective_room_state(room_id).brightness_offset;
+        let brightness =
+            (position.values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&position.values, brightness);
+        Ok(self.plan_non_periodic_turn_on(room_id, command))
     }
 
     pub(crate) fn plan_set_time_offset(

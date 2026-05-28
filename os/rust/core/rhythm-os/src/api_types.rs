@@ -434,6 +434,7 @@ pub struct NodeStateDto {
     pub disabled: bool,
     pub time_offset: f32,
     pub brightness_offset: f32,
+    pub curve_modifier: CurveModifierDto,
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
@@ -454,6 +455,14 @@ pub struct NodeStateDto {
     pub timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CurveModifierDto {
+    pub time_offset_minutes: f32,
+    pub brightness_offset: f32,
+    pub brightness: u8,
+    pub kelvin: u16,
 }
 
 /// Batch node response — `{"nodes": [...]}`.
@@ -667,6 +676,12 @@ mod tests {
             disabled: false,
             time_offset: 5.0,
             brightness_offset: -10.0,
+            curve_modifier: CurveModifierDto {
+                time_offset_minutes: 5.0,
+                brightness_offset: -10.0,
+                brightness: 80,
+                kelvin: 4000,
+            },
             lights_on: true,
             observed_power: ObservedPowerDto {
                 lights_on: true,
@@ -703,6 +718,10 @@ mod tests {
         assert_eq!(json["mood_active"], false);
         assert_eq!(json["standby_enabled"], false);
         assert_eq!(json["standby_active"], false);
+        assert_eq!(json["curve_modifier"]["time_offset_minutes"], 5.0);
+        assert_eq!(json["curve_modifier"]["brightness_offset"], -10.0);
+        assert_eq!(json["curve_modifier"]["brightness"], 80);
+        assert_eq!(json["curve_modifier"]["kelvin"], 4000);
         assert!(json.get("room_profile").is_none());
     }
 

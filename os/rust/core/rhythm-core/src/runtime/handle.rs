@@ -155,6 +155,20 @@ pub trait RuntimeHandle: Send + Sync {
     /// Computes the offset so effective brightness equals the target.
     fn set_room_brightness(&self, room_id: &str, brightness: u8) -> Result<()>;
 
+    /// Move a room along its active curve until it best matches the requested
+    /// color temperature, then render the resulting adaptive command.
+    fn set_room_curve_color_temperature(
+        &self,
+        room_id: &str,
+        kelvin: u16,
+        preserve_brightness: bool,
+    ) -> Result<()> {
+        let _ = (room_id, kelvin, preserve_brightness);
+        Err(anyhow::anyhow!(
+            "Color-temperature curve modifiers are unavailable for this runtime"
+        ))
+    }
+
     /// Set the time offset for a room directly (not additive).
     fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> Result<()>;
 
@@ -838,6 +852,35 @@ where
         };
         dispatch_manual_plan(self, dispatch)
             .map_err(|e| anyhow::anyhow!("set_brightness failed: {}", e))
+    }
+
+    fn set_room_curve_color_temperature(
+        &self,
+        room_id: &str,
+        kelvin: u16,
+        preserve_brightness: bool,
+    ) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
+        let current_hour = self.current_hour();
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine
+                .plan_set_curve_color_temperature(
+                    room_id,
+                    current_hour,
+                    kelvin,
+                    preserve_brightness,
+                )
+                .map_err(anyhow::Error::msg)?
+        };
+        dispatch_manual_plan(self, dispatch)
+            .map_err(|e| anyhow::anyhow!("set_curve_color_temperature failed: {}", e))
     }
 
     fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> Result<()> {
