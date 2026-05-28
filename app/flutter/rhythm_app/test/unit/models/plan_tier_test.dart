@@ -50,7 +50,7 @@ void main() {
 
   group('Entitlement display metadata', () {
     test('describes standby gating', () {
-      expect(Entitlement.standby.displayName, 'Mood Lighting');
+      expect(Entitlement.standby.displayName, 'Standby Lighting');
       expect(Entitlement.standby.minimumTier, PlanTier.pro);
       expect(Entitlement.standby.isComingSoon, isFalse);
       expect(Entitlement.standby.labelFor(PlanTier.basic), 'Pro only');

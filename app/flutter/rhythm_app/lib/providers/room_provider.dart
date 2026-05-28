@@ -174,6 +174,19 @@ class RoomProvider extends ChangeNotifier {
   /// Per-room direct color from server (for direct-color profiles like idle).
   final Map<String, (int r, int g, int b)> _roomColor = {};
 
+  /// Last known Mood color for each room.
+  ///
+  /// This is separate from [_roomColor] because the live direct color is
+  /// cleared when a room returns to Kelvin/CCT mode, while Mood should still
+  /// remember the last selected color when the user comes back to it.
+  final Map<String, (int r, int g, int b)> _roomMoodColor = {};
+
+  /// Last known Mood brightness for each room.
+  ///
+  /// This is separate from [_roomBrightness] because the generic brightness
+  /// cache can hold the active-mode runtime brightness.
+  final Map<String, int> _roomMoodBrightness = {};
+
   /// Whether Mood lighting is enabled for this room.
   final Map<String, bool> _roomMoodEnabled = {};
 
@@ -193,7 +206,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Raw room mode state from the server/local controls.
   ///
-  /// This represents Rhythm's automation intent (`active`,
+  /// This represents Rhythm's automation intent (`active`, `mood`, `standby`,
   /// `hardOff`, etc.) and may remain `active` even when the physical lights
   /// are currently off due to an external wall switch, dimmer, or hub action.
   ///
@@ -201,7 +214,6 @@ class RoomProvider extends ChangeNotifier {
   /// rather than inferring semantics from observed power alone.
   RoomModeState getRoomState(String roomId) {
     final state = _roomStates[roomId];
-    if (state == RoomModeState.idle) return RoomModeState.hardOff;
     if (state != null) return state;
     return RoomModeState.active;
   }
@@ -219,14 +231,18 @@ class RoomProvider extends ChangeNotifier {
     return state;
   }
 
-  /// Legacy idle state is no longer a power mode.
-  bool isRoomIdle(String roomId) => false;
+  /// Whether a room is in Standby mode.
+  bool isRoomIdle(String roomId) {
+    final state = getRoomState(roomId);
+    return state == RoomModeState.standby || state == RoomModeState.idle;
+  }
 
   /// Whether a room has per-room Mood lighting enabled.
   bool isMoodEnabled(String roomId) => _roomMoodEnabled[roomId] ?? false;
 
   /// Whether a room is actively showing Mood lighting.
-  bool isMoodActive(String roomId) => _roomMoodActive[roomId] ?? false;
+  bool isMoodActive(String roomId) =>
+      _roomMoodActive[roomId] ?? getRoomState(roomId) == RoomModeState.mood;
 
   /// Latest live mode for a room from SSE, when available.
   RhythmMode? getRoomMode(String roomId) => _roomModes[roomId];
@@ -298,9 +314,61 @@ class RoomProvider extends ChangeNotifier {
   /// Get direct color for a room (from direct-color profiles), or null.
   (int r, int g, int b)? getRoomColor(String roomId) => _roomColor[roomId];
 
+  /// Get the last known Mood color for a room, or null.
+  (int r, int g, int b)? getMoodColor(String roomId) => _roomMoodColor[roomId];
+
+  /// Get the last known Mood brightness for a room, or null.
+  int? getMoodBrightness(String roomId) => _roomMoodBrightness[roomId];
+
+  /// Update cached Mood color from the server's persisted mood profile.
+  void setMoodColorFromServer(String roomId, (int r, int g, int b)? color) {
+    var changed = false;
+    if (color == null) {
+      changed = _roomMoodColor.remove(roomId) != null;
+    } else if (_roomMoodColor[roomId] != color) {
+      _roomMoodColor[roomId] = color;
+      changed = true;
+    }
+    if (changed) notifyListeners();
+  }
+
+  /// Update cached Mood brightness from the server's persisted mood profile.
+  void setMoodBrightnessFromServer(String roomId, int? brightness) {
+    var changed = false;
+    if (brightness == null) {
+      changed = _roomMoodBrightness.remove(roomId) != null;
+    } else {
+      final clamped = brightness.clamp(1, 100).toInt();
+      if (_roomMoodBrightness[roomId] != clamped) {
+        _roomMoodBrightness[roomId] = clamped;
+        changed = true;
+      }
+    }
+    if (changed) notifyListeners();
+  }
+
+  /// Set Mood brightness locally with a 3s optimistic lock.
+  void setMoodBrightnessLocal(String roomId, int brightness) {
+    final clamped = brightness.clamp(1, 100).toInt();
+    if (_roomMoodBrightness[roomId] == clamped) return;
+    _roomMoodBrightness[roomId] = clamped;
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    notifyListeners();
+  }
+
   /// Set room color locally with a 3s optimistic lock.
-  void setRoomColorLocal(String roomId, int r, int g, int b) {
+  void setRoomColorLocal(
+    String roomId,
+    int r,
+    int g,
+    int b, {
+    bool rememberAsMood = false,
+  }) {
     _roomColor[roomId] = (r, g, b);
+    if (rememberAsMood) {
+      _roomMoodColor[roomId] = (r, g, b);
+    }
     _roomStateLockedUntil[roomId] =
         DateTime.now().add(const Duration(seconds: 3));
     notifyListeners();
@@ -662,12 +730,23 @@ class RoomProvider extends ChangeNotifier {
       _roomBrightness[roomId] = brightness;
       changed = true;
     }
+    if (brightness != null &&
+        (state == RoomModeState.mood || moodActive == true)) {
+      final clamped = brightness.clamp(1, 100).toInt();
+      if (_roomMoodBrightness[roomId] != clamped) {
+        _roomMoodBrightness[roomId] = clamped;
+        changed = true;
+      }
+    }
     if (kelvin != null && _roomKelvin[roomId] != kelvin) {
       _roomKelvin[roomId] = kelvin;
       changed = true;
     }
     if (color != null) {
       _roomColor[roomId] = color;
+      if (state == RoomModeState.mood || moodActive == true) {
+        _roomMoodColor[roomId] = color;
+      }
       changed = true;
     } else if (kelvin != null && kelvin > 0) {
       // Clear direct color when receiving a real kelvin value.
@@ -892,6 +971,8 @@ class RoomProvider extends ChangeNotifier {
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
+    _roomMoodColor.clear();
+    _roomMoodBrightness.clear();
     _roomMoodEnabled.clear();
     _roomMoodActive.clear();
     _lastTickTime.clear();
@@ -920,6 +1001,8 @@ class RoomProvider extends ChangeNotifier {
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
+    _roomMoodColor.clear();
+    _roomMoodBrightness.clear();
     _roomMoodEnabled.clear();
     _roomMoodActive.clear();
     _lastTickTime.clear();

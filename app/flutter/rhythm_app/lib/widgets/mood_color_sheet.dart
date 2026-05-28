@@ -178,12 +178,12 @@ class _MoodColorSheetState extends State<MoodColorSheet>
         final thumbX = (_hue / 360) * width;
 
         return GestureDetector(
-          onTapDown: (d) => _onSpectrumInteraction(
-              d.localPosition.dx, width, haptic: true),
-          onHorizontalDragStart: (d) => _onSpectrumInteraction(
-              d.localPosition.dx, width, commit: false),
-          onHorizontalDragUpdate: (d) => _onSpectrumInteraction(
-              d.localPosition.dx, width, commit: false),
+          onTapDown: (d) =>
+              _onSpectrumInteraction(d.localPosition.dx, width, haptic: true),
+          onHorizontalDragStart: (d) =>
+              _onSpectrumInteraction(d.localPosition.dx, width, commit: false),
+          onHorizontalDragUpdate: (d) =>
+              _onSpectrumInteraction(d.localPosition.dx, width, commit: false),
           onHorizontalDragEnd: (_) => _commitCurrentColor(),
           child: SizedBox(
             height: 48,
@@ -262,6 +262,7 @@ class _MoodColorSheetState extends State<MoodColorSheet>
       children: _presets.map((preset) {
         final selected = _isPresetSelected(preset.color);
         return GestureDetector(
+          key: Key('mood_color_preset_${preset.label.toLowerCase()}'),
           onTap: () {
             HapticFeedback.lightImpact();
             _onHueChanged(preset.hue);

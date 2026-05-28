@@ -302,6 +302,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         ? 'Hide this light'
         : 'Hide this room';
     final canDeleteRoom = _canDeleteRoom(syncProvider);
+    final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -363,6 +364,15 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               );
             },
           ),
+          _SettingsRow(
+            icon: Icons.bedtime_outlined,
+            label: 'Standby',
+            trailing: _ToggleSwitch(
+              value: standbyEnabled,
+              onChanged: (val) => _setStandbyEnabled(context, val),
+            ),
+            onTap: () => _setStandbyEnabled(context, !standbyEnabled),
+          ),
         ]),
         if (canDeleteRoom) ...[
           const SizedBox(height: 16),
@@ -393,6 +403,13 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         ],
       ],
     );
+  }
+
+  void _setStandbyEnabled(BuildContext context, bool enabled) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    syncProvider.setNodeStandbyEnabledLocal(room.id, enabled);
+    syncProvider.pushNodePreferences(room.id, standbyEnabled: enabled);
+    HapticFeedback.selectionClick();
   }
 
   Widget _buildDevicesContent(BuildContext context) {

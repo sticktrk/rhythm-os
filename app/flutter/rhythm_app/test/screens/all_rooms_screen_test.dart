@@ -284,7 +284,7 @@ void main() {
     expect(fullWidth.left, closeTo(bulb.left, 0.1));
   });
 
-  testWidgets('compact bulb cards collapse legacy idle to off', (tester) async {
+  testWidgets('compact bulb cards show mood for mood state', (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
@@ -305,7 +305,7 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await roomProvider.addRoom(_bulb1);
-    roomProvider.setRoomStateLocal(_bulb1.id, RoomModeState.idle);
+    roomProvider.setRoomStateLocal(_bulb1.id, RoomModeState.mood);
     await tester.binding.setSurfaceSize(const Size(390, 844));
 
     await tester.pumpWidget(
@@ -332,8 +332,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Bulb 1'), findsOneWidget);
-    expect(find.text('Off'), findsOneWidget);
-    expect(find.text('Mood'), findsNothing);
+    expect(find.text('Mood'), findsOneWidget);
   });
 
   testWidgets(

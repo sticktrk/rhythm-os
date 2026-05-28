@@ -9,14 +9,15 @@ import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
 import 'device_detail_sheet.dart';
+import 'mood_color_sheet.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 /// Light mode for a room card.
-enum RoomMode { on, off }
+enum RoomMode { mood, standby, on, off }
 
 /// Hue-style room card with CCT-tinted background, big segmented power
-/// control (off / on), rhythm controls, and brightness slider.
+/// control (mood / off / on), rhythm controls, and brightness slider.
 class RoomCard extends StatefulWidget {
   final String roomId;
   final CurveConfigDto globalConfig;
@@ -44,7 +45,9 @@ class _RoomCardState extends State<RoomCard> {
 
   String _analyticsModeForState(RoomModeState state) {
     final mode = switch (state) {
-      RoomModeState.hardOff || RoomModeState.idle => RoomMode.off,
+      RoomModeState.mood => RoomMode.mood,
+      RoomModeState.standby || RoomModeState.idle => RoomMode.standby,
+      RoomModeState.hardOff => RoomMode.off,
       RoomModeState.warning ||
       RoomModeState.wake ||
       RoomModeState.active =>
@@ -64,13 +67,34 @@ class _RoomCardState extends State<RoomCard> {
 
     final serverSync = context.read<ServerSyncProvider>();
 
+    if (newMode == RoomMode.mood &&
+        roomProvider.getDisplayRoomState(widget.roomId) == RoomModeState.mood) {
+      HapticFeedback.lightImpact();
+      _showMoodColorPicker(
+        roomProvider,
+        currentBrightness: _currentMoodBrightness(roomProvider),
+      );
+      return;
+    }
+
     // Optimistic local state update
     switch (newMode) {
+      case RoomMode.mood:
+        HapticFeedback.lightImpact();
+        roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+        roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+        roomProvider.setMoodEnabledLocal(widget.roomId, true);
+        roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.mood);
       case RoomMode.on:
         HapticFeedback.mediumImpact();
         roomProvider.setRoomLightsOnLocal(widget.roomId, true);
         roomProvider.setRoomRhythmEnabled(widget.roomId, true);
         roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
+      case RoomMode.standby:
+        HapticFeedback.mediumImpact();
+        roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+        roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+        roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.standby);
       case RoomMode.off:
         HapticFeedback.heavyImpact();
         roomProvider.setRoomLightsOnLocal(widget.roomId, false);
@@ -78,11 +102,24 @@ class _RoomCardState extends State<RoomCard> {
     }
 
     switch (newMode) {
+      case RoomMode.mood:
+        serverSync.pushNodePreferences(
+          widget.roomId,
+          rhythmEnabled: true,
+          state: RoomModeState.mood,
+          profileSettings: const {'mood_enabled': true},
+        );
       case RoomMode.on:
         serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.active,
+        );
+      case RoomMode.standby:
+        serverSync.pushNodePreferences(
+          widget.roomId,
+          rhythmEnabled: true,
+          state: RoomModeState.standby,
         );
       case RoomMode.off:
         serverSync.pushNodePreferences(
@@ -103,10 +140,66 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
-  void _onBrightnessSliderEnd() {
+  int _currentMoodBrightness(RoomProvider roomProvider) =>
+      (_sliderBrightness ?? roomProvider.getMoodBrightness(widget.roomId) ?? 1)
+          .clamp(1, 100)
+          .toInt();
+
+  void _showMoodColorPicker(
+    RoomProvider roomProvider, {
+    required int currentBrightness,
+  }) {
+    final existingColor = roomProvider.getMoodColor(widget.roomId) ??
+        roomProvider.getRoomColor(widget.roomId);
+    final initialColor = existingColor != null
+        ? Color.fromARGB(
+            255, existingColor.$1, existingColor.$2, existingColor.$3)
+        : null;
+
+    MoodColorSheet.show(
+      context,
+      initialColor: initialColor,
+      onColorChanged: (color) {
+        final r = (color.r * 255).round();
+        final g = (color.g * 255).round();
+        final b = (color.b * 255).round();
+        context.read<ServerSyncProvider>().dispatchNodeColor(
+              widget.roomId,
+              r,
+              g,
+              b,
+              scope: 'mood',
+              brightness: currentBrightness,
+            );
+      },
+    );
+  }
+
+  (int, int, int) _rgbFromColor(Color color) => (
+        (color.r * 255).round().clamp(0, 255),
+        (color.g * 255).round().clamp(0, 255),
+        (color.b * 255).round().clamp(0, 255),
+      );
+
+  void _onBrightnessSliderEnd({
+    required RoomMode mode,
+    required Color currentColor,
+  }) {
     if (_sliderBrightness == null) return;
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
+    if (mode == RoomMode.mood) {
+      final rgb = _rgbFromColor(currentColor);
+      serverSync.dispatchNodeColor(
+        widget.roomId,
+        rgb.$1,
+        rgb.$2,
+        rgb.$3,
+        scope: 'mood',
+        brightness: _sliderBrightness!,
+      );
+    } else {
+      serverSync.dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
+    }
     AnalyticsService().logRoomBrightnessAdjusted(
       roomId: widget.roomId,
       brightness: _sliderBrightness!,
@@ -150,6 +243,8 @@ class _RoomCardState extends State<RoomCard> {
           RoomModeState,
           int?,
           int?,
+          int?,
+          (int, int, int)?,
           (int, int, int)?,
           bool,
           bool
@@ -160,8 +255,10 @@ class _RoomCardState extends State<RoomCard> {
         p.getMotionTimer(widget.roomId),
         p.getDisplayRoomState(widget.roomId),
         p.getBrightness(widget.roomId),
+        p.getMoodBrightness(widget.roomId),
         p.getKelvin(widget.roomId),
         p.getRoomColor(widget.roomId),
+        p.getMoodColor(widget.roomId),
         p.hasMotionSensor(widget.roomId),
         p.isRoomTransitioning(widget.roomId),
       ),
@@ -172,16 +269,21 @@ class _RoomCardState extends State<RoomCard> {
           motionTimer,
           roomState,
           serverBrightness,
+          serverMoodBrightness,
           serverKelvin,
           serverColor,
+          moodColor,
           hasSensor,
           isTransitioning
         ) = data;
         if (room == null) return const SizedBox.shrink();
+        final roomProvider = context.read<RoomProvider>();
 
         // Check if this room's hub is reachable.
         final hubConnected = context.select<ServerSyncProvider, bool>(
             (p) => p.isRoomHubConnected(room.source));
+        final standbyEnabled = context.select<ServerSyncProvider, bool>(
+            (p) => p.standbyEnabledForNode(widget.roomId));
 
         // External reset bumps the generation counter — drop local overrides
         if (resetGen != _lastResetGen) {
@@ -191,28 +293,37 @@ class _RoomCardState extends State<RoomCard> {
         }
 
         final mode = switch (roomState) {
-          RoomModeState.hardOff || RoomModeState.idle => RoomMode.off,
+          RoomModeState.mood => RoomMode.mood,
+          RoomModeState.standby || RoomModeState.idle => RoomMode.standby,
+          RoomModeState.hardOff => RoomMode.off,
           RoomModeState.warning ||
           RoomModeState.wake ||
           RoomModeState.active =>
             RoomMode.on,
         };
 
-        // Use server-provided brightness and kelvin
-        final brightness = serverBrightness ?? 50;
+        // Mood has its own profile brightness. Do not reuse the active-mode
+        // room brightness when the room is in Mood.
+        final brightness = mode == RoomMode.mood
+            ? serverMoodBrightness ?? 1
+            : serverBrightness ?? 50;
         final kelvin = serverKelvin ?? 3000;
 
         // Display brightness depends on mode
         final displayBrightness = switch (mode) {
+          RoomMode.mood => _sliderBrightness ?? brightness,
+          RoomMode.standby => brightness,
           RoomMode.on => _sliderBrightness ?? brightness,
           RoomMode.off => _sliderBrightness ?? brightness,
         };
 
+        final displayColor =
+            mode == RoomMode.mood ? serverColor ?? moodColor : serverColor;
         final cctColor = _cctMode && _sliderKelvin != null
             ? ColorUtils.cctToColor(_sliderKelvin!)
-            : serverColor != null
+            : displayColor != null
                 ? Color.fromARGB(
-                    255, serverColor.$1, serverColor.$2, serverColor.$3)
+                    255, displayColor.$1, displayColor.$2, displayColor.$3)
                 : ColorUtils.cctToColor(kelvin);
 
         // Blend directly from a neutral dark base toward the CCT color —
@@ -220,6 +331,8 @@ class _RoomCardState extends State<RoomCard> {
         final dimT = displayBrightness / 100.0;
         const darkBase = Color(0xFF141210);
         final bgColor = switch (mode) {
+          RoomMode.mood => Color.lerp(darkBase, cctColor, 0.22)!,
+          RoomMode.standby => Color.lerp(darkBase, cctColor, 0.14)!,
           RoomMode.on => Color.lerp(darkBase, cctColor, 0.10 + dimT * 0.50)!,
           RoomMode.off => CelestialColors.backgroundCard,
         };
@@ -228,6 +341,8 @@ class _RoomCardState extends State<RoomCard> {
         // (same approach as _RhythmPill) so names stay readable at any brightness.
         final onLight = mode == RoomMode.on && bgColor.computeLuminance() > 0.4;
         final textColor = switch (mode) {
+          RoomMode.mood => const Color(0xFFEFE0C4),
+          RoomMode.standby => const Color(0xFFD9CBB1),
           RoomMode.on => onLight
               ? (kelvin < 4000
                   ? const Color(0xFF3A2A1A) // warm dark brown
@@ -236,6 +351,8 @@ class _RoomCardState extends State<RoomCard> {
           RoomMode.off => CelestialColors.textSecondary,
         };
         final iconColor = switch (mode) {
+          RoomMode.mood => const Color(0xFFD8C5A4),
+          RoomMode.standby => const Color(0xFFCDBE9D),
           RoomMode.on => onLight
               ? (kelvin < 4000
                   ? const Color(0xFF4A3828) // warm brown
@@ -248,7 +365,9 @@ class _RoomCardState extends State<RoomCard> {
         final offCurve = mode == RoomMode.on &&
             (room.brightnessOffset != 0 || room.timeOffsetMinutes != 0);
 
-        final sliderActive = !isTransitioning && mode == RoomMode.on;
+        final sliderActive =
+            !isTransitioning && (mode == RoomMode.on || mode == RoomMode.mood);
+        final sliderInCctMode = _cctMode && mode == RoomMode.on;
         final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
         final glowColor = cctColor;
         final sliderActiveTrackColor =
@@ -295,6 +414,44 @@ class _RoomCardState extends State<RoomCard> {
                 ),
                 child: Stack(
                   children: [
+                    if (mode == RoomMode.mood) ...[
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(20),
+                              gradient: RadialGradient(
+                                center: const Alignment(0.7, -0.6),
+                                radius: 1.3,
+                                colors: [
+                                  cctColor.withValues(alpha: 0.45),
+                                  cctColor.withValues(alpha: 0.12),
+                                  Colors.transparent,
+                                ],
+                                stops: const [0.0, 0.5, 1.0],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(20),
+                              gradient: RadialGradient(
+                                center: const Alignment(-0.5, 0.9),
+                                radius: 0.9,
+                                colors: [
+                                  cctColor.withValues(alpha: 0.20),
+                                  Colors.transparent,
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                     // Main content
                     Column(
                       mainAxisSize: MainAxisSize.min,
@@ -376,11 +533,16 @@ class _RoomCardState extends State<RoomCard> {
                             onModeChanged: _onModeChanged,
                             offCurve: offCurve,
                             cctColor: cctColor,
+                            standbyEnabled: standbyEnabled,
                             enabled: !isTransitioning,
                           ),
                         ),
-                        if (mode == RoomMode.on)
+                        if (mode == RoomMode.on ||
+                            mode == RoomMode.mood ||
+                            mode == RoomMode.standby)
                           GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: mode == RoomMode.standby ? () {} : null,
                             onLongPress: () {},
                             child: Padding(
                               padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
@@ -388,8 +550,19 @@ class _RoomCardState extends State<RoomCard> {
                                 children: [
                                   // Mode toggle button
                                   GestureDetector(
-                                    onTap:
-                                        sliderActive ? _toggleSliderMode : null,
+                                    onTap: sliderActive
+                                        ? () {
+                                            if (mode == RoomMode.mood) {
+                                              _showMoodColorPicker(
+                                                roomProvider,
+                                                currentBrightness:
+                                                    displayBrightness,
+                                              );
+                                            } else {
+                                              _toggleSliderMode();
+                                            }
+                                          }
+                                        : null,
                                     child: AnimatedContainer(
                                       duration:
                                           const Duration(milliseconds: 220),
@@ -397,7 +570,7 @@ class _RoomCardState extends State<RoomCard> {
                                       height: 32,
                                       decoration: BoxDecoration(
                                         borderRadius: BorderRadius.circular(10),
-                                        color: _cctMode
+                                        color: sliderInCctMode
                                             ? ColorUtils.cctToColor(
                                                     (_sliderKelvin ?? kelvin)
                                                         .clamp(_minKelvin,
@@ -406,7 +579,7 @@ class _RoomCardState extends State<RoomCard> {
                                             : Colors.white
                                                 .withValues(alpha: 0.07),
                                         border: Border.all(
-                                          color: _cctMode
+                                          color: sliderInCctMode
                                               ? ColorUtils.cctToColor(
                                                       (_sliderKelvin ?? kelvin)
                                                           .clamp(_minKelvin,
@@ -438,12 +611,19 @@ class _RoomCardState extends State<RoomCard> {
                                             ),
                                           ),
                                           child: Icon(
-                                            _cctMode
-                                                ? Icons.contrast_rounded
-                                                : Icons.wb_sunny_rounded,
-                                            key: ValueKey('$mode-$_cctMode'),
+                                            mode == RoomMode.mood
+                                                ? Icons.palette_rounded
+                                                : mode == RoomMode.standby
+                                                    ? Icons
+                                                        .lightbulb_outline_rounded
+                                                    : sliderInCctMode
+                                                        ? Icons.contrast_rounded
+                                                        : Icons
+                                                            .wb_sunny_rounded,
+                                            key: ValueKey(
+                                                '$mode-$sliderInCctMode'),
                                             size: 18,
-                                            color: _cctMode
+                                            color: sliderInCctMode
                                                 ? ColorUtils.cctToColor(
                                                     (_sliderKelvin ?? kelvin)
                                                         .clamp(_minKelvin,
@@ -462,7 +642,7 @@ class _RoomCardState extends State<RoomCard> {
                                       data: SliderThemeData(
                                         trackHeight: 14,
                                         thumbShape: _SunSliderThumbShape(
-                                          icon: _cctMode
+                                          icon: sliderInCctMode
                                               ? Icons.contrast_rounded
                                               : Icons.wb_sunny_rounded,
                                         ),
@@ -475,7 +655,7 @@ class _RoomCardState extends State<RoomCard> {
                                               _SunSliderThumbShape.radius + 2,
                                           vertical: 10,
                                         ),
-                                        trackShape: _cctMode
+                                        trackShape: sliderInCctMode
                                             ? const _CCTGradientTrackShape()
                                             : const RoundedRectSliderTrackShape(),
                                         activeTrackColor:
@@ -484,18 +664,39 @@ class _RoomCardState extends State<RoomCard> {
                                             sliderInactiveTrackColor,
                                         thumbColor: sliderThumbColor,
                                         overlayColor: sliderOverlayColor,
-                                        disabledActiveTrackColor:
-                                            CelestialColors.orbitRing
-                                                .withValues(alpha: 0.35),
+                                        disabledActiveTrackColor: mode ==
+                                                RoomMode.mood
+                                            ? cctColor.withValues(alpha: 0.30)
+                                            : mode == RoomMode.standby
+                                                ? cctColor.withValues(
+                                                    alpha: 0.24,
+                                                  )
+                                                : CelestialColors.orbitRing
+                                                    .withValues(
+                                                    alpha: 0.35,
+                                                  ),
                                         disabledInactiveTrackColor:
-                                            CelestialColors.orbitRing
-                                                .withValues(alpha: 0.18),
-                                        disabledThumbColor: CelestialColors
-                                            .textSecondary
-                                            .withValues(alpha: 0.55),
+                                            mode == RoomMode.mood ||
+                                                    mode == RoomMode.standby
+                                                ? Colors.black
+                                                    .withValues(alpha: 0.15)
+                                                : CelestialColors.orbitRing
+                                                    .withValues(alpha: 0.18),
+                                        disabledThumbColor:
+                                            mode == RoomMode.mood ||
+                                                    mode == RoomMode.standby
+                                                ? Color.lerp(
+                                                    Colors.white,
+                                                    cctColor,
+                                                    mode == RoomMode.standby
+                                                        ? 0.45
+                                                        : 0.25,
+                                                  )!
+                                                : CelestialColors.textSecondary
+                                                    .withValues(alpha: 0.55),
                                       ),
                                       child: Slider(
-                                        value: _cctMode
+                                        value: sliderInCctMode
                                             ? (_sliderKelvin ?? kelvin)
                                                 .toDouble()
                                                 .clamp(_minKelvin.toDouble(),
@@ -503,16 +704,16 @@ class _RoomCardState extends State<RoomCard> {
                                             : displayBrightness
                                                 .toDouble()
                                                 .clamp(1, 100),
-                                        min: _cctMode
+                                        min: sliderInCctMode
                                             ? _minKelvin.toDouble()
                                             : 1,
-                                        max: _cctMode
+                                        max: sliderInCctMode
                                             ? _maxKelvin.toDouble()
                                             : 100,
                                         onChanged: sliderActive
                                             ? (v) {
                                                 setState(() {
-                                                  if (_cctMode) {
+                                                  if (sliderInCctMode) {
                                                     _sliderKelvin = v.round();
                                                   } else {
                                                     _sliderBrightness =
@@ -523,10 +724,13 @@ class _RoomCardState extends State<RoomCard> {
                                             : null,
                                         onChangeEnd: sliderActive
                                             ? (_) {
-                                                if (_cctMode) {
+                                                if (sliderInCctMode) {
                                                   _onKelvinSliderEnd();
                                                 } else {
-                                                  _onBrightnessSliderEnd();
+                                                  _onBrightnessSliderEnd(
+                                                    mode: mode,
+                                                    currentColor: cctColor,
+                                                  );
                                                 }
                                               }
                                             : null,
@@ -719,7 +923,7 @@ class _CCTGradientTrackShape extends SliderTrackShape
   }
 }
 
-/// Big segmented power control: Off | On.
+/// Big segmented power control: Mood | Off | On.
 ///
 /// Each segment is a discrete tap target with a stacked icon + label, so
 /// every state is visible and discoverable — no hidden long-press. A
@@ -730,12 +934,14 @@ class _SegmentedToggle extends StatefulWidget {
   final ValueChanged<RoomMode> onModeChanged;
   final bool offCurve;
   final Color cctColor;
+  final bool standbyEnabled;
   final bool enabled;
 
   const _SegmentedToggle({
     required this.mode,
     required this.onModeChanged,
     required this.cctColor,
+    this.standbyEnabled = false,
     this.offCurve = false,
     this.enabled = true,
   });
@@ -754,11 +960,13 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
   int? _dragIndex;
 
   static const List<_SegmentSpec> _segments = [
+    _SegmentSpec(RoomMode.mood, Icons.spa_rounded, 'Mood'),
     _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
     _SegmentSpec(RoomMode.on, Icons.lightbulb_rounded, 'On'),
   ];
 
   int _indexFor(RoomMode m) {
+    if (m == RoomMode.standby) return _indexFor(RoomMode.on);
     final segs = _segments;
     for (var i = 0; i < segs.length; i++) {
       if (segs[i].mode == m) return i;
@@ -775,15 +983,24 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     return (localX / segWidth).floor().clamp(0, segs.length - 1);
   }
 
-  void _select(int i) {
+  void _select(int i, {bool repeatTap = false}) {
     if (!widget.enabled) return;
     final target = _segments[i].mode;
-    if (target != widget.mode) widget.onModeChanged(target);
+    if (repeatTap &&
+        target == RoomMode.on &&
+        widget.mode == RoomMode.on &&
+        widget.standbyEnabled) {
+      widget.onModeChanged(RoomMode.standby);
+      return;
+    }
+    if (target != widget.mode || (repeatTap && target == RoomMode.mood)) {
+      widget.onModeChanged(target);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final segments = _segments;
+    final segments = _displaySegments();
     final restingIndex = _indexFor(widget.mode);
     final activeIndex = _dragIndex ?? restingIndex;
     final activeMode = segments[activeIndex].mode;
@@ -867,7 +1084,7 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
                         Expanded(
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
-                            onTap: () => _select(i),
+                            onTap: () => _select(i, repeatTap: true),
                             child: Center(
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
@@ -913,9 +1130,28 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     );
   }
 
+  List<_SegmentSpec> _displaySegments() {
+    if (widget.mode != RoomMode.standby) return _segments;
+    return const [
+      _SegmentSpec(RoomMode.mood, Icons.spa_rounded, 'Mood'),
+      _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
+      _SegmentSpec(
+          RoomMode.standby, Icons.lightbulb_outline_rounded, 'Standby'),
+    ];
+  }
+
   Gradient _highlightGradient(RoomMode m) {
     const base = Color(0xFF1C1C1C);
     switch (m) {
+      case RoomMode.standby:
+        return LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.lerp(base, widget.cctColor, 0.28)!,
+            Color.lerp(base, widget.cctColor, 0.18)!,
+          ],
+        );
       case RoomMode.on:
         final start = Color.lerp(base, widget.cctColor, 0.50)!;
         final end = Color.lerp(base, widget.cctColor, 0.65)!;
@@ -935,6 +1171,15 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
           end: Alignment.bottomRight,
           colors: [start, end],
         );
+      case RoomMode.mood:
+        return LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color.lerp(base, widget.cctColor, 0.35)!,
+            Color.lerp(base, widget.cctColor, 0.25)!,
+          ],
+        );
       case RoomMode.off:
         return const LinearGradient(
           colors: [Color(0xFF353B45), Color(0xFF3F454F)],
@@ -944,12 +1189,28 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
 
   List<BoxShadow> _highlightShadow(RoomMode m) {
     switch (m) {
+      case RoomMode.standby:
+        return [
+          BoxShadow(
+            color: widget.cctColor.withValues(alpha: 0.18),
+            blurRadius: 10,
+            spreadRadius: -3,
+          ),
+        ];
       case RoomMode.on:
         return [
           BoxShadow(
             color: widget.cctColor
                 .withValues(alpha: widget.offCurve ? 0.20 : 0.35),
             blurRadius: 14,
+            spreadRadius: -2,
+          ),
+        ];
+      case RoomMode.mood:
+        return [
+          BoxShadow(
+            color: widget.cctColor.withValues(alpha: 0.25),
+            blurRadius: 12,
             spreadRadius: -2,
           ),
         ];
@@ -960,12 +1221,16 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
 
   Color _activeTextColor(RoomMode m) {
     switch (m) {
+      case RoomMode.standby:
+        return const Color(0xFFEADCC0);
       case RoomMode.on:
         final probe =
             Color.lerp(const Color(0xFF1C1C1C), widget.cctColor, 0.60)!;
         return probe.computeLuminance() > 0.30
             ? const Color(0xFF1A1A1E)
             : const Color(0xFFFFF3DC);
+      case RoomMode.mood:
+        return const Color(0xFFFFF3DC);
       case RoomMode.off:
         return const Color(0xFFE6E8EB);
     }

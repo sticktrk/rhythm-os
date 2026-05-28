@@ -67,7 +67,7 @@ void main() {
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 
-    test('collapses legacy idle display to hard off', () async {
+    test('preserves mood display when lights are actually on', () async {
       await provider.addRoom(
         const RoomDto(
           id: 'room-1',
@@ -87,14 +87,14 @@ void main() {
         rhythmEnabled: true,
         timeOffset: 0,
         brightnessOffset: 0,
-        state: RoomModeState.idle,
+        state: RoomModeState.mood,
         lightsOn: true,
       );
 
-      expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
+      expect(provider.getDisplayRoomState('room-1'), RoomModeState.mood);
     });
 
-    test('local power toggles keep legacy idle collapsed to hard off',
+    test('remembers mood color after active Kelvin state clears direct color',
         () async {
       await provider.addRoom(
         const RoomDto(
@@ -115,13 +115,97 @@ void main() {
         rhythmEnabled: true,
         timeOffset: 0,
         brightnessOffset: 0,
-        state: RoomModeState.idle,
+        state: RoomModeState.mood,
+        lightsOn: true,
+        color: (20, 80, 240),
+        moodActive: true,
+      );
+
+      expect(provider.getRoomColor('room-1'), (20, 80, 240));
+      expect(provider.getMoodColor('room-1'), (20, 80, 240));
+
+      await provider.applyServerNodeState(
+        'room-1',
+        rhythmEnabled: true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: RoomModeState.active,
+        lightsOn: true,
+        kelvin: 3200,
+        moodActive: false,
+      );
+
+      expect(provider.getRoomColor('room-1'), isNull);
+      expect(provider.getMoodColor('room-1'), (20, 80, 240));
+    });
+
+    test('remembers locally picked mood color before server echo', () async {
+      await provider.addRoom(
+        const RoomDto(
+          id: 'room-1',
+          name: 'Kitchen',
+          source: RoomSourceDto.hue,
+          deviceIds: ['light-1'],
+          rhythmEnabled: true,
+          disabled: false,
+          lightsOn: true,
+          timeOffsetMinutes: 0,
+          brightnessOffset: 0,
+        ),
+      );
+
+      provider.setRoomColorLocal(
+        'room-1',
+        245,
+        120,
+        40,
+        rememberAsMood: true,
+      );
+
+      expect(provider.getRoomColor('room-1'), (245, 120, 40));
+      expect(provider.getMoodColor('room-1'), (245, 120, 40));
+
+      await provider.applyServerNodeState(
+        'room-1',
+        rhythmEnabled: true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: RoomModeState.active,
+        lightsOn: true,
+        kelvin: 4000,
+      );
+
+      expect(provider.getRoomColor('room-1'), isNull);
+      expect(provider.getMoodColor('room-1'), (245, 120, 40));
+    });
+
+    test('local power toggles do not overwrite semantic mood state', () async {
+      await provider.addRoom(
+        const RoomDto(
+          id: 'room-1',
+          name: 'Kitchen',
+          source: RoomSourceDto.hue,
+          deviceIds: ['light-1'],
+          rhythmEnabled: true,
+          disabled: false,
+          lightsOn: true,
+          timeOffsetMinutes: 0,
+          brightnessOffset: 0,
+        ),
+      );
+
+      await provider.applyServerNodeState(
+        'room-1',
+        rhythmEnabled: true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: RoomModeState.mood,
         lightsOn: true,
       );
 
       await provider.setRoomLightsOnLocal('room-1', false);
 
-      expect(provider.getRoomState('room-1'), RoomModeState.hardOff);
+      expect(provider.getRoomState('room-1'), RoomModeState.mood);
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 

@@ -80,6 +80,26 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   bool setLightBreakerResult = true;
   int setLightBreakerCalls = 0;
   bool? lastLightBreakerEnabled;
+  final List<
+      ({
+        String nodeId,
+        bool? rhythmEnabled,
+        bool? disabled,
+        bool? standbyEnabled,
+        RoomModeState? state,
+        bool? softOff,
+        Map<String, dynamic>? profileSettings,
+      })> nodePreferenceCalls = [];
+  final List<
+      ({
+        String nodeId,
+        int r,
+        int g,
+        int b,
+        int? brightness,
+        int? transitionMs,
+        String? scope,
+      })> nodeColorCalls = [];
 
   @override
   Future<void> hubCredentials({
@@ -108,6 +128,27 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<Map<String, dynamic>?> getTriageCount() async => null;
 
   @override
+  Future<void> nodePreferencesSet({
+    required String nodeId,
+    bool? rhythmEnabled,
+    bool? disabled,
+    bool? standbyEnabled,
+    RoomModeState? state,
+    bool? softOff,
+    Map<String, dynamic>? profileSettings,
+  }) async {
+    nodePreferenceCalls.add((
+      nodeId: nodeId,
+      rhythmEnabled: rhythmEnabled,
+      disabled: disabled,
+      standbyEnabled: standbyEnabled,
+      state: state,
+      softOff: softOff,
+      profileSettings: profileSettings,
+    ));
+  }
+
+  @override
   Future<List<RhythmTopologyNode>> getTopologyNodes() async => topologyNodes;
 
   @override
@@ -128,6 +169,27 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     if (!setLightBreakerResult) return false;
     lightBreakerEnabled = enabled;
     return true;
+  }
+
+  @override
+  Future<void> nodeColor({
+    required String nodeId,
+    required int r,
+    required int g,
+    required int b,
+    int? brightness,
+    int? transitionMs,
+    String? scope,
+  }) async {
+    nodeColorCalls.add((
+      nodeId: nodeId,
+      r: r,
+      g: g,
+      b: b,
+      brightness: brightness,
+      transitionMs: transitionMs,
+      scope: scope,
+    ));
   }
 
   @override
@@ -1231,6 +1293,58 @@ void main() {
       expect(room.profileSettings?.fadeMs, 1500);
     });
 
+    test('resolves persisted mood color from server mood profile', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+              'profile_settings': {
+                'mood_enabled': true,
+                'mood_profile_id': 'node_mood_room-1',
+              },
+            },
+          ],
+          'profiles': [
+            {
+              'id': 'node_mood_room-1',
+              'name': 'Kitchen Mood',
+              'curve': {
+                'type': 'constant',
+                'brightness': 1,
+                'color_temp': 0,
+                'direct_color': {
+                  'rgb': {'r': 20, 'g': 80, 'b': 240},
+                  'xy': {'x': 0.16, 'y': 0.08},
+                },
+              },
+            },
+          ],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.moodColorForNode('room-1'), (20, 80, 240));
+      expect(roomProvider.getMoodColor('room-1'), (20, 80, 240));
+    });
+
     test('applies mode_changed updates to active mode for main pills',
         () async {
       final provider = ServerSyncProvider(
@@ -1420,6 +1534,121 @@ void main() {
       };
       expect(hubsByAddress['192.168.1.10:443'], isTrue);
       expect(hubsByAddress['192.168.1.11:443'], isFalse);
+    });
+  });
+
+  group('ServerSyncProvider.dispatchNodeColor', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _FakeRhythmConnection connection;
+    late ServerSyncProvider provider;
+
+    setUp(() async {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _FakeRhythmConnection(api);
+      provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      await roomProvider.addRoom(const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ));
+    });
+
+    tearDown(() {
+      provider.dispose();
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('preserves current brightness for mood-scoped color writes', () async {
+      await roomProvider.applyServerNodeState(
+        'room-1',
+        rhythmEnabled: true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: RoomModeState.mood,
+        lightsOn: true,
+        brightness: 7,
+      );
+
+      final dispatched = provider.dispatchNodeColor(
+        'room-1',
+        20,
+        80,
+        240,
+        scope: 'mood',
+      );
+
+      expect(dispatched, isTrue);
+      expect(api.nodeColorCalls, hasLength(1));
+      final call = api.nodeColorCalls.single;
+      expect(call.scope, 'mood');
+      expect(call.brightness, 7);
+      expect(call.r, 20);
+      expect(call.g, 80);
+      expect(call.b, 240);
+      expect(roomProvider.getMoodColor('room-1'), (20, 80, 240));
+    });
+
+    test('uses mood default brightness when no server brightness is known', () {
+      final dispatched = provider.dispatchNodeColor(
+        'room-1',
+        255,
+        149,
+        0,
+        scope: 'mood',
+      );
+
+      expect(dispatched, isTrue);
+      expect(api.nodeColorCalls.single.brightness, 1);
+    });
+
+    test('does not reuse active brightness for mood-scoped color writes',
+        () async {
+      await roomProvider.applyServerNodeState(
+        'room-1',
+        rhythmEnabled: true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: RoomModeState.active,
+        lightsOn: true,
+        brightness: 44,
+      );
+
+      final dispatched = provider.dispatchNodeColor(
+        'room-1',
+        255,
+        149,
+        0,
+        scope: 'mood',
+      );
+
+      expect(dispatched, isTrue);
+      expect(api.nodeColorCalls.single.brightness, 1);
+    });
+
+    test('does not inject brightness for non-mood color writes', () {
+      final dispatched = provider.dispatchNodeColor(
+        'room-1',
+        255,
+        149,
+        0,
+      );
+
+      expect(dispatched, isTrue);
+      expect(api.nodeColorCalls.single.brightness, isNull);
     });
   });
 
@@ -2385,6 +2614,74 @@ void main() {
 
     expect(find.text('Delete Room'), findsNothing);
     expect(api.topologyDeleteRoomCalls, 0);
+  });
+
+  testWidgets('room settings standby switch pushes node preference',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['matter'],
+            'device_ids': ['light-1'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'standby_enabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Settings');
+    await tester.tap(find.text('Standby'));
+    await tester.pump();
+
+    expect(api.nodePreferenceCalls, hasLength(1));
+    final call = api.nodePreferenceCalls.single;
+    expect(call.nodeId, 'room-1');
+    expect(call.standbyEnabled, isTrue);
+    expect(provider.standbyEnabledForNode('room-1'), isTrue);
   });
 
   testWidgets('Delete Room is shown for matter rooms and calls the SDK method',

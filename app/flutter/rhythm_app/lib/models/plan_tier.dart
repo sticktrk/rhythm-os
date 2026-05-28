@@ -18,8 +18,8 @@ enum Entitlement {
   /// soon.
   multiUserAccess,
 
-  /// Idle / standby lighting: per-room idle state, idle pill on room cards,
-  /// and the standby section in the light profile editor.
+  /// Standby lighting: per-room standby state and the standby section in the
+  /// light profile editor.
   standby,
 
   /// Advanced day-mode timing controls: motion timeout, light transition, and
@@ -92,7 +92,7 @@ extension EntitlementX on Entitlement {
         Entitlement.cloudBackupRestore => 'Cloud Backup & Restore',
         Entitlement.multiDeviceSync => 'All Rooms Sync',
         Entitlement.multiUserAccess => 'Multi-user Access',
-        Entitlement.standby => 'Mood Lighting',
+        Entitlement.standby => 'Standby Lighting',
         Entitlement.advancedDayControls => 'Advanced Day Controls',
         Entitlement.sleepPrimarySettings => 'Sleep Primary Settings',
         Entitlement.transitionButton => 'Button Trigger',
@@ -105,7 +105,7 @@ extension EntitlementX on Entitlement {
         Entitlement.multiDeviceSync =>
           'Restore All Rooms layout on a new phone',
         Entitlement.multiUserAccess => 'Share a hub with multiple users',
-        Entitlement.standby => 'Idle scenes for day and sleep modes',
+        Entitlement.standby => 'Standby scenes for day and sleep modes',
         Entitlement.advancedDayControls =>
           'Custom motion timeout, transition, and interval',
         Entitlement.sleepPrimarySettings => 'Custom sleep brightness and color',

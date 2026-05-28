@@ -249,6 +249,13 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Profile configs from the server.
   List<RhythmCurveConfig> get profiles => _profiles;
 
+  /// Persisted Mood color resolved from server profile settings, if present.
+  (int r, int g, int b)? moodColorForNode(String nodeId) {
+    final node = nodeById(nodeId);
+    if (node == null) return null;
+    return _moodColorForNode(node);
+  }
+
   /// Active resolved profile ID for display/edit sync.
   String? get activeProfileId => _activeProfileId;
 
@@ -406,8 +413,96 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmRoom? nodeById(String nodeId) =>
       _helloNodes.where((node) => node.id == nodeId).firstOrNull;
 
+  bool standbyEnabledForNode(String nodeId) =>
+      nodeById(nodeId)?.standbyEnabled ?? false;
+
+  void setNodeStandbyEnabledLocal(String nodeId, bool enabled) {
+    final index = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (index == -1 || _helloNodes[index].standbyEnabled == enabled) return;
+
+    final previous = _helloNodes[index];
+    _helloNodes[index] = RhythmRoom(
+      id: previous.id,
+      name: previous.name,
+      kind: previous.kind,
+      parentId: previous.parentId,
+      placement: previous.placement,
+      groupedLightId: previous.groupedLightId,
+      state: previous.state,
+      transitioning: previous.transitioning,
+      rhythmEnabled: previous.rhythmEnabled,
+      disabled: previous.disabled,
+      timeOffset: previous.timeOffset,
+      brightnessOffset: previous.brightnessOffset,
+      hubTypes: previous.hubTypes,
+      manufacturer: previous.manufacturer,
+      model: previous.model,
+      deviceIds: previous.deviceIds,
+      devices: previous.devices,
+      profileSettings: previous.profileSettings,
+      observedPower: previous.observedPower,
+      moodEnabled: previous.moodEnabled,
+      moodActive: previous.moodActive,
+      standbyEnabled: enabled,
+      standbyActive: previous.standbyActive,
+      lightsOn: previous.lightsOn,
+      brightness: previous.brightness,
+      kelvin: previous.kelvin,
+      motionActive: previous.motionActive,
+      motionOwned: previous.motionOwned,
+      remainingSecs: previous.remainingSecs,
+      timeoutSecs: previous.timeoutSecs,
+      warningActive: previous.warningActive,
+    );
+    _helloRooms = _buildRoomSummaries();
+    notifyListeners();
+  }
+
   RhythmTopologyNode? topologyNodeById(String nodeId) =>
       _topologyNodes.where((node) => node.id == nodeId).firstOrNull;
+
+  (int r, int g, int b)? _moodColorForNode(RhythmRoom node) {
+    final moodProfileId = node.profileSettings?.moodProfileId;
+    if (moodProfileId == null || moodProfileId.isEmpty) return null;
+    final profile =
+        _profiles.where((profile) => profile.id == moodProfileId).firstOrNull;
+    final directColor =
+        profile == null ? null : _directColorForProfile(profile);
+    final rgb = directColor?.rgb;
+    if (rgb == null) return null;
+    return (rgb.r, rgb.g, rgb.b);
+  }
+
+  int? _moodBrightnessForNode(RhythmRoom node) {
+    final moodProfileId = node.profileSettings?.moodProfileId;
+    if (moodProfileId == null || moodProfileId.isEmpty) return null;
+    final profile =
+        _profiles.where((profile) => profile.id == moodProfileId).firstOrNull;
+    final curve = profile?.curve;
+    if (curve is RhythmConstantCurve) {
+      return curve.brightness;
+    }
+    return null;
+  }
+
+  RhythmDirectColor? _directColorForProfile(RhythmCurveConfig profile) {
+    return switch (profile.curve) {
+      RhythmSuperGaussianCurve(:final directColor) => directColor,
+      RhythmConstantCurve(:final directColor) => directColor,
+      _ => profile.directColor,
+    };
+  }
+
+  void _syncServerMoodProfiles(Iterable<RhythmRoom> nodes) {
+    if (_profiles.isEmpty) return;
+    for (final node in nodes) {
+      _roomProvider.setMoodColorFromServer(node.id, _moodColorForNode(node));
+      _roomProvider.setMoodBrightnessFromServer(
+        node.id,
+        _moodBrightnessForNode(node),
+      );
+    }
+  }
 
   Iterable<RhythmTopologyControlLink> controlsForSourceNode(String nodeId) =>
       topologyNodeById(nodeId)?.controls ?? const [];
@@ -950,6 +1045,7 @@ class ServerSyncProvider extends ChangeNotifier {
     } finally {
       _receivingFromServer = false;
     }
+    _syncServerMoodProfiles(validNodes);
   }
 
   /// Handle source rooms changed (Hue pairing, re-sync, disconnect).
@@ -1247,24 +1343,26 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Returns true if dispatched to server, false if not connected.
   bool dispatchNodeBrightness(String nodeId, int brightness) {
     if (HueServiceLocator.isDemoMode) {
+      final currentState = _roomProvider.getRoomState(nodeId);
+      final moodActive = currentState == RoomModeState.mood;
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
         on: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(nodeId),
-        state: RoomModeState.active,
+        state: moodActive ? RoomModeState.mood : RoomModeState.active,
       );
       _roomProvider.applyServerNodeState(
         nodeId,
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
-        state: RoomModeState.active,
+        state: moodActive ? RoomModeState.mood : RoomModeState.active,
         lightsOn: true,
         brightness: brightness,
         kelvin: _roomProvider.getKelvin(nodeId),
-        moodEnabled: _roomProvider.isMoodEnabled(nodeId),
-        moodActive: false,
+        moodEnabled: moodActive ? true : _roomProvider.isMoodEnabled(nodeId),
+        moodActive: moodActive,
       );
       return true;
     }
@@ -1288,15 +1386,30 @@ class ServerSyncProvider extends ChangeNotifier {
     int? brightness,
     int? transitionMs,
   }) {
-    _roomProvider.setRoomColorLocal(nodeId, r, g, b);
+    final persistAsMood = scope == 'mood';
+    final effectiveBrightness = brightness ??
+        (persistAsMood ? _roomProvider.getMoodBrightness(nodeId) ?? 1 : null);
+    _roomProvider.setRoomColorLocal(
+      nodeId,
+      r,
+      g,
+      b,
+      rememberAsMood: persistAsMood,
+    );
+    if (persistAsMood) {
+      _roomProvider.setMoodEnabledLocal(nodeId, true);
+      if (effectiveBrightness != null) {
+        _roomProvider.setMoodBrightnessLocal(nodeId, effectiveBrightness);
+      }
+    }
     if (HueServiceLocator.isDemoMode) {
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
         on: true,
-        brightness: brightness ?? _roomProvider.getBrightness(nodeId),
+        brightness: effectiveBrightness,
         kelvin: null,
         color: (r, g, b),
-        state: null,
+        state: persistAsMood ? RoomModeState.mood : null,
       );
       return true;
     }
@@ -1306,7 +1419,7 @@ class ServerSyncProvider extends ChangeNotifier {
       r: r,
       g: g,
       b: b,
-      brightness: brightness,
+      brightness: effectiveBrightness,
       transitionMs: transitionMs,
       scope: scope,
     );
@@ -1320,16 +1433,18 @@ class ServerSyncProvider extends ChangeNotifier {
   void pushNodePreferences(String nodeId,
       {bool? rhythmEnabled,
       bool? disabled,
+      bool? standbyEnabled,
       RoomModeState? state,
       Map<String, dynamic>? profileSettings}) {
     if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
     if (!_connection.connected || _receivingFromServer) return;
     debugPrint(
-        'ServerSync: pushNodePreferences $nodeId rhythmEnabled=$rhythmEnabled disabled=$disabled state=${state?.wireValue}');
+        'ServerSync: pushNodePreferences $nodeId rhythmEnabled=$rhythmEnabled disabled=$disabled standbyEnabled=$standbyEnabled state=${state?.wireValue}');
     api.nodePreferencesSet(
       nodeId: nodeId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
+      standbyEnabled: standbyEnabled,
       state: state,
       profileSettings: profileSettings,
     );
@@ -1338,12 +1453,14 @@ class ServerSyncProvider extends ChangeNotifier {
   void pushRoomPreferences(String roomId,
       {bool? rhythmEnabled,
       bool? disabled,
+      bool? standbyEnabled,
       RoomModeState? state,
       Map<String, dynamic>? profileSettings}) {
     pushNodePreferences(
       roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
+      standbyEnabled: standbyEnabled,
       state: state,
       profileSettings: profileSettings,
     );
@@ -2098,6 +2215,8 @@ class ServerSyncProvider extends ChangeNotifier {
       profileSettings: state.profileSettings ?? previous.profileSettings,
       moodEnabled: state.moodEnabled ?? previous.moodEnabled,
       moodActive: state.moodActive ?? previous.moodActive,
+      standbyEnabled: state.standbyEnabled ?? previous.standbyEnabled,
+      standbyActive: state.standbyActive ?? previous.standbyActive,
       lightsOn: state.lightsOn ?? previous.lightsOn,
       brightness: state.brightness ?? previous.brightness,
       kelvin: state.kelvin ?? previous.kelvin,
@@ -2143,6 +2262,8 @@ class ServerSyncProvider extends ChangeNotifier {
       profileSettings: previous.profileSettings,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
+      standbyEnabled: previous.standbyEnabled,
+      standbyActive: previous.standbyActive,
       lightsOn: previous.lightsOn,
       brightness: previous.brightness,
       kelvin: previous.kelvin,
@@ -2184,6 +2305,8 @@ class ServerSyncProvider extends ChangeNotifier {
             right.profileSettings?.toJson().toString() ||
         left.moodEnabled != right.moodEnabled ||
         left.moodActive != right.moodActive ||
+        left.standbyEnabled != right.standbyEnabled ||
+        left.standbyActive != right.standbyActive ||
         left.lightsOn != right.lightsOn ||
         left.brightness != right.brightness ||
         left.kelvin != right.kelvin ||
@@ -2263,6 +2386,8 @@ class ServerSyncProvider extends ChangeNotifier {
         profileSettings: state?.profileSettings,
         moodEnabled: state?.moodEnabled ?? false,
         moodActive: state?.moodActive ?? false,
+        standbyEnabled: state?.standbyEnabled ?? false,
+        standbyActive: state?.standbyActive ?? false,
         lightsOn: state?.lightsOn,
         brightness: state?.brightness,
         kelvin: state?.kelvin,

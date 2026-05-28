@@ -479,8 +479,17 @@ class DemoServerApi extends RhythmServerApi {
     room['state'] =
         (state ?? (on ? RoomModeState.active : RoomModeState.hardOff))
             .wireValue;
-    room['mood_enabled'] = room['mood_enabled'] as bool? ?? false;
-    room['mood_active'] = false;
+    final effectiveState =
+        state ?? (on ? RoomModeState.active : RoomModeState.hardOff);
+    room['mood_enabled'] = (room['mood_enabled'] as bool? ?? false) ||
+        effectiveState == RoomModeState.mood;
+    room['mood_active'] = effectiveState == RoomModeState.mood;
+    final standbyActive = effectiveState == RoomModeState.standby ||
+        effectiveState == RoomModeState.idle;
+    room['standby_active'] = standbyActive;
+    if (standbyActive) {
+      room['standby_enabled'] = true;
+    }
     final profileSettings = Map<String, dynamic>.from(
         (room['profile_settings'] as Map?) ?? const {});
     profileSettings['mood_enabled'] = room['mood_enabled'];
