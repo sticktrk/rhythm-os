@@ -78,11 +78,21 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   RoomProvider? _pendingModeActionRoomProvider;
   VoidCallback? _pendingModeActionRoomListener;
 
-  /// Sticky flag governing the [ServerDisconnectedScreen]. Set true when we
-  /// can't reach the server *and* have never completed a hello with it (so
-  /// we don't flash the disconnect screen during the transient reconnect
-  /// that fires after every save action). Cleared on [RhythmConnectionState.connected].
+  /// Sticky flag governing the [ServerDisconnectedScreen]. Set true only when
+  /// we've been unable to reach the server *and* have never completed a hello
+  /// with it for longer than [_serverConnectGrace] (so we don't flash the
+  /// disconnect screen during the normal connect/reconnect handshake — e.g.
+  /// app resume or a bridge waking up). Cleared on
+  /// [RhythmConnectionState.connected].
   bool _serverLostConnection = false;
+
+  /// How long a cold connection may stay unconnected before we escalate from
+  /// the "Setting up…" loader to the full [ServerDisconnectedScreen]. Covers
+  /// the transient `connecting`/`reconnecting` blip seen on app resume and on
+  /// the first tap into a server hub (the RPi Zero bridge can take a moment
+  /// to answer the first hello).
+  static const _serverConnectGrace = Duration(seconds: 5);
+  Timer? _serverConnectGraceTimer;
 
   MainNavTab get _currentTab => _tabs[_tabIndex];
 
@@ -97,9 +107,27 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void dispose() {
     _cancelPendingModeActionHandoff();
+    _serverConnectGraceTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _roomPageController.dispose();
     super.dispose();
+  }
+
+  /// Arm the grace timer that escalates a stalled cold connection to the
+  /// retry screen. Idempotent — repeated calls during rebuilds keep the
+  /// single in-flight window rather than restarting it.
+  void _startServerConnectGrace() {
+    if (_serverConnectGraceTimer != null) return;
+    _serverConnectGraceTimer = Timer(_serverConnectGrace, () {
+      _serverConnectGraceTimer = null;
+      if (!mounted) return;
+      setState(() => _serverLostConnection = true);
+    });
+  }
+
+  void _cancelServerConnectGrace() {
+    _serverConnectGraceTimer?.cancel();
+    _serverConnectGraceTimer = null;
   }
 
   @override
@@ -584,22 +612,25 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         final serverHub = homeProvider.getFirstHubOfType(HubType.server);
         final state = serverSync.connectionState;
 
-        // Govern the disconnect screen:
-        //   • `connected`              → clear the flag, show the room grid.
-        //   • `disconnected`           → flag it, hub is truly gone.
-        //   • `reconnecting` (initial, never synced)  → flag it (hub looks
-        //     unreachable from cold start).
-        //   • `reconnecting` (after a clean sync)     → do NOT flag — this
-        //     is the transient blip that fires after every HTTP action and
-        //     would otherwise flash the disconnect screen on every save.
-        //   • `connecting` (first-attempt phase)      → leave alone so the
-        //     "Setting up…" connecting state can render.
-        if (state == RhythmConnectionState.connected) {
+        // Govern the disconnect screen without flashing it during the normal
+        // connect handshake:
+        //   • `connected`              → clear the flag + grace timer, show
+        //     the room grid.
+        //   • not connected, never synced (`connecting`/`reconnecting`/
+        //     `disconnected` from a cold start) → arm the grace timer instead
+        //     of flagging immediately. We keep showing the "Setting up…"
+        //     loader (no rooms) or the cached room grid (resume) until the
+        //     timer fires; only then do we surface the retry screen. This
+        //     covers the resume blip and a bridge taking a moment to answer
+        //     its first hello.
+        //   • not connected, already synced (transient blip after a save /
+        //     pull-to-refresh) → leave the flag and timer alone so the grid
+        //     stays put.
+        if (serverHub == null || state == RhythmConnectionState.connected) {
           _serverLostConnection = false;
-        } else if (state == RhythmConnectionState.disconnected ||
-            (state == RhythmConnectionState.reconnecting &&
-                !serverSync.hasBeenSynced)) {
-          _serverLostConnection = true;
+          _cancelServerConnectGrace();
+        } else if (!serverSync.hasBeenSynced && !_serverLostConnection) {
+          _startServerConnectGrace();
         }
 
         if (serverHub != null) {

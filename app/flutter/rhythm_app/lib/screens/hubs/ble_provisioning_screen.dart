@@ -13,6 +13,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../../providers/home_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
+import '../../services/recent_servers_service.dart';
 import '../../widgets/solar_orbit.dart';
 
 enum _ProvisioningPhase {
@@ -537,6 +538,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   Future<void> _persistServerHub(String ip, String? ownerToken) async {
     final homeProvider = context.read<HomeProvider>();
+    final displayName = _deviceInfo?.name ?? 'RhythmServer';
     for (final hub in homeProvider.currentHomeHubs) {
       final matches = hub.type == HubType.server &&
           hub.endpoint.host == ip &&
@@ -548,11 +550,23 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       if (token != null && token.isNotEmpty && !hasSavedToken) {
         await homeProvider.updateHub(hub.copyWith(token: token));
       }
+      await RecentServersService.instance.record(
+        name: hub.name,
+        host: ip,
+        port: 54448,
+        token: token != null && token.isNotEmpty ? token : hub.token,
+      );
       return;
     }
 
     await homeProvider.addServerHub(
-      name: _deviceInfo?.name ?? 'RhythmServer',
+      name: displayName,
+      host: ip,
+      port: 54448,
+      token: ownerToken,
+    );
+    await RecentServersService.instance.record(
+      name: displayName,
       host: ip,
       port: 54448,
       token: ownerToken,

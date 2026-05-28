@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -3533,7 +3534,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                           InfoTooltip(
                             message: 'Override the default state for each room '
                                 'while this profile is active. Useful for '
-                                'keeping certain rooms always on or off '
+                                'keeping certain rooms on, standby, or off '
                                 'regardless of the curve.',
                             iconSize: 13,
                           ),
@@ -4377,12 +4378,50 @@ class _TimeGradientPainter extends CustomPainter {
 // Room default card
 // -----------------------------------------------------------------------------
 
-enum _RoomDefaultMode { none, off, active }
+enum _RoomDefaultMode { none, off, standby, active }
+
+_RoomDefaultMode _roomDefaultModeForState(String? state) => switch (state) {
+      'active' => _RoomDefaultMode.active,
+      'idle' || 'soft_off' || 'standby' => _RoomDefaultMode.standby,
+      'mood' || 'hard_off' => _RoomDefaultMode.off,
+      _ => _RoomDefaultMode.none,
+    };
+
+String? _stateFromRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
+      _RoomDefaultMode.active => 'active',
+      _RoomDefaultMode.standby => 'standby',
+      _RoomDefaultMode.off => 'hard_off',
+      _RoomDefaultMode.none => null,
+    };
+
+_RoomDefaultMode _nextRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
+      _RoomDefaultMode.active => _RoomDefaultMode.standby,
+      _RoomDefaultMode.standby => _RoomDefaultMode.off,
+      _RoomDefaultMode.off => _RoomDefaultMode.none,
+      _RoomDefaultMode.none => _RoomDefaultMode.active,
+    };
+
+String _roomDefaultLabel(_RoomDefaultMode mode) => switch (mode) {
+      _RoomDefaultMode.active => 'On',
+      _RoomDefaultMode.standby => 'Standby',
+      _RoomDefaultMode.off => 'Off',
+      _RoomDefaultMode.none => 'No override',
+    };
+
+@visibleForTesting
+String roomDefaultStateLabelForTesting(String? state) =>
+    _roomDefaultLabel(_roomDefaultModeForState(state));
+
+@visibleForTesting
+String? nextRoomDefaultStateForTesting(String? state) =>
+    _stateFromRoomDefaultMode(
+      _nextRoomDefaultMode(_roomDefaultModeForState(state)),
+    );
 
 class _RoomDefaultCard extends StatelessWidget {
   final String roomId;
   final String roomName;
-  final String? state; // null = no override, "active", "hard_off"
+  final String? state; // null = no override, "active", "standby", "hard_off"
   final ValueChanged<String?> onStateChanged;
 
   const _RoomDefaultCard({
@@ -4393,17 +4432,7 @@ class _RoomDefaultCard extends StatelessWidget {
     required this.onStateChanged,
   });
 
-  _RoomDefaultMode get _mode => switch (state) {
-        'active' => _RoomDefaultMode.active,
-        'mood' || 'idle' || 'standby' || 'hard_off' => _RoomDefaultMode.off,
-        _ => _RoomDefaultMode.none,
-      };
-
-  String? _stateFromMode(_RoomDefaultMode mode) => switch (mode) {
-        _RoomDefaultMode.active => 'active',
-        _RoomDefaultMode.off => 'hard_off',
-        _RoomDefaultMode.none => null,
-      };
+  _RoomDefaultMode get _mode => _roomDefaultModeForState(state);
 
   @override
   Widget build(BuildContext context) {
@@ -4412,23 +4441,22 @@ class _RoomDefaultCard extends StatelessWidget {
 
     final bgColor = switch (mode) {
       _RoomDefaultMode.active => const Color(0xFF1E1A12),
+      _RoomDefaultMode.standby => const Color(0xFF1D1A13),
       _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.card,
     };
 
-    final stateLabel = switch (mode) {
-      _RoomDefaultMode.active => 'On',
-      _RoomDefaultMode.off => 'Off',
-      _RoomDefaultMode.none => 'No override',
-    };
+    final stateLabel = _roomDefaultLabel(mode);
 
     final stateLabelColor = switch (mode) {
       _RoomDefaultMode.active => const Color(0xFFD4A020),
+      _RoomDefaultMode.standby => _Palette.idle,
       _RoomDefaultMode.off => _Palette.textSecondary,
       _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.4),
     };
 
     final indicatorColor = switch (mode) {
       _RoomDefaultMode.active => const Color(0xFFD4A020),
+      _RoomDefaultMode.standby => _Palette.idle.withValues(alpha: 0.9),
       _RoomDefaultMode.off => _Palette.textSecondary.withValues(alpha: 0.8),
       _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.75),
     };
@@ -4514,7 +4542,7 @@ class _RoomDefaultCard extends StatelessWidget {
                   mode: mode,
                   onModeChanged: (newMode) {
                     HapticFeedback.lightImpact();
-                    onStateChanged(_stateFromMode(newMode));
+                    onStateChanged(_stateFromRoomDefaultMode(newMode));
                   },
                 ),
               ],
@@ -4724,11 +4752,7 @@ class _DefaultStateToggle extends StatelessWidget {
   });
 
   void _onTap() {
-    onModeChanged(switch (mode) {
-      _RoomDefaultMode.active => _RoomDefaultMode.off,
-      _RoomDefaultMode.off => _RoomDefaultMode.none,
-      _RoomDefaultMode.none => _RoomDefaultMode.active,
-    });
+    onModeChanged(_nextRoomDefaultMode(mode));
   }
 
   void _onLongPress() {
@@ -4791,6 +4815,7 @@ class _DefaultStateToggle extends StatelessWidget {
   Widget _buildToggle() {
     final alignment = switch (mode) {
       _RoomDefaultMode.off => Alignment.centerLeft,
+      _RoomDefaultMode.standby => Alignment.center,
       _RoomDefaultMode.active => Alignment.centerRight,
       _RoomDefaultMode.none => Alignment.centerRight, // unreachable
     };
@@ -4799,6 +4824,9 @@ class _DefaultStateToggle extends StatelessWidget {
       _RoomDefaultMode.off || _RoomDefaultMode.none => const LinearGradient(
           colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
         ),
+      _RoomDefaultMode.standby => const LinearGradient(
+          colors: [Color(0xFF2D2A20), Color(0xFF50472D)],
+        ),
       _RoomDefaultMode.active => const LinearGradient(
           colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
         ),
@@ -4806,6 +4834,7 @@ class _DefaultStateToggle extends StatelessWidget {
 
     final thumbColor = switch (mode) {
       _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.textSecondary,
+      _RoomDefaultMode.standby => _Palette.idle,
       _RoomDefaultMode.active => Colors.white,
     };
 
@@ -4813,6 +4842,13 @@ class _DefaultStateToggle extends StatelessWidget {
       _RoomDefaultMode.active => [
           BoxShadow(
             color: _Palette.amber.withValues(alpha: 0.4),
+            blurRadius: 8,
+            spreadRadius: 1,
+          ),
+        ],
+      _RoomDefaultMode.standby => [
+          BoxShadow(
+            color: _Palette.idle.withValues(alpha: 0.28),
             blurRadius: 8,
             spreadRadius: 1,
           ),

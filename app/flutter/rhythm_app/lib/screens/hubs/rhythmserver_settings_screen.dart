@@ -26,7 +26,6 @@ import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../services/device_restart_service.dart';
 import '../../services/ota_service.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
@@ -103,7 +102,6 @@ class RhythmServerSettingsScreen extends StatefulWidget {
 class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     with SingleTickerProviderStateMixin {
   late final RhythmDiagnosticsApi _client;
-  late final DeviceRestartService _restartService;
   final OtaService _otaService = OtaService();
 
   bool _isOnline = false;
@@ -130,7 +128,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       _serverContext == 'rpiz';
   bool get _isHaAddon => _serverContext == 'ha_addon';
   bool get _supportsDebugBundle => true;
-  bool get _supportsRestartEndpoint => !_isBridge && !_isHaAddon;
 
   String get _headerTitle =>
       widget.headerTitleOverride ??
@@ -154,10 +151,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       port: widget.hub.endpoint.port,
       authToken: widget.hub.token,
     );
-    _restartService = DeviceRestartService(
-      baseUrl: widget.hub.endpoint.baseUrl,
-      authToken: widget.hub.token,
-    );
 
     _glowController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -179,7 +172,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   void dispose() {
     _otaService.removeListener(_onOtaStateChanged);
     _otaService.dispose();
-    _restartService.dispose();
     _glowController.dispose();
     super.dispose();
   }
@@ -378,11 +370,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         _buildDebugSection(),
                       ],
                       const SizedBox(height: 24),
-                      if (_isBridge) ...[
+                      if (!_isHaAddon) ...[
                         _buildRebootButton(),
-                        const SizedBox(height: 12),
-                      ] else if (_supportsRestartEndpoint) ...[
-                        _buildRestartButton(),
                         const SizedBox(height: 12),
                       ],
                       _buildResetButton(),
@@ -1468,22 +1457,38 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     setState(() => _isRebooting = true);
 
-    final success = await _client.reboot();
+    final dispatched = await _client.reboot();
 
     if (!mounted) return;
 
     setState(() => _isRebooting = false);
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Rebooting $_headerTitle — it will reconnect shortly.'
-              : 'Failed to send reboot command.',
+    if (!dispatched) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to send reboot command.'),
+          behavior: SnackBarBehavior.floating,
         ),
-        behavior: SnackBarBehavior.floating,
-      ),
+      );
+      return;
+    }
+
+    final cameBack = await _RebootOverlay.show(
+      context,
+      client: _client,
+      headerTitle: _headerTitle,
     );
+    if (!mounted) return;
+
+    if (cameBack) {
+      unawaited(context.read<ServerSyncProvider>().connection.reconnect());
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$_headerTitle is back online.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   Widget _buildRebootButton() {
@@ -1527,118 +1532,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             const SizedBox(width: 10),
             Text(
               _isRebooting ? 'Rebooting...' : 'Reboot $_headerTitle',
-              style: TextStyle(
-                color: buttonColor,
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _handleRestart() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        title: Text(
-          'Restart $_headerTitle',
-          style: const TextStyle(color: CelestialColors.textPrimary),
-        ),
-        content: Text(
-          'This will restart your $_headerTitle. It should come back online within a minute.',
-          style: const TextStyle(color: CelestialColors.textSecondary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(
-              'Cancel',
-              style: TextStyle(color: CelestialColors.textSecondary),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(
-              'Restart',
-              style: TextStyle(color: Colors.orange.shade400),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    setState(() => _isRebooting = true);
-
-    final result = await _restartService.scheduleRestart();
-
-    if (!mounted) return;
-
-    setState(() => _isRebooting = false);
-
-    if (result.success) {
-      unawaited(context.read<ServerSyncProvider>().connection.reconnect());
-    }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          result.success
-              ? '${result.message}. $_headerTitle will reconnect shortly.'
-              : result.message,
-        ),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: result.success ? null : Colors.red.shade400,
-      ),
-    );
-  }
-
-  Widget _buildRestartButton() {
-    final buttonColor = _isOnline
-        ? Colors.orange.shade400
-        : CelestialColors.textSecondary.withValues(alpha: 0.4);
-
-    return GestureDetector(
-      onTap: (_isOnline && !_isRebooting) ? _handleRestart : null,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: _isOnline
-              ? Colors.orange.shade400.withValues(alpha: 0.08)
-              : Colors.white.withValues(alpha: 0.02),
-          border: Border.all(
-            color: _isOnline
-                ? Colors.orange.shade400.withValues(alpha: 0.25)
-                : CelestialColors.textSecondary.withValues(alpha: 0.1),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (_isRebooting)
-              SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation(buttonColor),
-                ),
-              )
-            else
-              Icon(
-                Icons.restart_alt_rounded,
-                color: buttonColor,
-                size: 18,
-              ),
-            const SizedBox(width: 10),
-            Text(
-              _isRebooting ? 'Restarting...' : 'Restart $_headerTitle',
               style: TextStyle(
                 color: buttonColor,
                 fontSize: 15,
@@ -3658,6 +3551,273 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         const SizedBox(height: 40),
         GestureDetector(
           onTap: _dismiss,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              color: CelestialColors.textSecondary.withValues(alpha: 0.08),
+              border: Border.all(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.2),
+              ),
+            ),
+            child: const Text(
+              'Close',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// =============================================================================
+// Reboot Overlay — polls health while the device cycles, dismisses when back
+// =============================================================================
+
+class _RebootOverlay extends StatefulWidget {
+  final RhythmDiagnosticsApi client;
+  final String headerTitle;
+
+  const _RebootOverlay({required this.client, required this.headerTitle});
+
+  static Future<bool> show(
+    BuildContext context, {
+    required RhythmDiagnosticsApi client,
+    required String headerTitle,
+  }) async {
+    final result =
+        await Navigator.of(context, rootNavigator: true).push<bool>(
+      PageRouteBuilder(
+        opaque: true,
+        pageBuilder: (_, __, ___) => _RebootOverlay(
+          client: client,
+          headerTitle: headerTitle,
+        ),
+        transitionsBuilder: (_, animation, __, child) {
+          return FadeTransition(opacity: animation, child: child);
+        },
+        transitionDuration: const Duration(milliseconds: 300),
+      ),
+    );
+    return result ?? false;
+  }
+
+  @override
+  State<_RebootOverlay> createState() => _RebootOverlayState();
+}
+
+class _RebootOverlayState extends State<_RebootOverlay>
+    with SingleTickerProviderStateMixin {
+  // RPi Zero cold-boot fits comfortably in 90s. Self-update polls for 3min,
+  // but a bare reboot is much faster than an OTA so this is tighter.
+  static const _deadline = Duration(seconds: 90);
+  static const _pollInterval = Duration(seconds: 3);
+  static const _teal = Color(0xFF00BCD4);
+
+  late final AnimationController _pulseController;
+  late final Animation<double> _pulseAnimation;
+  Timer? _pollTimer;
+  Timer? _deadlineTimer;
+  bool _sawDisconnect = false;
+  bool _timedOut = false;
+  bool _finished = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 2000),
+      vsync: this,
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 0.3, end: 0.8).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
+    _deadlineTimer = Timer(_deadline, _onTimeout);
+    // Server sleeps 2s before invoking /sbin/reboot; delay first poll so we
+    // don't get a stale "healthy" from the pre-reboot process.
+    Future.delayed(const Duration(seconds: 3), _poll);
+    _pollTimer = Timer.periodic(_pollInterval, (_) => _poll());
+  }
+
+  Future<void> _poll() async {
+    if (_finished || !mounted) return;
+    final ok = await widget.client.healthCheck();
+    if (_finished || !mounted) return;
+    if (!ok) {
+      if (!_sawDisconnect) setState(() => _sawDisconnect = true);
+      return;
+    }
+    if (_sawDisconnect) {
+      _finish(success: true);
+    }
+  }
+
+  void _onTimeout() {
+    if (_finished) return;
+    _pollTimer?.cancel();
+    setState(() => _timedOut = true);
+  }
+
+  void _finish({required bool success}) {
+    if (_finished) return;
+    _finished = true;
+    _pollTimer?.cancel();
+    _deadlineTimer?.cancel();
+    Navigator.of(context).pop(success);
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _deadlineTimer?.cancel();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _timedOut) _finish(success: false);
+      },
+      child: Scaffold(
+        backgroundColor: CelestialColors.backgroundDark,
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40),
+              child: _timedOut ? _buildTimeout() : _buildWaiting(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWaiting() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedBuilder(
+          animation: _pulseAnimation,
+          builder: (_, __) => Container(
+            width: 92,
+            height: 92,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: [
+                  _teal.withValues(alpha: 0.18),
+                  _teal.withValues(alpha: 0.04),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: _teal.withValues(
+                    alpha: _pulseAnimation.value * 0.28,
+                  ),
+                  blurRadius: 32,
+                  spreadRadius: 4,
+                ),
+              ],
+            ),
+            child:
+                const Icon(Icons.restart_alt_rounded, color: _teal, size: 38),
+          ),
+        ),
+        const SizedBox(height: 28),
+        Text(
+          'Rebooting ${widget.headerTitle}',
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: CelestialColors.textPrimary,
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.2,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          _sawDisconnect
+              ? 'Waiting for ${widget.headerTitle} to come back online...'
+              : 'Powering down...',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: _teal.withValues(alpha: 0.75),
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 28),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.info_outline_rounded,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+              size: 16,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              'Do not close the app',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTimeout() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 80,
+          height: 80,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.red.shade400.withValues(alpha: 0.15),
+          ),
+          child: Icon(
+            Icons.error_outline_rounded,
+            color: Colors.red.shade400,
+            size: 40,
+          ),
+        ),
+        const SizedBox(height: 32),
+        const Text(
+          'Reboot Timed Out',
+          style: TextStyle(
+            color: CelestialColors.textPrimary,
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '${widget.headerTitle} did not come back online within '
+          '${_deadline.inSeconds}s.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: Colors.red.shade400,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 40),
+        GestureDetector(
+          onTap: () => _finish(success: false),
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(vertical: 14),

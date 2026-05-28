@@ -29,6 +29,7 @@ import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../services/analytics_service.dart';
 import '../services/ble_provisioning_service.dart';
+import '../services/recent_servers_service.dart';
 
 /// Which empty-state variant to show.
 enum ConnectHubMode { rhythmServer, hue }
@@ -290,10 +291,21 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     // Rebuild when focus state changes so the IP field border reflects it.
     _manualIpFocus.addListener(_onManualIpFocusChanged);
 
+    // Recent servers list — locally cached, rendered immediately even if
+    // mDNS hasn't found anything yet. Online/offline overlay refreshes from
+    // discovery sweeps via [RecentServersService.markOnline / setOnlineIds].
+    if (widget.mode == ConnectHubMode.rhythmServer) {
+      RecentServersService.instance.addListener(_onRecentServersChanged);
+    }
+
     // Auto-start mDNS scanning in rhythmServer mode
     if (widget.mode == ConnectHubMode.rhythmServer) {
       unawaited(_scanForAllDevices());
     }
+  }
+
+  void _onRecentServersChanged() {
+    if (mounted) setState(() {});
   }
 
   void _onManualIpFocusChanged() {
@@ -302,6 +314,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   @override
   void dispose() {
+    if (widget.mode == ConnectHubMode.rhythmServer) {
+      RecentServersService.instance.removeListener(_onRecentServersChanged);
+    }
     _bonsoirDiscovery?.stop();
     _bleScanSubscription?.cancel();
     _bleService.dispose();
@@ -322,7 +337,41 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       _scanForBleDevices().catchError((Object error, StackTrace stackTrace) {
         debugPrint('BLE scan failed: $error');
       }),
+      // Recents have a known endpoint — probe each directly instead of
+      // waiting for mDNS to rediscover them. mDNS only adds *new* boxes
+      // to the list.
+      _probeRecentServers().catchError((Object error, StackTrace stackTrace) {
+        debugPrint('Recent probe failed: $error');
+      }),
     ]);
+  }
+
+  Future<void> _probeRecentServers() async {
+    final recents = RecentServersService.instance.servers;
+    if (recents.isEmpty) {
+      RecentServersService.instance.setOnlineIds(const []);
+      return;
+    }
+
+    final results = await Future.wait(
+      recents.map((server) async {
+        final ok = await _probeRecentServerHealth(server.host, server.port);
+        return ok ? server.id : null;
+      }),
+    );
+
+    if (!mounted) return;
+    RecentServersService.instance.setOnlineIds(
+      results.whereType<String>(),
+    );
+  }
+
+  Future<bool> _probeRecentServerHealth(String host, int port) async {
+    try {
+      return await RhythmDiagnosticsApi(host: host, port: port).healthCheck();
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _scanForDevices() async {
@@ -814,6 +863,18 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         return;
       }
 
+      // Local recent list — populated regardless of how we got here (mDNS,
+      // manual IP, or recent re-tap) so reconnects don't have to wait on a
+      // fresh mDNS sweep next time.
+      await RecentServersService.instance.record(
+        name: result.name,
+        host: hub.address,
+        port: hub.port,
+        token: authToken ?? result.token,
+      );
+
+      if (!mounted) return;
+
       if (!kIsWeb) HapticFeedback.heavyImpact();
       await SuccessModal.show(
         context,
@@ -904,6 +965,13 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         continue;
       }
       final token = savedHub.token?.trim();
+      if (token != null && token.isNotEmpty) return token;
+    }
+    // Fall back to a token cached in the local recents list — lets the user
+    // reconnect to a previously-paired box without re-running BLE auth.
+    for (final recent in RecentServersService.instance.servers) {
+      if (recent.host != hub.address || recent.port != hub.port) continue;
+      final token = recent.token?.trim();
       if (token != null && token.isNotEmpty) return token;
     }
     return null;
@@ -1331,8 +1399,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   // ── Middle: devices list or empty state ────────────────────────────────────
 
   Widget _buildMiddleContent() {
-    if (_discoveredDevices.isNotEmpty || _bleDevices.isNotEmpty) {
-      return _buildDiscoveredDevices();
+    final recents = RecentServersService.instance.servers;
+    if (recents.isNotEmpty ||
+        _discoveredDevices.isNotEmpty ||
+        _bleDevices.isNotEmpty) {
+      return _buildDiscoveredDevices(recents);
     }
 
     // Empty state: soft guidance
@@ -1355,10 +1426,13 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 
-  Widget _buildDiscoveredDevices() {
-    final itemCount =
-        (_discoveredDevices.isEmpty ? 0 : _discoveredDevices.length + 1) +
-            (_bleDevices.isEmpty ? 0 : _bleDevices.length + 1);
+  Widget _buildDiscoveredDevices(List<RecentServer> recents) {
+    final recentIds = recents.map((s) => s.id).toSet();
+    // Hide any mDNS hit that's already represented in the recent list — the
+    // recent card carries the online dot from the same probe.
+    final freshlyDiscovered = _discoveredDevices
+        .where((hub) => !recentIds.contains('${hub.address}:${hub.port}'))
+        .toList(growable: false);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -1366,18 +1440,30 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         physics: const BouncingScrollPhysics(),
         padding: EdgeInsets.zero,
         children: [
-          if (_discoveredDevices.isNotEmpty) ...[
+          if (recents.isNotEmpty) ...[
             _buildDiscoverySectionHeader(
-              'EXISTING BOXES',
-              'Already on Wi-Fi',
+              'RECENT BOXES',
+              'Saved on this device',
             ),
-            for (final hub in _discoveredDevices) ...[
+            for (final server in recents) ...[
+              _buildRecentDeviceCard(server),
+              const SizedBox(height: 8),
+            ],
+          ],
+          if (freshlyDiscovered.isNotEmpty) ...[
+            if (recents.isNotEmpty) const SizedBox(height: 6),
+            _buildDiscoverySectionHeader(
+              'ON NETWORK',
+              'Found by mDNS',
+            ),
+            for (final hub in freshlyDiscovered) ...[
               _buildExistingDeviceCard(hub),
               const SizedBox(height: 8),
             ],
           ],
           if (_bleDevices.isNotEmpty) ...[
-            if (_discoveredDevices.isNotEmpty) const SizedBox(height: 6),
+            if (recents.isNotEmpty || freshlyDiscovered.isNotEmpty)
+              const SizedBox(height: 6),
             _buildDiscoverySectionHeader(
               'NEW BOXES',
               'Ready for Bluetooth setup',
@@ -1387,7 +1473,6 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
               const SizedBox(height: 8),
             ],
           ],
-          if (itemCount == 0) const SizedBox.shrink(),
         ],
       ),
     );
@@ -1426,6 +1511,204 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         ],
       ),
     );
+  }
+
+  Widget _buildRecentDeviceCard(RecentServer server) {
+    final isOnline = RecentServersService.instance.isOnline(server.id);
+    final hasError = _connectError == server.host;
+    final isBusy = _isConnecting && !hasError;
+    final b = _breathe.value;
+
+    // Reuse the connect path: the recent entry behaves exactly like a
+    // discovered hub, just sourced from local storage instead of mDNS.
+    final hub = DiscoveredHub(
+      host: server.host,
+      port: server.port,
+      address: server.host,
+      name: server.name,
+      type: HubType.server,
+    );
+
+    final Color pipColor;
+    if (hasError) {
+      pipColor = Colors.red.withValues(alpha: 0.85);
+    } else if (isOnline) {
+      pipColor = Color.lerp(
+        _teal.withValues(alpha: 0.45),
+        _teal,
+        b,
+      )!;
+    } else {
+      pipColor = CelestialColors.textSecondary.withValues(alpha: 0.35);
+    }
+
+    final String subtitle;
+    if (hasError) {
+      subtitle = _connectErrorMessage ?? 'tap to retry';
+    } else if (isOnline) {
+      subtitle = '${server.host} • Online';
+    } else if (_isScanning) {
+      subtitle = '${server.host} • Checking…';
+    } else {
+      subtitle = '${server.host} • Offline';
+    }
+
+    return GestureDetector(
+      onTap: _isConnecting ? null : () => _connectToDevice(hub),
+      onLongPress: () => _confirmForgetRecent(server),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(
+            color: hasError
+                ? Colors.red.withValues(alpha: 0.35)
+                : isOnline
+                    ? _teal.withValues(alpha: 0.28)
+                    : Colors.white.withValues(alpha: 0.10),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 34,
+              height: 34,
+              child: Stack(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _teal.withValues(alpha: isOnline ? 0.14 : 0.08),
+                    ),
+                    child: Icon(
+                      Icons.developer_board_rounded,
+                      color: _teal.withValues(alpha: isOnline ? 0.92 : 0.55),
+                      size: 17,
+                    ),
+                  ),
+                  Positioned(
+                    top: 1,
+                    right: 1,
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: pipColor,
+                        border: Border.all(
+                          color: CelestialColors.backgroundDark
+                              .withValues(alpha: 0.9),
+                          width: 1.2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          server.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: CelestialColors.textPrimary.withValues(
+                              alpha: isOnline ? 1.0 : 0.75,
+                            ),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.1,
+                          ),
+                        ),
+                      ),
+                      _buildDiscoveryBadge('Recent', _teal),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: hasError
+                          ? Colors.red.withValues(alpha: 0.75)
+                          : CelestialColors.textSecondary
+                              .withValues(alpha: 0.55),
+                      fontSize: 11.5,
+                      fontFamily: hasError ? null : 'monospace',
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isBusy)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  color: _teal.withValues(alpha: 0.7),
+                ),
+              )
+            else
+              Icon(
+                Icons.arrow_forward_rounded,
+                color: _teal.withValues(alpha: isOnline ? 0.7 : 0.4),
+                size: 18,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmForgetRecent(RecentServer server) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: Text(
+          'Forget ${server.name}?',
+          style: const TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: Text(
+          'Removes ${server.host} from your recent list. You can re-add it any time by connecting again.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: CelestialColors.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Forget',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await RecentServersService.instance.remove(server.id);
+    }
   }
 
   Widget _buildExistingDeviceCard(DiscoveredHub hub) {

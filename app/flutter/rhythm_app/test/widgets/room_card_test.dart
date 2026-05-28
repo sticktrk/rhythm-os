@@ -34,6 +34,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         Map<String, dynamic>? profileSettings,
       })> nodePreferenceCalls = [];
   final List<({String nodeId, int brightness})> nodeBrightnessCalls = [];
+  final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
+  final List<
+      ({
+        String nodeId,
+        int kelvin,
+        bool preserveBrightness,
+      })> nodeCurveColorTemperatureCalls = [];
   final List<
       ({
         String nodeId,
@@ -54,6 +61,29 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     required int brightness,
   }) async {
     nodeBrightnessCalls.add((nodeId: nodeId, brightness: brightness));
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeCurveBrightness({
+    required String nodeId,
+    required int brightness,
+  }) async {
+    nodeCurveBrightnessCalls.add((nodeId: nodeId, brightness: brightness));
+    return null;
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeCurveColorTemperature({
+    required String nodeId,
+    required int kelvin,
+    bool preserveBrightness = true,
+  }) async {
+    nodeCurveColorTemperatureCalls.add((
+      nodeId: nodeId,
+      kelvin: kelvin,
+      preserveBrightness: preserveBrightness,
+    ));
+    return null;
   }
 
   @override
@@ -126,13 +156,41 @@ class _StandbyServerSyncProvider extends ServerSyncProvider {
     required super.connection,
     required super.roomProvider,
     required super.homeProvider,
-    this.standbyEnabled = true,
   });
 
-  final bool standbyEnabled;
-
   @override
-  bool standbyEnabledForNode(String nodeId) => standbyEnabled;
+  bool standbyEnabledForNode(String nodeId) => true;
+}
+
+CurveData _curveDataWithKelvins(List<int> kelvins) {
+  return CurveData(
+    hours: [
+      for (var i = 0; i < kelvins.length; i++)
+        kelvins.length == 1 ? 0 : i * (24 / (kelvins.length - 1)),
+    ],
+    brightness: List<int>.filled(kelvins.length, 50),
+    kelvin: kelvins,
+    solar: SolarInfo(
+      solarNoon: 12,
+      solarMidnight: 0,
+      sunrise: 6,
+      sunset: 18,
+      dayLength: 12,
+    ),
+  );
+}
+
+double _timeOffsetMinutesForEffectiveHour(double targetHour) {
+  final now = DateTime.now();
+  final currentHour = now.hour + (now.minute / 60.0) + (now.second / 3600.0);
+  var deltaHours = targetHour - currentHour;
+  while (deltaHours > 12) {
+    deltaHours -= 24;
+  }
+  while (deltaHours <= -12) {
+    deltaHours += 24;
+  }
+  return deltaHours * 60;
 }
 
 void main() {
@@ -422,6 +480,218 @@ void main() {
     expect(call.nodeId, 'room-1');
     expect(call.rhythmEnabled, isTrue);
     expect(call.state, RoomModeState.standby);
+  });
+
+  testWidgets('active brightness slider uses curve modifier endpoint',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      lightsOn: true,
+      brightness: 42,
+      kelvin: 2700,
+    );
+
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    tester.widget<Slider>(find.byType(Slider)).onChanged!(67);
+    await tester.pump();
+    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(67);
+    await tester.pump();
+
+    expect(connection.api.nodeBrightnessCalls, isEmpty);
+    expect(connection.api.nodeCurveBrightnessCalls, hasLength(1));
+    final call = connection.api.nodeCurveBrightnessCalls.single;
+    expect(call.nodeId, 'room-1');
+    expect(call.brightness, 67);
+  });
+
+  testWidgets('active CCT slider uses curve color-temperature modifier',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      lightsOn: true,
+      brightness: 42,
+      kelvin: 2700,
+    );
+
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+              curveData: _curveDataWithKelvins([3000, 3200, 3400]),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byIcon(Icons.wb_sunny_rounded).first);
+    await tester.pump();
+    tester.widget<Slider>(find.byType(Slider)).onChanged!(3200);
+    await tester.pump();
+    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3200);
+    await tester.pump();
+
+    expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
+    final call = connection.api.nodeCurveColorTemperatureCalls.single;
+    expect(call.nodeId, 'room-1');
+    expect(call.kelvin, 3200);
+    expect(call.preserveBrightness, isTrue);
+  });
+
+  testWidgets('active CCT slider uses current curve side without wrapping',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final timeOffsetMinutes = _timeOffsetMinutesForEffectiveHour(18);
+    await roomProvider.addRoom(
+      RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: timeOffsetMinutes,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: timeOffsetMinutes,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      lightsOn: true,
+      brightness: 42,
+      kelvin: 3000,
+    );
+
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+              curveData: _curveDataWithKelvins([2400, 6500, 3000]),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byIcon(Icons.wb_sunny_rounded).first);
+    await tester.pump(const Duration(milliseconds: 350));
+
+    final cctSlider = tester.widget<Slider>(find.byType(Slider));
+    expect(cctSlider.min, 3000);
+    expect(cctSlider.max, 6500);
+    cctSlider.onChanged!(3000);
+    await tester.pump();
+    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3000);
+    await tester.pump();
+
+    expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
+    expect(connection.api.nodeCurveColorTemperatureCalls.single.kelvin, 3000);
   });
 
   testWidgets('mood color picker keeps current mood brightness',

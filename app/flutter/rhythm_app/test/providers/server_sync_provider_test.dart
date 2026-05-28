@@ -100,6 +100,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         int? transitionMs,
         String? scope,
       })> nodeColorCalls = [];
+  final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
+  final List<
+      ({
+        String nodeId,
+        int kelvin,
+        bool preserveBrightness,
+      })> nodeCurveColorTemperatureCalls = [];
 
   @override
   Future<void> hubCredentials({
@@ -190,6 +197,29 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       transitionMs: transitionMs,
       scope: scope,
     ));
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeCurveBrightness({
+    required String nodeId,
+    required int brightness,
+  }) async {
+    nodeCurveBrightnessCalls.add((nodeId: nodeId, brightness: brightness));
+    return null;
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeCurveColorTemperature({
+    required String nodeId,
+    required int kelvin,
+    bool preserveBrightness = true,
+  }) async {
+    nodeCurveColorTemperatureCalls.add((
+      nodeId: nodeId,
+      kelvin: kelvin,
+      preserveBrightness: preserveBrightness,
+    ));
+    return null;
   }
 
   @override
@@ -1592,6 +1622,66 @@ void main() {
       };
       expect(hubsByAddress['192.168.1.10:443'], isTrue);
       expect(hubsByAddress['192.168.1.11:443'], isFalse);
+    });
+  });
+
+  group('ServerSyncProvider curve modifiers', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _FakeRhythmConnection connection;
+    late ServerSyncProvider provider;
+
+    setUp(() async {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _FakeRhythmConnection(api);
+      provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      await roomProvider.addRoom(const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ));
+    });
+
+    tearDown(() {
+      provider.dispose();
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('dispatches brightness as a curve modifier', () {
+      final dispatched = provider.dispatchNodeCurveBrightness('room-1', 61);
+
+      expect(dispatched, isTrue);
+      expect(api.nodeCurveBrightnessCalls, hasLength(1));
+      final call = api.nodeCurveBrightnessCalls.single;
+      expect(call.nodeId, 'room-1');
+      expect(call.brightness, 61);
+    });
+
+    test('dispatches color temperature as a curve modifier', () {
+      final dispatched = provider.dispatchNodeCurveColorTemperature(
+        'room-1',
+        3200,
+      );
+
+      expect(dispatched, isTrue);
+      expect(api.nodeCurveColorTemperatureCalls, hasLength(1));
+      final call = api.nodeCurveColorTemperatureCalls.single;
+      expect(call.nodeId, 'room-1');
+      expect(call.kelvin, 3200);
+      expect(call.preserveBrightness, isTrue);
     });
   });
 
