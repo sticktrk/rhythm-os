@@ -4954,6 +4954,7 @@ fn apply_active_mode_outputs(
         target_mode,
         transition.as_ref().map(|config| config.id.as_str())
     );
+    let reset_motion_timers_for_outputs = previous_mode != target_mode || transition.is_some();
 
     let Some(runtime) = runtime else {
         if let Ok(mut s) = state.lock() {
@@ -5168,6 +5169,11 @@ fn apply_active_mode_outputs(
         preserved_hard_off,
         unresolved_rooms
     );
+    if reset_motion_timers_for_outputs {
+        for room_id in &changed_room_ids {
+            queue_motion_timer_clear(state, room_id);
+        }
+    }
     if let Some(cycle_duration) = cycle_duration {
         dispatch_room_commands(
             state,
@@ -15484,6 +15490,34 @@ mod tests {
         do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
 
         assert_eq!(runtime.lights_off_calls(), vec![("r1".into(), None)]);
+        assert_eq!(
+            state.lock().unwrap().pending_motion_clear,
+            vec!["r1".to_string()]
+        );
+    }
+
+    #[test]
+    fn mode_transition_reapply_clears_motion_timer_for_standby_room() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, true)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "r1", true);
+            s.motion_snapshots.insert(
+                "r1".into(),
+                MotionSnapshot {
+                    motion_active: false,
+                    motion_owned: true,
+                    remaining_secs: Some(180),
+                    timeout_secs: 300,
+                    warning_active: false,
+                },
+            );
+        }
+
+        do_trigger_transition(&state, "sleep_to_day").unwrap();
+
+        assert!(!runtime.applied_commands().is_empty());
         assert_eq!(
             state.lock().unwrap().pending_motion_clear,
             vec!["r1".to_string()]
