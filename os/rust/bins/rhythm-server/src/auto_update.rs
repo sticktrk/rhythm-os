@@ -176,8 +176,15 @@ fn attempt_update(state: &SharedState) {
                 result.installed_targets,
                 result.checksum_verified,
             );
-            self_update::persist_before_restart(state);
-            self_update::schedule_post_update_restart();
+            if let Err(error) =
+                self_update::schedule_post_update_restart_with_best_effort_persist(state.clone())
+            {
+                warn!(
+                    target: "sys",
+                    "auto-update: restart scheduled, but failed to spawn persistence worker: {}",
+                    error
+                );
+            }
         }
         Err(e) => {
             warn!(target: "sys", "auto-update: apply failed: {}", e);

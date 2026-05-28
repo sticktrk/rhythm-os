@@ -1633,6 +1633,56 @@ pub fn persist_before_restart(state: &rhythm_os::state::SharedState) {
     rhythm_os::commands::persist_state(state);
 }
 
+fn schedule_restart_with_best_effort_persist<S, P>(
+    state: rhythm_os::state::SharedState,
+    schedule: S,
+    spawn_persist: P,
+) -> std::io::Result<()>
+where
+    S: FnOnce(),
+    P: FnOnce(rhythm_os::state::SharedState) -> std::io::Result<()>,
+{
+    schedule();
+    spawn_persist(state)
+}
+
+fn spawn_restart_persist_worker(state: rhythm_os::state::SharedState) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("restart-persist".to_string())
+        .spawn(move || persist_before_restart(&state))
+        .map(|_| ())
+}
+
+/// Schedule a remotely requested restart and best-effort state persistence.
+///
+/// This intentionally uses the same restart scheduler as OTA. On rpiz
+/// appliances it reboots the device; on supervised binary installs it exits so
+/// the service manager can restart the process. The scheduler is armed before
+/// persistence starts so a stuck state/event-loop lock cannot prevent reboot.
+pub fn schedule_user_initiated_restart_with_best_effort_persist(
+    state: rhythm_os::state::SharedState,
+) -> std::io::Result<()> {
+    schedule_restart_with_best_effort_persist(
+        state,
+        schedule_user_initiated_restart,
+        spawn_restart_persist_worker,
+    )
+}
+
+/// Schedule a post-update restart and best-effort state persistence.
+///
+/// OTA and manual restart both use the same restart scheduler; this wrapper
+/// keeps the reboot/exit armed even if persistence gets stuck.
+pub fn schedule_post_update_restart_with_best_effort_persist(
+    state: rhythm_os::state::SharedState,
+) -> std::io::Result<()> {
+    schedule_restart_with_best_effort_persist(
+        state,
+        schedule_post_update_restart,
+        spawn_restart_persist_worker,
+    )
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ApplianceApplyGuardOutcome {
     Completed,
@@ -3226,6 +3276,57 @@ mod tests {
     fn external_reboot_args_are_empty_for_graceful_and_forced_for_fallback() {
         assert!(external_reboot_args(false).is_empty());
         assert_eq!(external_reboot_args(true), &["-f"]);
+    }
+
+    #[test]
+    fn restart_with_best_effort_persist_arms_restart_before_persist_worker() {
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        let schedule_calls = calls.clone();
+        let persist_calls = calls.clone();
+        schedule_restart_with_best_effort_persist(
+            state,
+            move || schedule_calls.lock().unwrap().push("schedule"),
+            move |_| {
+                persist_calls.lock().unwrap().push("spawn_persist");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["schedule", "spawn_persist"],
+            "restart must be armed before best-effort persistence can block"
+        );
+    }
+
+    #[test]
+    fn restart_with_best_effort_persist_stays_armed_when_persist_spawn_fails() {
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+
+        let schedule_calls = calls.clone();
+        let result = schedule_restart_with_best_effort_persist(
+            state,
+            move || schedule_calls.lock().unwrap().push("schedule"),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "spawn failed",
+                ))
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["schedule"],
+            "restart should remain armed even when persistence worker spawn fails"
+        );
     }
 
     #[test]

@@ -419,23 +419,16 @@ fn scan_mdns() -> Vec<serde_json::Value> {
 
 async fn restart_device(State(state): State<SharedState>) -> Response {
     log::info!(target: "http", "Restart requested via /api/restart");
-    crate::self_update::schedule_user_initiated_restart();
-    persist_before_restart_async(state, "user request");
-    json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
-}
-
-fn persist_before_restart_async(state: SharedState, reason: &'static str) {
-    if let Err(error) = std::thread::Builder::new()
-        .name("restart-persist".to_string())
-        .spawn(move || crate::self_update::persist_before_restart(&state))
+    if let Err(error) =
+        crate::self_update::schedule_user_initiated_restart_with_best_effort_persist(state)
     {
         log::warn!(
             target: "http",
-            "Failed to spawn restart persistence worker for {}: {}",
-            reason,
+            "Restart scheduled, but failed to spawn restart persistence worker: {}",
             error
         );
     }
+    json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -458,8 +451,15 @@ async fn reset_matter_fabric(State(state): State<SharedState>) -> Response {
             Err(error) => return err_500(format!("Matter fabric reset task failed: {error}")),
         };
 
-    crate::self_update::persist_before_restart(&state);
-    crate::self_update::schedule_user_initiated_restart();
+    if let Err(error) =
+        crate::self_update::schedule_user_initiated_restart_with_best_effort_persist(state)
+    {
+        log::warn!(
+            target: "http",
+            "Matter fabric reset restart scheduled, but failed to spawn persistence worker: {}",
+            error
+        );
+    }
 
     match serde_json::to_string(&summary) {
         Ok(json) => json_ok(json),
@@ -683,8 +683,15 @@ async fn do_update(
         None,
     );
 
-    crate::self_update::persist_before_restart(&state);
-    crate::self_update::schedule_post_update_restart();
+    if let Err(error) =
+        crate::self_update::schedule_post_update_restart_with_best_effort_persist(state.clone())
+    {
+        log::warn!(
+            target: "http",
+            "OTA restart scheduled, but failed to spawn persistence worker: {}",
+            error
+        );
+    }
 
     json_ok(format!(
         r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{},"installed_targets":{}}}"#,

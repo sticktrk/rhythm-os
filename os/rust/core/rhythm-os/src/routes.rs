@@ -18,7 +18,7 @@ pub struct SharedRoute {
 ///
 /// Does NOT include:
 /// - `GET /api/events` (SSE — transport-dependent)
-/// - Hardware-specific: `/api/wifi`, `/api/diag/*`, `/api/system/reboot`
+/// - Hardware-specific: `/api/wifi`, `/api/diag/*`
 /// - Platform-specific OTA: `/api/ota/version`, `/api/ota/upload`, `/api/ota/capabilities`, `/api/ota/status`, `/api/ota/check`, `/api/ota/update`
 pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     SharedRoute {
