@@ -216,6 +216,7 @@ struct ModeDefaultApplyContext<'a> {
     transition_started_at: chrono::NaiveDateTime,
     dispatch_generation: u64,
     power_save: bool,
+    reset_all_room_defaults: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -4070,7 +4071,7 @@ fn apply_room_mode_defaults(
     else {
         return false;
     };
-    if mode_config.room_defaults.is_empty() {
+    if mode_config.room_defaults.is_empty() && !ctx.reset_all_room_defaults {
         return false;
     }
 
@@ -4078,20 +4079,47 @@ fn apply_room_mode_defaults(
         .iter()
         .map(|snap| (snap.id.as_str(), snap))
         .collect();
+    let defaults_by_room: HashMap<&str, RoomModeState> = mode_config
+        .room_defaults
+        .iter()
+        .map(|default| (default.room_id.as_str(), default.state))
+        .collect();
+    let mut target_rooms = Vec::new();
     let mut changed_room_ids = Vec::new();
     let mut non_hard_off_changed_room_ids = Vec::new();
     let mut hard_off_rooms = Vec::new();
     let mut lights_on_updates = Vec::new();
     let mut missing_rooms = 0usize;
 
-    for room_default in &mode_config.room_defaults {
-        let Some(snap) = snapshots_by_id.get(room_default.room_id.as_str()).copied() else {
-            missing_rooms += 1;
-            continue;
-        };
+    if ctx.reset_all_room_defaults {
+        for room_default in &mode_config.room_defaults {
+            if !snapshots_by_id.contains_key(room_default.room_id.as_str()) {
+                missing_rooms += 1;
+            }
+        }
+        for snap in snapshots {
+            let target_state = defaults_by_room
+                .get(snap.id.as_str())
+                .copied()
+                .unwrap_or(RoomModeState::Active);
+            target_rooms.push((snap, target_state));
+        }
+    } else {
+        for room_default in &mode_config.room_defaults {
+            let Some(snap) = snapshots_by_id.get(room_default.room_id.as_str()).copied() else {
+                missing_rooms += 1;
+                continue;
+            };
+            target_rooms.push((snap, room_default.state));
+        }
+    }
 
-        let target_state =
-            room_state_for_mood_setting(ctx.power_save, &snap.profile_settings, room_default.state);
+    for (snap, configured_target_state) in target_rooms {
+        let target_state = room_state_for_mood_setting(
+            ctx.power_save,
+            &snap.profile_settings,
+            configured_target_state,
+        );
         let current_state = persistent_room_state_for_settings(
             ctx.power_save,
             &snap.profile_settings,
@@ -4099,7 +4127,10 @@ fn apply_room_mode_defaults(
             snap.mood_active,
             snap.soft_off,
         );
-        if current_state == target_state {
+        let reset_offsets = ctx.reset_all_room_defaults
+            && (snap.time_offset_minutes.abs() > f32::EPSILON
+                || snap.brightness_offset.abs() > f32::EPSILON);
+        if current_state == target_state && !reset_offsets {
             continue;
         }
 
@@ -4108,7 +4139,7 @@ fn apply_room_mode_defaults(
             warn!(
                 target: "cmd",
                 "active_mode_apply: ignoring invalid room default state for room '{}'",
-                room_default.room_id
+                snap.id
             );
             continue;
         };
@@ -4122,8 +4153,16 @@ fn apply_room_mode_defaults(
                     snap.rhythm_enabled
                 },
                 disabled: snap.disabled,
-                time_offset_minutes: snap.time_offset_minutes,
-                brightness_offset: snap.brightness_offset,
+                time_offset_minutes: if ctx.reset_all_room_defaults {
+                    0.0
+                } else {
+                    snap.time_offset_minutes
+                },
+                brightness_offset: if ctx.reset_all_room_defaults {
+                    0.0
+                } else {
+                    snap.brightness_offset
+                },
                 soft_off,
                 mood_active,
                 standby_enabled: snap.standby_enabled,
@@ -4915,6 +4954,7 @@ fn apply_active_mode_outputs(
     apply_scope: ModeOutputApplyScope,
     dispatch_generation: u64,
     force_observed_off_outputs: bool,
+    reset_all_room_defaults: bool,
 ) {
     let (
         runtime,
@@ -4990,6 +5030,7 @@ fn apply_active_mode_outputs(
             transition_started_at,
             dispatch_generation,
             power_save,
+            reset_all_room_defaults,
         },
         &snapshots,
     );
@@ -5228,6 +5269,7 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
         transition,
         ModeOutputApplyScope::all_visible(),
         dispatch_generation,
+        false,
         false,
     );
     persist_state(state);
@@ -5476,6 +5518,8 @@ fn do_settings_set_internal(
         if !reapply_scope.is_empty() {
             let force_observed_off_outputs =
                 force_reapply_outputs && transition_for_apply.is_some();
+            let reset_all_room_defaults =
+                force_reapply_outputs && !mode_changed && transition_for_apply.is_some();
             apply_active_mode_outputs(
                 state,
                 previous_mode,
@@ -5484,6 +5528,7 @@ fn do_settings_set_internal(
                 reapply_scope,
                 dispatch_generation,
                 force_observed_off_outputs,
+                reset_all_room_defaults,
             );
         } else {
             debug!(
@@ -7384,6 +7429,7 @@ pub fn do_config_set_with_options(
             None,
             ModeOutputApplyScope::all_visible(),
             dispatch_generation,
+            false,
             false,
         );
     }

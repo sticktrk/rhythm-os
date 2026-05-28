@@ -130,3 +130,125 @@ fn put_mode_applies_room_defaults_on_mode_activation() {
         "hard-off default should send turn_off for office"
     );
 }
+
+#[test]
+fn same_mode_transition_resets_rooms_to_mode_defaults() {
+    let (harness, spy) = TestHarness::with_spy_controller_at(10.0, 125);
+    let harness = harness.with_discovery(
+        vec![
+            room("guest_bath", "Guest Bath"),
+            room("mud_room", "Mud Room"),
+            room("office", "Office"),
+        ],
+        vec![],
+    );
+    harness.sync();
+
+    let guest_bath_id = harness.resolve("guest_bath");
+    let mud_room_id = harness.resolve("mud_room");
+    let office_id = harness.resolve("office");
+
+    let mode_response = handlers::handle_put_mode(
+        &harness.state,
+        &json!({
+            "configs": [{
+                "mode": "day",
+                "active_profile_id": "rhythm",
+                "room_defaults": [
+                    { "room_id": office_id, "state": "standby" }
+                ]
+            }]
+        }),
+    );
+    assert_eq!(
+        mode_response.status, 200,
+        "mode config update should succeed"
+    );
+
+    let transitions_response = handlers::handle_put_transitions(
+        &harness.state,
+        &json!({
+            "transitions": [{
+                "from_mode": "sleep",
+                "to_mode": "day",
+                "trigger": { "kind": "solar", "event": "sunrise" },
+                "duration_ms": { "mode": "fixed", "value": 1000 }
+            }]
+        }),
+    );
+    assert_eq!(
+        transitions_response.status, 200,
+        "transition config update should succeed"
+    );
+    let transitions: serde_json::Value = serde_json::from_str(&transitions_response.body).unwrap();
+    let transition_id = transitions["transitions"][0]["id"]
+        .as_str()
+        .expect("transition id")
+        .to_string();
+
+    // Drift the active Day mode away from its defaults: two rooms are not in
+    // Day's explicit room_defaults list, so they should fall back to Active.
+    harness.action("guest_bath", "on").unwrap();
+    harness.set_room_preferences("guest_bath", Some(true), None, Some(true));
+    harness.set_room_offset("guest_bath", 45.0);
+
+    harness.action("mud_room", "on").unwrap();
+    harness.action("mud_room", "lights_off").unwrap();
+    harness.set_room_offset("mud_room", -30.0);
+
+    harness.action("office", "on").unwrap();
+    spy.reset();
+
+    let trigger_response = handlers::handle_post_transition_trigger(&harness.state, &transition_id);
+    assert_eq!(
+        trigger_response.status, 200,
+        "same-mode trigger should succeed"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&trigger_response.body).unwrap();
+    assert_eq!(parsed["active"], "day");
+    assert_eq!(parsed["last_change"]["transition_id"], transition_id);
+
+    let guest_bath = harness.snapshot("guest_bath").unwrap();
+    assert!(
+        !guest_bath.soft_off && !guest_bath.hard_off,
+        "unlisted room should reset to the implicit Active default"
+    );
+    assert_eq!(guest_bath.time_offset_minutes, 0.0);
+
+    let mud_room = harness.snapshot("mud_room").unwrap();
+    assert!(
+        !mud_room.soft_off && !mud_room.hard_off,
+        "unlisted hard-off room should reset to the implicit Active default"
+    );
+    assert_eq!(mud_room.time_offset_minutes, 0.0);
+
+    let office = harness.snapshot("office").unwrap();
+    assert!(
+        office.soft_off && !office.hard_off,
+        "explicit Day room_default should still win over implicit Active"
+    );
+
+    assert!(harness.lights_on("guest_bath"));
+    assert!(harness.lights_on("mud_room"));
+    assert!(harness.lights_on("office"));
+
+    let turn_on_calls = spy.turn_on_calls();
+    assert!(
+        turn_on_calls
+            .iter()
+            .any(|(room_id, _)| room_id == &guest_bath_id),
+        "same-mode reapply should dispatch the implicit Active room"
+    );
+    assert!(
+        turn_on_calls
+            .iter()
+            .any(|(room_id, _)| room_id == &mud_room_id),
+        "same-mode reapply should turn a hard-off implicit Active room back on"
+    );
+    assert!(
+        turn_on_calls
+            .iter()
+            .any(|(room_id, command)| { room_id == &office_id && command.brightness == 1 }),
+        "explicit Standby default should render the standby profile"
+    );
+}
