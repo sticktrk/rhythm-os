@@ -3,7 +3,7 @@
 //! When sleep→day fires for a room that was lit during sleep, the engine
 //! issues a fade-in command (the "expired_transitions" counter in periodic
 //! logs counts these). If the user presses the bottom button while that fade
-//! is playing on the bulb, the non-powersave OffPress must dispatch 1% and
+//! is playing on the bulb, the OffPress must hard-off the room and
 //! *that* must be the last command — no later automatic dispatch should
 //! overwrite it.
 
@@ -18,7 +18,7 @@ use rhythm_core::{
 use rhythm_os::commands;
 
 #[test]
-fn off_press_during_mode_transition_fade_dims_to_one_percent() {
+fn off_press_during_mode_transition_fade_hard_offs() {
     let (rooms, devices) = rooms_with_lights(&[("master", "Master")]);
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
@@ -63,21 +63,16 @@ fn off_press_during_mode_transition_fade_dims_to_one_percent() {
     // User presses bottom button right after the transition fired.
     h.action("master", "off").unwrap();
 
-    let calls = spy.turn_on_calls();
-    assert_eq!(spy.turn_off_calls().len(), 0);
-    assert!(
-        !calls.is_empty(),
-        "off press post-transition must dispatch turn_on"
-    );
+    let off_calls = spy.turn_off_calls();
+    assert_eq!(spy.turn_on_calls().len(), 0);
     assert_eq!(
-        calls.last().unwrap().1.brightness,
+        off_calls.len(),
         1,
-        "off press post-transition must end at 1% (fade was at {}, last call was {})",
-        fade_bri,
-        calls.last().unwrap().1.brightness
+        "off press post-transition must dispatch hard-off (fade was at {})",
+        fade_bri
     );
 
     let snap = h.snapshot("master").unwrap();
-    assert!(snap.soft_off, "final state must be soft-off");
-    assert!(!snap.hard_off);
+    assert!(!snap.soft_off, "final state must not be legacy soft-off");
+    assert!(snap.hard_off);
 }

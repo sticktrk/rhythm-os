@@ -6,7 +6,7 @@
 
 use rhythm_core::{
     runtime::hub_registry::DeviceType, LightNodeKind, LightProfileConfig, ModeChangeCause,
-    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState, RoomProfileSettings,
+    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState, RoomProfileSettings, TimerSetting,
 };
 use serde::Serialize;
 
@@ -28,6 +28,32 @@ pub struct ObservedPowerDto {
     pub source: Option<String>,
 }
 
+/// API representation of room profile settings with legacy mood fields resolved.
+#[derive(Clone, Debug, Serialize)]
+pub struct RoomProfileSettingsDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub mood_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mood_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fade_ms: Option<TimerSetting>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_timeout_secs: Option<TimerSetting>,
+}
+
+impl RoomProfileSettingsDto {
+    pub fn from_settings(settings: &RoomProfileSettings, mood_enabled: bool) -> Self {
+        Self {
+            profile_id: settings.profile_id.clone(),
+            mood_enabled,
+            mood_profile_id: settings.mood_profile_id.clone(),
+            fade_ms: settings.fade_ms.clone(),
+            motion_timeout_secs: settings.motion_timeout_secs.clone(),
+        }
+    }
+}
+
 /// Core room rhythm state — used by mutation responses and as the base
 /// for poll and full-state variants.
 #[derive(Clone, Debug, Serialize)]
@@ -45,6 +71,11 @@ pub struct RoomRhythmState {
     pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
+    pub mood_enabled: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
+    pub standby_active: bool,
+    pub profile_settings: RoomProfileSettingsDto,
     #[serde(
         rename = "room_profile",
         default,
@@ -267,7 +298,6 @@ pub struct LocationDto {
 /// App-level settings in state snapshot and `GET /api/settings`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
-    pub power_save: bool,
     pub auto_update: bool,
 }
 
@@ -409,8 +439,11 @@ pub struct NodeStateDto {
     pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
-    #[serde(default, skip_serializing_if = "RoomProfileSettings::is_empty")]
-    pub profile_settings: RoomProfileSettings,
+    pub mood_enabled: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
+    pub standby_active: bool,
+    pub profile_settings: RoomProfileSettingsDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -607,6 +640,14 @@ mod tests {
             transitioning: true,
             brightness: 80,
             kelvin: 4000,
+            mood_enabled: false,
+            mood_active: false,
+            standby_enabled: false,
+            standby_active: false,
+            profile_settings: RoomProfileSettingsDto::from_settings(
+                &rhythm_core::RoomProfileSettings::default(),
+                false,
+            ),
             room_profile: rhythm_core::RoomProfileSettings::default(),
         }
     }
@@ -636,7 +677,14 @@ mod tests {
             transitioning: true,
             brightness: 80,
             kelvin: 4000,
-            profile_settings: rhythm_core::RoomProfileSettings::default(),
+            mood_enabled: false,
+            mood_active: false,
+            standby_enabled: false,
+            standby_active: false,
+            profile_settings: RoomProfileSettingsDto::from_settings(
+                &rhythm_core::RoomProfileSettings::default(),
+                false,
+            ),
             motion_active: None,
             motion_owned: None,
             remaining_secs: None,
@@ -647,10 +695,14 @@ mod tests {
 
     #[test]
     fn node_state_uses_profile_settings_key() {
-        let mut node = sample_node_state();
-        node.profile_settings.profile_id = Some("sleep".into());
+        let node = sample_node_state();
         let json: Value = serde_json::to_value(node).unwrap();
         assert!(json.get("profile_settings").is_some());
+        assert_eq!(json["profile_settings"]["mood_enabled"], false);
+        assert_eq!(json["mood_enabled"], false);
+        assert_eq!(json["mood_active"], false);
+        assert_eq!(json["standby_enabled"], false);
+        assert_eq!(json["standby_active"], false);
         assert!(json.get("room_profile").is_none());
     }
 
@@ -676,6 +728,11 @@ mod tests {
         assert_eq!(json["transitioning"], true);
         assert_eq!(json["brightness"], 80);
         assert_eq!(json["kelvin"], 4000);
+        assert_eq!(json["profile_settings"]["mood_enabled"], false);
+        assert_eq!(json["mood_enabled"], false);
+        assert_eq!(json["mood_active"], false);
+        assert_eq!(json["standby_enabled"], false);
+        assert_eq!(json["standby_active"], false);
         // No status wrapper
         assert!(json.get("status").is_none());
     }
@@ -804,12 +861,9 @@ mod tests {
 
     #[test]
     fn settings_dto_serializes() {
-        let dto = SettingsDto {
-            power_save: true,
-            auto_update: true,
-        };
+        let dto = SettingsDto { auto_update: true };
         let json: Value = serde_json::to_value(&dto).unwrap();
-        assert_eq!(json["power_save"], true);
+        assert!(json.get("power_save").is_none());
         assert_eq!(json["auto_update"], true);
         assert!(json.get("light_breaker_enabled").is_none());
         assert!(json.get("mode").is_none());
@@ -1087,10 +1141,7 @@ mod tests {
                 timezone_name: None,
                 twilight: None,
             },
-            settings: SettingsDto {
-                power_save: false,
-                auto_update: true,
-            },
+            settings: SettingsDto { auto_update: true },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
@@ -1196,10 +1247,7 @@ mod tests {
                     },
                 }),
             },
-            settings: SettingsDto {
-                power_save: false,
-                auto_update: true,
-            },
+            settings: SettingsDto { auto_update: true },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
@@ -1241,7 +1289,7 @@ mod tests {
             json["location"]["twilight"]["dusk"]["astronomical_local_time"],
             "19:00:00"
         );
-        assert_eq!(json["settings"]["power_save"], false);
+        assert!(json["settings"].get("power_save").is_none());
         assert_eq!(json["mode"]["active"], "day");
         assert_eq!(json["mode"]["last_change"]["cause"], "schedule");
         assert_eq!(json["mode"]["last_change"]["transition_id"], "day_to_sleep");

@@ -1866,10 +1866,9 @@ pub fn apply_pending_motion_seeds(
                 continue;
             }
 
-            // Idle/soft-off is also an explicit persisted room state. For
-            // inactive startup-prefetch sensors, the room's semantic
-            // lights_on=true should not be mistaken for motion-owned light.
-            if soft_off && !is_active {
+            // Legacy soft-off is treated as off; do not resurrect timers from
+            // stale startup-prefetch state.
+            if soft_off {
                 soft_off_dropped += 1;
                 continue;
             }
@@ -2270,6 +2269,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
             node_id,
             rhythm_enabled,
             disabled,
+            standby_enabled,
             target_state,
             room_profile,
             dispatch_spacing,
@@ -2286,6 +2286,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 &node_id,
                 rhythm_enabled,
                 disabled,
+                standby_enabled,
                 target_state,
                 room_profile.as_ref(),
                 persist_after,
@@ -3348,6 +3349,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings {
                     motion_timeout_secs: Some(TimerSetting::Fixed {
@@ -3949,6 +3952,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -3998,6 +4003,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4060,6 +4067,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4170,6 +4179,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4231,6 +4242,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4285,6 +4298,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4338,6 +4353,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: true,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4364,6 +4381,7 @@ mod tests {
                 node_id: "room_a".into(),
                 rhythm_enabled: None,
                 disabled: None,
+                standby_enabled: None,
                 target_state: Some(rhythm_core::RoomModeState::Active),
                 room_profile: None,
                 dispatch_spacing: Duration::from_secs(3),
@@ -4447,6 +4465,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4764,6 +4784,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -4915,6 +4937,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             }],
@@ -5659,7 +5683,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_active_seed_dispatches_turn_on_for_soft_off_room() {
+    fn apply_active_seed_drops_soft_off_room() {
         let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
         let state = make_state_with_counted_turn_on(
             soft_off_room_snapshot("room_a"),
@@ -5670,17 +5694,13 @@ mod tests {
         let mut motion = MotionTimerState::new();
         let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
 
-        wait_for_atomic_at_least(&turn_on_room_calls, 1);
-        assert!(dirty);
-        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(!dirty);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 0);
         assert!(
-            motion.motion_owned.contains("room_a"),
-            "active prefetch should claim motion ownership"
+            !motion.motion_owned.contains("room_a"),
+            "legacy soft_off startup seeds should be dropped"
         );
-        assert_eq!(
-            motion.sensors["sensor_1"].stopped_at, None,
-            "active prefetch should seed an active source"
-        );
+        assert!(motion.sensors.is_empty());
     }
 
     /// A stale startup prefetch must not overwrite a source that already
@@ -5804,6 +5824,8 @@ mod tests {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off,
+            mood_active: false,
+            standby_enabled: false,
             hard_off,
             profile_settings: RoomProfileSettings::default(),
         }

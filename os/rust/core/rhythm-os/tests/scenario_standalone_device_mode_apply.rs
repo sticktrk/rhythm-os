@@ -74,6 +74,7 @@ fn manual_transition_dispatches_to_roomless_light_device() {
         &standalone_id,
         Some(true),
         Some(false),
+        None,
         Some(RoomModeState::Active),
         None,
         false,

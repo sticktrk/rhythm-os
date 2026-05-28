@@ -553,7 +553,7 @@ impl TestHarness {
             .unwrap_or(0)
     }
 
-    /// Set room preferences (rhythm_enabled, disabled, soft_off).
+    /// Set room preferences (rhythm_enabled, disabled, legacy soft_off/standby).
     pub fn set_room_preferences(
         &self,
         room_id: &str,
@@ -564,7 +564,7 @@ impl TestHarness {
         let resolved = self.resolve(room_id);
         let target_state = soft_off.map(|soft_off| {
             if soft_off {
-                rhythm_core::RoomModeState::Idle
+                rhythm_core::RoomModeState::Standby
             } else {
                 rhythm_core::RoomModeState::Active
             }
@@ -574,8 +574,29 @@ impl TestHarness {
             &resolved,
             rhythm_enabled,
             disabled,
+            None,
             target_state,
             None,
+            false,
+        )
+        .expect("do_node_preferences_set failed");
+    }
+
+    /// Set legacy mood compatibility fields for a room.
+    pub fn set_room_mood_enabled(&self, room_id: &str, enabled: bool) {
+        let resolved = self.resolve(room_id);
+        let patch = commands::RoomProfileSettingsPatch {
+            mood_enabled: Some(Some(enabled)),
+            ..Default::default()
+        };
+        commands::do_node_preferences_set(
+            &self.state,
+            &resolved,
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
             false,
         )
         .expect("do_node_preferences_set failed");

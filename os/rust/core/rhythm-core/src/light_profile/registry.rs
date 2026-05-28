@@ -324,16 +324,28 @@ impl LightProfileRegistry {
         }
 
         let mode_config = self.mode_config_or_default(mode);
-        let state_config = mode_config
-            .resolve_state_profile_id(state, active_profile_id.as_str())
-            .and_then(|target_id| self.profile_config_cloned(target_id))
-            .unwrap_or_else(|| {
-                if matches!(state, RoomModeState::Idle | RoomModeState::HardOff) {
-                    Self::default_idle_profile_for_mode(mode)
-                } else {
-                    active_config.clone()
-                }
-            });
+        let state_config = if state == RoomModeState::Mood {
+            settings
+                .and_then(|settings| settings.mood_profile_id.as_deref())
+                .and_then(|target_id| self.profile_config_cloned(target_id))
+        } else {
+            None
+        }
+        .or_else(|| {
+            mode_config
+                .resolve_state_profile_id(state, active_profile_id.as_str())
+                .and_then(|target_id| self.profile_config_cloned(target_id))
+        })
+        .unwrap_or_else(|| {
+            if matches!(
+                state,
+                RoomModeState::Mood | RoomModeState::Standby | RoomModeState::HardOff
+            ) {
+                Self::default_idle_profile_for_mode(mode)
+            } else {
+                active_config.clone()
+            }
+        });
 
         self.profile_for_config_with_active(&state_config, active_profile)
     }
@@ -564,7 +576,7 @@ mod tests {
 
         let active = registry.active_profile().calculate(&ctx);
         let idle = registry
-            .profile_for_room_state(RhythmMode::Day, RoomModeState::Idle, None)
+            .profile_for_room_state(RhythmMode::Day, RoomModeState::Mood, None)
             .calculate(&ctx);
 
         assert_eq!(idle.brightness, 1);
@@ -591,7 +603,7 @@ mod tests {
 
         let ctx = test_context(12.0);
         let idle = registry
-            .profile_for_room_state(RhythmMode::Sleep, RoomModeState::Idle, None)
+            .profile_for_room_state(RhythmMode::Sleep, RoomModeState::Mood, None)
             .calculate(&ctx);
 
         assert_eq!(idle.brightness, 1);
@@ -641,7 +653,7 @@ mod tests {
             Some(&settings),
         );
         let idle =
-            registry.profile_for_room_state(RhythmMode::Day, RoomModeState::Idle, Some(&settings));
+            registry.profile_for_room_state(RhythmMode::Day, RoomModeState::Mood, Some(&settings));
         let ctx = test_context(12.0);
         let active_values = active.calculate(&ctx);
         let idle_values = idle.calculate(&ctx);
@@ -682,7 +694,7 @@ mod tests {
         }]);
 
         let idle = registry
-            .profile_for_room_state(RhythmMode::Day, RoomModeState::Idle, None)
+            .profile_for_room_state(RhythmMode::Day, RoomModeState::Mood, None)
             .calculate(&ctx);
 
         assert_eq!(idle.brightness, 1);

@@ -170,11 +170,11 @@ fn composite_turn_off_fans_out() {
     hue_spy.reset();
     ha_spy.reset();
 
-    // OffPress → soft-off (on at 1% brightness, not hard off)
+    // OffPress → true off.
     let input = InputEvent::new("kitchen", rhythm_core::ButtonAction::OffPress);
     runtime.handle_event(&input).unwrap();
 
-    // Hue: set_grouped_light(on=true, brightness=1) — soft-off
+    // Hue: set_grouped_light(on=false).
     let hue_calls = hue_spy.set_grouped_light_calls();
     assert_eq!(hue_calls.len(), 1);
     match &hue_calls[0] {
@@ -184,21 +184,17 @@ fn composite_turn_off_fans_out() {
             brightness,
             ..
         } => {
-            assert!(*on, "Soft-off sends on=true at min brightness");
-            assert_eq!(*brightness, Some(1), "Soft-off brightness should be 1%");
+            assert!(!*on, "OffPress sends on=false");
+            assert_eq!(*brightness, None, "hard-off should not send brightness");
             assert_eq!(grouped_light_id, "gl-kitchen");
         }
         _ => unreachable!(),
     }
 
-    // HA: call_service("light", "turn_on") with soft-off brightness
-    let ha_calls = ha_spy.calls_for_service("turn_on");
+    // HA: call_service("light", "turn_off").
+    let ha_calls = ha_spy.calls_for_service("turn_off");
     assert_eq!(ha_calls.len(), 1);
     assert_eq!(ha_calls[0].data["area_id"], "ha-kitchen");
-    assert_eq!(
-        ha_calls[0].data["brightness_pct"], 1,
-        "Soft-off brightness should be 1%"
-    );
 }
 
 #[test]
@@ -303,12 +299,10 @@ fn composite_rhythm_off_no_transport_calls() {
 }
 
 #[test]
-fn composite_off_press_partial_failure_still_dims_working_hub() {
+fn composite_off_press_partial_failure_still_turns_off_working_hub() {
     // Asymmetric to `composite_partial_failure_succeeds` (which covered Reset).
-    // OffPress is the more important path because soft-off is what the user
-    // expects to "dim everything" — losing one hub's bulbs to a transient
-    // failure must not silently turn the request into a no-op on the working
-    // hub.
+    // OffPress must not silently become a no-op on the working hub if another
+    // hub has a transient failure.
     let (runtime, hue_spy, ha_spy, _composite) = make_composite_pipeline();
     runtime.set_power_save(false);
 
@@ -323,12 +317,8 @@ fn composite_off_press_partial_failure_still_dims_working_hub() {
     let result = runtime.handle_event(&off);
     assert!(result.is_ok(), "OffPress must succeed when one hub works");
 
-    // HA must still receive bri=1 even though Hue failed.
-    let ha_calls = ha_spy.calls_for_service("turn_on");
-    assert_eq!(ha_calls.len(), 1, "HA should receive the soft-off");
+    // HA must still receive turn_off even though Hue failed.
+    let ha_calls = ha_spy.calls_for_service("turn_off");
+    assert_eq!(ha_calls.len(), 1, "HA should receive hard-off");
     assert_eq!(ha_calls[0].data["area_id"], "ha-kitchen");
-    assert_eq!(
-        ha_calls[0].data["brightness_pct"], 1,
-        "Working hub must still receive 1% brightness"
-    );
 }

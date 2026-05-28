@@ -4,8 +4,8 @@
 //! - short press → `Reset` (clears offsets, enables rhythm, turns on)
 //! - long press → `OnPress` (plain on, preserves offsets)
 //!
-//! These cover daily flows that exercise transitions out of soft-off and
-//! hard-off back into adaptive lighting.
+//! These cover daily flows that exercise transitions out of hard-off back into
+//! adaptive lighting.
 
 mod harness;
 
@@ -33,7 +33,7 @@ fn top_short_press_from_hard_off_turns_on_adaptive() {
 }
 
 #[test]
-fn top_short_press_from_soft_off_resumes_adaptive() {
+fn top_short_press_from_off_press_resumes_adaptive() {
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
@@ -47,11 +47,11 @@ fn top_short_press_from_soft_off_resumes_adaptive() {
     h.action("kitchen", "on").unwrap();
 
     let calls = spy.turn_on_calls();
-    assert_eq!(calls.len(), 1, "on after soft-off should dispatch turn_on");
+    assert_eq!(calls.len(), 1, "on after off should dispatch turn_on");
     let cmd = &calls[0].1;
     assert!(
         cmd.brightness > 1,
-        "soft-off→on must lift brightness above 1%, got {}",
+        "off→on must lift brightness above 1%, got {}",
         cmd.brightness
     );
 }

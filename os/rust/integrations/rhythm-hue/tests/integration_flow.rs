@@ -173,7 +173,7 @@ fn sse_button_off_press_defaults_to_hard_off() {
 }
 
 #[test]
-fn sse_button_off_press_sends_soft_off_when_power_save_disabled() {
+fn sse_button_off_press_stays_hard_off_when_power_save_disabled() {
     let (runtime, registry, spy) = make_hue_pipeline();
     runtime.set_power_save(false);
 
@@ -214,8 +214,8 @@ fn sse_button_off_press_sends_soft_off_when_power_save_disabled() {
             brightness,
             ..
         } => {
-            assert!(*on, "non-powersave OffPress should soft-off");
-            assert_eq!(*brightness, Some(1), "soft-off brightness should be 1%");
+            assert!(!*on, "power_save-disabled OffPress should hard-off");
+            assert_eq!(*brightness, None, "hard-off should not send brightness");
             assert_eq!(grouped_light_id, "gl-room1");
         }
         other => panic!("Expected SetGroupedLight, got {:?}", other),

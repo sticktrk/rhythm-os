@@ -711,9 +711,9 @@ mod tests {
 
     static DRY_RUN_INIT: Once = Once::new();
 
-    // The restart helper spawns a thread that sleeps 1s then either reboots the
-    // device or calls process::exit(1). Setting this env var keeps the spawned
-    // thread inert so tests can exercise the route without nuking the runner.
+    // Keep the legacy dry-run env initialized for routes that inspect it
+    // directly. Scheduled restart threads are also forced to dry-run under
+    // cfg(test), so parallel tests cannot exit the runner asynchronously.
     fn init_restart_dry_run() {
         DRY_RUN_INIT.call_once(|| std::env::set_var("RHYTHM_RESTART_DRY_RUN", "1"));
     }

@@ -2,13 +2,13 @@
 //!
 //! Tests motion sensor state interactions visible in the room grid UI. Motion
 //! sensors are a key feature shown per-room, and their interaction with manual
-//! actions and soft-off needs scenario coverage.
+//! actions and Standby state needs scenario coverage.
 //!
 //! ## API journey
 //!
 //! 1. Room grid shows motion icon on rooms with motion sensors
 //! 2. Manual actions override motion state
-//! 3. Soft-off works while motion state is active
+//! 3. Standby requests stay Standby while motion state is active
 
 mod harness;
 
@@ -79,13 +79,13 @@ fn lights_off_does_not_clear_motion_snapshot() {
 }
 
 // ============================================================================
-// Scenario: soft_off on a motion room
+// Scenario: Standby request on a motion room
 // ============================================================================
 
-/// Setting soft_off preference on a motion room should work independently
-/// of motion state.
+/// Setting Standby on a motion room should enter Standby independently of motion
+/// state and queue the motion timer clear.
 #[test]
-fn soft_off_on_motion_room() {
+fn standby_request_enters_standby_on_motion_room() {
     let harness = TestHarness::new().with_discovery(
         vec![room("hallway", "Hallway")],
         vec![motion_sensor("motion_01", "hallway")],
@@ -97,12 +97,13 @@ fn soft_off_on_motion_room() {
     harness.action("hallway", "on").unwrap();
     harness.set_motion_active("hallway");
 
-    // -- Action: set soft_off preference --
+    // -- Action: set Standby preference through the legacy soft_off field --
     harness.set_room_preferences("hallway", None, None, Some(true));
 
-    // -- Assert: soft_off set, motion snapshot still present --
+    // -- Assert: Standby set, motion snapshot still present until the event loop clears it --
     let snap = harness.snapshot("hallway").unwrap();
-    assert!(snap.soft_off, "soft_off should be set");
+    assert!(snap.soft_off, "standby should be set");
+    assert!(!snap.hard_off, "standby should not hard-off the room");
     let resolved = harness.resolve("hallway");
     let has_motion = harness
         .state
@@ -111,4 +112,5 @@ fn soft_off_on_motion_room() {
         .motion_snapshots
         .contains_key(&resolved);
     assert!(has_motion, "motion snapshot should still be present");
+    assert_eq!(harness.pending_motion_clears(), vec![resolved]);
 }

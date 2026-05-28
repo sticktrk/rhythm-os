@@ -5,11 +5,9 @@
 
 use serde::Serialize;
 
-use rhythm_core::{
-    ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState, RoomProfileSettings,
-};
+use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState};
 
-use crate::api_types::{LightBreakerDto, ObservedPowerDto, SettingsDto};
+use crate::api_types::{LightBreakerDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto};
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
 use crate::state::MotionSnapshot;
 
@@ -223,12 +221,15 @@ pub struct NodeStateEvent {
     pub brightness: u8,
     /// Effective color temperature in Kelvin.
     pub kelvin: u16,
+    pub mood_enabled: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
+    pub standby_active: bool,
     /// `true` when this event was triggered by the periodic rhythm tick.
     /// Absent (or `false`) for user actions, polls, and other state changes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tick: bool,
-    #[serde(default, skip_serializing_if = "RoomProfileSettings::is_empty")]
-    pub profile_settings: RoomProfileSettings,
+    pub profile_settings: RoomProfileSettingsDto,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +242,10 @@ pub(crate) struct NodeStateEventParams {
     pub transitioning: bool,
     pub brightness: u8,
     pub kelvin: u16,
+    pub mood_enabled: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
+    pub standby_active: bool,
 }
 
 impl NodeStateEvent {
@@ -255,6 +260,10 @@ impl NodeStateEvent {
             transitioning,
             brightness,
             kelvin,
+            mood_enabled,
+            mood_active,
+            standby_enabled,
+            standby_active,
         } = params;
         Self {
             id: snap.id.clone(),
@@ -269,8 +278,15 @@ impl NodeStateEvent {
             transitioning,
             brightness,
             kelvin,
+            mood_enabled,
+            mood_active,
+            standby_enabled,
+            standby_active,
             tick: false,
-            profile_settings: snap.profile_settings.clone(),
+            profile_settings: RoomProfileSettingsDto::from_settings(
+                &snap.profile_settings,
+                mood_enabled,
+            ),
         }
     }
 }
@@ -308,10 +324,7 @@ mod tests {
     #[test]
     fn server_event_serializes_with_tagged_type_and_data() {
         let event = ServerEvent::SettingsChanged {
-            settings: SettingsDto {
-                power_save: true,
-                auto_update: true,
-            },
+            settings: SettingsDto { auto_update: true },
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -320,9 +333,8 @@ mod tests {
             json
         );
         assert!(
-            json.contains("\"power_save\":true"),
-            "expected settings payload, got {}",
-            json
+            !json.contains("power_save"),
+            "unexpected power_save: {json}"
         );
         assert!(
             json.contains("\"auto_update\":true"),
@@ -513,10 +525,7 @@ mod tests {
         // Push more events than the channel capacity.
         for _ in 0..32 {
             let _ = tx.send(ServerEvent::SettingsChanged {
-                settings: SettingsDto {
-                    power_save: false,
-                    auto_update: true,
-                },
+                settings: SettingsDto { auto_update: true },
             });
         }
 
@@ -562,10 +571,7 @@ mod tests {
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(4);
         drop(rx);
         let result = tx.send(ServerEvent::SettingsChanged {
-            settings: SettingsDto {
-                power_save: false,
-                auto_update: true,
-            },
+            settings: SettingsDto { auto_update: true },
         });
         assert!(
             result.is_err(),

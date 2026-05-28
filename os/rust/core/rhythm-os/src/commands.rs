@@ -14,10 +14,10 @@ use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
-    ButtonAction, HubDispatchTarget, InputEvent, LightNodeKind, LightProfileConfig,
-    LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig,
-    ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, RhythmMode, RoomModeState,
-    RoomProfileSettings, RuntimeHandle, TimerSetting,
+    ButtonAction, HubDispatchTarget, InputEvent, LightDirectColor, LightNodeKind,
+    LightProfileConfig, LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig,
+    ModeTransitionConfig, ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb,
+    RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
 };
 use serde_json::Value;
 
@@ -26,8 +26,8 @@ use crate::api_types::{
     HubStartupRetryDto, InputBindingsDto, LightBreakerDto, LocationDto, ModeLastChangeDto,
     ModeSettingsDto, ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto,
     PreferredEndpointDto, ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto,
-    ReviewSummaryDto, RoomPollState, RoomRhythmState, RoomsPollResponse, SettingsDto,
-    StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
+    ReviewSummaryDto, RoomPollState, RoomProfileSettingsDto, RoomRhythmState, RoomsPollResponse,
+    SettingsDto, StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
@@ -219,7 +219,7 @@ impl ModeOutputApplyScope {
     fn includes(self, room_state: RoomModeState) -> bool {
         match room_state {
             RoomModeState::Active => self.active,
-            RoomModeState::Idle => self.idle,
+            RoomModeState::Mood | RoomModeState::Standby => self.idle,
             RoomModeState::Wake => self.wake,
             RoomModeState::Warning => self.warning,
             RoomModeState::HardOff => false,
@@ -514,7 +514,7 @@ fn compute_room_display_values_for_settings_from_parts(
     let adjusted_brightness =
         (values.brightness as f32 + room.brightness_offset).clamp(1.0, 100.0) as u8;
     let brightness = match render_state {
-        RoomModeState::Idle => values.brightness,
+        RoomModeState::Mood | RoomModeState::Standby => values.brightness,
         RoomModeState::Warning
             if !warning_uses_custom_profile(lighting.mode_configs, lighting.mode) =>
         {
@@ -555,16 +555,140 @@ fn compute_room_display_values_for_settings(
     )
 }
 
-fn room_mode_state_from_flags(
+fn room_mood_enabled(_power_save: bool, settings: &RoomProfileSettings) -> bool {
+    settings.mood_enabled_or(true)
+}
+
+fn room_mood_active(
+    power_save: bool,
+    settings: &RoomProfileSettings,
     hard_off: bool,
+    mood_active: bool,
+    soft_off: bool,
+) -> bool {
+    let _ = (power_save, settings, soft_off);
+    mood_active && !hard_off
+}
+
+fn room_mode_state_for_settings(
+    _power_save: bool,
+    _settings: &RoomProfileSettings,
+    hard_off: bool,
+    mood_active: bool,
     soft_off: bool,
     warning_active: bool,
 ) -> RoomModeState {
-    RoomModeState::from_flags(hard_off, soft_off, warning_active)
+    if hard_off {
+        RoomModeState::HardOff
+    } else if warning_active {
+        RoomModeState::Warning
+    } else if mood_active {
+        RoomModeState::Mood
+    } else if soft_off {
+        RoomModeState::Standby
+    } else {
+        RoomModeState::Active
+    }
 }
 
-fn persistent_room_state_from_flags(hard_off: bool, soft_off: bool) -> RoomModeState {
-    room_mode_state_from_flags(hard_off, soft_off, false)
+fn persistent_room_state_for_settings(
+    power_save: bool,
+    settings: &RoomProfileSettings,
+    hard_off: bool,
+    mood_active: bool,
+    soft_off: bool,
+) -> RoomModeState {
+    room_mode_state_for_settings(power_save, settings, hard_off, mood_active, soft_off, false)
+}
+
+fn normalize_legacy_state_flags(
+    soft_off: bool,
+    mood_active: bool,
+    hard_off: bool,
+) -> (bool, bool, bool) {
+    let soft_off = soft_off && !hard_off && !mood_active;
+    let mood_active = mood_active && !hard_off && !soft_off;
+    (soft_off, mood_active, hard_off)
+}
+
+fn normalize_legacy_soft_off_room(mut room: rhythm_core::Room) -> rhythm_core::Room {
+    let (soft_off, mood_active, hard_off) =
+        normalize_legacy_state_flags(room.soft_off, room.mood_active, room.hard_off);
+    room.soft_off = soft_off;
+    room.mood_active = mood_active;
+    room.hard_off = hard_off;
+    room
+}
+
+fn restored_room_state_from_snapshot(snap: &rhythm_core::RoomSnapshot) -> RestoredRoomState {
+    let (soft_off, mood_active, hard_off) =
+        normalize_legacy_state_flags(snap.soft_off, snap.mood_active, snap.hard_off);
+    RestoredRoomState {
+        rhythm_enabled: snap.rhythm_enabled,
+        disabled: snap.disabled,
+        time_offset_minutes: snap.time_offset_minutes,
+        brightness_offset: snap.brightness_offset,
+        soft_off,
+        mood_active,
+        standby_enabled: snap.standby_enabled,
+        hard_off,
+        profile_settings: snap.profile_settings.clone(),
+    }
+}
+
+fn restored_room_state_from_room(room: &rhythm_core::Room) -> RestoredRoomState {
+    let (soft_off, mood_active, hard_off) =
+        normalize_legacy_state_flags(room.soft_off, room.mood_active, room.hard_off);
+    RestoredRoomState {
+        rhythm_enabled: room.rhythm_enabled,
+        disabled: room.disabled,
+        time_offset_minutes: room.time_offset_minutes,
+        brightness_offset: room.brightness_offset,
+        soft_off,
+        mood_active,
+        standby_enabled: room.standby_enabled,
+        hard_off,
+        profile_settings: room.profile_settings.clone(),
+    }
+}
+
+fn restored_node_state_from_snapshot(snap: &rhythm_core::NodeSnapshot) -> RestoredNodeState {
+    let (soft_off, mood_active, hard_off) =
+        normalize_legacy_state_flags(snap.soft_off, snap.mood_active, snap.hard_off);
+    RestoredNodeState {
+        rhythm_enabled: snap.rhythm_enabled,
+        disabled: snap.disabled,
+        time_offset_minutes: snap.time_offset_minutes,
+        brightness_offset: snap.brightness_offset,
+        soft_off,
+        mood_active,
+        standby_enabled: snap.standby_enabled,
+        hard_off,
+        profile_settings: snap.profile_settings.clone(),
+    }
+}
+
+fn restored_node_state_from_room(room: &rhythm_core::Room) -> RestoredNodeState {
+    let (soft_off, mood_active, hard_off) =
+        normalize_legacy_state_flags(room.soft_off, room.mood_active, room.hard_off);
+    RestoredNodeState {
+        rhythm_enabled: room.rhythm_enabled,
+        disabled: room.disabled,
+        time_offset_minutes: room.time_offset_minutes,
+        brightness_offset: room.brightness_offset,
+        soft_off,
+        mood_active,
+        standby_enabled: room.standby_enabled,
+        hard_off,
+        profile_settings: room.profile_settings.clone(),
+    }
+}
+
+fn profile_settings_dto(
+    power_save: bool,
+    settings: &RoomProfileSettings,
+) -> RoomProfileSettingsDto {
+    RoomProfileSettingsDto::from_settings(settings, room_mood_enabled(power_save, settings))
 }
 
 fn room_mode_transition_active(
@@ -588,11 +712,12 @@ fn active_transition_room_ids(
         .collect()
 }
 
-fn room_flags_for_target_state(state: RoomModeState) -> Result<(bool, bool)> {
+fn room_flags_for_target_state(state: RoomModeState) -> Result<(bool, bool, bool)> {
     match state {
-        RoomModeState::Active => Ok((false, false)),
-        RoomModeState::Idle => Ok((true, false)),
-        RoomModeState::HardOff => Ok((false, true)),
+        RoomModeState::Active => Ok((false, false, false)),
+        RoomModeState::Mood => Ok((false, true, false)),
+        RoomModeState::Standby => Ok((true, false, false)),
+        RoomModeState::HardOff => Ok((false, false, true)),
         RoomModeState::Wake | RoomModeState::Warning => Err(anyhow::anyhow!(
             "Room state '{}' cannot be set directly",
             serde_json::to_string(&state).unwrap_or_else(|_| "\"invalid\"".to_string())
@@ -600,12 +725,13 @@ fn room_flags_for_target_state(state: RoomModeState) -> Result<(bool, bool)> {
     }
 }
 
-fn room_state_for_power_save(power_save: bool, state: RoomModeState) -> RoomModeState {
-    if power_save && matches!(state, RoomModeState::Idle) {
-        RoomModeState::HardOff
-    } else {
-        state
-    }
+fn room_state_for_mood_setting(
+    power_save: bool,
+    settings: &RoomProfileSettings,
+    state: RoomModeState,
+) -> RoomModeState {
+    let _ = (power_save, settings);
+    state
 }
 
 fn clear_room_mode_transition(state: &SharedState, room_id: &str) {
@@ -742,6 +868,8 @@ fn resolved_room_motion_timeout_secs_from_parts(
 pub struct RoomProfileSettingsPatch {
     pub clear_all: bool,
     pub profile_id: Option<Option<String>>,
+    pub mood_enabled: Option<Option<bool>>,
+    pub mood_profile_id: Option<Option<String>>,
     pub fade_ms: Option<Option<TimerSetting>>,
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
 }
@@ -756,6 +884,12 @@ impl RoomProfileSettingsPatch {
         if let Some(profile_id) = &self.profile_id {
             settings.profile_id = profile_id.clone();
         }
+        if let Some(mood_enabled) = &self.mood_enabled {
+            settings.mood_enabled = *mood_enabled;
+        }
+        if let Some(mood_profile_id) = &self.mood_profile_id {
+            settings.mood_profile_id = mood_profile_id.clone();
+        }
         if let Some(fade_ms) = &self.fade_ms {
             settings.fade_ms = fade_ms.clone();
         }
@@ -767,6 +901,8 @@ impl RoomProfileSettingsPatch {
     fn touches_profile_settings(&self) -> bool {
         self.clear_all
             || self.profile_id.is_some()
+            || self.mood_enabled.is_some()
+            || self.mood_profile_id.is_some()
             || self.fade_ms.is_some()
             || self.motion_timeout_secs.is_some()
     }
@@ -873,9 +1009,17 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
             .attached_light_uses_parent_dispatch(node_id, &s.canonical_registry)
 }
 
-fn semantic_lights_on_override(power_save: bool, hard_off: bool, soft_off: bool) -> Option<bool> {
-    if hard_off || (soft_off && power_save) {
+fn semantic_lights_on_override(
+    _power_save: bool,
+    _settings: &RoomProfileSettings,
+    hard_off: bool,
+    mood_active: bool,
+    soft_off: bool,
+) -> Option<bool> {
+    if hard_off {
         Some(false)
+    } else if mood_active {
+        Some(true)
     } else if soft_off {
         Some(true)
     } else {
@@ -1177,7 +1321,13 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
     }
 
     let power_save = state.lock().ok().is_some_and(|s| s.power_save);
-    let semantic_override = semantic_lights_on_override(power_save, snap.hard_off, snap.soft_off);
+    let semantic_override = semantic_lights_on_override(
+        power_save,
+        &snap.profile_settings,
+        snap.hard_off,
+        snap.mood_active,
+        snap.soft_off,
+    );
     let observation_source = if semantic_override.is_some() {
         ObservedPowerSource::SemanticOverride
     } else {
@@ -1282,8 +1432,13 @@ pub(crate) fn refresh_all_lights_on_cache_for_runtime(
         }
 
         let power_save = state.lock().ok().is_some_and(|s| s.power_save);
-        let semantic_override =
-            semantic_lights_on_override(power_save, snap.hard_off, snap.soft_off);
+        let semantic_override = semantic_lights_on_override(
+            power_save,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        );
         let lights_on = if let Some(lights_on) = semantic_override {
             lights_on
         } else {
@@ -1402,14 +1557,35 @@ fn build_node_state_dto_from_snapshot_parts(
         .motion_snapshots
         .get(&snap.id)
         .is_some_and(|motion| motion.warning_active);
-    let state = room_mode_state_from_flags(snap.hard_off, snap.soft_off, warning_active);
+    let mood_enabled = room_mood_enabled(ctx.state.power_save, &snap.profile_settings);
+    let mood_active = room_mood_active(
+        ctx.state.power_save,
+        &snap.profile_settings,
+        snap.hard_off,
+        snap.mood_active,
+        snap.soft_off,
+    );
+    let state = room_mode_state_for_settings(
+        ctx.state.power_save,
+        &snap.profile_settings,
+        snap.hard_off,
+        snap.mood_active,
+        snap.soft_off,
+        warning_active,
+    );
     let observed_power = observed_power_from_cache(
         ctx.state,
         ctx.room_observed_power,
         &snap.id,
         snap.kind,
         effective_parent_id.as_deref(),
-        semantic_lights_on_override(ctx.state.power_save, snap.hard_off, snap.soft_off),
+        semantic_lights_on_override(
+            ctx.state.power_save,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        ),
     );
     let (brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
         RoomLightingContext {
@@ -1478,7 +1654,11 @@ fn build_node_state_dto_from_snapshot_parts(
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
         brightness,
         kelvin,
-        profile_settings: snap.profile_settings.clone(),
+        mood_enabled,
+        mood_active,
+        standby_enabled: snap.standby_enabled,
+        standby_active: snap.soft_off && !snap.hard_off,
+        profile_settings: profile_settings_dto(ctx.state.power_save, &snap.profile_settings),
         motion_active,
         motion_owned,
         remaining_secs,
@@ -1490,19 +1670,33 @@ fn build_node_state_dto_from_snapshot_parts(
 /// Build a NodeStateEvent for an addressable node, computing display values
 /// from AppState.
 ///
-/// For soft-off nodes, brightness is the soft-off percentage (not curve value).
-/// Kelvin is always from the curve (soft-off tracks color temp).
+/// Hard-off nodes report off brightness while active nodes report profile output.
 pub fn build_node_state_event(
     state: &SharedState,
     snap: &rhythm_core::NodeSnapshot,
 ) -> crate::server_event::NodeStateEvent {
     let now = std::time::Instant::now();
-    let (mode, room_state, observed_power, transitioning, brightness, kelvin, hub_types) = {
+    let (
+        mode,
+        room_state,
+        observed_power,
+        transitioning,
+        brightness,
+        kelvin,
+        hub_types,
+        mood_enabled,
+        mood_active,
+        standby_enabled,
+        standby_active,
+    ) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
         let mode_configs = s.mode_configs();
-        let room_state = room_mode_state_from_flags(
+        let room_state = room_mode_state_for_settings(
+            s.power_save,
+            &snap.profile_settings,
             snap.hard_off,
+            snap.mood_active,
             snap.soft_off,
             s.motion_snapshots
                 .get(&snap.id)
@@ -1514,10 +1708,26 @@ pub fn build_node_state_event(
             &snap.id,
             snap.kind,
             snap.parent_id.as_deref(),
-            semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
+            semantic_lights_on_override(
+                s.power_save,
+                &snap.profile_settings,
+                snap.hard_off,
+                snap.mood_active,
+                snap.soft_off,
+            ),
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
+        let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
+        let mood_active = room_mood_active(
+            s.power_save,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        );
+        let standby_enabled = snap.standby_enabled;
+        let standby_active = snap.soft_off && !snap.hard_off;
         let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
             RoomLightingContext {
                 light_profile_configs: &s.light_profile_configs,
@@ -1544,6 +1754,10 @@ pub fn build_node_state_event(
             curve_brightness,
             kelvin,
             hub_types,
+            mood_enabled,
+            mood_active,
+            standby_enabled,
+            standby_active,
         )
     };
     crate::server_event::NodeStateEvent::from_snapshot(
@@ -1557,6 +1771,10 @@ pub fn build_node_state_event(
             transitioning,
             brightness,
             kelvin,
+            mood_enabled,
+            mood_active,
+            standby_enabled,
+            standby_active,
         },
     )
 }
@@ -2499,6 +2717,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         topo_hub_types,
         rooms_with_sensors,
         transitioning_rooms,
+        power_save,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let now = std::time::Instant::now();
@@ -2528,6 +2747,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             topology_hub_types_map(&s),
             sensor_rooms,
             active_transition_room_ids(&s.room_mode_transitions, now),
+            s.power_save,
         )
     };
 
@@ -2548,10 +2768,27 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 &snap.id,
                 snap.kind,
                 snap.parent_id.as_deref(),
-                semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
+                semantic_lights_on_override(
+                    s.power_save,
+                    &snap.profile_settings,
+                    snap.hard_off,
+                    snap.mood_active,
+                    snap.soft_off,
+                ),
             );
-            let room_state = room_mode_state_from_flags(
+            let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
+            let mood_active = room_mood_active(
+                s.power_save,
+                &snap.profile_settings,
                 snap.hard_off,
+                snap.mood_active,
+                snap.soft_off,
+            );
+            let room_state = room_mode_state_for_settings(
+                s.power_save,
+                &snap.profile_settings,
+                snap.hard_off,
+                snap.mood_active,
                 snap.soft_off,
                 motion_snapshots
                     .get(&snap.id)
@@ -2582,6 +2819,11 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 transitioning: transitioning_rooms.contains(&snap.id),
                 brightness: curve_brightness,
                 kelvin,
+                mood_enabled,
+                mood_active,
+                standby_enabled: snap.standby_enabled,
+                standby_active: snap.soft_off && !snap.hard_off,
+                profile_settings: profile_settings_dto(s.power_save, &snap.profile_settings),
                 room_profile: snap.profile_settings.clone(),
             };
             let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
@@ -2624,7 +2866,22 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         }
     } else if let Some(ref mgr) = storage_rooms {
         for room in mgr.iter() {
-            let room_state = room_mode_state_from_flags(room.hard_off, room.soft_off, false);
+            let mood_enabled = room_mood_enabled(power_save, &room.profile_settings);
+            let mood_active = room_mood_active(
+                power_save,
+                &room.profile_settings,
+                room.hard_off,
+                room.mood_active,
+                room.soft_off,
+            );
+            let room_state = room_mode_state_for_settings(
+                power_save,
+                &room.profile_settings,
+                room.hard_off,
+                room.mood_active,
+                room.soft_off,
+                false,
+            );
             let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
                 RoomLightingContext {
                     light_profile_configs: &light_profile_configs,
@@ -2656,6 +2913,11 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     transitioning: false,
                     brightness: curve_brightness,
                     kelvin,
+                    mood_enabled,
+                    mood_active,
+                    standby_enabled: room.standby_enabled,
+                    standby_active: room.soft_off && !room.hard_off,
+                    profile_settings: profile_settings_dto(power_save, &room.profile_settings),
                     room_profile: room.profile_settings.clone(),
                 },
                 motion_active: None,
@@ -2677,7 +2939,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
     let now = std::time::Instant::now();
-    let (runtime, room_observed_power, warning_active, transitioning, hub_types) = {
+    let (runtime, room_observed_power, warning_active, transitioning, hub_types, power_save) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -2687,6 +2949,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
                 .is_some_and(|motion| motion.warning_active),
             room_mode_transition_active(&s.room_mode_transitions, room_id, now),
             room_hub_types_from_topology(&s, room_id),
+            s.power_save,
         )
     };
 
@@ -2694,7 +2957,22 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
     let snap = runtime
         .engine_room_snapshot(room_id)
         .ok_or_else(|| anyhow::anyhow!("Room '{}' not found in engine", room_id))?;
-    let room_state = room_mode_state_from_flags(snap.hard_off, snap.soft_off, warning_active);
+    let mood_enabled = room_mood_enabled(power_save, &snap.profile_settings);
+    let mood_active = room_mood_active(
+        power_save,
+        &snap.profile_settings,
+        snap.hard_off,
+        snap.mood_active,
+        snap.soft_off,
+    );
+    let room_state = room_mode_state_for_settings(
+        power_save,
+        &snap.profile_settings,
+        snap.hard_off,
+        snap.mood_active,
+        snap.soft_off,
+        warning_active,
+    );
     let observed_power = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         observed_power_from_cache(
@@ -2703,7 +2981,13 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
             room_id,
             snap.kind,
             snap.parent_id.as_deref(),
-            semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
+            semantic_lights_on_override(
+                s.power_save,
+                &snap.profile_settings,
+                snap.hard_off,
+                snap.mood_active,
+                snap.soft_off,
+            ),
         )
     };
     let (curve_brightness, kelvin) = {
@@ -2729,6 +3013,11 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         transitioning,
         brightness: curve_brightness,
         kelvin,
+        mood_enabled,
+        mood_active,
+        standby_enabled: snap.standby_enabled,
+        standby_active: snap.soft_off && !snap.hard_off,
+        profile_settings: profile_settings_dto(power_save, &snap.profile_settings),
         room_profile: snap.profile_settings.clone(),
     })
 }
@@ -2755,7 +3044,6 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 /// Build `SettingsDto` from an already-locked `AppState`.
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
-        power_save: s.power_save,
         auto_update: s.auto_update,
     }
 }
@@ -2910,6 +3198,8 @@ fn topology_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::N
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         });
@@ -2946,6 +3236,8 @@ fn topology_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::N
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         });
@@ -3006,6 +3298,8 @@ fn registry_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::N
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             });
@@ -3462,6 +3756,10 @@ fn restore_backup_room_manager(
     state: &SharedState,
     rooms: &rhythm_core::RoomManager,
 ) -> Result<()> {
+    let mut normalized_rooms = rhythm_core::RoomManager::new();
+    for room in rooms.iter().cloned().map(normalize_legacy_soft_off_room) {
+        normalized_rooms.add_room(room);
+    }
     let needs_runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let has_runtime = s.hubs.values().any(|hub| hub.runtime.is_some());
@@ -3472,7 +3770,10 @@ fn restore_backup_room_manager(
     }
 
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
-    let desired_ids: HashSet<String> = rooms.iter().map(|room| room.id.clone()).collect();
+    let desired_ids: HashSet<String> = normalized_rooms
+        .iter()
+        .map(|room| room.id.clone())
+        .collect();
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -3493,27 +3794,16 @@ fn restore_backup_room_manager(
             }
         }
 
-        for room in rooms.iter() {
+        for room in normalized_rooms.iter() {
             runtime.add_node(&room.id, &room.name, room.kind, room.parent_id.clone());
-            runtime.restore_node_state(
-                &room.id,
-                RestoredNodeState {
-                    rhythm_enabled: room.rhythm_enabled,
-                    disabled: room.disabled,
-                    time_offset_minutes: room.time_offset_minutes,
-                    brightness_offset: room.brightness_offset,
-                    soft_off: room.soft_off,
-                    hard_off: room.hard_off,
-                    profile_settings: room.profile_settings.clone(),
-                },
-            );
+            runtime.restore_node_state(&room.id, restored_node_state_from_room(room));
         }
 
         persist_rooms(state);
     } else {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         if let Some(storage) = s.storage.as_ref() {
-            if let Err(e) = storage.save_rooms(rooms) {
+            if let Err(e) = storage.save_rooms(&normalized_rooms) {
                 warn!(target: "cmd", "Failed to save restored rooms: {}", e);
             }
         }
@@ -3770,13 +4060,21 @@ fn apply_room_mode_defaults(
             continue;
         };
 
-        let target_state = room_state_for_power_save(ctx.power_save, room_default.state);
-        let current_state = persistent_room_state_from_flags(snap.hard_off, snap.soft_off);
+        let target_state =
+            room_state_for_mood_setting(ctx.power_save, &snap.profile_settings, room_default.state);
+        let current_state = persistent_room_state_for_settings(
+            ctx.power_save,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        );
         if current_state == target_state {
             continue;
         }
 
-        let Ok((soft_off, hard_off)) = room_flags_for_target_state(target_state) else {
+        let Ok((soft_off, mood_active, hard_off)) = room_flags_for_target_state(target_state)
+        else {
             warn!(
                 target: "cmd",
                 "active_mode_apply: ignoring invalid room default state for room '{}'",
@@ -3788,18 +4086,24 @@ fn apply_room_mode_defaults(
         runtime.restore_room_state(
             &snap.id,
             RestoredRoomState {
-                rhythm_enabled: if soft_off { true } else { snap.rhythm_enabled },
+                rhythm_enabled: if soft_off || mood_active {
+                    true
+                } else {
+                    snap.rhythm_enabled
+                },
                 disabled: snap.disabled,
                 time_offset_minutes: snap.time_offset_minutes,
                 brightness_offset: snap.brightness_offset,
                 soft_off,
+                mood_active,
+                standby_enabled: snap.standby_enabled,
                 hard_off,
                 profile_settings: snap.profile_settings.clone(),
             },
         );
 
         match target_state {
-            RoomModeState::Active | RoomModeState::Idle => {
+            RoomModeState::Active | RoomModeState::Mood | RoomModeState::Standby => {
                 lights_on_updates.push((snap.id.clone(), true));
                 non_hard_off_changed_room_ids.push(snap.id.clone());
             }
@@ -3836,7 +4140,7 @@ fn apply_room_mode_defaults(
 
     // Broadcast the engine-state change immediately for non-HardOff targets.
     // The HardOff branch below emits its own event after queueing the off
-    // dispatch. For Active/Idle targets the lighting command is queued
+    // dispatch. For Active/Mood targets the lighting command is queued
     // asynchronously via dispatch_room_commands and only emits its own event
     // when the worker runs, which can be many seconds later (production logs
     // show ~9s on a busy mode change). Without this synchronous emit, every
@@ -4060,6 +4364,244 @@ fn queue_node_dispatch_batch(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeColorScope {
+    Auto,
+    Preview,
+    Mood,
+}
+
+impl Default for NodeColorScope {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NodeColorUpdate {
+    pub rgb: Rgb,
+    pub xy: Option<XyColor>,
+    pub brightness: Option<u8>,
+    pub transition_ms: Option<u32>,
+    pub scope: NodeColorScope,
+}
+
+fn node_mood_profile_id(node_id: &str) -> String {
+    let mut safe_id = String::with_capacity(node_id.len());
+    for byte in node_id.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            safe_id.push(ch);
+        } else {
+            safe_id.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    format!("node_mood_{}", safe_id)
+}
+
+fn node_mood_profile_name(snapshot: &rhythm_core::NodeSnapshot) -> String {
+    if snapshot.name.trim().is_empty() || snapshot.name == snapshot.id {
+        "Mood".to_string()
+    } else {
+        format!("{} Mood", snapshot.name)
+    }
+}
+
+fn set_fixed_profile_brightness(config: &mut LightProfileConfig, brightness: u8) {
+    let brightness = brightness.clamp(1, 100);
+    config.min_brightness = brightness;
+    config.max_brightness = brightness;
+    config.max_dim_steps = 1;
+    if let rhythm_core::LightCurveShape::Constant { brightness, .. } = &mut config.curve {
+        *brightness = 1.0;
+    }
+}
+
+fn fixed_profile_brightness(config: &LightProfileConfig) -> u8 {
+    config
+        .max_brightness
+        .max(config.min_brightness)
+        .clamp(1, 100)
+}
+
+fn set_fixed_profile_color(
+    config: &mut LightProfileConfig,
+    rgb: Rgb,
+    xy: XyColor,
+    brightness: Option<u8>,
+    transition_ms: Option<u32>,
+) {
+    let brightness = brightness
+        .map(|brightness| brightness.clamp(1, 100))
+        .unwrap_or_else(|| fixed_profile_brightness(config));
+    set_fixed_profile_brightness(config, brightness);
+    config.curve = rhythm_core::LightCurveShape::Constant {
+        brightness: 1.0,
+        color_temp: 0.0,
+        direct_color: Some(LightDirectColor { xy, rgb }),
+    };
+    if let Some(transition_ms) = transition_ms {
+        config.fade_ms = TimerSetting::Fixed {
+            value: transition_ms,
+        };
+    }
+}
+
+fn base_mood_profile_config_locked(
+    s: &AppState,
+    snapshot: &rhythm_core::NodeSnapshot,
+    profile_id: &str,
+) -> LightProfileConfig {
+    if let Some(config) = s.light_profile_config(profile_id).cloned() {
+        return config;
+    }
+
+    let mode_configs = s.mode_configs();
+    resolved_profile_config_for_room_state_from_parts(
+        RoomLightingContext {
+            light_profile_configs: &s.light_profile_configs,
+            mode_configs: &mode_configs,
+            mode: s.active_mode,
+            solar_noon: s.solar_noon_hour(),
+            latitude: s.latitude,
+            longitude: s.longitude,
+            timezone_name: s.timezone_name.as_deref(),
+            utc_offset: s.utc_offset_hours,
+        },
+        &snapshot.profile_settings,
+        RoomModeState::Mood,
+    )
+}
+
+fn update_node_mood_profile<F>(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    snapshot: &rhythm_core::NodeSnapshot,
+    persist: bool,
+    mut update: F,
+) -> Result<()>
+where
+    F: FnMut(&mut LightProfileConfig),
+{
+    let (profile, profile_settings) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let profile_id = node_mood_profile_id(node_id);
+        let mut profile = base_mood_profile_config_locked(&s, snapshot, &profile_id);
+        profile.id = profile_id.clone();
+        profile.name = node_mood_profile_name(snapshot);
+        update(&mut profile);
+        s.set_light_profile_config(profile.clone());
+        if persist {
+            persist_light_profiles_locked(&s);
+        }
+
+        let mut profile_settings = snapshot.profile_settings.clone();
+        profile_settings.mood_enabled = Some(true);
+        profile_settings.mood_profile_id = Some(profile_id);
+        (profile, profile_settings)
+    };
+
+    runtime.set_light_profile_config(profile)?;
+
+    let mut restored = RestoredNodeState::from(snapshot);
+    restored.rhythm_enabled = true;
+    restored.soft_off = false;
+    restored.mood_active = true;
+    restored.hard_off = false;
+    restored.profile_settings = profile_settings;
+    runtime.restore_node_state(node_id, restored);
+    clear_room_mode_transition(state, node_id);
+    queue_motion_timer_clear(state, node_id);
+    runtime.mood_tick_room(node_id)?;
+    update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
+    emit_node_state_event_after_apply(state, runtime, node_id);
+
+    if persist {
+        persist_rooms(state);
+    }
+
+    Ok(())
+}
+
+fn do_set_node_mood_brightness(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    snapshot: &rhythm_core::NodeSnapshot,
+    brightness: u8,
+    persist: bool,
+) -> Result<String> {
+    update_node_mood_profile(state, runtime, node_id, snapshot, persist, |profile| {
+        set_fixed_profile_brightness(profile, brightness)
+    })?;
+
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
+}
+
+pub fn do_set_node_color(
+    state: &SharedState,
+    node_id: &str,
+    update: NodeColorUpdate,
+    persist: bool,
+) -> Result<String> {
+    let xy = update
+        .xy
+        .unwrap_or_else(|| rhythm_core::rgb_to_xy(update.rgb));
+    let brightness = update.brightness.map(|brightness| brightness.clamp(1, 100));
+
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snap = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+
+    let persist_as_mood = match update.scope {
+        NodeColorScope::Mood => true,
+        NodeColorScope::Preview => false,
+        NodeColorScope::Auto => room_mood_active(
+            false,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        ),
+    };
+
+    if persist_as_mood {
+        update_node_mood_profile(state, &runtime, node_id, &snap, persist, |profile| {
+            set_fixed_profile_color(profile, update.rgb, xy, brightness, update.transition_ms)
+        })?;
+        return build_node_state(state, node_id).and_then(|node_state| {
+            serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+        });
+    }
+
+    let command = LightingCommand::from_color(
+        brightness.unwrap_or(100),
+        update.rgb,
+        xy,
+        update.transition_ms,
+    );
+    log_room_command_dispatch(runtime.as_ref(), node_id, &command);
+    runtime.apply_room_command(node_id, command)?;
+    clear_room_mode_transition(state, node_id);
+    update_lights_on_cache_for_runtime_node(state, &runtime, node_id, true);
+    emit_node_state_event_after_apply(state, &runtime, node_id);
+    if persist {
+        persist_rooms(state);
+    }
+
+    build_node_state(state, node_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
+}
+
 fn dispatch_room_commands(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -4189,7 +4731,7 @@ fn resolve_room_output_for_state_at_from_parts(
     let adjusted_brightness =
         (values.brightness as f32 + room.brightness_offset).clamp(1.0, 100.0) as u8;
     let brightness = match render_state {
-        RoomModeState::Idle => values.brightness,
+        RoomModeState::Mood | RoomModeState::Standby => values.brightness,
         RoomModeState::Warning
             if !warning_uses_custom_profile(lighting.mode_configs, lighting.mode) =>
         {
@@ -4243,11 +4785,26 @@ fn resolved_profile_config_for_room_state_from_parts(
         .cloned()
         .unwrap_or_else(|| ModeConfig::default_for_mode(lighting.mode));
 
-    mode_config
-        .resolve_state_profile_id(room_state, active_profile_id.as_str())
-        .and_then(|target_id| lighting.light_profile_configs.get(target_id).cloned())
+    let room_mood_config = if room_state == RoomModeState::Mood {
+        settings
+            .mood_profile_id
+            .as_deref()
+            .and_then(|target_id| lighting.light_profile_configs.get(target_id).cloned())
+    } else {
+        None
+    };
+
+    room_mood_config
+        .or_else(|| {
+            mode_config
+                .resolve_state_profile_id(room_state, active_profile_id.as_str())
+                .and_then(|target_id| lighting.light_profile_configs.get(target_id).cloned())
+        })
         .unwrap_or_else(|| {
-            if matches!(room_state, RoomModeState::Idle | RoomModeState::HardOff) {
+            if matches!(
+                room_state,
+                RoomModeState::Mood | RoomModeState::Standby | RoomModeState::HardOff
+            ) {
                 factory_default_idle_profile_config_for_mode(lighting.mode)
             } else {
                 active_config.clone()
@@ -4312,6 +4869,8 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
             time_offset_minutes: node.time_offset_minutes,
             brightness_offset: node.brightness_offset,
             soft_off: node.soft_off,
+            mood_active: node.mood_active,
+            standby_enabled: node.standby_enabled,
             hard_off: node.hard_off,
             profile_settings: node.profile_settings,
         })
@@ -4422,8 +4981,11 @@ fn apply_active_mode_outputs(
     let mut unresolved_rooms = 0usize;
 
     for snap in &snapshots {
-        let room_state = room_mode_state_from_flags(
+        let room_state = room_mode_state_for_settings(
+            power_save,
+            &snap.profile_settings,
             snap.hard_off,
+            snap.mood_active,
             snap.soft_off,
             motion_snapshots
                 .get(&snap.id)
@@ -4444,7 +5006,7 @@ fn apply_active_mode_outputs(
         }
 
         let is_visible = match room_state {
-            RoomModeState::Idle => true,
+            RoomModeState::Mood | RoomModeState::Standby => true,
             RoomModeState::HardOff => false,
             RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning
                 if force_observed_off_outputs =>
@@ -4459,7 +5021,13 @@ fn apply_active_mode_outputs(
                         &snap.id,
                         snap.kind,
                         snap.parent_id.as_deref(),
-                        semantic_lights_on_override(power_save, snap.hard_off, snap.soft_off),
+                        semantic_lights_on_override(
+                            power_save,
+                            &snap.profile_settings,
+                            snap.hard_off,
+                            snap.mood_active,
+                            snap.soft_off,
+                        ),
                     )
                     .unwrap_or(true)
                 })
@@ -4814,7 +5382,7 @@ fn do_settings_set_internal(
             };
 
             for room_id in &power_save_refresh_rooms {
-                info!(target: "cmd", "Converting idle room '{}' to hard_off (power_save ON)", room_id);
+                info!(target: "cmd", "Converting legacy soft_off room '{}' to hard_off (power_save compatibility)", room_id);
                 if queued {
                     update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
                     emit_node_state_event_after_apply(state, &runtime, room_id);
@@ -5060,6 +5628,15 @@ fn validate_room_profile_settings(
             ));
         }
     }
+    if let Some(profile_id) = room_profile.mood_profile_id.as_deref() {
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Room '{}' references unknown mood light profile '{}'",
+                room_id,
+                profile_id
+            ));
+        }
+    }
 
     Ok(())
 }
@@ -5068,6 +5645,8 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
     RoomProfileSettingsPatch {
         clear_all: false,
         profile_id: Some(room.room_profile.profile_id.clone()),
+        mood_enabled: Some(room.room_profile.mood_enabled),
+        mood_profile_id: Some(room.room_profile.mood_profile_id.clone()),
         fade_ms: Some(room.room_profile.fade_ms.clone()),
         motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
     }
@@ -5121,6 +5700,7 @@ fn apply_backup_configuration_room_preferences(
                 &room_id,
                 Some(imported_room.rhythm_enabled),
                 Some(imported_room.disabled),
+                None,
                 Some(imported_room.state),
                 Some(&patch),
                 false,
@@ -5573,34 +6153,60 @@ pub fn do_room_set(
         let existing = runtime.engine_room_snapshot(&engine_room_id);
         let had_existing = existing.is_some();
         runtime.add_room(&engine_room_id, &params.name);
+        let settings_for_state = existing
+            .as_ref()
+            .map(|snap| snap.profile_settings.clone())
+            .unwrap_or_default();
         let state_flags = params
             .state
-            .map(|state| room_flags_for_target_state(room_state_for_power_save(power_save, state)))
+            .map(|state| {
+                room_flags_for_target_state(room_state_for_mood_setting(
+                    power_save,
+                    &settings_for_state,
+                    state,
+                ))
+            })
             .transpose()?;
-        let (rhythm_enabled, time_offset, bri_offset, soft_off, hard_off, profile_settings) =
-            existing
-                .map(|snap| {
-                    let (soft_off, hard_off) =
-                        state_flags.unwrap_or((snap.soft_off, snap.hard_off));
-                    (
-                        params.rhythm_enabled,
-                        snap.time_offset_minutes,
-                        snap.brightness_offset,
-                        soft_off,
-                        hard_off,
-                        snap.profile_settings,
-                    )
-                })
-                .unwrap_or((
+        let (
+            rhythm_enabled,
+            time_offset,
+            bri_offset,
+            soft_off,
+            mood_active,
+            standby_enabled,
+            hard_off,
+            profile_settings,
+        ) = existing
+            .map(|snap| {
+                let (soft_off, mood_active, hard_off) =
+                    state_flags.unwrap_or((snap.soft_off, snap.mood_active, snap.hard_off));
+                (
                     params.rhythm_enabled,
-                    0.0,
-                    0.0,
-                    state_flags.unwrap_or((false, false)).0,
-                    state_flags.unwrap_or((false, false)).1,
-                    RoomProfileSettings::default(),
-                ));
-        // Soft-off rooms need rhythm enabled for periodic soft-off ticks
-        let rhythm_enabled = if soft_off { true } else { rhythm_enabled };
+                    snap.time_offset_minutes,
+                    snap.brightness_offset,
+                    soft_off,
+                    mood_active,
+                    snap.standby_enabled,
+                    hard_off,
+                    snap.profile_settings,
+                )
+            })
+            .unwrap_or((
+                params.rhythm_enabled,
+                0.0,
+                0.0,
+                state_flags.unwrap_or((false, false, false)).0,
+                state_flags.unwrap_or((false, false, false)).1,
+                false,
+                state_flags.unwrap_or((false, false, false)).2,
+                RoomProfileSettings::default(),
+            ));
+        // Mood and Standby need rhythm enabled when present.
+        let rhythm_enabled = if soft_off || mood_active {
+            true
+        } else {
+            rhythm_enabled
+        };
         debug!(
             target: "cmd",
             "room_set: engine='{}' existing={} rhythm={} disabled={} soft_off={} hard_off={} room_profile={}",
@@ -5620,6 +6226,8 @@ pub fn do_room_set(
                 time_offset_minutes: time_offset,
                 brightness_offset: bri_offset,
                 soft_off,
+                mood_active,
+                standby_enabled,
                 hard_off,
                 profile_settings,
             },
@@ -5795,6 +6403,20 @@ pub fn do_set_node_brightness(
     };
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    let snapshot = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    if snapshot.mood_active && !snapshot.hard_off {
+        info!(
+            target: "cmd",
+            "set_node_brightness: {} updating mood profile brightness",
+            node_id
+        );
+        return do_set_node_mood_brightness(
+            state, &runtime, node_id, &snapshot, brightness, persist,
+        );
+    }
 
     runtime.set_room_brightness(node_id, brightness)?;
     clear_room_mode_transition(state, node_id);
@@ -6112,7 +6734,13 @@ fn time_offset_preview_room_is_on(s: &AppState, snap: &rhythm_core::NodeSnapshot
         &snap.id,
         snap.kind,
         snap.parent_id.as_deref(),
-        semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
+        semantic_lights_on_override(
+            s.power_save,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        ),
     )
 }
 
@@ -6401,7 +7029,7 @@ pub fn do_motion_timeout_set(
         motion_timeout_secs: Some(Some(TimerSetting::Fixed { value })),
         ..Default::default()
     };
-    do_node_preferences_set(state, node_id, None, None, None, Some(&patch), true)?;
+    do_node_preferences_set(state, node_id, None, None, None, None, Some(&patch), true)?;
     Ok(())
 }
 
@@ -6417,7 +7045,7 @@ pub fn do_motion_timeout_clear(
         motion_timeout_secs: Some(None),
         ..Default::default()
     };
-    do_node_preferences_set(state, node_id, None, None, None, Some(&patch), true)?;
+    do_node_preferences_set(state, node_id, None, None, None, None, Some(&patch), true)?;
     Ok(())
 }
 
@@ -7155,16 +7783,18 @@ pub fn do_node_preferences_set(
     node_id: &str,
     rhythm_enabled: Option<bool>,
     disabled: Option<bool>,
+    standby_enabled: Option<bool>,
     target_state: Option<RoomModeState>,
     room_profile: Option<&RoomProfileSettingsPatch>,
     persist: bool,
 ) -> Result<String> {
     info!(
         target: "cmd",
-        "node_preferences_set: {} rhythm={:?} disabled={:?} state={:?} profile_settings={}",
+        "node_preferences_set: {} rhythm={:?} disabled={:?} standby={:?} state={:?} profile_settings={}",
         node_id,
         rhythm_enabled,
         disabled,
+        standby_enabled,
         target_state,
         room_profile.is_some()
     );
@@ -7194,26 +7824,42 @@ pub fn do_node_preferences_set(
                 &snap.id,
                 snap.kind,
                 snap.parent_id.as_deref(),
-                semantic_lights_on_override(s.power_save, snap.hard_off, snap.soft_off),
+                semantic_lights_on_override(
+                    s.power_save,
+                    &snap.profile_settings,
+                    snap.hard_off,
+                    snap.mood_active,
+                    snap.soft_off,
+                ),
             ),
             s.power_save,
         )
     };
 
     let prev_soft_off = snap.soft_off;
+    let prev_mood_active = snap.mood_active;
     let prev_hard_off = snap.hard_off;
     let requested_rhythm_enabled = rhythm_enabled;
     let rhythm_enabled = requested_rhythm_enabled.unwrap_or(snap.rhythm_enabled);
     let disabled = disabled.unwrap_or(snap.disabled);
+    let standby_enabled = standby_enabled.unwrap_or(snap.standby_enabled);
     let explicit_state_request = target_state.is_some();
-    let requested_state = target_state
-        .unwrap_or_else(|| persistent_room_state_from_flags(snap.hard_off, snap.soft_off));
-    let persistent_state = room_state_for_power_save(power_save, requested_state);
-    let (soft_off, hard_off) = room_flags_for_target_state(persistent_state)?;
+    let requested_state = target_state.unwrap_or_else(|| {
+        persistent_room_state_for_settings(
+            power_save,
+            &snap.profile_settings,
+            snap.hard_off,
+            snap.mood_active,
+            snap.soft_off,
+        )
+    });
     let mut profile_settings = snap.profile_settings.clone();
     if let Some(patch) = room_profile {
         patch.apply_to(&mut profile_settings);
     }
+    let persistent_state =
+        room_state_for_mood_setting(power_save, &profile_settings, requested_state);
+    let (soft_off, mood_active, hard_off) = room_flags_for_target_state(persistent_state)?;
 
     if let Some(profile_id) = profile_settings.profile_id.as_deref() {
         if rhythm_core::is_builtin_state_profile_id(profile_id) {
@@ -7225,10 +7871,17 @@ pub fn do_node_preferences_set(
             return Err(anyhow::anyhow!("Unknown light profile: {}", profile_id));
         }
     }
+    if let Some(profile_id) = profile_settings.mood_profile_id.as_deref() {
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Unknown mood light profile: {}",
+                profile_id
+            ));
+        }
+    }
 
-    // Soft-off rooms need rhythm enabled for periodic soft-off ticks unless
-    // the caller is explicitly pausing rhythm for that room.
-    let rhythm_enabled = if soft_off && requested_rhythm_enabled != Some(false) {
+    // Mood and Standby need rhythm enabled unless the caller explicitly pauses it.
+    let rhythm_enabled = if (soft_off || mood_active) && requested_rhythm_enabled != Some(false) {
         true
     } else {
         rhythm_enabled
@@ -7242,6 +7895,8 @@ pub fn do_node_preferences_set(
             time_offset_minutes: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
             soft_off,
+            mood_active,
+            standby_enabled,
             hard_off,
             profile_settings: profile_settings.clone(),
         },
@@ -7264,15 +7919,21 @@ pub fn do_node_preferences_set(
         if let Err(e) = runtime.handle_event(&event) {
             warn!(target: "cmd", "lights_off for '{}' failed: {}", node_id, e);
         }
+    } else if mood_active && !prev_mood_active {
+        refresh_lights_on = true;
+        info!(target: "cmd", "node_preferences_set: {} entering mood", node_id);
+        if let Err(e) = runtime.mood_tick_room(node_id) {
+            warn!(target: "cmd", "mood_tick for '{}' failed: {}", node_id, e);
+        }
     } else if soft_off && !prev_soft_off {
         refresh_lights_on = true;
-        info!(target: "cmd", "node_preferences_set: {} entering idle", node_id);
+        info!(target: "cmd", "node_preferences_set: {} entering standby", node_id);
         if let Err(e) = runtime.soft_off_tick_room(node_id) {
-            warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
+            warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
         }
-    } else if !soft_off && prev_soft_off {
+    } else if (!soft_off && prev_soft_off) || (!mood_active && prev_mood_active) {
         refresh_lights_on = true;
-        info!(target: "cmd", "node_preferences_set: {} leaving idle, turning on", node_id);
+        info!(target: "cmd", "node_preferences_set: {} leaving mood/standby, turning on", node_id);
         if let Err(e) = runtime.turn_on_room(node_id) {
             warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
         }
@@ -7285,21 +7946,34 @@ pub fn do_node_preferences_set(
                     warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
                 }
             }
-            RoomModeState::Idle => {
-                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to idle", node_id);
+            RoomModeState::Mood => {
+                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to mood", node_id);
+                if let Err(e) = runtime.mood_tick_room(node_id) {
+                    warn!(target: "cmd", "mood_tick for '{}' failed: {}", node_id, e);
+                }
+            }
+            RoomModeState::Standby => {
+                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to standby", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
-                    warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
+                    warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
         }
     } else if room_profile.is_some_and(|patch| patch.touches_profile_settings()) {
         match persistent_state {
-            RoomModeState::Idle => {
+            RoomModeState::Mood => {
                 refresh_lights_on = true;
-                info!(target: "cmd", "node_preferences_set: {} applying profile settings to idle state", node_id);
+                info!(target: "cmd", "node_preferences_set: {} applying profile settings to mood", node_id);
+                if let Err(e) = runtime.mood_tick_room(node_id) {
+                    warn!(target: "cmd", "mood_tick for '{}' failed: {}", node_id, e);
+                }
+            }
+            RoomModeState::Standby => {
+                refresh_lights_on = true;
+                info!(target: "cmd", "node_preferences_set: {} applying profile settings to standby", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
-                    warn!(target: "cmd", "soft_off_tick for '{}' failed: {}", node_id, e);
+                    warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::Active if lights_on => {
@@ -7337,6 +8011,7 @@ pub struct QueuedNodePreferencesPatch {
     pub node_id: String,
     pub rhythm_enabled: Option<bool>,
     pub disabled: Option<bool>,
+    pub standby_enabled: Option<bool>,
     pub target_state: Option<RoomModeState>,
     pub room_profile: Option<RoomProfileSettingsPatch>,
 }
@@ -7358,6 +8033,17 @@ fn validate_room_profile_settings_patch(
             return Err(anyhow::anyhow!("Unknown light profile: {}", profile_id));
         }
     }
+    if let Some(profile_id) = room_profile
+        .and_then(|patch| patch.mood_profile_id.as_ref())
+        .and_then(|profile_id| profile_id.as_deref())
+    {
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Unknown mood light profile: {}",
+                profile_id
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -7367,6 +8053,7 @@ pub fn queue_node_preferences_set(
     node_id: &str,
     rhythm_enabled: Option<bool>,
     disabled: Option<bool>,
+    standby_enabled: Option<bool>,
     target_state: Option<RoomModeState>,
     room_profile: Option<RoomProfileSettingsPatch>,
     persist_after: bool,
@@ -7387,6 +8074,7 @@ pub fn queue_node_preferences_set(
         node_id: node_id.to_string(),
         rhythm_enabled,
         disabled,
+        standby_enabled,
         target_state,
         room_profile,
         dispatch_spacing,
@@ -7427,6 +8115,7 @@ pub fn queue_node_preferences_batch(
             node_id: update.node_id,
             rhythm_enabled: update.rhythm_enabled,
             disabled: update.disabled,
+            standby_enabled: update.standby_enabled,
             target_state: update.target_state,
             room_profile: update.room_profile,
             dispatch_spacing,
@@ -7512,6 +8201,8 @@ pub(crate) fn ensure_runtime_room_exists(
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
                     hard_off: false,
                     profile_settings: RoomProfileSettings::default(),
                 },
@@ -7655,62 +8346,18 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
     for (room_id, room_name) in rooms {
         ensure_runtime_room_exists(state, &room_id, &room_name)?;
         if let Some(snap) = existing_room_states.get(&room_id) {
-            runtime.restore_room_state(
-                &room_id,
-                RestoredRoomState {
-                    rhythm_enabled: snap.rhythm_enabled,
-                    disabled: snap.disabled,
-                    time_offset_minutes: snap.time_offset_minutes,
-                    brightness_offset: snap.brightness_offset,
-                    soft_off: snap.soft_off,
-                    hard_off: snap.hard_off,
-                    profile_settings: snap.profile_settings.clone(),
-                },
-            );
+            runtime.restore_room_state(&room_id, restored_room_state_from_snapshot(snap));
         } else if let Some(room) = persisted_node_states.get(&room_id) {
-            runtime.restore_room_state(
-                &room_id,
-                RestoredRoomState {
-                    rhythm_enabled: room.rhythm_enabled,
-                    disabled: room.disabled,
-                    time_offset_minutes: room.time_offset_minutes,
-                    brightness_offset: room.brightness_offset,
-                    soft_off: room.soft_off,
-                    hard_off: room.hard_off,
-                    profile_settings: room.profile_settings.clone(),
-                },
-            );
+            runtime.restore_room_state(&room_id, restored_room_state_from_room(room));
         }
     }
 
     for (node_id, node_name, device_type, parent_id) in nodes {
         ensure_runtime_device_node_exists(state, &node_id, &node_name, device_type, parent_id)?;
         if let Some(snap) = existing_node_states.get(&node_id) {
-            runtime.restore_node_state(
-                &node_id,
-                RestoredNodeState {
-                    rhythm_enabled: snap.rhythm_enabled,
-                    disabled: snap.disabled,
-                    time_offset_minutes: snap.time_offset_minutes,
-                    brightness_offset: snap.brightness_offset,
-                    soft_off: snap.soft_off,
-                    hard_off: snap.hard_off,
-                    profile_settings: snap.profile_settings.clone(),
-                },
-            );
+            runtime.restore_node_state(&node_id, restored_node_state_from_snapshot(snap));
         } else if let Some(node) = persisted_node_states.get(&node_id) {
-            runtime.restore_node_state(
-                &node_id,
-                RestoredNodeState {
-                    rhythm_enabled: node.rhythm_enabled,
-                    disabled: node.disabled,
-                    time_offset_minutes: node.time_offset_minutes,
-                    brightness_offset: node.brightness_offset,
-                    soft_off: node.soft_off,
-                    hard_off: node.hard_off,
-                    profile_settings: node.profile_settings.clone(),
-                },
-            );
+            runtime.restore_node_state(&node_id, restored_node_state_from_room(node));
         }
     }
 
@@ -7828,6 +8475,8 @@ fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()
             time_offset_minutes: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: snap.standby_enabled,
             hard_off: false,
             profile_settings: snap.profile_settings,
         },
@@ -7877,6 +8526,8 @@ pub(crate) fn ensure_runtime_device_node_exists(
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
                     hard_off: false,
                     profile_settings: RoomProfileSettings::default(),
                 },
@@ -9637,6 +10288,8 @@ mod tests {
                 snap.time_offset_minutes = state.time_offset_minutes;
                 snap.brightness_offset = state.brightness_offset;
                 snap.soft_off = state.soft_off;
+                snap.mood_active = state.mood_active;
+                snap.standby_enabled = state.standby_enabled;
                 snap.hard_off = state.hard_off;
                 snap.profile_settings = state.profile_settings;
             }
@@ -9661,6 +10314,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             });
@@ -9690,6 +10345,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: RoomProfileSettings::default(),
             });
@@ -9714,7 +10371,15 @@ mod tests {
         ) -> anyhow::Result<()> {
             let room_state = self
                 .engine_room_snapshot(room_id)
-                .map(|snap| persistent_room_state_from_flags(snap.hard_off, snap.soft_off))
+                .map(|snap| {
+                    persistent_room_state_for_settings(
+                        false,
+                        &snap.profile_settings,
+                        snap.hard_off,
+                        snap.mood_active,
+                        snap.soft_off,
+                    )
+                })
                 .unwrap_or(RoomModeState::Active);
             self.applied_commands
                 .lock()
@@ -9916,6 +10581,8 @@ mod tests {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: rhythm_core::RoomProfileSettings::default(),
         }
@@ -10865,7 +11532,7 @@ mod tests {
             "grouped_light_id": "gl_abc",
             "rhythm_enabled": true,
             "disabled": false,
-            "state": "idle",
+            "state": "mood",
             "device_ids": ["d1", "d2"]
         });
         let params = RoomParams::from_json(&json).unwrap();
@@ -10874,7 +11541,7 @@ mod tests {
         assert_eq!(params.grouped_light_id, "gl_abc");
         assert!(params.rhythm_enabled);
         assert!(!params.disabled);
-        assert_eq!(params.state, Some(RoomModeState::Idle));
+        assert_eq!(params.state, Some(RoomModeState::Mood));
         assert_eq!(params.device_ids, vec!["d1".to_string(), "d2".to_string()]);
     }
 
@@ -11127,9 +11794,9 @@ mod tests {
     #[test]
     fn settings_response_is_valid_settings_json() {
         let (state, _rt) = setup_state(vec![]);
-        let result = do_settings_set(&state, Some(true), None, None, None, None).unwrap();
+        let result = do_settings_set(&state, None, None, None, None, Some(false)).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(parsed["power_save"].is_boolean());
+        assert!(parsed.get("power_save").is_none());
         assert!(parsed["auto_update"].is_boolean());
         assert!(parsed.get("mode").is_none());
         // No status wrapper
@@ -11148,7 +11815,6 @@ mod tests {
             s.last_active_mode_change_utc_ms = Some(1_700_000_000_000);
         }
         let dto = build_settings_dto(&state).unwrap();
-        assert!(dto.power_save);
         assert!(!dto.auto_update);
     }
 
@@ -11503,6 +12169,8 @@ mod tests {
         room.soft_off = true;
         room.profile_settings = rhythm_core::RoomProfileSettings {
             profile_id: Some("focus".into()),
+            mood_enabled: None,
+            mood_profile_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 3_210 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 654 }),
         };
@@ -11590,6 +12258,7 @@ mod tests {
         assert_eq!(restored_room.time_offset_minutes, 27.0);
         assert_eq!(restored_room.brightness_offset, 11.0);
         assert!(restored_room.soft_off);
+        assert!(!restored_room.hard_off);
         assert_eq!(
             restored_room.profile_settings.profile_id.as_deref(),
             Some("focus")
@@ -11657,8 +12326,8 @@ mod tests {
         let state = Arc::new(Mutex::new(app));
         install_mock_hub_provider(&state);
 
-        // Restored room state: living is rhythm-on with soft_off=true but
-        // hard_off=false.
+        // Restored room state: living is rhythm-on Standby. It must not be
+        // clobbered by mode defaults on a late reconnect.
         let mut rooms = rhythm_core::RoomManager::new();
         let room = rooms.get_or_create("living", "Living Room");
         room.rhythm_enabled = true;
@@ -11676,9 +12345,9 @@ mod tests {
                 light_breaker_enabled: true,
                 active_mode: RhythmMode::Day,
                 profiles: Vec::new(),
-                // Conflict: Day mode's room_default for "living" is HardOff. If
+                // Conflict: Day mode's room_default for "living" is Active. If
                 // the pending flag leaks past restore, reconcile_runtime_from_state
-                // will dispatch lights_off and force hard_off=true on the room.
+                // will dispatch Active and clear restored hard_off on the room.
                 mode_configs: vec![
                     ModeConfig {
                         mode: RhythmMode::Day,
@@ -11688,7 +12357,7 @@ mod tests {
                         warning_profile_id: None,
                         room_defaults: vec![rhythm_core::RoomModeDefault {
                             room_id: "living".into(),
-                            state: RoomModeState::HardOff,
+                            state: RoomModeState::Active,
                         }],
                     },
                     ModeConfig::default_for_mode(RhythmMode::Sleep),
@@ -11769,13 +12438,10 @@ mod tests {
             .engine_room_snapshot("living")
             .expect("living should be present after reconcile");
         assert!(
-            !snap.hard_off,
-            "restored hard_off=false must survive a late hub reconnect"
-        );
-        assert!(
             snap.soft_off,
-            "restored soft_off=true must survive a late hub reconnect"
+            "restored Standby must survive late hub reconnect"
         );
+        assert!(!snap.hard_off, "restored Standby must not become hard-off");
     }
 
     #[test]
@@ -11872,6 +12538,7 @@ mod tests {
         assert_eq!(office.name, "Office");
         assert!(office.disabled);
         assert!(office.soft_off);
+        assert!(!office.hard_off);
         let lamp = runtime
             .engine_node_snapshot("desk-lamp")
             .expect("restored backup device node should exist");
@@ -12289,6 +12956,8 @@ mod tests {
         let room = rooms.get_or_create("office", "Office");
         room.profile_settings = rhythm_core::RoomProfileSettings {
             profile_id: Some("missing_profile".into()),
+            mood_enabled: None,
+            mood_profile_id: None,
             fade_ms: None,
             motion_timeout_secs: None,
         };
@@ -12919,7 +13588,7 @@ mod tests {
         }
         let result = build_state_snapshot(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["settings"]["power_save"], true);
+        assert!(parsed["settings"].get("power_save").is_none());
         assert_eq!(parsed["settings"]["auto_update"], true);
         assert!(parsed["settings"].get("light_breaker_enabled").is_none());
         assert!(parsed["settings"].get("light_breaker").is_none());
@@ -13543,7 +14212,8 @@ mod tests {
     fn room_preferences_rhythm_enabled() {
         let snap = make_snapshot("r1", false, false);
         let (state, _rt) = setup_state(vec![snap]);
-        let result = do_node_preferences_set(&state, "r1", Some(true), None, None, None, false);
+        let result =
+            do_node_preferences_set(&state, "r1", Some(true), None, None, None, None, false);
         assert!(result.is_ok());
     }
 
@@ -13553,7 +14223,8 @@ mod tests {
         let (state, _rt) = setup_state(vec![snap]);
         set_observed_lights_on(&state, "r1", true);
 
-        let result = do_node_preferences_set(&state, "r1", None, Some(true), None, None, false);
+        let result =
+            do_node_preferences_set(&state, "r1", None, Some(true), None, None, None, false);
 
         assert!(result.is_ok());
         let s = state.lock().unwrap();
@@ -13561,9 +14232,7 @@ mod tests {
     }
 
     #[test]
-    fn room_preferences_idle_without_explicit_pause_implies_rhythm_enabled() {
-        // Idle should force rhythm enabled so standby ticks still render when
-        // the request is only changing room state.
+    fn room_preferences_mood_without_explicit_pause_enters_mood() {
         let mut snap = make_snapshot("r1", false, false);
         snap.rhythm_enabled = false;
         let (state, runtime) = setup_state(vec![snap]);
@@ -13573,27 +14242,29 @@ mod tests {
             "r1",
             None,
             None,
-            Some(RoomModeState::Idle),
+            None,
+            Some(RoomModeState::Mood),
             None,
             false,
         );
         assert!(result.is_ok());
-        // Idle implies lights conceptually on.
         assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
         let snap = runtime.engine_room_snapshot("r1").unwrap();
         assert!(snap.rhythm_enabled);
-        assert!(snap.soft_off);
+        assert!(snap.mood_active);
+        assert!(!snap.soft_off);
         assert!(!snap.hard_off);
     }
 
     #[test]
-    fn room_preferences_explicit_pause_preserved_while_idle() {
+    fn room_preferences_explicit_pause_preserved_for_mood() {
         let snap = make_snapshot("r1", false, true);
         let (state, runtime) = setup_state(vec![snap]);
         state.lock().unwrap().power_save = false;
 
-        let result = do_node_preferences_set(&state, "r1", Some(false), None, None, None, false)
-            .expect("pause rhythm while idle");
+        let result =
+            do_node_preferences_set(&state, "r1", Some(false), None, None, None, None, false)
+                .expect("pause rhythm while mood");
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["rhythm_enabled"], false);
@@ -13604,7 +14275,7 @@ mod tests {
     }
 
     #[test]
-    fn room_preferences_idle_maps_to_hard_off_when_power_save_enabled() {
+    fn room_preferences_mood_ignores_power_save() {
         let mut snap = make_snapshot("r1", false, false);
         snap.rhythm_enabled = false;
         let (state, runtime) = setup_state(vec![snap]);
@@ -13615,27 +14286,23 @@ mod tests {
             "r1",
             Some(false),
             None,
-            Some(RoomModeState::Idle),
+            None,
+            Some(RoomModeState::Mood),
             None,
             false,
         );
 
         assert!(result.is_ok());
-        assert_eq!(
-            observed_lights_on(&state.lock().unwrap(), "r1"),
-            Some(false)
-        );
-        assert_eq!(
-            runtime.events(),
-            vec![("r1".into(), ButtonAction::LightsOff)]
-        );
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
+        assert!(runtime.events().is_empty());
         let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(snap.mood_active);
         assert!(!snap.soft_off);
-        assert!(snap.hard_off);
+        assert!(!snap.hard_off);
     }
 
     #[test]
-    fn room_preferences_idle_updates_parent_lights_on_for_attached_light() {
+    fn room_preferences_mood_updates_parent_lights_on_for_attached_light() {
         let (state, rt, device_id) = setup_attached_hue_light_with_group_dispatch();
         state.lock().unwrap().power_save = false;
         if let Some(child) = rt
@@ -13653,7 +14320,8 @@ mod tests {
             &device_id,
             Some(false),
             None,
-            Some(RoomModeState::Idle),
+            None,
+            Some(RoomModeState::Mood),
             None,
             false,
         );
@@ -13665,7 +14333,7 @@ mod tests {
     }
 
     #[test]
-    fn room_preferences_idle_updates_parent_lights_on_without_group_dispatch() {
+    fn room_preferences_mood_updates_parent_lights_on_without_group_dispatch() {
         let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
         state.lock().unwrap().power_save = false;
         if let Some(child) = rt
@@ -13683,7 +14351,8 @@ mod tests {
             &device_id,
             Some(false),
             None,
-            Some(RoomModeState::Idle),
+            None,
+            Some(RoomModeState::Mood),
             None,
             false,
         );
@@ -13707,6 +14376,7 @@ mod tests {
             &matter_id,
             None,
             None,
+            None,
             Some(RoomModeState::HardOff),
             None,
             false,
@@ -13721,8 +14391,16 @@ mod tests {
     #[test]
     fn room_preferences_missing_room_errors() {
         let (state, _rt) = setup_state(vec![]);
-        let result =
-            do_node_preferences_set(&state, "nonexistent", Some(true), None, None, None, false);
+        let result = do_node_preferences_set(
+            &state,
+            "nonexistent",
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -13745,6 +14423,7 @@ mod tests {
         let result = do_node_preferences_set(
             &state,
             "r1",
+            None,
             None,
             None,
             Some(RoomModeState::HardOff),
@@ -13783,6 +14462,7 @@ mod tests {
             "r1",
             Some(true),
             None,
+            None,
             Some(RoomModeState::Active),
             None,
             false,
@@ -13800,7 +14480,7 @@ mod tests {
     }
 
     #[test]
-    fn room_preferences_idle_queues_motion_timer_clear() {
+    fn room_preferences_mood_queues_motion_timer_clear() {
         let snap = make_snapshot("r1", false, false);
         let (state, runtime) = setup_state(vec![snap]);
         {
@@ -13823,7 +14503,8 @@ mod tests {
             "r1",
             Some(true),
             None,
-            Some(RoomModeState::Idle),
+            None,
+            Some(RoomModeState::Mood),
             None,
             false,
         );
@@ -13834,7 +14515,8 @@ mod tests {
             vec!["r1".to_string()]
         );
         let snap = runtime.engine_room_snapshot("r1").unwrap();
-        assert!(snap.soft_off);
+        assert!(snap.mood_active);
+        assert!(!snap.soft_off);
         assert!(!snap.hard_off);
     }
 
@@ -13861,28 +14543,25 @@ mod tests {
         assert!(!state.lock().unwrap().auto_update);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["auto_update"], false);
-        assert_eq!(parsed["power_save"], true);
+        assert!(parsed.get("power_save").is_none());
     }
 
     #[test]
-    fn settings_power_save_emits_settings_changed_payload() {
+    fn settings_auto_update_emits_settings_changed_payload() {
         let (state, _rt) = setup_state(vec![]);
         let (event_tx, mut event_rx) =
             tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
         state.lock().unwrap().event_tx = Some(event_tx);
 
-        do_settings_set(&state, Some(true), None, None, None, Some(false)).unwrap();
+        do_settings_set(&state, None, None, None, None, Some(false)).unwrap();
 
-        let mut power_save = None;
         let mut auto_update = None;
         while let Ok(event) = event_rx.try_recv() {
             if let crate::server_event::ServerEvent::SettingsChanged { settings } = event {
-                power_save = Some(settings.power_save);
                 auto_update = Some(settings.auto_update);
                 break;
             }
         }
-        assert_eq!(power_save, Some(true));
         assert_eq!(auto_update, Some(false));
     }
 
@@ -14445,11 +15124,12 @@ mod tests {
     }
 
     #[test]
-    fn idle_only_mode_change_reapplies_idle_rooms_only() {
-        let (state, runtime) = setup_state(vec![
-            make_snapshot("active_room", false, false),
-            make_snapshot("idle_room", false, true),
-        ]);
+    fn mood_profile_mapping_change_reapplies_mood_rooms() {
+        let mut mood_room = make_snapshot("mood_room", false, false);
+        mood_room.mood_active = true;
+        mood_room.profile_settings.mood_enabled = Some(true);
+        let (state, runtime) =
+            setup_state(vec![make_snapshot("active_room", false, false), mood_room]);
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
@@ -14496,7 +15176,11 @@ mod tests {
 
         let applied = runtime.applied_commands();
         assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].0, "idle_room");
+        assert_eq!(applied[0].0, "mood_room");
+        assert_eq!(
+            runtime.applied_states(),
+            vec![("mood_room".into(), RoomModeState::Mood)]
+        );
     }
 
     #[test]
@@ -14544,22 +15228,19 @@ mod tests {
                 warning_profile_id: None,
                 room_defaults: vec![rhythm_core::RoomModeDefault {
                     room_id: "r1".into(),
-                    state: RoomModeState::Idle,
+                    state: RoomModeState::HardOff,
                 }],
             }]);
         }
 
         do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
 
-        assert_eq!(runtime.restore_calls(), vec![("r1".into(), true, false)]);
-        assert_eq!(
-            runtime.applied_states(),
-            vec![("r1".into(), RoomModeState::Idle)]
-        );
+        assert_eq!(runtime.restore_calls(), vec![("r1".into(), false, true)]);
+        assert!(runtime.applied_states().is_empty());
 
         let snap = runtime.engine_room_snapshot("r1").unwrap();
-        assert!(snap.soft_off);
-        assert!(!snap.hard_off);
+        assert!(!snap.soft_off);
+        assert!(snap.hard_off);
     }
 
     #[test]
@@ -14702,7 +15383,7 @@ mod tests {
                 warning_profile_id: None,
                 room_defaults: vec![rhythm_core::RoomModeDefault {
                     room_id: "r1".into(),
-                    state: RoomModeState::Idle,
+                    state: RoomModeState::HardOff,
                 }],
             }]),
             None,
@@ -14786,7 +15467,15 @@ mod tests {
                     .engine_room_snapshot("active-room")
                     .unwrap()
                     .soft_off,
-                "{:?}: persisted soft_off should survive restart",
+                "{:?}: mood should survive restart",
+                cause
+            );
+            assert!(
+                !runtime
+                    .engine_room_snapshot("active-room")
+                    .unwrap()
+                    .hard_off,
+                "{:?}: mood should not become hard-off on restart",
                 cause
             );
             assert!(
@@ -15287,13 +15976,22 @@ mod tests {
         let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
         let storage = TestStorage::default();
         let room_id = state.lock().unwrap().topology.create_room("Office");
+        let mood_room_id = state.lock().unwrap().topology.create_room("Den");
         let mut rooms = rhythm_core::RoomManager::new();
         let mut room = rhythm_core::Room::new(&room_id, "Office");
         room.rhythm_enabled = true;
         room.time_offset_minutes = 14.0;
         room.brightness_offset = -3.0;
         room.soft_off = true;
+        room.standby_enabled = true;
         rooms.add_room(room);
+        let mut mood_room = rhythm_core::Room::new(&mood_room_id, "Den");
+        mood_room.rhythm_enabled = true;
+        mood_room.mood_active = true;
+        mood_room.standby_enabled = false;
+        mood_room.soft_off = false;
+        mood_room.hard_off = false;
+        rooms.add_room(mood_room);
         storage.save_rooms(&rooms).unwrap();
         state.lock().unwrap().storage = Some(Box::new(storage.clone()));
 
@@ -15307,6 +16005,17 @@ mod tests {
         assert_eq!(office.time_offset_minutes, 14.0);
         assert_eq!(office.brightness_offset, -3.0);
         assert!(office.soft_off);
+        assert!(!office.mood_active);
+        assert!(office.standby_enabled);
+        assert!(!office.hard_off);
+        let den = runtime
+            .engine_room_snapshot(&mood_room_id)
+            .expect("persisted mood room should be materialized");
+        assert!(den.rhythm_enabled);
+        assert!(den.mood_active);
+        assert!(!den.soft_off);
+        assert!(!den.standby_enabled);
+        assert!(!den.hard_off);
 
         let saved = storage.inner.lock().unwrap();
         let saved_office = saved
@@ -15314,6 +16023,50 @@ mod tests {
             .get(&room_id)
             .expect("persisted room flags should survive reconcile save");
         assert!(saved_office.soft_off);
+        assert!(!saved_office.mood_active);
+        assert!(saved_office.standby_enabled);
+        assert!(!saved_office.hard_off);
+        let saved_den = saved
+            .rooms
+            .get(&mood_room_id)
+            .expect("persisted mood room flags should survive reconcile save");
+        assert!(saved_den.mood_active);
+        assert!(!saved_den.soft_off);
+        assert!(!saved_den.standby_enabled);
+        assert!(!saved_den.hard_off);
+    }
+
+    #[test]
+    fn reconcile_runtime_from_state_trusts_standby_preference_only_persistence() {
+        let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
+        let storage = TestStorage::default();
+        let room_id = state.lock().unwrap().topology.create_room("Pantry");
+        let mut rooms = rhythm_core::RoomManager::new();
+        let mut room = rhythm_core::Room::new(&room_id, "Pantry");
+        room.standby_enabled = true;
+        rooms.add_room(room);
+        storage.save_rooms(&rooms).unwrap();
+        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+
+        reconcile_runtime_from_state(&state).unwrap();
+        persist_rooms(&state);
+
+        let pantry = runtime
+            .engine_room_snapshot(&room_id)
+            .expect("persisted topology room should be materialized");
+        assert!(pantry.standby_enabled);
+        assert!(!pantry.rhythm_enabled);
+        assert!(!pantry.soft_off);
+        assert!(!pantry.mood_active);
+        assert!(!pantry.hard_off);
+
+        let saved = storage.inner.lock().unwrap();
+        let saved_pantry = saved
+            .rooms
+            .get(&room_id)
+            .expect("standby preference should survive reconcile save");
+        assert!(saved_pantry.standby_enabled);
+        assert!(!saved_pantry.rhythm_enabled);
     }
 
     #[test]
@@ -15349,7 +16102,7 @@ mod tests {
             .engine_node_snapshot(&device_id)
             .expect("assigned light child should be materialized");
         assert_eq!(child_snap.parent_id.as_deref(), Some(room_id.as_str()));
-        assert!(child_snap.soft_off);
+        assert!(!child_snap.soft_off);
         assert!(child_snap.hard_off);
 
         let saved = storage.inner.lock().unwrap();
@@ -15357,7 +16110,7 @@ mod tests {
             .rooms
             .get(&device_id)
             .expect("assigned light child should be persisted");
-        assert!(saved_child.soft_off);
+        assert!(!saved_child.soft_off);
         assert!(saved_child.hard_off);
     }
 
@@ -15416,7 +16169,11 @@ mod tests {
             .expect("topology room should still exist in runtime");
         assert!(
             office.soft_off,
-            "reconcile should preserve existing soft_off"
+            "reconcile should preserve existing Standby"
+        );
+        assert!(
+            !office.hard_off,
+            "reconcile should not migrate Standby to hard-off"
         );
         assert!(
             office.rhythm_enabled,
@@ -15717,6 +16474,8 @@ mod tests {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: true,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: true,
                 profile_settings: RoomProfileSettings::default(),
             },

@@ -74,6 +74,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT"],
     },
     SharedRoute {
+        path: "/api/nodes/color",
+        methods: &["PUT"],
+    },
+    SharedRoute {
         path: "/api/nodes/offset",
         methods: &["PUT"],
     },

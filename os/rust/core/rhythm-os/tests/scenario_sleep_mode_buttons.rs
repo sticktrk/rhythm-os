@@ -2,15 +2,15 @@
 //!
 //! Sleep mode swaps the active light profile to `sleep` and turns lights off
 //! (`SleepOn`) or back to rhythm and on (`SleepOff`). Button presses inside
-//! sleep mode must still respect their non-powersave semantics — bottom =
-//! soft-off, top = adaptive on — without leaking state across the mode toggle.
+//! sleep mode must still respect their current semantics — bottom = hard off,
+//! top = adaptive on — without leaking state across the mode toggle.
 
 mod harness;
 
 use harness::*;
 
 #[test]
-fn sleep_on_then_bottom_button_dims_to_one_percent() {
+fn sleep_on_then_bottom_button_hard_offs() {
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
@@ -23,20 +23,10 @@ fn sleep_on_then_bottom_button_dims_to_one_percent() {
 
     h.action("kitchen", "off").unwrap();
 
-    assert_eq!(
-        spy.turn_off_calls().len(),
-        0,
-        "soft-off in sleep mode must not hard-off"
-    );
-    let calls = spy.turn_on_calls();
-    assert_eq!(
-        calls.len(),
-        1,
-        "off press in sleep mode should dispatch turn_on"
-    );
-    assert_eq!(
-        calls[0].1.brightness, 1,
-        "sleep-mode soft-off brightness must be 1%"
+    assert_eq!(spy.turn_off_calls().len(), 1, "off in sleep hard-offs");
+    assert!(
+        spy.turn_on_calls().is_empty(),
+        "off press in sleep mode must not dispatch soft-off turn_on"
     );
 }
 
@@ -51,9 +41,18 @@ fn sleep_cycle_preserves_button_behavior() {
     h.action("kitchen", "on").unwrap();
 
     h.action("kitchen", "sleep_on").unwrap();
+    spy.reset();
+
     h.action("kitchen", "off").unwrap();
-    let after_sleep_off = spy.turn_on_calls().last().unwrap().1.brightness;
-    assert_eq!(after_sleep_off, 1, "off in sleep should still be 1%");
+    assert_eq!(
+        spy.turn_off_calls().len(),
+        1,
+        "off in sleep should hard-off"
+    );
+    assert!(
+        spy.turn_on_calls().is_empty(),
+        "off in sleep should not send a 1% soft-off command"
+    );
 
     h.action("kitchen", "sleep_off").unwrap();
     spy.reset();

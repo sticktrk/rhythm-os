@@ -27,7 +27,7 @@ use crate::commands::{self};
 use crate::logging;
 use crate::state::SharedState;
 use crate::topology::{InputBinding, InputBindingPreset, NodeControlKind};
-use rhythm_core::ButtonAction;
+use rhythm_core::{ButtonAction, Rgb, XyColor};
 
 fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
     if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
@@ -56,6 +56,94 @@ fn dispatch_spacing_from_body(body: &Value) -> Result<Duration, String> {
         return Err("dispatch_spacing_ms must be <= 60000".to_string());
     }
     Ok(Duration::from_millis(ms))
+}
+
+fn parse_rgb(value: Option<&Value>) -> Result<Rgb, String> {
+    let value = value.ok_or_else(|| "Missing rgb".to_string())?;
+    let body = value
+        .as_object()
+        .ok_or_else(|| "rgb must be an object".to_string())?;
+
+    let channel = |key: &str| -> Result<u8, String> {
+        let raw = body
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| format!("rgb.{key} must be an integer"))?;
+        if raw > u8::MAX as u64 {
+            return Err(format!("rgb.{key} must be <= 255"));
+        }
+        Ok(raw as u8)
+    };
+
+    Ok(Rgb::new(channel("r")?, channel("g")?, channel("b")?))
+}
+
+fn parse_xy(value: Option<&Value>) -> Result<Option<XyColor>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let body = value
+        .as_object()
+        .ok_or_else(|| "xy must be an object or null".to_string())?;
+    let x = body
+        .get("x")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "xy.x must be a number".to_string())? as f32;
+    let y = body
+        .get("y")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "xy.y must be a number".to_string())? as f32;
+    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return Err("xy values must be between 0 and 1".to_string());
+    }
+    Ok(Some(XyColor { x, y }))
+}
+
+fn parse_optional_u8(value: Option<&Value>, key: &str) -> Result<Option<u8>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{key} must be an integer or null"))?;
+    Ok(Some(raw.clamp(1, 100) as u8))
+}
+
+fn parse_optional_u32(value: Option<&Value>, key: &str) -> Result<Option<u32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{key} must be an integer or null"))?;
+    if raw > u32::MAX as u64 {
+        return Err(format!("{key} must be <= {}", u32::MAX));
+    }
+    Ok(Some(raw as u32))
+}
+
+fn parse_color_scope(value: Option<&Value>) -> Result<commands::NodeColorScope, String> {
+    let Some(value) = value else {
+        return Ok(commands::NodeColorScope::Auto);
+    };
+    let raw = value
+        .as_str()
+        .ok_or_else(|| "scope must be a string".to_string())?;
+    match raw {
+        "auto" => Ok(commands::NodeColorScope::Auto),
+        "preview" => Ok(commands::NodeColorScope::Preview),
+        "mood" => Ok(commands::NodeColorScope::Mood),
+        _ => Err(format!("Invalid color scope: {raw}")),
+    }
 }
 
 fn nodes_response(
@@ -636,9 +724,32 @@ fn parse_profile_settings_patch(
         )),
     };
 
+    let mood_enabled = match body.get("mood_enabled") {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => Some(Some(v.as_bool().ok_or_else(|| {
+            format!("{field_name}.mood_enabled must be a boolean or null")
+        })?)),
+    };
+
+    let mood_profile_value = body
+        .get("mood_profile_id")
+        .or_else(|| body.get("idle_profile_id"));
+    let mood_profile_id = match mood_profile_value {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => Some(Some(
+            v.as_str()
+                .ok_or_else(|| format!("{field_name}.mood_profile_id must be a string or null"))?
+                .to_string(),
+        )),
+    };
+
     Ok(Some(commands::RoomProfileSettingsPatch {
         clear_all: false,
         profile_id,
+        mood_enabled,
+        mood_profile_id,
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
     }))
@@ -872,10 +983,12 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
     if body.get("light_breaker_enabled").is_some() || body.get("light_breaker").is_some() {
         return ApiResponse::bad_request("Light breaker moved to /api/light-breaker");
     }
-    let power_save = body.get("power_save").and_then(|v| v.as_bool());
+    if body.get("power_save").is_some() {
+        return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
+    }
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
 
-    match commands::do_settings_set(state, power_save, None, None, None, auto_update) {
+    match commands::do_settings_set(state, None, None, None, None, auto_update) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -907,7 +1020,7 @@ pub fn handle_put_mode(state: &SharedState, body: &Value) -> ApiResponse {
         return ApiResponse::bad_request("last_change is read-only");
     }
     if body.get("power_save").is_some() {
-        return ApiResponse::bad_request("power_save belongs in /api/settings");
+        return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
     }
     if body.get("profiles").is_some() {
         return ApiResponse::bad_request("Profiles moved to /api/profiles and /api/config");
@@ -951,7 +1064,7 @@ pub fn handle_put_transitions(state: &SharedState, body: &Value) -> ApiResponse 
         );
     }
     if body.get("power_save").is_some() {
-        return ApiResponse::bad_request("power_save belongs in /api/settings");
+        return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
     }
     if body.get("active").is_some()
         || body.get("configs").is_some()
@@ -1454,6 +1567,51 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
     nodes_response(results, batch, dispatch_spacing)
 }
 
+/// Set node color. `scope=mood` updates this node's Mood profile and enters Mood.
+pub fn handle_set_node_color(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+
+    let mut results = Vec::with_capacity(items.len());
+
+    for item in &items {
+        let raw_node_id = match item.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let parsed_update: Result<commands::NodeColorUpdate, String> = (|| {
+            Ok(commands::NodeColorUpdate {
+                rgb: parse_rgb(item.get("rgb"))?,
+                xy: parse_xy(item.get("xy"))?,
+                brightness: parse_optional_u8(item.get("brightness"), "brightness")?,
+                transition_ms: parse_optional_u32(item.get("transition_ms"), "transition_ms")?,
+                scope: parse_color_scope(item.get("scope"))?,
+            })
+        })();
+        let update = match parsed_update {
+            Ok(update) => update,
+            Err(e) => return ApiResponse::bad_request(&e),
+        };
+
+        if let Err(e) = commands::do_set_node_color(state, &node_id, update, persist) {
+            return ApiResponse::server_error(e);
+        }
+        match commands::build_node_state(state, &node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+
+    nodes_response(results, false, dispatch_spacing)
+}
+
 /// Set room time offset. Accepts single object or array.
 ///
 /// Always returns `{"rooms":[...]}` regardless of count.
@@ -1584,6 +1742,7 @@ pub fn handle_put_room_preferences(
         let room_id = commands::resolve_node_id(state, raw_room_id);
         let rhythm_enabled = item.get("rhythm_enabled").and_then(|v| v.as_bool());
         let disabled = item.get("disabled").and_then(|v| v.as_bool());
+        let standby_enabled = item.get("standby_enabled").and_then(|v| v.as_bool());
         let room_state = match item.get("state").cloned() {
             Some(value) => match serde_json::from_value::<rhythm_core::RoomModeState>(value) {
                 Ok(state) => Some(state),
@@ -1591,11 +1750,14 @@ pub fn handle_put_room_preferences(
             },
             None => None,
         };
-        let room_profile =
-            match parse_profile_settings_patch(item.get("room_profile"), "room_profile") {
-                Ok(patch) => patch,
-                Err(e) => return ApiResponse::bad_request(&e),
-            };
+        let room_profile = match parse_profile_settings_patch(
+            item.get("profile_settings")
+                .or_else(|| item.get("room_profile")),
+            "profile_settings",
+        ) {
+            Ok(patch) => patch,
+            Err(e) => return ApiResponse::bad_request(&e),
+        };
 
         let per_item_persist = persist && !batch;
         match commands::do_node_preferences_set(
@@ -1603,6 +1765,7 @@ pub fn handle_put_room_preferences(
             &room_id,
             rhythm_enabled,
             disabled,
+            standby_enabled,
             room_state,
             room_profile.as_ref(),
             per_item_persist,
@@ -1646,6 +1809,7 @@ pub fn handle_put_node_preferences(
         let node_id = commands::resolve_node_id(state, raw_node_id);
         let rhythm_enabled = item.get("rhythm_enabled").and_then(|v| v.as_bool());
         let disabled = item.get("disabled").and_then(|v| v.as_bool());
+        let standby_enabled = item.get("standby_enabled").and_then(|v| v.as_bool());
         let room_state = match item.get("state").cloned() {
             Some(value) => match serde_json::from_value::<rhythm_core::RoomModeState>(value) {
                 Ok(state) => Some(state),
@@ -1662,6 +1826,7 @@ pub fn handle_put_node_preferences(
             node_id,
             rhythm_enabled,
             disabled,
+            standby_enabled,
             target_state: room_state,
             room_profile,
         });
@@ -2869,6 +3034,8 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
@@ -2882,6 +3049,8 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
@@ -3729,10 +3898,10 @@ mod tests {
     #[test]
     fn put_settings_returns_raw_settings() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"power_save": true, "auto_update": false}));
+        let r = handle_put_settings(&state, &json!({"auto_update": false}));
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(parsed["power_save"], true);
+        assert!(parsed.get("power_save").is_none());
         assert_eq!(parsed["auto_update"], false);
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
@@ -3744,10 +3913,18 @@ mod tests {
         let r = handle_get_settings(&state);
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert!(parsed["power_save"].is_boolean());
+        assert!(parsed.get("power_save").is_none());
         assert!(parsed["auto_update"].is_boolean());
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_settings_rejects_removed_power_save() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"power_save": false}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("power_save has been removed"));
     }
 
     #[test]

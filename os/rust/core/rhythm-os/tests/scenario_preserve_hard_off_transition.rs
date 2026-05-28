@@ -1,6 +1,5 @@
 //! Mode transitions with `preserve_hard_off=true` must keep hard-off rooms
-//! hard-off, but a subsequent non-powersave `OffPress` must still soft-off
-//! them to 1%.
+//! hard-off, and a subsequent `OffPress` must remain hard-off.
 //!
 //! The factory-default Sleep↔Day transitions both have `preserve_hard_off=true`
 //! (see `factory_default_config.rs:267,277`), which is what the user runs in
@@ -19,7 +18,7 @@ use rhythm_core::{
 use rhythm_os::commands;
 
 #[test]
-fn preserve_hard_off_transition_keeps_hard_off_then_off_press_soft_offs() {
+fn preserve_hard_off_transition_keeps_hard_off_then_off_press_hard_offs() {
     let (rooms, devices) = rooms_with_lights(&[("master", "Master")]);
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118);
     let h = h.with_discovery(rooms, devices);
@@ -77,15 +76,17 @@ fn preserve_hard_off_transition_keeps_hard_off_then_off_press_soft_offs() {
 
     h.action("master", "off").unwrap();
 
-    let calls = spy.turn_on_calls();
-    assert_eq!(spy.turn_off_calls().len(), 0);
-    assert_eq!(calls.len(), 1, "off press must dispatch one turn_on");
-    assert_eq!(calls[0].1.brightness, 1, "soft-off brightness must be 1%");
+    assert_eq!(
+        spy.turn_off_calls().len(),
+        1,
+        "off press must dispatch one hard-off"
+    );
+    assert_eq!(spy.turn_on_calls().len(), 0);
 
     let post_snap = h.snapshot("master").unwrap();
-    assert!(post_snap.soft_off, "off press must establish soft-off");
+    assert!(!post_snap.soft_off, "off press must not establish soft-off");
     assert!(
-        !post_snap.hard_off,
-        "off press must clear hard_off (recovery path)"
+        post_snap.hard_off,
+        "off press must keep hard_off (repeated off path)"
     );
 }

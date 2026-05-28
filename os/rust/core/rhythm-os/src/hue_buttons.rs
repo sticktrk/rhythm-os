@@ -52,7 +52,7 @@ pub fn map_hue_button(button_index: u8, event_type: HueButtonEventType) -> Optio
         (2, HueButtonEventType::Repeat) => Some(ButtonAction::UpHold),
         (3, HueButtonEventType::InitialPress) => Some(ButtonAction::DownPress),
         (3, HueButtonEventType::Repeat) => Some(ButtonAction::DownHold),
-        // Button 4 (bottom): short press = soft off (dim to 1%), long press = lights fully off.
+        // Button 4 (bottom): short press = hard off, long press = lights fully off.
         // Keep short press on release so a hold can promote cleanly to LongPress.
         (4, HueButtonEventType::ShortRelease) => Some(ButtonAction::OffPress),
         (4, HueButtonEventType::LongPress) => Some(ButtonAction::LightsOff),

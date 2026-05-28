@@ -2,7 +2,7 @@
 //!
 //! Buttons 2 and 3 short-press map to `UpPress`/`DownPress`, which apply a ±10%
 //! brightness offset. These tests pin the clamp behavior at the rails and the
-//! lift behavior out of soft-off.
+//! lift behavior out of hard-off.
 
 mod harness;
 
@@ -50,7 +50,7 @@ fn dim_down_at_min_floors_at_one_percent() {
 }
 
 #[test]
-fn dim_up_after_soft_off_lifts_off_one_percent() {
+fn dim_up_after_off_press_lifts_from_hard_off() {
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
@@ -68,7 +68,7 @@ fn dim_up_after_soft_off_lifts_off_one_percent() {
     let last = calls.last().unwrap().1.brightness;
     assert!(
         last > 1,
-        "dim_up after soft-off must lift above 1%, got {}",
+        "dim_up after off must lift above 1%, got {}",
         last
     );
 }

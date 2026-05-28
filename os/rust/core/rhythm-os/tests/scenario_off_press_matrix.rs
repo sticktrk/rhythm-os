@@ -1,15 +1,15 @@
 //! Matrix coverage for OffPress behavior.
 //!
 //! The default user-facing contract is simple: pressing the bottom button fully
-//! turns lights off. The pro/non-powersave contract keeps the older standby
-//! behavior by dimming to 1%. This file iterates the matrix so any future bug
+//! turns lights off. Disabling the legacy `power_save` setting no longer
+//! changes that behavior. This file iterates the matrix so any future bug
 //! ("but did you try at hour X with state Y?") is caught without asking that
 //! question manually.
 //!
 //! Replaces what would otherwise be a `proptest`-style randomized check; we
 //! avoid the dep by enumerating a representative grid that exercises curve
-//! regimes (winter/summer, early-morning/midday/evening), the room states the
-//! engine can be in entering the press, and idle/active mode.
+//! regimes (winter/summer, early-morning/midday/evening), and the room states
+//! the engine can be in entering the press.
 
 mod harness;
 
@@ -19,7 +19,7 @@ use harness::*;
 enum PriorState {
     Fresh,
     Active,
-    SoftOff,
+    LegacySoftOff,
     HardOff,
 }
 
@@ -29,7 +29,7 @@ fn prepare(h: &TestHarness, prior: PriorState) {
         PriorState::Active => {
             h.action("kitchen", "on").unwrap();
         }
-        PriorState::SoftOff => {
+        PriorState::LegacySoftOff => {
             h.action("kitchen", "on").unwrap();
             h.action("kitchen", "off").unwrap();
         }
@@ -94,7 +94,7 @@ fn off_press_defaults_to_hard_off_across_matrix() {
 }
 
 #[test]
-fn off_press_dims_to_one_percent_when_power_save_disabled_across_matrix() {
+fn off_press_stays_hard_off_when_power_save_disabled_across_matrix() {
     // (hour, day_of_year) — winter morning through summer evening.
     let times = [
         (2.0_f32, 15_u32), // 2am winter
@@ -111,7 +111,7 @@ fn off_press_dims_to_one_percent_when_power_save_disabled_across_matrix() {
     let states = [
         PriorState::Fresh,
         PriorState::Active,
-        PriorState::SoftOff,
+        PriorState::LegacySoftOff,
         PriorState::HardOff,
     ];
 
@@ -135,7 +135,7 @@ fn off_press_dims_to_one_percent_when_power_save_disabled_across_matrix() {
             let observed = calls.last().map(|(_, c)| c.brightness);
             let snap = h.snapshot("kitchen").unwrap();
 
-            if off_calls != 0 || observed != Some(1) || snap.hard_off || !snap.soft_off {
+            if off_calls != 1 || observed.is_some() || !snap.hard_off || snap.soft_off {
                 failures.push(format!(
                     "hour={} day={} prior={:?}: turn_off_calls={} last_bri={:?} soft_off={} hard_off={}",
                     hour, day, prior, off_calls, observed, snap.soft_off, snap.hard_off
@@ -146,7 +146,7 @@ fn off_press_dims_to_one_percent_when_power_save_disabled_across_matrix() {
 
     assert!(
         failures.is_empty(),
-        "non-powersave off_press matrix failures ({}):\n  {}",
+        "power_save-disabled off_press matrix failures ({}):\n  {}",
         failures.len(),
         failures.join("\n  ")
     );

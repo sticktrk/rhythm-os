@@ -129,7 +129,7 @@ fn rhythm_toggle_changes_rhythm_enabled() {
 // Scenario 4e: Preferences update reflected in snapshots
 // ============================================================================
 
-/// Room preferences (soft_off, disabled) should be immediately reflected
+/// Room preferences (Standby request, disabled) should be immediately reflected
 /// in engine snapshots.
 #[test]
 fn preferences_reflected_in_snapshots() {
@@ -140,13 +140,14 @@ fn preferences_reflected_in_snapshots() {
     harness.sync();
     harness.set_settings(Some(false));
 
-    // -- Action: set soft_off on kitchen --
+    // -- Action: send a Standby request on kitchen through the legacy soft_off field --
     harness.action("kitchen", "on").unwrap();
     harness.set_room_preferences("kitchen", None, None, Some(true));
 
-    // -- Assert: snapshot reflects soft_off --
+    // -- Assert: snapshot reflects Standby state --
     let snap = harness.snapshot("kitchen").unwrap();
-    assert!(snap.soft_off, "soft_off should be set");
+    assert!(snap.soft_off, "Standby should be retained");
+    assert!(!snap.hard_off, "Standby should not map to hard_off");
 
     // -- Action: disable bedroom --
     harness.set_room_preferences("bedroom", None, Some(true), None);

@@ -3,13 +3,13 @@
 //! Real bundle (rpiz, 2026-04-28T10:14 UTC) showed the user's room in
 //! `hard_off=true` immediately after a `Sleep → Day` transition that fired at
 //! ~05:59 EDT. Three minutes later the user pressed the bottom button on the
-//! dimmer; logs show `OffPress` was correctly received and dispatched, but the
-//! lights "weren't dim".
+//! dimmer; logs show `OffPress` was correctly received and dispatched. The
+//! hard-off pivot means that press should now remain a full off command.
 //!
 //! These tests exercise that specific state shape: hard-off entering the press,
 //! and the same shape after a mode transition (which under the dispatch-queue
 //! invalidator should drop any stale sleep-era queued commands). If a regression
-//! lets a non-1% command land for non-powersave `OffPress` here, this is the
+//! lets a non-off command land for `OffPress` here, this is the
 //! test that should catch it.
 
 mod harness;
@@ -22,7 +22,7 @@ use rhythm_core::{
 use rhythm_os::commands;
 
 #[test]
-fn off_press_while_hard_off_dims_to_one_percent() {
+fn off_press_while_hard_off_sends_hard_off() {
     let (rooms, devices) = rooms_with_lights(&[("master", "Master")]);
     let (h, spy) = TestHarness::with_spy_controller_at(6.04, 118); // 06:02 EDT, late April
     let h = h.with_discovery(rooms, devices);
@@ -37,22 +37,21 @@ fn off_press_while_hard_off_dims_to_one_percent() {
 
     h.action("master", "off").unwrap();
 
-    assert_eq!(spy.turn_off_calls().len(), 0, "soft-off must not hard-off");
-    let calls = spy.turn_on_calls();
+    let off_calls = spy.turn_off_calls();
     assert_eq!(
-        calls.len(),
+        off_calls.len(),
         1,
-        "off press from hard-off must dispatch one turn_on"
+        "off press from hard-off must dispatch one turn_off"
     );
     assert_eq!(
-        calls[0].1.brightness, 1,
-        "off press from hard-off must be 1%, got {}",
-        calls[0].1.brightness
+        spy.turn_on_calls().len(),
+        0,
+        "off press from hard-off must not dispatch legacy soft-off"
     );
 }
 
 #[test]
-fn off_press_immediately_after_sleep_to_day_transition_dims_to_one_percent() {
+fn off_press_immediately_after_sleep_to_day_transition_sends_hard_off() {
     let (rooms, devices) = rooms_with_lights(&[
         ("master", "Master"),
         ("kitchen", "Kitchen"),
@@ -97,29 +96,17 @@ fn off_press_immediately_after_sleep_to_day_transition_dims_to_one_percent() {
     // moments after the day transition.
     h.action("master", "off").unwrap();
 
-    assert_eq!(
-        spy.turn_off_calls().len(),
-        0,
-        "post-transition soft-off must not hard-off"
-    );
-    let calls = spy.turn_on_calls();
-    let master_calls: Vec<_> = calls
+    let off_calls = spy.turn_off_calls();
+    let master_off_calls: Vec<_> = off_calls
         .iter()
-        .filter(|(rid, _)| rid == &h.resolve("master"))
+        .filter(|rid| *rid == &h.resolve("master"))
         .collect();
     assert_eq!(
-        master_calls.len(),
+        master_off_calls.len(),
         1,
-        "exactly one turn_on for master, got {} (all calls: {:?})",
-        master_calls.len(),
-        calls
-            .iter()
-            .map(|(rid, c)| (rid.clone(), c.brightness))
-            .collect::<Vec<_>>()
+        "exactly one turn_off for master, got {} (all off calls: {:?})",
+        master_off_calls.len(),
+        off_calls
     );
-    assert_eq!(
-        master_calls[0].1.brightness, 1,
-        "post-transition off press must be 1%, got {}",
-        master_calls[0].1.brightness
-    );
+    assert!(spy.turn_on_calls().is_empty());
 }

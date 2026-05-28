@@ -1761,9 +1761,10 @@ pub fn schedule_liveness_restart() {
 }
 
 fn schedule_restart(reason: &'static str) {
+    let dry_run = restart_dry_run_enabled();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        if std::env::var_os("RHYTHM_RESTART_DRY_RUN").is_some() {
+        if dry_run {
             log::info!(target: "sys", "Restart dry-run ({}); skipping reboot/exit", reason);
             return;
         }
@@ -1788,6 +1789,16 @@ fn schedule_restart(reason: &'static str) {
             }
         }
     });
+}
+
+#[cfg(test)]
+fn restart_dry_run_enabled() -> bool {
+    true
+}
+
+#[cfg(not(test))]
+fn restart_dry_run_enabled() -> bool {
+    std::env::var_os("RHYTHM_RESTART_DRY_RUN").is_some()
 }
 
 fn spawn_forced_reboot_fallback(reason: &'static str) {

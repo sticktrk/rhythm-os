@@ -77,6 +77,7 @@ pub enum WorkItem {
         node_id: String,
         rhythm_enabled: Option<bool>,
         disabled: Option<bool>,
+        standby_enabled: Option<bool>,
         target_state: Option<RoomModeState>,
         room_profile: Option<crate::commands::RoomProfileSettingsPatch>,
         dispatch_spacing: Duration,
@@ -1077,6 +1078,8 @@ pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::Room
         room.time_offset_minutes = snap.time_offset_minutes;
         room.brightness_offset = snap.brightness_offset;
         room.soft_off = snap.soft_off;
+        room.mood_active = snap.mood_active;
+        room.standby_enabled = snap.standby_enabled;
         room.hard_off = snap.hard_off;
         room.profile_settings = snap.profile_settings;
     }
@@ -1274,6 +1277,23 @@ mod tests {
                     time_offset_minutes: 15.0,
                     brightness_offset: -5.0,
                     soft_off: true,
+                    mood_active: false,
+                    standby_enabled: true,
+                    hard_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
+                },
+                RoomSnapshot {
+                    id: "den".into(),
+                    name: "Den".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    mood_active: true,
+                    standby_enabled: false,
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
@@ -1287,6 +1307,8 @@ mod tests {
                     time_offset_minutes: 0.0,
                     brightness_offset: 0.0,
                     soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
@@ -1294,7 +1316,7 @@ mod tests {
         };
 
         let rooms = rooms_from_engine(&runtime);
-        assert_eq!(rooms.iter().count(), 2);
+        assert_eq!(rooms.iter().count(), 3);
 
         let kitchen = rooms.get("kitchen").unwrap();
         assert_eq!(kitchen.name, "Kitchen");
@@ -1303,6 +1325,13 @@ mod tests {
         assert!((kitchen.time_offset_minutes - 15.0).abs() < f32::EPSILON);
         assert!((kitchen.brightness_offset - -5.0).abs() < f32::EPSILON);
         assert!(kitchen.soft_off);
+        assert!(!kitchen.mood_active);
+        assert!(kitchen.standby_enabled);
+
+        let den = rooms.get("den").unwrap();
+        assert!(den.mood_active);
+        assert!(!den.soft_off);
+        assert!(!den.standby_enabled);
 
         let bedroom = rooms.get("bedroom").unwrap();
         assert!(!bedroom.rhythm_enabled);

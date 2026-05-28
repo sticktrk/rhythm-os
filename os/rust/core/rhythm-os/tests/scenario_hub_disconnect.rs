@@ -6,7 +6,7 @@
 //! ## API journey
 //!
 //! 1. Two hubs connected (Hue + HA), Kitchen bound to both
-//! 2. Kitchen is ON with rhythm_enabled, soft_off=false
+//! 2. Kitchen is ON with rhythm_enabled, hard_off=false
 //! 3. Hue bridge goes offline → hub removed from active hubs
 //! 4. Room state (rhythm_enabled, offsets) preserved in engine
 //! 5. Hub reconnects → re-sync → state restored, Kitchen fully operational
@@ -39,7 +39,7 @@ fn setup_bound_kitchen() -> (TestHarness, rhythm_os::canonical::identity::HubKey
 // Scenario 3a: Room state preserved through disconnect
 // ============================================================================
 
-/// Engine room state (rhythm_enabled, soft_off, offsets) should survive
+/// Engine room state (rhythm_enabled, hard_off, offsets) should survive
 /// when the hub that owns the room data disappears and reappears.
 #[test]
 fn room_state_survives_hub_resync() {
@@ -48,12 +48,13 @@ fn room_state_survives_hub_resync() {
 
     // -- Setup: modify room state --
     harness.action("hue-kitchen", "on").unwrap();
-    harness.set_room_preferences("hue-kitchen", Some(true), None, Some(true));
+    harness.action("hue-kitchen", "lights_off").unwrap();
 
     let snap_before = harness.snapshot("hue-kitchen").unwrap();
     assert!(snap_before.rhythm_enabled);
-    assert!(snap_before.soft_off);
-    assert!(harness.lights_on("hue-kitchen"));
+    assert!(!snap_before.soft_off);
+    assert!(snap_before.hard_off);
+    assert!(!harness.lights_on("hue-kitchen"));
 
     // -- Action: re-sync primary hub (simulates disconnect → reconnect) --
     harness.sync();
@@ -61,8 +62,9 @@ fn room_state_survives_hub_resync() {
     // -- Assert: state preserved --
     let snap_after = harness.snapshot("hue-kitchen").unwrap();
     assert!(snap_after.rhythm_enabled, "rhythm_enabled preserved");
-    assert!(snap_after.soft_off, "soft_off preserved");
-    assert!(harness.lights_on("hue-kitchen"), "lights_on preserved");
+    assert!(!snap_after.soft_off, "legacy soft_off collapsed");
+    assert!(snap_after.hard_off, "hard_off preserved");
+    assert!(!harness.lights_on("hue-kitchen"), "lights_off preserved");
 }
 
 // ============================================================================

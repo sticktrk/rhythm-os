@@ -282,20 +282,17 @@ fn summarize_periodic_dispatch(
 
 fn periodic_room_state(
     room: &rhythm_core::NodeSnapshot,
-    power_save: bool,
+    _power_save: bool,
 ) -> Option<rhythm_core::RoomModeState> {
-    if !room.rhythm_enabled || room.hard_off {
-        return None;
-    }
-    if room.soft_off && power_save {
+    if !room.rhythm_enabled || room.hard_off || room.mood_active {
         return None;
     }
 
-    Some(if room.soft_off && !power_save {
-        rhythm_core::RoomModeState::Idle
+    if room.soft_off {
+        Some(rhythm_core::RoomModeState::Standby)
     } else {
-        rhythm_core::RoomModeState::Active
-    })
+        Some(rhythm_core::RoomModeState::Active)
+    }
 }
 
 pub(crate) fn effective_cycle_duration(
@@ -2024,6 +2021,8 @@ mod tests {
             time_offset_minutes,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         }
@@ -2044,6 +2043,8 @@ mod tests {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: RoomProfileSettings::default(),
         }
@@ -2803,6 +2804,8 @@ mod tests {
                 time_offset_minutes: 30.0,
                 brightness_offset: 10.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }]),
@@ -2986,6 +2989,8 @@ mod tests {
                 time_offset_minutes: 30.0,
                 brightness_offset: 10.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: rhythm_core::RoomProfileSettings::default(),
             }]),

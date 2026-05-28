@@ -1,6 +1,6 @@
-//! Brightness offset persistence across the soft-off cycle.
+//! Brightness offset persistence across the off cycle.
 //!
-//! When a user dims up (sets a +offset) then soft-offs and re-presses the top
+//! When a user dims up (sets a +offset) then turns off and re-presses the top
 //! button, what should happen to the offset is a product call. This file pins
 //! whatever the current behavior is so a refactor doesn't silently flip it.
 //!

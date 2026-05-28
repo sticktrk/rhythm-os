@@ -1,7 +1,7 @@
-//! Scenario 2: Room control across hubs (on/off/idle/brightness).
+//! Scenario 2: Room control across hubs (on/off/brightness).
 //!
 //! After rooms are bound across hubs, room card interactions (toggle, brightness,
-//! soft-off, lights-off) must dispatch correctly. Single-hub rooms should only
+//! hard-off, lights-off) must dispatch correctly. Single-hub rooms should only
 //! dispatch to their owning hub.
 //!
 //! ## API journey
@@ -9,7 +9,7 @@
 //! 1. Kitchen is bound to both Hue and HA (from Scenario 1)
 //! 2. User taps Kitchen card → on → PUT /api/nodes/action
 //! 3. User drags brightness → PUT /api/nodes/brightness
-//! 4. User taps idle → PUT /api/nodes/preferences (soft_off: true)
+//! 4. Standby preference enters the standby room state
 //! 5. User long-presses → off → PUT /api/nodes/action lights_off
 //! 6. Single-hub room (Office) works normally through just HA
 
@@ -130,12 +130,12 @@ fn actions_across_hub_types() {
 }
 
 // ============================================================================
-// Scenario 2d: Soft-off (idle) on cross-hub room
+// Scenario 2d: Standby request on cross-hub room
 // ============================================================================
 
-/// Setting soft_off on a cross-hub room should update the engine state.
+/// Setting Standby on a cross-hub room should enter Standby without losing targets.
 #[test]
-fn soft_off_on_cross_hub_room() {
+fn standby_request_enters_standby_cross_hub_room() {
     let (harness, _office_id) = setup_multi_hub();
     harness.set_settings(Some(false));
 
@@ -143,18 +143,24 @@ fn soft_off_on_cross_hub_room() {
     harness.action("hue-kitchen", "on").unwrap();
     assert!(harness.lights_on("hue-kitchen"));
 
-    // -- Action: set soft_off on Kitchen --
+    // -- Action: set Standby on Kitchen through the legacy soft_off field --
     harness.set_room_preferences("hue-kitchen", None, None, Some(true));
 
-    // -- Assert: engine snapshot shows soft_off --
+    // -- Assert: engine snapshot shows Standby and cross-hub routing is intact --
     let snap = harness
         .snapshot("hue-kitchen")
         .expect("Kitchen should exist");
-    assert!(snap.soft_off, "Kitchen should be in soft-off mode");
+    assert!(snap.soft_off, "Kitchen should be in Standby");
+    assert!(!snap.hard_off, "Kitchen should not be in hard-off mode");
     assert!(
         snap.rhythm_enabled,
-        "rhythm should still be enabled during soft-off"
+        "rhythm should still be enabled during Standby"
     );
+    assert!(
+        harness.lights_on("hue-kitchen"),
+        "Standby tracks as lights-on"
+    );
+    assert_eq!(harness.hub_target_count("hue-kitchen"), 2);
 }
 
 // ============================================================================
@@ -186,7 +192,7 @@ fn brightness_on_cross_hub_room() {
 // Scenario 2f: Room state preserved through re-sync
 // ============================================================================
 
-/// User state (rhythm_enabled, soft_off) should survive hub re-sync.
+/// User state (rhythm_enabled, Standby) should survive hub re-sync.
 #[test]
 fn room_state_preserved_through_resync() {
     let (harness, _office_id) = setup_multi_hub();
@@ -197,7 +203,8 @@ fn room_state_preserved_through_resync() {
     harness.set_room_preferences("hue-kitchen", Some(true), None, Some(true));
 
     let snap_before = harness.snapshot("hue-kitchen").unwrap();
-    assert!(snap_before.soft_off, "soft_off should be set");
+    assert!(snap_before.soft_off, "Standby should be set");
+    assert!(!snap_before.hard_off, "Standby should not be hard-off");
     assert!(snap_before.rhythm_enabled, "rhythm should be enabled");
 
     // -- Action: re-sync the primary hub (simulates hub reconnect) --
@@ -209,10 +216,10 @@ fn room_state_preserved_through_resync() {
         snap_after.rhythm_enabled,
         "rhythm_enabled preserved through re-sync"
     );
-    // soft_off is preserved via engine snapshot during room re-add
-    assert!(snap_after.soft_off, "soft_off preserved through re-sync");
+    assert!(snap_after.soft_off, "Standby preserved through re-sync");
+    assert!(!snap_after.hard_off, "Standby did not become hard-off");
     assert!(
         harness.lights_on("hue-kitchen"),
-        "lights_on state preserved"
+        "Standby lights-on state preserved"
     );
 }

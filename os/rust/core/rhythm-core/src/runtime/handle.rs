@@ -8,7 +8,7 @@ use crate::controller::LightController;
 use crate::light_profile::LightProfileConfig;
 use crate::lighting::LightingCommand;
 use crate::primitives::{ManualDispatchPlan, PeriodicTickPlan};
-use crate::room::{LightNodeKind, ModeConfig, RoomModeState, RoomProfileSettings};
+use crate::room::{LightNodeKind, ModeConfig, RoomProfileSettings};
 use crate::solar::{SolarTime, SunTimes};
 use anyhow::Result;
 
@@ -145,8 +145,7 @@ pub trait RuntimeHandle: Send + Sync {
     /// Turn a room fully off, optionally fading out first.
     fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()>;
 
-    /// Set power save mode on the engine. Returns soft-off room IDs converted
-    /// to hard-off and needing a physical off refresh.
+    /// Set power save mode on the engine. Returns room IDs needing refresh.
     fn set_power_save(&self, enabled: bool) -> Vec<String>;
 
     /// Get whether power save mode is enabled.
@@ -162,9 +161,13 @@ pub trait RuntimeHandle: Send + Sync {
     /// Get the idle brightness from the active light profile.
     fn idle_brightness(&self) -> u8;
 
-    /// Send a soft-off tick to a room: idle curve color at idle brightness.
-    /// Used when `soft_off` preference is toggled on for immediate visual feedback.
+    /// Render and enter Standby.
     fn soft_off_tick_room(&self, room_id: &str) -> Result<()>;
+
+    /// Render and enter Mood.
+    fn mood_tick_room(&self, room_id: &str) -> Result<()> {
+        self.soft_off_tick_room(room_id)
+    }
 
     /// Query the light controller to check if any lights are on in a room.
     /// Used for initial state sync on startup.
@@ -201,6 +204,8 @@ pub struct RoomSnapshot {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
     pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
 }
@@ -213,6 +218,8 @@ pub struct RestoredRoomState {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
     pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
 }
@@ -229,6 +236,8 @@ pub struct NodeSnapshot {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
     pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
 }
@@ -245,6 +254,8 @@ impl NodeSnapshot {
             time_offset_minutes: snapshot.time_offset_minutes,
             brightness_offset: snapshot.brightness_offset,
             soft_off: snapshot.soft_off,
+            mood_active: snapshot.mood_active,
+            standby_enabled: snapshot.standby_enabled,
             hard_off: snapshot.hard_off,
             profile_settings: snapshot.profile_settings,
         }
@@ -259,6 +270,8 @@ pub struct RestoredNodeState {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
     pub hard_off: bool,
     pub profile_settings: RoomProfileSettings,
 }
@@ -271,6 +284,8 @@ impl From<&RoomSnapshot> for RestoredRoomState {
             time_offset_minutes: snapshot.time_offset_minutes,
             brightness_offset: snapshot.brightness_offset,
             soft_off: snapshot.soft_off,
+            mood_active: snapshot.mood_active,
+            standby_enabled: snapshot.standby_enabled,
             hard_off: snapshot.hard_off,
             profile_settings: snapshot.profile_settings.clone(),
         }
@@ -285,6 +300,8 @@ impl From<&NodeSnapshot> for RestoredNodeState {
             time_offset_minutes: snapshot.time_offset_minutes,
             brightness_offset: snapshot.brightness_offset,
             soft_off: snapshot.soft_off,
+            mood_active: snapshot.mood_active,
+            standby_enabled: snapshot.standby_enabled,
             hard_off: snapshot.hard_off,
             profile_settings: snapshot.profile_settings.clone(),
         }
@@ -299,6 +316,8 @@ impl From<&RestoredNodeState> for RestoredRoomState {
             time_offset_minutes: state.time_offset_minutes,
             brightness_offset: state.brightness_offset,
             soft_off: state.soft_off,
+            mood_active: state.mood_active,
+            standby_enabled: state.standby_enabled,
             hard_off: state.hard_off,
             profile_settings: state.profile_settings.clone(),
         }
@@ -469,13 +488,7 @@ where
                                 .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
                             engine.record_turn_on_dispatch(source_room_id, node_id, command);
 
-                            let room_state_label = match room_state {
-                                RoomModeState::Active => "active",
-                                RoomModeState::Idle => "idle",
-                                RoomModeState::Wake => "wake",
-                                RoomModeState::Warning => "warning",
-                                RoomModeState::HardOff => "hard_off",
-                            };
+                            let room_state_label = room_state.as_api_str();
 
                             tracing::debug!(
                                 target: "sys",
@@ -515,6 +528,8 @@ where
             time_offset_minutes: room.time_offset_minutes,
             brightness_offset: room.brightness_offset,
             soft_off: room.soft_off,
+            mood_active: room.mood_active,
+            standby_enabled: room.standby_enabled,
             hard_off: room.hard_off,
             profile_settings: room.profile_settings.clone(),
         })
@@ -537,6 +552,8 @@ where
                 time_offset_minutes: room.time_offset_minutes,
                 brightness_offset: room.brightness_offset,
                 soft_off: room.soft_off,
+                mood_active: room.mood_active,
+                standby_enabled: room.standby_enabled,
                 hard_off: room.hard_off,
                 profile_settings: room.profile_settings.clone(),
             })
@@ -556,6 +573,8 @@ where
             time_offset_minutes: node.time_offset_minutes,
             brightness_offset: node.brightness_offset,
             soft_off: node.soft_off,
+            mood_active: node.mood_active,
+            standby_enabled: node.standby_enabled,
             hard_off: node.hard_off,
             profile_settings: node.profile_settings.clone(),
         })
@@ -578,6 +597,8 @@ where
                 time_offset_minutes: node.time_offset_minutes,
                 brightness_offset: node.brightness_offset,
                 soft_off: node.soft_off,
+                mood_active: node.mood_active,
+                standby_enabled: node.standby_enabled,
                 hard_off: node.hard_off,
                 profile_settings: node.profile_settings.clone(),
             })
@@ -598,6 +619,8 @@ where
             time_offset_minutes: effective.time_offset_minutes,
             brightness_offset: effective.brightness_offset,
             soft_off: effective.soft_off,
+            mood_active: effective.mood_active,
+            standby_enabled: effective.standby_enabled,
             hard_off: effective.hard_off,
             profile_settings: effective.profile_settings,
         })
@@ -622,6 +645,8 @@ where
                     time_offset_minutes: effective.time_offset_minutes,
                     brightness_offset: effective.brightness_offset,
                     soft_off: effective.soft_off,
+                    mood_active: effective.mood_active,
+                    standby_enabled: effective.standby_enabled,
                     hard_off: effective.hard_off,
                     profile_settings: effective.profile_settings,
                 })
@@ -638,7 +663,9 @@ where
                 room.disabled = state.disabled;
                 room.time_offset_minutes = state.time_offset_minutes;
                 room.brightness_offset = state.brightness_offset;
-                room.soft_off = state.soft_off;
+                room.soft_off = state.soft_off && !state.hard_off && !state.mood_active;
+                room.mood_active = state.mood_active && !state.hard_off;
+                room.standby_enabled = state.standby_enabled;
                 room.hard_off = state.hard_off;
                 room.profile_settings = state.profile_settings;
                 restored = true;
@@ -859,6 +886,22 @@ where
             .map_err(|e| anyhow::anyhow!("soft_off_tick failed: {}", e))
     }
 
+    fn mood_tick_room(&self, room_id: &str) -> Result<()> {
+        let dispatch_lock = self.dispatch_lock(room_id);
+        let _dispatch_guard = dispatch_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock dispatch gate: {}", e))?;
+        let current_hour = self.current_hour();
+        let dispatch = {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+            engine.plan_mood_tick(room_id, current_hour)
+        };
+        dispatch_manual_plan(self, dispatch).map_err(|e| anyhow::anyhow!("mood_tick failed: {}", e))
+    }
+
     fn any_lights_on(&self, room_id: &str) -> Result<bool> {
         crate::runtime::executor::block_on(self.controller().any_lights_on(room_id))
             .map_err(|e| anyhow::anyhow!("any_lights_on failed: {}", e))
@@ -992,6 +1035,8 @@ mod tests {
                 time_offset_minutes: 30.0,
                 brightness_offset: 5.0,
                 soft_off: true,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 profile_settings: crate::RoomProfileSettings::default(),
             },
@@ -1025,6 +1070,8 @@ mod tests {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: crate::RoomProfileSettings::default(),
         }
@@ -1037,6 +1084,8 @@ mod tests {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             profile_settings: crate::RoomProfileSettings::default(),
         }

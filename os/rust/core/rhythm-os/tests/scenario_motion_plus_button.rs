@@ -1,7 +1,7 @@
 //! Motion + button interaction tests.
 //!
 //! When motion is active, the room is "owned" by motion. A user pressing the
-//! bottom button must still soft-off the room without motion bouncing the
+//! bottom button must still hard-off the room without motion bouncing the
 //! lights back on, and the top button after motion clears must resume adaptive
 //! lighting.
 
@@ -24,16 +24,16 @@ fn off_press_overrides_motion_active_cache() {
 
     h.action("kitchen", "off").unwrap();
 
-    assert_eq!(spy.turn_off_calls().len(), 0);
-    let calls = spy.turn_on_calls();
+    let off_calls = spy.turn_off_calls();
     assert_eq!(
-        calls.len(),
+        off_calls.len(),
         1,
-        "off press should dispatch one soft-off even when motion is active"
+        "off press should dispatch one hard-off even when motion is active"
     );
     assert_eq!(
-        calls[0].1.brightness, 1,
-        "motion must not lift soft-off above 1%"
+        spy.turn_on_calls().len(),
+        0,
+        "motion must not translate manual off into legacy soft-off"
     );
 }
 

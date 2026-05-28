@@ -40,7 +40,7 @@ fn action_on_produces_lighting_command() {
 }
 
 #[test]
-fn action_off_sends_soft_off() {
+fn action_off_sends_hard_off() {
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);
     let (h, spy) = harness::TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
@@ -51,21 +51,11 @@ fn action_off_sends_soft_off() {
     h.action("kitchen", "on").unwrap();
     spy.reset();
 
-    // OffPress triggers soft-off (turn_on at 1% brightness), not hard turn_off
+    // OffPress now means true off.
     h.action("kitchen", "off").unwrap();
 
-    assert_eq!(
-        spy.turn_off_calls().len(),
-        0,
-        "Soft-off should not call turn_off"
-    );
-    assert_eq!(
-        spy.turn_on_count(),
-        1,
-        "Soft-off should call turn_on at min brightness"
-    );
-    let (_, cmd) = &spy.turn_on_calls()[0];
-    assert_eq!(cmd.brightness, 1, "Soft-off brightness should be 1%");
+    assert_eq!(spy.turn_off_calls().len(), 1, "Off should call turn_off");
+    assert_eq!(spy.turn_on_count(), 0, "Off should not dim via turn_on");
 }
 
 #[test]

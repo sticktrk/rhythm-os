@@ -111,7 +111,7 @@ impl From<&Room> for BackupConfigurationRoom {
             name: room.name.clone(),
             rhythm_enabled: room.rhythm_enabled,
             disabled: room.disabled,
-            state: RoomModeState::from_flags(room.hard_off, room.soft_off, false),
+            state: RoomModeState::from_flags(room.hard_off, room.soft_off, room.mood_active, false),
             room_profile: room.profile_settings.clone(),
         }
     }

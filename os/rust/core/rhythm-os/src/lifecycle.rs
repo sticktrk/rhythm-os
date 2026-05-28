@@ -83,7 +83,7 @@ where
 }
 
 /// Detect the fingerprint of a corrupted persisted-rooms file: every room at
-/// its factory-default state (rhythm disabled, no offsets, not soft-off).
+/// its factory-default state (rhythm disabled, no offsets, no persisted state).
 /// This is the signature of the historical `do_room_set` bug that dropped
 /// params during runtime creation, and on detection the caller should fall
 /// back to seeding rooms with `rhythm_enabled=true` rather than trusting the
@@ -100,6 +100,10 @@ pub(crate) fn persisted_rooms_look_corrupted(rooms: &rhythm_core::room::RoomMana
             || room.time_offset_minutes != 0.0
             || room.brightness_offset != 0.0
             || room.soft_off
+            || room.mood_active
+            || room.standby_enabled
+            || room.hard_off
+            || !room.profile_settings.is_empty()
         {
             return false;
         }
@@ -352,6 +356,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                                     time_offset_minutes: 0.0,
                                     brightness_offset: 0.0,
                                     soft_off: false,
+                                    mood_active: false,
+                                    standby_enabled: false,
                                     hard_off: false,
                                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                                 },
@@ -367,6 +373,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                                     time_offset_minutes: room.time_offset_minutes,
                                     brightness_offset: room.brightness_offset,
                                     soft_off: room.soft_off,
+                                    mood_active: room.mood_active,
+                                    standby_enabled: room.standby_enabled,
                                     hard_off: room.hard_off,
                                     profile_settings: room.profile_settings.clone(),
                                 },
@@ -391,6 +399,8 @@ pub fn ensure_hub_runtime<C: rhythm_core::LightController + Send + Sync + 'stati
                                 time_offset_minutes: 0.0,
                                 brightness_offset: 0.0,
                                 soft_off: false,
+                                mood_active: false,
+                                standby_enabled: false,
                                 hard_off: false,
                                 profile_settings: rhythm_core::RoomProfileSettings::default(),
                             },
@@ -719,14 +729,7 @@ pub fn ensure_composite_runtime(
         if let Some(ref storage) = s.storage {
             match storage.load_rooms() {
                 Ok(persisted) => {
-                    let all_defaults = !persisted.is_empty()
-                        && persisted.iter().all(|r| {
-                            !r.rhythm_enabled
-                                && !r.disabled
-                                && r.time_offset_minutes == 0.0
-                                && r.brightness_offset == 0.0
-                                && !r.soft_off
-                        });
+                    let all_defaults = persisted_rooms_look_corrupted(&persisted);
 
                     if all_defaults {
                         warn!(target: "sys", "All {} rooms at default state — defaulting to rhythm_enabled=true", persisted.len());
@@ -739,6 +742,8 @@ pub fn ensure_composite_runtime(
                                     time_offset_minutes: 0.0,
                                     brightness_offset: 0.0,
                                     soft_off: false,
+                                    mood_active: false,
+                                    standby_enabled: false,
                                     hard_off: false,
                                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                                 },
@@ -754,6 +759,8 @@ pub fn ensure_composite_runtime(
                                     time_offset_minutes: node.time_offset_minutes,
                                     brightness_offset: node.brightness_offset,
                                     soft_off: node.soft_off,
+                                    mood_active: node.mood_active,
+                                    standby_enabled: node.standby_enabled,
                                     hard_off: node.hard_off,
                                     profile_settings: node.profile_settings.clone(),
                                 },
@@ -784,6 +791,8 @@ pub fn ensure_composite_runtime(
                                 time_offset_minutes: 0.0,
                                 brightness_offset: 0.0,
                                 soft_off: false,
+                                mood_active: false,
+                                standby_enabled: false,
                                 hard_off: false,
                                 profile_settings: rhythm_core::RoomProfileSettings::default(),
                             },
@@ -960,13 +969,17 @@ mod tests {
 
     #[test]
     fn any_nondefault_field_saves_persistence_from_corruption_flag() {
-        // Non-zero time_offset, brightness_offset, disabled, or soft_off all
-        // prove the persistence layer is writing real data.
+        // Any user-set persisted field proves the persistence layer is writing
+        // real data rather than the historical all-default corruption shape.
         for mutator in [
             |r: &mut Room| r.time_offset_minutes = 10.0,
             |r: &mut Room| r.brightness_offset = -0.3,
             |r: &mut Room| r.disabled = true,
             |r: &mut Room| r.soft_off = true,
+            |r: &mut Room| r.mood_active = true,
+            |r: &mut Room| r.standby_enabled = true,
+            |r: &mut Room| r.hard_off = true,
+            |r: &mut Room| r.profile_settings.mood_enabled = Some(false),
             |r: &mut Room| r.rhythm_enabled = true,
         ] {
             let mut rooms = RoomManager::new();
@@ -1004,16 +1017,15 @@ mod tests {
     }
 
     #[test]
-    fn hard_off_only_room_is_still_corrupted_signature() {
-        // `hard_off` is intentionally NOT part of the corruption check (hard
-        // off is a valid user state even on an otherwise-defaulted room).
+    fn hard_off_only_room_is_not_corrupted_signature() {
+        // Hard-off is a valid user state even on an otherwise-defaulted room.
         let mut rooms = RoomManager::new();
         let mut room = default_room("kitchen");
         room.hard_off = true;
         rooms.add_room(room);
         assert!(
-            persisted_rooms_look_corrupted(&rooms),
-            "hard_off alone does not prove non-corruption"
+            !persisted_rooms_look_corrupted(&rooms),
+            "hard_off alone should prove non-corruption"
         );
     }
 }

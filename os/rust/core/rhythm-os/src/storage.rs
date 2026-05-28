@@ -2162,6 +2162,9 @@ mod tests {
             let mut rooms = rhythm_core::room::RoomManager::new();
             rooms.get_or_create("living-room", "Living Room");
             rooms.get_or_create("bedroom", "Bedroom");
+            rooms.get_mut("living-room").unwrap().mood_active = true;
+            rooms.get_mut("bedroom").unwrap().soft_off = true;
+            rooms.get_mut("bedroom").unwrap().standby_enabled = true;
             assert_eq!(rooms.len(), 2);
 
             storage.save_rooms(&rooms).unwrap();
@@ -2169,8 +2172,13 @@ mod tests {
             assert_eq!(loaded.len(), 2);
             assert!(loaded.get("living-room").is_some());
             assert_eq!(loaded.get("living-room").unwrap().name, "Living Room");
+            assert!(loaded.get("living-room").unwrap().mood_active);
+            assert!(!loaded.get("living-room").unwrap().soft_off);
             assert!(loaded.get("bedroom").is_some());
             assert_eq!(loaded.get("bedroom").unwrap().name, "Bedroom");
+            assert!(loaded.get("bedroom").unwrap().soft_off);
+            assert!(loaded.get("bedroom").unwrap().standby_enabled);
+            assert!(!loaded.get("bedroom").unwrap().mood_active);
             cleanup(&path);
         }
 

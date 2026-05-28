@@ -156,8 +156,8 @@ pub struct RhythmEngine<C: LightController> {
     /// Room state manager.
     rooms: RoomManager,
 
-    /// Power save mode. When true (default), off actions turn lights fully off.
-    /// When false, off actions enter standby/soft-off brightness.
+    /// Legacy power-save switch retained for stored settings compatibility.
+    /// Off actions always turn lights fully off.
     power_save: bool,
 
     /// Last periodic command sent per source-room/target pair.
@@ -276,21 +276,20 @@ impl<C: LightController> RhythmEngine<C> {
         self.power_save
     }
 
-    /// Get the idle brightness from the current mode's idle profile.
+    /// Get the mood brightness from the current mode's mood profile.
     pub fn idle_brightness(&self, current_hour: f32) -> u8 {
         let ctx = self.create_context(current_hour);
         self.profile_registry
             .profile_for_room_state(
                 self.profile_registry.active_mode(),
-                RoomModeState::Idle,
+                RoomModeState::Mood,
                 None,
             )
             .calculate(&ctx)
             .brightness
     }
 
-    /// Set power save mode. Returns soft-off room IDs converted to hard-off
-    /// because the default power-save behavior treats off as a real off state.
+    /// Set legacy global power-save mode.
     pub fn set_power_save(&mut self, enabled: bool) -> Vec<String> {
         self.power_save = enabled;
         self.periodic_command_cache.clear();
@@ -298,22 +297,7 @@ impl<C: LightController> RhythmEngine<C> {
             room.clear_warning_state();
         }
 
-        if enabled {
-            let room_ids: Vec<String> = self
-                .rooms
-                .iter()
-                .filter(|r| r.soft_off)
-                .map(|r| r.id.clone())
-                .collect();
-            for room_id in &room_ids {
-                if let Some(room) = self.rooms.get_mut(room_id) {
-                    room.set_hard_off();
-                }
-            }
-            room_ids
-        } else {
-            Vec::new()
-        }
+        Vec::new()
     }
 
     /// Create a curve context for the given hour.
@@ -330,10 +314,20 @@ impl<C: LightController> RhythmEngine<C> {
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
                 hard_off: false,
                 warning_active: false,
                 profile_settings: RoomProfileSettings::default(),
             })
+    }
+
+    fn effective_mood_active(&self, effective: &EffectiveRoomState) -> bool {
+        effective.mood_active
+    }
+
+    fn effective_standby_active(&self, effective: &EffectiveRoomState) -> bool {
+        effective.soft_off && !effective.hard_off
     }
 
     fn periodic_cache_key(source_room_id: &str, target_id: &str) -> PeriodicCommandCacheKey {
@@ -470,26 +464,30 @@ impl<C: LightController> RhythmEngine<C> {
     }
 
     pub(crate) fn plan_turn_off(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
-        if self.power_save {
-            {
-                let room = self.rooms.get_or_create(room_id, room_id);
-                room.set_hard_off();
-            };
-            self.plan_non_periodic_turn_off(room_id, None)
-        } else {
-            {
-                let room = self.rooms.get_or_create(room_id, room_id);
-                room.set_soft_off();
-            };
-            let effective = self.effective_room_state(room_id);
-            let offset = effective.time_offset_minutes;
-            let profile_settings = effective.profile_settings;
-            let values =
-                self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
-
-            let command = Self::build_command(&values, values.brightness);
-            self.plan_non_periodic_turn_on(room_id, command)
+        let standby_enabled = self
+            .rooms
+            .get(room_id)
+            .map(|room| room.standby_enabled)
+            .unwrap_or(false);
+        if !standby_enabled {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.set_hard_off();
+            return self.plan_non_periodic_turn_off(room_id, None);
         }
+
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.set_standby();
+        }
+        let effective = self.effective_room_state(room_id);
+        let values = self.idle_values_for_settings(
+            Some(&effective.profile_settings),
+            current_hour,
+            effective.time_offset_minutes,
+        );
+        let command = Self::build_command(&values, values.brightness);
+        self.plan_non_periodic_turn_on(room_id, command)
     }
 
     pub(crate) fn plan_lights_off(
@@ -507,23 +505,41 @@ impl<C: LightController> RhythmEngine<C> {
         room_id: &str,
         current_hour: f32,
     ) -> ManualDispatchPlan {
-        let (offset, profile_settings) = self
-            .rooms
-            .effective_state(room_id)
-            .map(|state| (state.time_offset_minutes, state.profile_settings))
-            .unwrap_or((0.0, RoomProfileSettings::default()));
-        if let Some(room) = self.rooms.get_mut(room_id) {
-            room.clear_warning_state();
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.set_standby();
         }
-        if self.power_save {
-            {
-                let room = self.rooms.get_or_create(room_id, room_id);
-                room.set_hard_off();
-            };
-            return self.plan_non_periodic_turn_off(room_id, None);
-        }
-        let values = self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
 
+        let effective = self.effective_room_state(room_id);
+        let profile_settings = effective.profile_settings;
+        let values = self.idle_values_for_settings(
+            Some(&profile_settings),
+            current_hour,
+            effective.time_offset_minutes,
+        );
+        let command = Self::build_command(&values, values.brightness);
+        self.plan_non_periodic_turn_on(room_id, command)
+    }
+
+    pub(crate) fn plan_mood_tick(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+    ) -> ManualDispatchPlan {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.set_mood();
+        }
+
+        let effective = self.effective_room_state(room_id);
+        let values = self.values_for_room_state(
+            Some(&effective.profile_settings),
+            RoomModeState::Mood,
+            current_hour,
+            effective.time_offset_minutes,
+        );
         let command = Self::build_command(&values, values.brightness);
         self.plan_non_periodic_turn_on(room_id, command)
     }
@@ -620,30 +636,29 @@ impl<C: LightController> RhythmEngine<C> {
         let effective = self.effective_room_state(room_id);
         let rhythm_enabled = effective.rhythm_enabled;
         let soft_off = effective.soft_off;
+        let mood_active = effective.mood_active;
         let hard_off = effective.hard_off;
         let brightness_offset = effective.brightness_offset;
         let time_offset = effective.time_offset_minutes;
         let profile_settings = effective.profile_settings;
 
-        if hard_off || (!rhythm_enabled && !soft_off) {
+        if hard_off || mood_active || !rhythm_enabled {
             return None;
         }
-        if soft_off && self.power_save {
-            return None;
+
+        if soft_off {
+            let values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
+            let command = Self::build_command(&values, values.brightness);
+            return Some(self.plan_non_periodic_turn_on(room_id, command));
         }
 
         let ctx = self.create_context(current_hour);
         let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, time_offset);
 
-        let command = if soft_off && !self.power_save {
-            let idle_values =
-                self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
-            Self::build_command(&idle_values, idle_values.brightness)
-        } else {
-            let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
-            Self::build_command(&values, brightness)
-        };
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let command = Self::build_command(&values, brightness);
 
         Some(self.plan_non_periodic_turn_on(room_id, command))
     }
@@ -670,7 +685,10 @@ impl<C: LightController> RhythmEngine<C> {
         current_hour: f32,
         lights_on: Option<bool>,
     ) -> ManualActionPlan {
-        let effectively_off = if !self.power_save && self.effective_room_state(room_id).soft_off {
+        let effective = self.effective_room_state(room_id);
+        let effectively_off = if self.effective_mood_active(&effective)
+            || self.effective_standby_active(&effective)
+        {
             Some(true)
         } else {
             lights_on.map(|is_on| !is_on)
@@ -787,6 +805,7 @@ impl<C: LightController> RhythmEngine<C> {
         let effective = self.effective_room_state(source_room_id);
         let rhythm_enabled = effective.rhythm_enabled;
         let soft_off = effective.soft_off;
+        let mood_active = effective.mood_active;
         let hard_off = effective.hard_off;
         let warning_active = effective.warning_active;
 
@@ -796,28 +815,18 @@ impl<C: LightController> RhythmEngine<C> {
 
         // The motion-timeout warning dim is a transient "lights will turn off
         // soon" signal. Re-applying the active curve here would visibly undo
-        // the dim within the 60-second warning window — the user sees the
-        // lights dim, brighten, then drop to soft-off, which reads as a
-        // "double on/off". Let the dim stand until motion returns or the
-        // timeout fires.
+        // the dim before the timeout fires.
         if warning_active && !soft_off {
             return PeriodicTickPlan::Skipped;
         }
 
-        let mode = self.profile_registry.active_mode();
+        if mood_active {
+            return PeriodicTickPlan::Skipped;
+        }
 
         if soft_off {
-            let profile_settings = effective.profile_settings.clone();
-            let profile_id = self
-                .profile_registry
-                .profile_for_room_state(mode, RoomModeState::Idle, Some(&profile_settings))
-                .id()
-                .to_string();
-            if self.power_save {
-                return PeriodicTickPlan::Skipped;
-            }
-
             let offset = effective.time_offset_minutes;
+            let profile_settings = effective.profile_settings.clone();
             let values =
                 self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
             let command = Self::build_command(&values, values.brightness);
@@ -825,9 +834,18 @@ impl<C: LightController> RhythmEngine<C> {
                 return PeriodicTickPlan::Skipped;
             }
 
+            let profile_id = self
+                .profile_registry
+                .profile_for_room_state(
+                    self.profile_registry.active_mode(),
+                    RoomModeState::Standby,
+                    Some(&profile_settings),
+                )
+                .id()
+                .to_string();
             return PeriodicTickPlan::Dispatch {
                 command,
-                room_state: RoomModeState::Idle,
+                room_state: RoomModeState::Standby,
                 profile_id,
             };
         }
@@ -852,7 +870,11 @@ impl<C: LightController> RhythmEngine<C> {
 
         let profile_id = self
             .profile_registry
-            .profile_for_room_state(mode, RoomModeState::Active, Some(&profile_settings))
+            .profile_for_room_state(
+                self.profile_registry.active_mode(),
+                RoomModeState::Active,
+                Some(&profile_settings),
+            )
             .id()
             .to_string();
         PeriodicTickPlan::Dispatch {
@@ -1006,7 +1028,7 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> LightingValues {
         self.values_for_room_state(
             settings,
-            RoomModeState::Idle,
+            RoomModeState::Standby,
             current_hour,
             time_offset_minutes,
         )
@@ -1140,14 +1162,11 @@ impl<C: LightController> RhythmEngine<C> {
     /// `true` if lights were turned on, `false` if turned off.
     pub async fn toggle(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<bool> {
         // Determine if the room is effectively off
-        let effectively_off = if !self.power_save {
-            // When power_save is off, soft_off rooms are "logically off" at soft-off brightness
-            // — skip the HTTP round-trip to check Hue
-            if self.effective_room_state(room_id).soft_off {
-                true
-            } else {
-                !self.controller.any_lights_on(room_id).await?
-            }
+        let effective = self.effective_room_state(room_id);
+        let effectively_off = if self.effective_mood_active(&effective)
+            || self.effective_standby_active(&effective)
+        {
+            true
         } else {
             !self.controller.any_lights_on(room_id).await?
         };
@@ -1338,9 +1357,8 @@ impl<C: LightController> RhythmEngine<C> {
     /// Set the time offset for a room directly.
     ///
     /// Sets `room.time_offset_minutes` to the given value (not additive).
-    /// If the room is on (rhythm_enabled and not soft_off), sends full
+    /// If the room is on, sends full
     /// adaptive values at the new offset position, preserving brightness_offset.
-    /// If soft_off, sends soft-off brightness at the new color temp.
     /// If off, just sets the offset without sending light commands.
     ///
     /// # Arguments
@@ -1363,35 +1381,32 @@ impl<C: LightController> RhythmEngine<C> {
         let effective = self.effective_room_state(room_id);
         let rhythm_enabled = effective.rhythm_enabled;
         let soft_off = effective.soft_off;
+        let mood_active = effective.mood_active;
         let hard_off = effective.hard_off;
         let brightness_offset = effective.brightness_offset;
         let time_offset = effective.time_offset_minutes;
         let profile_settings = effective.profile_settings;
 
-        if hard_off || (!rhythm_enabled && !soft_off) {
+        if hard_off || mood_active || !rhythm_enabled {
             // Room is off — just set the offset, no light command
             return Ok(());
         }
-        if soft_off && self.power_save {
-            return Ok(());
+
+        if soft_off {
+            let values =
+                self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
+            let cmd = Self::build_command(&values, values.brightness);
+            return self.send_non_periodic_turn_on(room_id, cmd).await;
         }
 
         let ctx = self.create_context(current_hour);
         let module = self.active_profile_for_settings(Some(&profile_settings));
         let values = module.calculate_with_offset(&ctx, time_offset);
 
-        if soft_off && !self.power_save {
-            // Soft-off: use the current mode's idle profile values (brightness + color)
-            let idle_values =
-                self.idle_values_for_settings(Some(&profile_settings), current_hour, time_offset);
-            let cmd = Self::build_command(&idle_values, idle_values.brightness);
-            self.send_non_periodic_turn_on(room_id, cmd).await
-        } else {
-            // On: send full adaptive values preserving brightness_offset
-            let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
-            let cmd = Self::build_command(&values, brightness);
-            self.send_non_periodic_turn_on(room_id, cmd).await
-        }
+        // On: send full adaptive values preserving brightness_offset.
+        let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
+        let cmd = Self::build_command(&values, brightness);
+        self.send_non_periodic_turn_on(room_id, cmd).await
     }
 
     /// Reset to current solar time (clear all offsets).
@@ -1423,43 +1438,43 @@ impl<C: LightController> RhythmEngine<C> {
 
     /// Turn off lights in a room (rhythm state unchanged).
     ///
-    /// When power_save is disabled, lights dim to soft-off brightness with
-    /// adaptive color temperature instead of turning fully off. This
-    /// keeps bulbs warm and ready for instant response.
+    /// Turn lights off, or into Standby when this node opted in.
     ///
     /// # Arguments
     ///
     /// * `room_id` - The ID of the room
-    /// * `current_hour` - Current time in hours (0-24), used for adaptive
-    ///   color temperature when power_save is disabled
+    /// * `current_hour` - Current time in hours (0-24)
     pub async fn turn_off(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
-        if self.power_save {
-            {
-                let room = self.rooms.get_or_create(room_id, room_id);
-                room.set_hard_off();
-            };
-            self.send_non_periodic_turn_off(room_id, None).await
-        } else {
-            // Dim to soft-off brightness with idle profile color instead of turning off
-            {
-                let room = self.rooms.get_or_create(room_id, room_id);
-                room.set_soft_off();
-            };
-            let effective = self.effective_room_state(room_id);
-            let offset = effective.time_offset_minutes;
-            let profile_settings = effective.profile_settings;
-            let values =
-                self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
-
-            let cmd = Self::build_command(&values, values.brightness);
-            self.send_non_periodic_turn_on(room_id, cmd).await
+        let standby_enabled = self
+            .rooms
+            .get(room_id)
+            .map(|room| room.standby_enabled)
+            .unwrap_or(false);
+        if !standby_enabled {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.set_hard_off();
+            return self.send_non_periodic_turn_off(room_id, None).await;
         }
+
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.set_standby();
+        }
+        let effective = self.effective_room_state(room_id);
+        let values = self.idle_values_for_settings(
+            Some(&effective.profile_settings),
+            current_hour,
+            effective.time_offset_minutes,
+        );
+        let cmd = Self::build_command(&values, values.brightness);
+        self.send_non_periodic_turn_on(room_id, cmd).await
     }
 
-    /// Turn lights fully off, bypassing soft-off logic.
+    /// Turn lights fully off.
     ///
     /// Always calls `controller.turn_off()` regardless of power_save setting.
-    /// Also clears the `soft_off` flag on the room if it was set.
+    /// Also clears the legacy `soft_off` flag on the room if it was set.
     pub async fn lights_off(
         &mut self,
         room_id: &str,
@@ -1500,6 +1515,7 @@ impl<C: LightController> RhythmEngine<C> {
         let effective = self.effective_room_state(source_room_id);
         let rhythm_enabled = effective.rhythm_enabled;
         let soft_off = effective.soft_off;
+        let mood_active = effective.mood_active;
         let hard_off = effective.hard_off;
         let warning_active = effective.warning_active;
 
@@ -1513,21 +1529,18 @@ impl<C: LightController> RhythmEngine<C> {
             return PeriodicTickResult::Skipped;
         }
 
-        // Soft-off rooms: update color temp at soft-off brightness. Under
-        // power_save, soft-off is not an active runtime state.
-        if soft_off {
-            if self.power_save {
-                return PeriodicTickResult::Skipped;
-            }
+        if mood_active {
+            return PeriodicTickResult::Skipped;
+        }
 
+        if soft_off {
             let offset = effective.time_offset_minutes;
-            let profile_settings = effective.profile_settings.clone();
+            let profile_settings = effective.profile_settings;
             let values =
                 self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
-            let cmd = Self::build_command(&values, values.brightness);
-
+            let command = Self::build_command(&values, values.brightness);
             return match self
-                .send_periodic_turn_on_target(source_room_id, target_id, cmd)
+                .send_periodic_turn_on_target(source_room_id, target_id, command)
                 .await
             {
                 Ok(true) => PeriodicTickResult::Updated,
@@ -1628,34 +1641,46 @@ impl<C: LightController> RhythmEngine<C> {
         }
     }
 
-    /// Send soft-off brightness with the current mode's idle profile color to a soft_off room.
-    ///
-    /// Called during periodic updates to keep the color
-    /// transitioning smoothly even when lights are "logically off".
+    /// Render and enter Standby, the opt-in 1% inherited-color soft-off state.
     pub async fn soft_off_tick(
         &mut self,
         room_id: &str,
         current_hour: f32,
     ) -> LightControlResult<()> {
-        let (offset, profile_settings) = self
-            .rooms
-            .effective_state(room_id)
-            .map(|state| (state.time_offset_minutes, state.profile_settings))
-            .unwrap_or((0.0, RoomProfileSettings::default()));
-        if let Some(room) = self.rooms.get_mut(room_id) {
-            room.clear_warning_state();
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.set_standby();
         }
-        if self.power_save {
-            {
-                let room = self.rooms.get_or_create(room_id, room_id);
-                room.set_hard_off();
-            };
-            return self.send_non_periodic_turn_off(room_id, None).await;
-        }
-        let values = self.idle_values_for_settings(Some(&profile_settings), current_hour, offset);
 
-        let cmd = Self::build_command(&values, values.brightness);
-        self.send_non_periodic_turn_on(room_id, cmd).await
+        let effective = self.effective_room_state(room_id);
+        let profile_settings = effective.profile_settings;
+        let values = self.idle_values_for_settings(
+            Some(&profile_settings),
+            current_hour,
+            effective.time_offset_minutes,
+        );
+        let command = Self::build_command(&values, values.brightness);
+        self.send_non_periodic_turn_on(room_id, command).await
+    }
+
+    /// Render and enter Mood without making it eligible for periodic ticks.
+    pub async fn mood_tick(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.enable_rhythm();
+            room.set_mood();
+        }
+
+        let effective = self.effective_room_state(room_id);
+        let values = self.values_for_room_state(
+            Some(&effective.profile_settings),
+            RoomModeState::Mood,
+            current_hour,
+            effective.time_offset_minutes,
+        );
+        let command = Self::build_command(&values, values.brightness);
+        self.send_non_periodic_turn_on(room_id, command).await
     }
 
     /// Check if solar midnight was crossed and reset all room offsets if so.
@@ -2779,28 +2804,23 @@ mod tests {
     }
 
     // =========================================================================
-    // Idle Curve Tests
+    // Legacy idle/soft-off compatibility tests
     // =========================================================================
 
     #[tokio::test]
-    async fn test_turn_off_uses_idle_profile() {
+    async fn test_turn_off_uses_hard_off() {
         let (mut engine, spy) = spy_engine();
 
         engine.set_power_save(false);
         engine.rhythm_on("room1").await.unwrap();
+        spy.reset();
         engine.turn_off("room1", 12.0).await.unwrap();
 
-        let calls = spy.turn_on_calls();
-        assert_eq!(calls.len(), 1, "soft-off should send turn_on");
-        let (_, cmd) = &calls[0];
-        assert!(
-            !cmd.is_direct_color,
-            "inherit-active idle should preserve kelvin representation"
-        );
-        assert_eq!(cmd.brightness, 1);
-        assert!(cmd.kelvin > 0);
-        assert!(cmd.xy.x > 0.0);
-        assert!(cmd.xy.y > 0.0);
+        assert_eq!(spy.turn_on_count(), 0, "off should not dim via turn_on");
+        assert_eq!(spy.turn_off_calls().len(), 1, "off should hard-off");
+        let room = engine.rooms().get("room1").unwrap();
+        assert!(room.hard_off);
+        assert!(!room.soft_off);
     }
 
     #[tokio::test]
@@ -2819,25 +2839,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_soft_off_tick_uses_idle_profile() {
+    async fn test_soft_off_tick_renders_standby() {
         let (mut engine, spy) = spy_engine();
 
         engine.set_power_save(false);
-        // Put room into soft_off state
         engine.rhythm_on("room1").await.unwrap();
         engine.turn_off("room1", 12.0).await.unwrap();
 
         spy.reset();
         engine.soft_off_tick("room1", 14.0).await.unwrap();
 
-        let calls = spy.turn_on_calls();
-        assert_eq!(calls.len(), 1);
-        let (_, cmd) = &calls[0];
-        assert!(
-            !cmd.is_direct_color,
-            "inherit-active idle should preserve kelvin representation"
-        );
-        assert_eq!(cmd.brightness, 1);
+        assert_eq!(spy.turn_on_count(), 1);
+        assert_eq!(spy.turn_off_calls().len(), 0);
+        let room = engine.rooms().get("room1").unwrap();
+        assert!(!room.hard_off);
+        assert!(room.soft_off);
     }
 
     #[tokio::test]
@@ -2849,25 +2865,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_time_offset_soft_off_uses_idle_profile() {
+    async fn test_set_time_offset_hard_off_does_not_dispatch() {
         let (mut engine, spy) = spy_engine();
 
         engine.set_power_save(false);
-        // Put room into soft_off state
         engine.rhythm_on("room1").await.unwrap();
         engine.turn_off("room1", 12.0).await.unwrap();
 
-        // Changing the time offset on a soft-off room should use the idle profile
         spy.reset();
         engine.set_time_offset("room1", 14.0, 30.0).await.unwrap();
 
-        let calls = spy.turn_on_calls();
-        assert_eq!(calls.len(), 1, "soft-off time offset should send turn_on");
-        let (_, cmd) = &calls[0];
-        assert!(
-            !cmd.is_direct_color,
-            "inherit-active idle should preserve kelvin representation"
-        );
-        assert_eq!(cmd.brightness, 1, "brightness from idle profile");
+        assert_eq!(spy.turn_on_count(), 0);
+        assert_eq!(spy.turn_off_calls().len(), 0);
+        let room = engine.rooms().get("room1").unwrap();
+        assert!(room.hard_off);
+        assert!(!room.soft_off);
+        assert_eq!(room.time_offset_minutes, 30.0);
     }
 }

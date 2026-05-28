@@ -1,16 +1,16 @@
 //! Regression for issue #17: when a mode transition flips a room from
-//! `HardOff` to `Idle` (or `Active`) via the destination mode's `room_defaults`,
+//! `HardOff` to `Active` via the destination mode's `room_defaults`,
 //! the server must broadcast a `NodeState` event for that room *as the engine
 //! state changes* — not only later when the dispatcher worker eventually
 //! processes the queued lighting command.
 //!
 //! Bug shape (sleep_to_day, Master room from the user's bundle):
 //!   - Master is hard-off (user pressed LightsOff before bed).
-//!   - Day mode_config has `room_defaults: [{ master: Idle }]`.
+//!   - Day mode_config has `room_defaults: [{ master: Active }]`.
 //!   - Sleep→Day transition fires.
-//!   - `apply_room_mode_defaults` flips Master HardOff → Idle in the engine
+//!   - `apply_room_mode_defaults` flips Master HardOff → Active in the engine
 //!     and updates observed_power, but only the `HardOff` *target* branch
-//!     emits a `NodeState` event (commands.rs:3397). For Active/Idle targets
+//!     emits a `NodeState` event. For Active targets
 //!     the engine mutation is silent.
 //!   - The downstream dispatcher queues an `ApplyNodeCommand` for Master,
 //!     but that runs on a separate thread with phase-gap pacing — in the
@@ -46,12 +46,12 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
     let master_id = h.resolve("master");
 
     // Mirror the user's mode config from issue #17:
-    //   Day:   master = idle  (dim during the day, room not in use)
+    //   Day:   master = active (lights via curve during the day)
     //   Sleep: master = active (lights via curve while bedroom is in use)
     let mut day_config = ModeConfig::default_for_mode(RhythmMode::Day);
     day_config.room_defaults = vec![RoomModeDefault {
         room_id: master_id.clone(),
-        state: RoomModeState::Idle,
+        state: RoomModeState::Active,
     }];
     let mut sleep_config = ModeConfig::default_for_mode(RhythmMode::Sleep);
     sleep_config.room_defaults = vec![RoomModeDefault {
@@ -110,11 +110,11 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
     let mid_snap = h.snapshot("master").unwrap();
     assert!(
         !mid_snap.hard_off,
-        "engine: hard_off must clear when day room_default Idle activates"
+        "engine: hard_off must clear when day room_default Active activates"
     );
     assert!(
-        mid_snap.soft_off,
-        "engine: soft_off must be set for Idle target"
+        !mid_snap.soft_off,
+        "engine: soft_off must remain clear for Active target"
     );
 
     // Drain everything broadcast so far. We are *not* processing the queued
@@ -134,7 +134,7 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
     assert!(
         !node_state_events_for_master.is_empty(),
         "apply_room_mode_defaults must emit at least one NodeState event for master \
-         when it flips HardOff -> Idle. Without this, every SSE consumer keeps showing \
+         when it flips HardOff -> Active. Without this, every SSE consumer keeps showing \
          HardOff until the dispatcher worker eventually processes the queued lighting \
          command (~9s in production)."
     );
@@ -144,8 +144,8 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
         .expect("checked non-empty above");
     assert_eq!(
         last.state,
-        RoomModeState::Idle,
-        "the emitted NodeState event for master must report state=Idle, matching the engine"
+        RoomModeState::Active,
+        "the emitted NodeState event for master must report state=Active, matching the engine"
     );
 }
 
@@ -162,7 +162,7 @@ fn mode_apply_uses_command_worker_even_when_periodic_worker_exists() {
     let mut day_config = ModeConfig::default_for_mode(RhythmMode::Day);
     day_config.room_defaults = vec![RoomModeDefault {
         room_id: master_id.clone(),
-        state: RoomModeState::Idle,
+        state: RoomModeState::Active,
     }];
     let mut sleep_config = ModeConfig::default_for_mode(RhythmMode::Sleep);
     sleep_config.room_defaults = vec![RoomModeDefault {

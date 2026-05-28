@@ -66,33 +66,85 @@ impl RhythmMode {
 /// can evolve toward mode-specific states (for example `wake`) without
 /// hard-coding behavior into the room struct itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum RoomModeState {
     #[default]
     Active,
-    Idle,
+    Mood,
+    Standby,
     Wake,
     Warning,
     HardOff,
 }
 
 impl RoomModeState {
+    /// App-facing state label.
+    pub const fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Mood => "mood",
+            Self::Standby => "standby",
+            Self::Wake => "wake",
+            Self::Warning => "warning",
+            Self::HardOff => "hard_off",
+        }
+    }
+
     /// Whether this state can be stored as a mode default target.
     pub const fn is_mode_default_target(self) -> bool {
-        matches!(self, Self::Active | Self::Idle | Self::HardOff)
+        matches!(
+            self,
+            Self::Active | Self::Mood | Self::Standby | Self::HardOff
+        )
     }
 
     /// Derive the current user-facing room state from existing runtime flags.
-    pub fn from_flags(hard_off: bool, soft_off: bool, warning_active: bool) -> Self {
+    pub fn from_flags(
+        hard_off: bool,
+        soft_off: bool,
+        mood_active: bool,
+        warning_active: bool,
+    ) -> Self {
         if hard_off {
             Self::HardOff
         } else if warning_active {
             Self::Warning
+        } else if mood_active {
+            Self::Mood
         } else if soft_off {
-            Self::Idle
+            Self::Standby
         } else {
             Self::Active
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for RoomModeState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_api_str())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for RoomModeState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "active" => Ok(Self::Active),
+            "mood" => Ok(Self::Mood),
+            "standby" | "idle" | "soft_off" => Ok(Self::Standby),
+            "hard_off" => Ok(Self::HardOff),
+            "wake" => Ok(Self::Wake),
+            "warning" => Ok(Self::Warning),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown room state '{raw}'"
+            ))),
         }
     }
 }
@@ -204,7 +256,7 @@ impl ModeConfig {
                     .filter(|id| !is_builtin_state_profile_id(id))
                     .unwrap_or(active_profile_id),
             ),
-            RoomModeState::Idle => self.idle_profile_id.as_deref(),
+            RoomModeState::Mood | RoomModeState::Standby => self.idle_profile_id.as_deref(),
             RoomModeState::Wake => {
                 Some(self.wake_profile_id.as_deref().unwrap_or(active_profile_id))
             }
@@ -213,7 +265,7 @@ impl ModeConfig {
                     .as_deref()
                     .unwrap_or(active_profile_id),
             ),
-            RoomModeState::HardOff => self.idle_profile_id.as_deref(),
+            RoomModeState::HardOff => None,
         }
     }
 }
@@ -747,6 +799,8 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
 ///
 /// This layer sits on top of the globally active profile:
 /// - `profile_id`: optionally selects a different stored base profile for this room
+/// - `mood_enabled`: legacy compatibility field, currently not runtime-active
+/// - `mood_profile_id`: legacy compatibility field for stored profile payloads
 /// - timer fields: optionally override the selected profile's timer settings
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -757,6 +811,24 @@ pub struct RoomProfileSettings {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub profile_id: Option<String>,
+
+    /// Optional legacy room-level mood enablement.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub mood_enabled: Option<bool>,
+
+    /// Optional legacy stored profile ID for mood/idle payloads.
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            alias = "idle_profile_id",
+            skip_serializing_if = "Option::is_none"
+        )
+    )]
+    pub mood_profile_id: Option<String>,
 
     /// Optional per-room fade override.
     #[cfg_attr(
@@ -776,7 +848,17 @@ pub struct RoomProfileSettings {
 impl RoomProfileSettings {
     /// Returns `true` when this room uses the global active profile unchanged.
     pub fn is_empty(&self) -> bool {
-        self.profile_id.is_none() && self.fade_ms.is_none() && self.motion_timeout_secs.is_none()
+        self.profile_id.is_none()
+            && self.mood_enabled.is_none()
+            && self.mood_profile_id.is_none()
+            && self.fade_ms.is_none()
+            && self.motion_timeout_secs.is_none()
+    }
+
+    /// Resolve legacy mood enablement for compatibility payloads.
+    pub fn mood_enabled_or(&self, default: bool) -> bool {
+        self.mood_enabled
+            .unwrap_or_else(|| self.mood_profile_id.is_some() || default)
     }
 
     /// Resolve which stored profile ID should back this room.
@@ -801,6 +883,11 @@ impl RoomProfileSettings {
                 .profile_id
                 .clone()
                 .or_else(|| parent.profile_id.clone()),
+            mood_enabled: self.mood_enabled.or(parent.mood_enabled),
+            mood_profile_id: self
+                .mood_profile_id
+                .clone()
+                .or_else(|| parent.mood_profile_id.clone()),
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
                 .motion_timeout_secs
@@ -843,6 +930,8 @@ pub struct EffectiveRoomState {
     pub time_offset_minutes: f32,
     pub brightness_offset: f32,
     pub soft_off: bool,
+    pub mood_active: bool,
+    pub standby_enabled: bool,
     pub hard_off: bool,
     pub warning_active: bool,
     pub profile_settings: RoomProfileSettings,
@@ -887,17 +976,21 @@ pub struct Room {
     /// Direct brightness offset (for dim_up/dim_down)
     pub brightness_offset: f32,
 
-    /// Whether this room is in "soft off" state (at soft-off brightness level).
-    /// Used when power_save is disabled: lights dim to the configured
-    /// soft-off brightness instead of turning fully off, maintaining
-    /// color temperature readiness.
+    /// Whether this room is in Standby, the opt-in 1% inherited-color soft-off state.
     #[cfg_attr(feature = "serde", serde(default))]
     pub soft_off: bool,
 
+    /// Whether this room is in Mood, the first-class 1% mood profile state.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mood_active: bool,
+
+    /// Whether OffPress should enter Standby instead of hard-off for this node.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub standby_enabled: bool,
+
     /// Whether this room is intentionally fully off.
     ///
-    /// Unlike `soft_off`, this is a true off state entered by explicit actions
-    /// such as a bottom-button long press.
+    /// This is the true off state entered by explicit off actions.
     #[cfg_attr(feature = "serde", serde(default))]
     pub hard_off: bool,
 
@@ -933,6 +1026,8 @@ impl Room {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             warning_active: false,
             profile_settings: RoomProfileSettings::default(),
@@ -981,14 +1076,26 @@ impl Room {
     /// Clear transient and persisted off-state flags, returning the room to active.
     pub fn clear_off_states(&mut self) {
         self.soft_off = false;
+        self.mood_active = false;
         self.hard_off = false;
         self.warning_active = false;
     }
 
-    /// Mark the room as idle/soft-off and clear mutually exclusive off states.
-    pub fn set_soft_off(&mut self) {
+    /// Mark the room as mood-active and clear mutually exclusive off states.
+    pub fn set_mood(&mut self) {
+        self.clear_off_states();
+        self.mood_active = true;
+    }
+
+    /// Mark the room as standby-active and clear mutually exclusive off states.
+    pub fn set_standby(&mut self) {
         self.clear_off_states();
         self.soft_off = true;
+    }
+
+    /// Legacy soft-off entry point retained as an alias for Standby.
+    pub fn set_soft_off(&mut self) {
+        self.set_standby();
     }
 
     /// Mark the room as hard-off and clear mutually exclusive off states.
@@ -1050,6 +1157,8 @@ impl Default for Room {
             time_offset_minutes: 0.0,
             brightness_offset: 0.0,
             soft_off: false,
+            mood_active: false,
+            standby_enabled: false,
             hard_off: false,
             warning_active: false,
             profile_settings: RoomProfileSettings::default(),
@@ -1253,6 +1362,8 @@ impl RoomManager {
             time_offset_minutes: room.time_offset_minutes,
             brightness_offset: room.brightness_offset,
             soft_off: room.soft_off,
+            mood_active: room.mood_active,
+            standby_enabled: room.standby_enabled,
             hard_off: room.hard_off,
             warning_active: room.warning_active,
             profile_settings: room.profile_settings.clone(),
@@ -1272,6 +1383,7 @@ impl RoomManager {
             state.time_offset_minutes += parent.time_offset_minutes;
             state.brightness_offset += parent.brightness_offset;
             state.soft_off |= parent.soft_off;
+            state.mood_active |= parent.mood_active;
             state.hard_off |= parent.hard_off;
             state.warning_active |= parent.warning_active;
             state.profile_settings = state
@@ -1282,6 +1394,7 @@ impl RoomManager {
 
         if state.hard_off {
             state.soft_off = false;
+            state.mood_active = false;
         }
 
         Some(state)
@@ -1380,6 +1493,8 @@ mod tests {
     fn test_room_profile_settings_apply_to_config() {
         let settings = RoomProfileSettings {
             profile_id: Some("sleep".into()),
+            mood_enabled: None,
+            mood_profile_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
         };
@@ -1405,23 +1520,28 @@ mod tests {
     #[test]
     fn test_room_mode_state_from_flags() {
         assert_eq!(
-            RoomModeState::from_flags(false, false, false),
+            RoomModeState::from_flags(false, false, false, false),
             RoomModeState::Active
         );
         assert_eq!(
-            RoomModeState::from_flags(false, true, false),
-            RoomModeState::Idle
+            RoomModeState::from_flags(false, true, false, false),
+            RoomModeState::Standby
         );
         assert_eq!(
-            RoomModeState::from_flags(false, false, true),
+            RoomModeState::from_flags(false, false, true, false),
+            RoomModeState::Mood
+        );
+        assert_eq!(
+            RoomModeState::from_flags(false, false, false, true),
             RoomModeState::Warning
         );
         assert_eq!(
-            RoomModeState::from_flags(true, false, false),
+            RoomModeState::from_flags(true, false, false, false),
             RoomModeState::HardOff
         );
         assert!(RoomModeState::Active.is_mode_default_target());
-        assert!(RoomModeState::Idle.is_mode_default_target());
+        assert!(RoomModeState::Mood.is_mode_default_target());
+        assert!(RoomModeState::Standby.is_mode_default_target());
         assert!(RoomModeState::HardOff.is_mode_default_target());
         assert!(!RoomModeState::Wake.is_mode_default_target());
         assert!(!RoomModeState::Warning.is_mode_default_target());
@@ -1469,7 +1589,7 @@ mod tests {
             Some("sleep")
         );
         assert_eq!(
-            config.resolve_state_profile_id(RoomModeState::Idle, "custom-sleep"),
+            config.resolve_state_profile_id(RoomModeState::Mood, "custom-sleep"),
             None
         );
         assert_eq!(
@@ -1678,12 +1798,36 @@ mod tests {
                 "\"sleep\""
             );
             assert_eq!(
+                serde_json::to_string(&RoomModeState::Mood).unwrap(),
+                "\"mood\""
+            );
+            assert_eq!(
+                serde_json::to_string(&RoomModeState::Standby).unwrap(),
+                "\"standby\""
+            );
+            assert_eq!(
                 serde_json::to_string(&RoomModeState::Warning).unwrap(),
                 "\"warning\""
             );
             assert_eq!(
                 serde_json::to_string(&RoomModeState::HardOff).unwrap(),
                 "\"hard_off\""
+            );
+        }
+
+        #[test]
+        fn test_room_mode_state_deserializes_mood_and_standby_aliases() {
+            assert_eq!(
+                serde_json::from_str::<RoomModeState>("\"mood\"").unwrap(),
+                RoomModeState::Mood
+            );
+            assert_eq!(
+                serde_json::from_str::<RoomModeState>("\"idle\"").unwrap(),
+                RoomModeState::Standby
+            );
+            assert_eq!(
+                serde_json::from_str::<RoomModeState>("\"standby\"").unwrap(),
+                RoomModeState::Standby
             );
         }
 
@@ -1820,7 +1964,7 @@ mod tests {
                 room_defaults: vec![
                     RoomModeDefault {
                         room_id: "kitchen".into(),
-                        state: RoomModeState::Idle,
+                        state: RoomModeState::Mood,
                     },
                     RoomModeDefault {
                         room_id: "office".into(),
@@ -1831,10 +1975,22 @@ mod tests {
 
             let json = serde_json::to_value(&config).unwrap();
             assert_eq!(json["room_defaults"][0]["room_id"], "kitchen");
-            assert_eq!(json["room_defaults"][0]["state"], "idle");
+            assert_eq!(json["room_defaults"][0]["state"], "mood");
 
             let decoded: ModeConfig = serde_json::from_value(json).unwrap();
-            assert_eq!(decoded, config);
+            assert_eq!(
+                decoded.room_defaults,
+                vec![
+                    RoomModeDefault {
+                        room_id: "kitchen".into(),
+                        state: RoomModeState::Mood,
+                    },
+                    RoomModeDefault {
+                        room_id: "office".into(),
+                        state: RoomModeState::HardOff,
+                    },
+                ]
+            );
 
             let empty_json =
                 serde_json::to_value(ModeConfig::default_for_mode(RhythmMode::Day)).unwrap();
@@ -1889,7 +2045,7 @@ mod tests {
                     },
                     RoomModeDefault {
                         room_id: "kitchen".into(),
-                        state: RoomModeState::Idle,
+                        state: RoomModeState::Mood,
                     },
                 ],
             };
@@ -1899,7 +2055,7 @@ mod tests {
                 config.room_defaults,
                 vec![RoomModeDefault {
                     room_id: "kitchen".into(),
-                    state: RoomModeState::Idle,
+                    state: RoomModeState::Mood,
                 }]
             );
         }
@@ -1987,6 +2143,8 @@ mod tests {
             room.disabled = true;
             room.time_offset_minutes = -45.0;
             room.brightness_offset = 20.0;
+            room.mood_active = true;
+            room.standby_enabled = true;
 
             let json = serde_json::to_string(&room).unwrap();
             let roundtrip: Room = serde_json::from_str(&json).unwrap();

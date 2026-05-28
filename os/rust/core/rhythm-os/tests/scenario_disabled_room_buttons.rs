@@ -11,7 +11,7 @@ mod harness;
 use harness::*;
 
 #[test]
-fn disabled_room_off_press_still_soft_offs() {
+fn disabled_room_off_press_still_hard_offs() {
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);
     let (h, spy) = TestHarness::with_spy_controller();
     let h = h.with_discovery(rooms, devices);
@@ -24,14 +24,13 @@ fn disabled_room_off_press_still_soft_offs() {
 
     h.action("kitchen", "off").unwrap();
 
-    let calls = spy.turn_on_calls();
-    assert_eq!(spy.turn_off_calls().len(), 0);
+    let off_calls = spy.turn_off_calls();
+    assert_eq!(spy.turn_on_calls().len(), 0);
     assert_eq!(
-        calls.len(),
+        off_calls.len(),
         1,
-        "manual off press must dispatch on a disabled room"
+        "manual off press must dispatch hard-off on a disabled room"
     );
-    assert_eq!(calls[0].1.brightness, 1, "still soft-off at 1%");
 }
 
 #[test]
