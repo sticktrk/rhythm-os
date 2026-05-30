@@ -109,8 +109,11 @@ fn evaluate_liveness(
         LivenessView::LockUnavailable => {
             *consecutive_lock_failures = consecutive_lock_failures.saturating_add(1);
             let blocked_secs = consecutive_lock_failures.saturating_mul(check_interval_secs);
-            (blocked_secs >= min_stale_secs)
-                .then_some((blocked_secs, min_stale_secs, "state_lock_blocked"))
+            (blocked_secs >= min_stale_secs).then_some((
+                blocked_secs,
+                min_stale_secs,
+                "state_lock_blocked",
+            ))
         }
     }
 }
@@ -208,7 +211,11 @@ mod tests {
                 check_interval,
                 min_stale,
             );
-            assert!(outcome.is_none(), "should not trip after {} failures", expected);
+            assert!(
+                outcome.is_none(),
+                "should not trip after {} failures",
+                expected
+            );
             assert_eq!(consecutive, expected);
         }
 

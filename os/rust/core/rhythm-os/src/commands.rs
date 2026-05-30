@@ -4030,6 +4030,7 @@ fn node_state_events_after_apply(
     };
 
     let mut events = vec![build_node_state_event(state, &snap)];
+    let mut emitted_node_ids = HashSet::from([snap.id.clone()]);
     if snap.kind == LightNodeKind::LightDevice {
         if let Some(parent_id) = snap
             .parent_id
@@ -4037,7 +4038,24 @@ fn node_state_events_after_apply(
             .filter(|parent_id| *parent_id != snap.id)
         {
             if let Some(parent_snap) = runtime.engine_effective_node_snapshot(parent_id) {
-                events.push(build_node_state_event(state, &parent_snap));
+                if emitted_node_ids.insert(parent_snap.id.clone()) {
+                    events.push(build_node_state_event(state, &parent_snap));
+                }
+            }
+        }
+    } else if snap.kind.is_room() {
+        let mut child_snaps: Vec<_> = runtime
+            .engine_all_effective_node_snapshots()
+            .into_iter()
+            .filter(|child| {
+                child.parent_id.as_deref() == Some(snap.id.as_str())
+                    && child.kind.is_light_addressable()
+            })
+            .collect();
+        child_snaps.sort_by(|left, right| left.id.cmp(&right.id));
+        for child_snap in child_snaps {
+            if emitted_node_ids.insert(child_snap.id.clone()) {
+                events.push(build_node_state_event(state, &child_snap));
             }
         }
     }
@@ -6842,7 +6860,7 @@ pub fn default_node_time_offset_updates(
         if !snap.kind.is_light_addressable() || snap.parent_id.is_some() {
             continue;
         }
-        if snap.kind.is_room() && !time_offset_preview_room_is_on(&s, &snap) {
+        if !time_offset_preview_node_is_on(&s, &snap) {
             continue;
         }
         if seen.insert(snap.id.clone()) {
@@ -6910,7 +6928,7 @@ fn enqueue_time_offset_batch_preview_ticks(
                 }
                 continue;
             }
-            if snap.kind.is_room() && !time_offset_preview_room_is_on(&s, snap) {
+            if !time_offset_preview_node_is_on(&s, snap) {
                 continue;
             }
             if seen_source.insert(snap.id.clone()) {
@@ -6943,7 +6961,7 @@ fn time_offset_batch_parent_covers_node(
         .is_some_and(|parent_id| top_level_update_ids.contains(parent_id))
 }
 
-fn time_offset_preview_room_is_on(s: &AppState, snap: &rhythm_core::NodeSnapshot) -> bool {
+fn time_offset_preview_node_is_on(s: &AppState, snap: &rhythm_core::NodeSnapshot) -> bool {
     lights_on_from_observed_cache(
         s,
         &s.room_observed_power,
@@ -7538,30 +7556,34 @@ pub fn do_absorb_time_offset(
         }
     }
 
-    // Reset all room time offsets to 0
+    // Reset all top-level light-addressable node time offsets to 0.
     if let Some(ref rt) = runtime {
-        let snapshots = rt.engine_all_room_snapshots();
-        let mut reset_room_ids = Vec::new();
+        let snapshots: Vec<_> = rt
+            .engine_all_effective_node_snapshots()
+            .into_iter()
+            .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+            .collect();
+        let mut reset_node_ids = Vec::new();
         for snap in &snapshots {
             if snap.time_offset_minutes.abs() > 0.001 {
-                let mut restored = RestoredRoomState::from(snap);
+                let mut restored = RestoredNodeState::from(snap);
                 restored.time_offset_minutes = 0.0;
-                rt.restore_room_state(&snap.id, restored);
-                reset_room_ids.push(snap.id.clone());
+                rt.restore_node_state(&snap.id, restored);
+                reset_node_ids.push(snap.id.clone());
             }
         }
 
-        for room_id in reset_room_ids {
+        for node_id in reset_node_ids {
             if let Err(e) = enqueue_time_offset_preview_ticks(
                 state,
                 rt,
-                &room_id,
+                &node_id,
                 default_http_batch_dispatch_spacing(),
             ) {
                 warn!(
                     target: "cmd",
-                    "Failed to enqueue offset reset refresh for room {}: {}",
-                    room_id,
+                    "Failed to enqueue offset reset refresh for node {}: {}",
+                    node_id,
                     e
                 );
             }
@@ -11949,6 +11971,21 @@ mod tests {
     }
 
     #[test]
+    fn room_node_state_event_after_apply_includes_light_children() {
+        let (state, rt) = setup_state(vec![
+            make_snapshot("room1", false, false),
+            make_light_child_snapshot("light1", "room1"),
+        ]);
+        set_observed_lights_on(&state, "room1", true);
+
+        let runtime: Arc<dyn RuntimeHandle> = rt;
+        let events = node_state_events_after_apply(&state, &runtime, "room1");
+        let ids: Vec<_> = events.iter().map(|event| event.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["room1", "light1"]);
+    }
+
+    #[test]
     fn build_node_state_event_includes_hub_types_from_topology() {
         let (state, rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         add_topology_room(&state, "r1", &["matter", "mock"]);
@@ -14276,6 +14313,7 @@ mod tests {
             s.composite_controller = Some(Arc::new(rhythm_core::CompositeController::new()));
             s.topology.ensure_standalone_device(&standalone_id);
             set_observed_lights_on_in_app(&mut s, "room1", true);
+            set_observed_lights_on_in_app(&mut s, &standalone_id, true);
             s.work_tx = Some(tx);
         }
 
@@ -14346,14 +14384,29 @@ mod tests {
             "",
             "",
         );
+        let off_standalone_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-off-standalone",
+            "Off Standalone Lamp",
+            "",
+            "",
+        );
         rt.snapshots
             .lock()
             .unwrap()
             .push(make_standalone_light_snapshot(&standalone_id));
+        rt.snapshots
+            .lock()
+            .unwrap()
+            .push(make_standalone_light_snapshot(&off_standalone_id));
         {
             let mut s = state.lock().unwrap();
             s.topology.ensure_standalone_device(&standalone_id);
+            s.topology.ensure_standalone_device(&off_standalone_id);
             set_observed_lights_on_in_app(&mut s, "room1", true);
+            set_observed_lights_on_in_app(&mut s, &standalone_id, true);
+            set_observed_lights_on_in_app(&mut s, &off_standalone_id, false);
         }
 
         let mut updates = default_node_time_offset_updates(&state, 20.0).unwrap();
@@ -14366,6 +14419,9 @@ mod tests {
         assert!(!updates.iter().any(|(node_id, _)| node_id == &ha_id));
         assert!(!updates.iter().any(|(node_id, _)| node_id == &hue_one_id));
         assert!(!updates.iter().any(|(node_id, _)| node_id == &hue_two_id));
+        assert!(!updates
+            .iter()
+            .any(|(node_id, _)| node_id == &off_standalone_id));
     }
 
     #[test]
@@ -15864,6 +15920,29 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             rt.engine_node_snapshot("r1").unwrap().time_offset_minutes,
+            0.0
+        );
+    }
+
+    #[test]
+    fn absorb_offset_resets_standalone_light_offsets() {
+        let mut room = make_snapshot("r1", false, false);
+        room.time_offset_minutes = 30.0;
+        let mut standalone = make_standalone_light_snapshot("light1");
+        standalone.time_offset_minutes = -45.0;
+        let (state, rt) = setup_state(vec![room, standalone]);
+
+        let result = do_absorb_time_offset(&state, None, 30.0);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            rt.engine_node_snapshot("r1").unwrap().time_offset_minutes,
+            0.0
+        );
+        assert_eq!(
+            rt.engine_node_snapshot("light1")
+                .unwrap()
+                .time_offset_minutes,
             0.0
         );
     }
