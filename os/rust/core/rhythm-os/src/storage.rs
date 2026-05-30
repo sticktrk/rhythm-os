@@ -1695,9 +1695,11 @@ mod tests {
                 })
                 .unwrap();
 
-            let mut app = crate::state::AppState::default();
-            app.require_api_auth = true;
-            app.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+            let mut app = crate::state::AppState {
+                require_api_auth: true,
+                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                ..Default::default()
+            };
 
             load_persisted_state(&mut app);
 
@@ -1712,9 +1714,11 @@ mod tests {
                 .save_api_auth(&crate::auth::StoredApiAuth::default())
                 .unwrap();
 
-            let mut app = crate::state::AppState::default();
-            app.require_api_auth = true;
-            app.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+            let mut app = crate::state::AppState {
+                require_api_auth: true,
+                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                ..Default::default()
+            };
 
             load_persisted_state(&mut app);
 

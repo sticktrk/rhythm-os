@@ -281,7 +281,7 @@ fn parse_wpa_credentials(content: &str, preferred_ssid: Option<&str>) -> Option<
 
     let selected = preferred_ssid
         .and_then(|preferred| networks.iter().find(|network| network.ssid == preferred))
-        .or_else(|| match networks.as_slice() {
+        .or(match networks.as_slice() {
             [single] => Some(single),
             _ => None,
         })?;

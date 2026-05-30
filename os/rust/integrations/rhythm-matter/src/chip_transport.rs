@@ -356,12 +356,10 @@ impl ChipTransport {
         }
 
         self.wait_for_ble_recovery_cooldown()?;
-        ensure_linux_ble_commissioning_ready(self.init_request.ble_controller.unwrap_or(0)).map_err(
-            |error| {
+        ensure_linux_ble_commissioning_ready(self.init_request.ble_controller.unwrap_or(0))
+            .inspect_err(|_error| {
                 self.set_sidecar_health(SidecarHealth::Unavailable);
-                error
-            },
-        )
+            })
     }
 
     fn wait_for_ble_recovery_cooldown(&self) -> Result<()> {
@@ -468,9 +466,8 @@ impl ChipTransport {
                     config.command.display()
                 )
             })
-            .map_err(|error| {
+            .inspect_err(|_error| {
                 self.set_sidecar_health(SidecarHealth::Unavailable);
-                error
             })?;
 
         *guard = Some(child);

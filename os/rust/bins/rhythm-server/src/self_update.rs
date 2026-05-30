@@ -3313,12 +3313,7 @@ mod tests {
         let result = schedule_restart_with_best_effort_persist(
             state,
             move || schedule_calls.lock().unwrap().push("schedule"),
-            |_| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "spawn failed",
-                ))
-            },
+            |_| Err(std::io::Error::other("spawn failed")),
         );
 
         assert!(result.is_err());

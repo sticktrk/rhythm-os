@@ -1043,9 +1043,7 @@ fn semantic_lights_on_override(
 ) -> Option<bool> {
     if hard_off {
         Some(false)
-    } else if mood_active {
-        Some(true)
-    } else if soft_off {
+    } else if mood_active || soft_off {
         Some(true)
     } else {
         None
@@ -4451,17 +4449,12 @@ fn queue_node_dispatch_batch(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NodeColorScope {
+    #[default]
     Auto,
     Preview,
     Mood,
-}
-
-impl Default for NodeColorScope {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4964,8 +4957,7 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
         .collect()
 }
 
-fn apply_active_mode_outputs(
-    state: &SharedState,
+struct ActiveModeOutputApply {
     previous_mode: RhythmMode,
     target_mode: RhythmMode,
     transition: Option<ModeTransitionConfig>,
@@ -4973,7 +4965,19 @@ fn apply_active_mode_outputs(
     dispatch_generation: u64,
     force_observed_off_outputs: bool,
     reset_all_room_defaults: bool,
-) {
+}
+
+fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply) {
+    let ActiveModeOutputApply {
+        previous_mode,
+        target_mode,
+        transition,
+        apply_scope,
+        dispatch_generation,
+        force_observed_off_outputs,
+        reset_all_room_defaults,
+    } = request;
+
     let (
         runtime,
         light_profile_configs,
@@ -5282,13 +5286,15 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
     );
     apply_active_mode_outputs(
         state,
-        active_mode,
-        active_mode,
-        transition,
-        ModeOutputApplyScope::all_visible(),
-        dispatch_generation,
-        false,
-        false,
+        ActiveModeOutputApply {
+            previous_mode: active_mode,
+            target_mode: active_mode,
+            transition,
+            apply_scope: ModeOutputApplyScope::all_visible(),
+            dispatch_generation,
+            force_observed_off_outputs: false,
+            reset_all_room_defaults: false,
+        },
     );
     persist_state(state);
 }
@@ -5540,13 +5546,15 @@ fn do_settings_set_internal(
                 force_reapply_outputs && !mode_changed && transition_for_apply.is_some();
             apply_active_mode_outputs(
                 state,
-                previous_mode,
-                selected_mode,
-                transition_for_apply,
-                reapply_scope,
-                dispatch_generation,
-                force_observed_off_outputs,
-                reset_all_room_defaults,
+                ActiveModeOutputApply {
+                    previous_mode,
+                    target_mode: selected_mode,
+                    transition: transition_for_apply,
+                    apply_scope: reapply_scope,
+                    dispatch_generation,
+                    force_observed_off_outputs,
+                    reset_all_room_defaults,
+                },
             );
         } else {
             debug!(
@@ -7442,13 +7450,15 @@ pub fn do_config_set_with_options(
     if should_apply_outputs {
         apply_active_mode_outputs(
             state,
-            active_mode,
-            active_mode,
-            None,
-            ModeOutputApplyScope::all_visible(),
-            dispatch_generation,
-            false,
-            false,
+            ActiveModeOutputApply {
+                previous_mode: active_mode,
+                target_mode: active_mode,
+                transition: None,
+                apply_scope: ModeOutputApplyScope::all_visible(),
+                dispatch_generation,
+                force_observed_off_outputs: false,
+                reset_all_room_defaults: false,
+            },
         );
     }
 
@@ -8017,6 +8027,7 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
 ///
 /// Only modifies user state, not topology. Safe for app to call without
 /// overwriting server-discovered rooms/devices.
+#[allow(clippy::too_many_arguments)]
 pub fn do_node_preferences_set(
     state: &SharedState,
     node_id: &str,

@@ -1201,6 +1201,7 @@ fn run_power_cycle_setup(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_brightness_command(
     commands: &mut Vec<Value>,
     transport: &Arc<dyn MatterTransport>,
@@ -1227,6 +1228,7 @@ fn run_brightness_command(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_level_variant_command(
     commands: &mut Vec<Value>,
     transport: &Arc<dyn MatterTransport>,
@@ -1274,6 +1276,7 @@ fn level_command_name(command: MatterLevelCommandVariant) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_color_temperature_command(
     commands: &mut Vec<Value>,
     transport: &Arc<dyn MatterTransport>,
@@ -1360,6 +1363,7 @@ fn run_hue_saturation_command(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_light_command<F>(
     commands: &mut Vec<Value>,
     transport: &Arc<dyn MatterTransport>,
@@ -1402,6 +1406,7 @@ fn run_light_command<F>(
     commands.push(entry);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_rapid_burst(
     commands: &mut Vec<Value>,
     transport: &Arc<dyn MatterTransport>,
@@ -1601,6 +1606,7 @@ fn run_rapid_brightness_burst(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_rapid_burst_with<F>(
     commands: &mut Vec<Value>,
     transport: &Arc<dyn MatterTransport>,
