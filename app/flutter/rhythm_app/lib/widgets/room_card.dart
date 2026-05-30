@@ -763,13 +763,38 @@ class _RoomCardState extends State<RoomCard> {
                           const SizedBox(height: 14),
                       ],
                     ),
-                    // Rhythm-active breathing border
+                    // Rhythm-active breathing border — solid while the room
+                    // is actually tracking the curve. Yields to the broken
+                    // orbit ring when the room has drifted off-curve.
                     Positioned.fill(
                       child: IgnorePointer(
                         child: _RhythmBorderGlow(
-                          active: rhythmGlowActive,
+                          active: rhythmGlowActive && !offCurve,
                           color: glowColor,
                         ),
+                      ),
+                    ),
+                    // Off-curve "broken orbit" ring — drifting amber dashes
+                    // signal that brightness or time was manually shifted and
+                    // the room is no longer locked to the curve.
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: _OffCurveOrbitRing(
+                          active: offCurve,
+                          color: glowColor,
+                        ),
+                      ),
+                    ),
+                    // Re-sync "clasp" docked on the broken ring's top-right
+                    // corner — tap to snap the room back onto the curve,
+                    // closing the orbit. Only present while off-curve.
+                    Positioned(
+                      top: 0,
+                      right: 0,
+                      child: _OffCurveResetButton(
+                        active: offCurve,
+                        color: glowColor,
+                        onReset: _resetRoom,
                       ),
                     ),
                   ],
@@ -1553,6 +1578,200 @@ class _RhythmBorderGlow extends StatelessWidget {
           border: Border.all(
             color: color.withValues(alpha: 0.6),
             width: 2,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Dashed "broken orbit" ring drawn around a room card when it has drifted
+/// off the curve (brightness or time manually adjusted). The dashes slowly
+/// orbit the perimeter so the card reads as "not locked to the curve" —
+/// deliberately distinct from the solid [_RhythmBorderGlow] shown while the
+/// room is tracking rhythm.
+class _OffCurveOrbitRing extends StatefulWidget {
+  final bool active;
+  final Color color;
+
+  const _OffCurveOrbitRing({required this.active, required this.color});
+
+  @override
+  State<_OffCurveOrbitRing> createState() => _OffCurveOrbitRingState();
+}
+
+class _OffCurveOrbitRingState extends State<_OffCurveOrbitRing>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 6),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(_OffCurveOrbitRing oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Only spin the controller while drifted — keeps idle cards cheap.
+    if (widget.active && !_controller.isAnimating) {
+      _controller.repeat();
+    } else if (!widget.active && _controller.isAnimating) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: widget.active ? 1.0 : 0.0,
+      duration: Duration(milliseconds: widget.active ? 400 : 500),
+      curve: Curves.easeInOut,
+      child: RepaintBoundary(
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) => CustomPaint(
+            painter: _OrbitRingPainter(
+              phase: _controller.value,
+              color: widget.color,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Paints a dashed rounded-rect stroke whose dashes drift around the path as
+/// [phase] sweeps 0→1, producing a slow orbital motion.
+class _OrbitRingPainter extends CustomPainter {
+  final double phase; // 0..1, drives dash drift
+  final Color color;
+
+  static const _inset = 1.0;
+  static const _radius = 20.0;
+  static const _dash = 11.0;
+  static const _gap = 9.0;
+
+  _OrbitRingPainter({required this.phase, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rrect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        _inset,
+        _inset,
+        size.width - _inset * 2,
+        size.height - _inset * 2,
+      ),
+      const Radius.circular(_radius - _inset),
+    );
+    final path = Path()..addRRect(rrect);
+
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round
+      ..color = color.withValues(alpha: 0.8);
+
+    const period = _dash + _gap;
+    // Negative start makes the dashes travel clockwise as phase advances.
+    final start = -phase * period;
+
+    for (final metric in path.computeMetrics()) {
+      var distance = start;
+      while (distance < metric.length) {
+        final segStart = distance.clamp(0.0, metric.length);
+        final segEnd = (distance + _dash).clamp(0.0, metric.length);
+        if (segEnd > segStart) {
+          canvas.drawPath(metric.extractPath(segStart, segEnd), paint);
+        }
+        distance += period;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_OrbitRingPainter old) =>
+      old.phase != phase || old.color != color;
+}
+
+/// Circular "re-sync" button docked on the [_OffCurveOrbitRing] at the card's
+/// top-right corner. Styled to sit on the ring (same color, matching 2px
+/// stroke) and pops in with a slight overshoot when the room drifts off-curve.
+/// Tapping snaps the room back to the curve, which closes the ring.
+class _OffCurveResetButton extends StatelessWidget {
+  final bool active;
+  final Color color;
+  final VoidCallback onReset;
+
+  const _OffCurveResetButton({
+    required this.active,
+    required this.color,
+    required this.onReset,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      ignoring: !active,
+      child: AnimatedScale(
+        scale: active ? 1.0 : 0.6,
+        duration: Duration(milliseconds: active ? 280 : 180),
+        curve: active ? Curves.easeOutBack : Curves.easeIn,
+        child: AnimatedOpacity(
+          opacity: active ? 1.0 : 0.0,
+          duration: Duration(milliseconds: active ? 240 : 160),
+          curve: Curves.easeInOut,
+          child: Semantics(
+            button: true,
+            label: 'Reset to curve',
+            child: GestureDetector(
+              onTap: () {
+                HapticFeedback.selectionClick();
+                onReset();
+              },
+              behavior: HitTestBehavior.opaque,
+              // Transparent padding enlarges the tap target to ~42px while
+              // keeping the visible clasp at 30px tucked into the corner.
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Color.lerp(const Color(0xFF141210), color, 0.18)!
+                        .withValues(alpha: 0.92),
+                    border: Border.all(
+                      color: color.withValues(alpha: 0.9),
+                      width: 2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.35),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.sync_rounded,
+                    size: 16,
+                    color: Colors.white.withValues(alpha: 0.92),
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
       ),
