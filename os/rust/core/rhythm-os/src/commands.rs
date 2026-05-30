@@ -8057,19 +8057,33 @@ pub fn do_node_preferences_set(
     let prev_mood_active = snap.mood_active;
     let prev_hard_off = snap.hard_off;
     let requested_rhythm_enabled = rhythm_enabled;
+    let requested_standby_enabled = standby_enabled;
     let rhythm_enabled = requested_rhythm_enabled.unwrap_or(snap.rhythm_enabled);
     let disabled = disabled.unwrap_or(snap.disabled);
     let standby_enabled = standby_enabled.unwrap_or(snap.standby_enabled);
     let explicit_state_request = target_state.is_some();
-    let requested_state = target_state.unwrap_or_else(|| {
-        persistent_room_state_for_settings(
-            power_save,
-            &snap.profile_settings,
-            snap.hard_off,
-            snap.mood_active,
-            snap.soft_off,
-        )
-    });
+    let current_persistent_state = persistent_room_state_for_settings(
+        power_save,
+        &snap.profile_settings,
+        snap.hard_off,
+        snap.mood_active,
+        snap.soft_off,
+    );
+    let mut standby_toggle_state_request = false;
+    let requested_state = match target_state {
+        Some(state) => state,
+        None if requested_standby_enabled == Some(true) && !lights_on => {
+            standby_toggle_state_request = true;
+            RoomModeState::Standby
+        }
+        None if requested_standby_enabled == Some(false)
+            && current_persistent_state == RoomModeState::Standby =>
+        {
+            standby_toggle_state_request = true;
+            RoomModeState::HardOff
+        }
+        None => current_persistent_state,
+    };
     let mut profile_settings = snap.profile_settings.clone();
     if let Some(patch) = room_profile {
         patch.apply_to(&mut profile_settings);
@@ -8119,7 +8133,7 @@ pub fn do_node_preferences_set(
         },
     );
     clear_room_mode_transition(state, node_id);
-    if explicit_state_request {
+    if explicit_state_request || standby_toggle_state_request {
         queue_motion_timer_clear(state, node_id);
     }
 

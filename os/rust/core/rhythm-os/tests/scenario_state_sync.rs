@@ -13,7 +13,8 @@
 
 mod harness;
 
-use harness::{room, rooms_with_lights, TestHarness};
+use harness::{light, room, rooms_with_lights, TestHarness};
+use rhythm_os::commands;
 
 // ============================================================================
 // Scenario 4a: Action response includes immediate state
@@ -155,6 +156,143 @@ fn preferences_reflected_in_snapshots() {
     // -- Assert: bedroom disabled --
     let snap = harness.snapshot("bedroom").unwrap();
     assert!(snap.disabled, "bedroom should be disabled");
+}
+
+/// Enabling Standby on an off room node should immediately render Standby,
+/// and disabling it while Standby is active should fully turn the node off.
+#[test]
+fn standby_toggle_controls_off_room_node() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![room("kitchen", "Kitchen")], vec![]);
+    harness.sync();
+
+    harness.action("kitchen", "on").unwrap();
+    harness.action("kitchen", "lights_off").unwrap();
+    assert!(!harness.lights_on("kitchen"), "kitchen should start off");
+    spy.reset();
+
+    let node_id = harness.resolve("kitchen");
+    commands::do_node_preferences_set(
+        &harness.state,
+        &node_id,
+        None,
+        None,
+        Some(true),
+        None,
+        None,
+        false,
+    )
+    .expect("enable standby");
+
+    let snap = harness.snapshot("kitchen").unwrap();
+    assert!(snap.standby_enabled, "standby preference should be enabled");
+    assert!(snap.soft_off, "off room node should enter Standby");
+    assert!(!snap.hard_off, "Standby should replace hard-off");
+    assert_eq!(spy.turn_on_count(), 1, "Standby should render lights on");
+    assert_eq!(spy.turn_off_count(), 0, "Standby should not hard-off");
+    assert!(harness.lights_on("kitchen"), "Standby tracks as lights-on");
+
+    spy.reset();
+    commands::do_node_preferences_set(
+        &harness.state,
+        &node_id,
+        None,
+        None,
+        Some(false),
+        None,
+        None,
+        false,
+    )
+    .expect("disable standby");
+
+    let snap = harness.snapshot("kitchen").unwrap();
+    assert!(
+        !snap.standby_enabled,
+        "standby preference should be disabled"
+    );
+    assert!(!snap.soft_off, "room should leave Standby");
+    assert!(snap.hard_off, "room should become hard-off");
+    assert_eq!(spy.turn_off_count(), 1, "disabling Standby should turn off");
+    assert_eq!(
+        spy.turn_on_count(),
+        0,
+        "disabling Standby should not turn on"
+    );
+    assert!(!harness.lights_on("kitchen"), "kitchen should track off");
+}
+
+/// The same Standby toggle contract applies to light-device nodes, including a
+/// standalone light with no parent room.
+#[test]
+fn standby_toggle_controls_off_light_device_node() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![], vec![light("matter-100", "")]);
+    harness.sync();
+
+    let node_id = {
+        let s = harness.state.lock().unwrap();
+        s.canonical_registry
+            .find_by_native_id(&harness.hub_key, "matter-100")
+            .expect("matter-100 should be canonical-registered")
+            .id
+            .clone()
+    };
+    let snap = harness
+        .state
+        .lock()
+        .unwrap()
+        .hub_runtime()
+        .expect("runtime present after sync")
+        .engine_node_snapshot(&node_id)
+        .expect("standalone light should exist");
+    assert_eq!(snap.kind, rhythm_core::LightNodeKind::LightDevice);
+    assert!(snap.parent_id.is_none());
+    assert!(
+        !harness.lights_on(&node_id),
+        "light device should start off"
+    );
+
+    commands::do_node_preferences_set(
+        &harness.state,
+        &node_id,
+        None,
+        None,
+        Some(true),
+        None,
+        None,
+        false,
+    )
+    .expect("enable standby");
+
+    let snap = harness.snapshot(&node_id).unwrap();
+    assert!(snap.standby_enabled, "standby preference should be enabled");
+    assert!(snap.soft_off, "off light device should enter Standby");
+    assert!(!snap.hard_off, "Standby should not hard-off the device");
+    assert_eq!(spy.turn_on_count(), 1, "Standby should render lights on");
+    assert!(harness.lights_on(&node_id), "Standby tracks as lights-on");
+
+    spy.reset();
+    commands::do_node_preferences_set(
+        &harness.state,
+        &node_id,
+        None,
+        None,
+        Some(false),
+        None,
+        None,
+        false,
+    )
+    .expect("disable standby");
+
+    let snap = harness.snapshot(&node_id).unwrap();
+    assert!(!snap.standby_enabled);
+    assert!(!snap.soft_off);
+    assert!(snap.hard_off);
+    assert_eq!(spy.turn_off_count(), 1, "disabling Standby should turn off");
+    assert!(
+        !harness.lights_on(&node_id),
+        "light device should track off"
+    );
 }
 
 // ============================================================================
