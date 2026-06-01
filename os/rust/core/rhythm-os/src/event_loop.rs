@@ -62,6 +62,9 @@ pub struct MotionTimerState {
     /// Manual button press removes a target from here so the
     /// timeout won't turn lights off.
     pub motion_owned: HashSet<String>,
+    /// Targets where this live event-loop instance already requested a motion
+    /// turn-on for the current ownership cycle.
+    pub motion_turn_on_requested: HashSet<String>,
     /// Targets currently in warning dim state (dimmed to 50% before timeout).
     pub warning_active: HashSet<String>,
     /// Last-dispatch time per (node_id, ButtonAction, device_id) used to drop
@@ -172,6 +175,7 @@ impl MotionTimerState {
         Self {
             sensors: HashMap::new(),
             motion_owned: HashSet::new(),
+            motion_turn_on_requested: HashSet::new(),
             warning_active: HashSet::new(),
             button_debounce: HashMap::new(),
         }
@@ -1120,6 +1124,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 return;
             }
             motion.motion_owned.remove(&node_id);
+            motion.motion_turn_on_requested.remove(&node_id);
             motion.warning_active.remove(&node_id);
             motion
                 .sensors
@@ -1245,6 +1250,11 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 }
 
                 let is_new_activation = !motion.has_active_sources_for_target(&target_node_id);
+                let was_motion_owned = motion.motion_owned.contains(&target_node_id);
+                let prior_motion_turn_on_requested =
+                    motion.motion_turn_on_requested.contains(&target_node_id);
+                let observed_lights_on =
+                    observed_room_lights_on_for_motion_reactivation(state, &target_node_id);
                 motion.sensors.insert(
                     source_node_id.clone(),
                     MotionSourceState {
@@ -1258,14 +1268,30 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 if is_new_activation {
                     motion.motion_owned.insert(target_node_id.clone());
 
-                    info!(
-                        target: "evt",
-                        "Motion: new activation source {} -> target {} (owned=true)",
-                        source_node_id,
-                        target_node_id
-                    );
+                    let should_turn_on = !was_motion_owned
+                        || observed_lights_on == Some(false)
+                        || (observed_lights_on.is_none() && !prior_motion_turn_on_requested);
 
-                    spawn_motion_turn_on_action(state, target_node_id.clone());
+                    if should_turn_on {
+                        motion
+                            .motion_turn_on_requested
+                            .insert(target_node_id.clone());
+                        info!(
+                            target: "evt",
+                            "Motion: new activation source {} -> target {} (owned=true)",
+                            source_node_id,
+                            target_node_id
+                        );
+
+                        spawn_motion_turn_on_action(state, target_node_id.clone());
+                    } else {
+                        info!(
+                            target: "evt",
+                            "Motion: reactivated source {} -> target {} during owned countdown; refreshed without turn_on",
+                            source_node_id,
+                            target_node_id
+                        );
+                    }
                 } else {
                     info!(
                         target: "evt",
@@ -1473,6 +1499,7 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
             );
             motion.sensors.clear();
             motion.motion_owned.clear();
+            motion.motion_turn_on_requested.clear();
             motion.warning_active.clear();
         }
         return;
@@ -1579,6 +1606,7 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
             .sensors
             .retain(|_, source| &source.target_node_id != target_node_id);
         motion.warning_active.remove(target_node_id);
+        motion.motion_turn_on_requested.remove(target_node_id);
 
         if motion.motion_owned.remove(target_node_id) {
             info!(
@@ -1667,6 +1695,7 @@ pub fn run_event_loop(
                 .sensors
                 .retain(|_, source| &source.target_node_id != target_node_id);
             motion_state.motion_owned.remove(target_node_id);
+            motion_state.motion_turn_on_requested.remove(target_node_id);
             motion_state.warning_active.remove(target_node_id);
         }
         if !pending_motion_clear.is_empty() {
@@ -1921,6 +1950,9 @@ pub fn apply_pending_motion_seeds(
             motion.warning_active.insert(target_node_id.clone());
         }
         if should_turn_on {
+            motion
+                .motion_turn_on_requested
+                .insert(target_node_id.clone());
             turn_on_targets.push(target_node_id.clone());
         }
         if is_active {
@@ -1993,6 +2025,21 @@ fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<
         s.room_observed_power
             .get(target_node_id)
             .map(|observed| observed.lights_on)
+    })
+}
+
+fn observed_room_lights_on_for_motion_reactivation(
+    state: &SharedState,
+    target_node_id: &str,
+) -> Option<bool> {
+    state.lock().ok().and_then(|s| {
+        let observed = s.room_observed_power.get(target_node_id)?;
+        match observed.source {
+            crate::state::ObservedPowerSource::Command if observed.lights_on => Some(true),
+            crate::state::ObservedPowerSource::Command => None,
+            _ if commands::observed_power_is_fresh(&s, observed) => Some(observed.lights_on),
+            _ => None,
+        }
     })
 }
 
@@ -4781,6 +4828,238 @@ mod tests {
             motion.sensors[&source_id].stopped_at, None,
             "detected=true must mark the seeded source active again"
         );
+    }
+
+    #[test]
+    fn motion_reactivation_during_owned_countdown_refreshes_without_turn_on() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            room_snapshot_with_flags("room_a", false, false),
+            turn_on_room_calls.clone(),
+        );
+        set_observed_lights_on(&state, "room_a", true);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            source_id.clone(),
+            motion_source(
+                &source_id,
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(30)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            turn_on_room_calls.load(Ordering::SeqCst),
+            0,
+            "reactivating during an owned countdown should refresh the timer without a duplicate turn_on"
+        );
+        assert!(motion.motion_owned.contains("room_a"));
+        assert_eq!(
+            motion.sensors[&source_id].stopped_at, None,
+            "detected=true must mark the countdown source active again"
+        );
+    }
+
+    #[test]
+    fn motion_reactivation_during_owned_countdown_dispatches_when_observed_off() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            room_snapshot_with_flags("room_a", false, false),
+            turn_on_room_calls.clone(),
+        );
+        set_observed_lights_on(&state, "room_a", false);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            source_id.clone(),
+            motion_source(
+                &source_id,
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(30)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(motion.motion_turn_on_requested.contains("room_a"));
+    }
+
+    #[test]
+    fn motion_reactivation_during_restored_owned_countdown_dispatches_when_power_unknown() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            room_snapshot_with_flags("room_a", false, false),
+            turn_on_room_calls.clone(),
+        );
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            source_id.clone(),
+            motion_source(
+                &source_id,
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(30)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(motion.motion_turn_on_requested.contains("room_a"));
+    }
+
+    #[test]
+    fn motion_reactivation_during_restored_owned_countdown_ignores_stale_observed_on() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            room_snapshot_with_flags("room_a", false, false),
+            turn_on_room_calls.clone(),
+        );
+        set_observed_lights_on(&state, "room_a", true);
+        {
+            let mut s = state.lock().unwrap();
+            s.room_observed_power
+                .get_mut("room_a")
+                .unwrap()
+                .observed_at_epoch_ms = current_epoch_ms().saturating_sub(10 * 60 * 1000);
+        }
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            source_id.clone(),
+            motion_source(
+                &source_id,
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(30)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn motion_reactivation_after_live_turn_on_request_skips_when_power_unknown() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            room_snapshot_with_flags("room_a", false, false),
+            turn_on_room_calls.clone(),
+        );
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            source_id.clone(),
+            motion_source(
+                &source_id,
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(30)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+        motion.motion_turn_on_requested.insert("room_a".into());
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            turn_on_room_calls.load(Ordering::SeqCst),
+            0,
+            "a live ownership cycle that already requested turn_on should not duplicate it"
+        );
+        assert!(motion.motion_turn_on_requested.contains("room_a"));
     }
 
     #[test]

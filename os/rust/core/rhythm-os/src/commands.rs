@@ -1065,7 +1065,7 @@ pub(crate) fn effective_lights_on_cache_key<'a>(
 
 const OBSERVED_POWER_MIN_FRESHNESS_SECS: u64 = 15;
 
-fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool {
+pub(crate) fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool {
     match observed.source {
         ObservedPowerSource::SemanticOverride => true,
         ObservedPowerSource::Command => false,
