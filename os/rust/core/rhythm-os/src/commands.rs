@@ -5425,6 +5425,68 @@ fn mood_scene_color_output(
     }
 }
 
+fn update_scene_brightness_for_target(
+    scene: &mut SceneDefinition,
+    scope_node_ids: &BTreeSet<String>,
+    snapshot: &rhythm_core::NodeSnapshot,
+    node_id: &str,
+    brightness: u8,
+) -> Result<()> {
+    let layer = scene
+        .light
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("Scene '{}' has no light layer", scene.id))?;
+    let mut updated = false;
+    if snapshot.kind.is_room() {
+        if let Some(default_output) = &mut layer.default_output {
+            default_output.power = LightScenePower::On;
+            default_output.brightness = brightness;
+            updated = true;
+        }
+        for output in &mut layer.palette {
+            output.power = LightScenePower::On;
+            output.brightness = brightness;
+            updated = true;
+        }
+        for entry in &mut layer.entries {
+            if scope_node_ids.contains(entry.target.node_id()) {
+                entry.output.power = LightScenePower::On;
+                entry.output.brightness = brightness;
+                updated = true;
+            }
+        }
+    } else if let Some(entry) = layer
+        .entries
+        .iter_mut()
+        .find(|entry| entry.target.node_id() == node_id)
+    {
+        entry.output.power = LightScenePower::On;
+        entry.output.brightness = brightness;
+        updated = true;
+    } else if let Some(default_output) = layer.default_output.clone() {
+        let mut output = default_output;
+        output.power = LightScenePower::On;
+        output.brightness = brightness;
+        layer.entries.push(LightSceneEntry {
+            target: LightSceneTargetRef::Node {
+                node_id: node_id.to_string(),
+            },
+            output,
+        });
+        updated = true;
+    }
+
+    if !updated {
+        return Err(anyhow::anyhow!(
+            "Scene '{}' has no light output to update for '{}'",
+            scene.id,
+            node_id
+        ));
+    }
+    scene.normalize();
+    Ok(())
+}
+
 fn update_node_mood_scene_color(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -5595,77 +5657,68 @@ fn update_node_mood_scene_brightness(
     brightness: u8,
     persist: bool,
 ) -> Result<()> {
-    let scene_id = snapshot
+    let bound_scene_id = snapshot
         .profile_settings
         .mood_scene_id
         .clone()
         .ok_or_else(|| anyhow::anyhow!("Node '{}' has no mood scene", node_id))?;
+    let node_scene_id = node_mood_scene_id(node_id);
+    let updates_generated_scene = bound_scene_id == node_scene_id;
     let scope_node_ids = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         light_scene_target_scope_node_ids(&s, runtime, node_id)
     };
+    let scene_id = if updates_generated_scene {
+        bound_scene_id.clone()
+    } else {
+        node_scene_id
+    };
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let scene = s
+        let mut scene = s
             .scenes
-            .get_mut(&scene_id)
-            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?;
-        let layer = scene
-            .light
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Scene '{}' has no light layer", scene_id))?;
-        let mut updated = false;
-        if snapshot.kind.is_room() {
-            if let Some(default_output) = &mut layer.default_output {
-                default_output.power = LightScenePower::On;
-                default_output.brightness = brightness;
-                updated = true;
-            }
-            for output in &mut layer.palette {
-                output.power = LightScenePower::On;
-                output.brightness = brightness;
-                updated = true;
-            }
-            for entry in &mut layer.entries {
-                if scope_node_ids.contains(entry.target.node_id()) {
-                    entry.output.power = LightScenePower::On;
-                    entry.output.brightness = brightness;
-                    updated = true;
-                }
-            }
-        } else if let Some(entry) = layer
-            .entries
-            .iter_mut()
-            .find(|entry| entry.target.node_id() == node_id)
-        {
-            entry.output.power = LightScenePower::On;
-            entry.output.brightness = brightness;
-            updated = true;
-        } else if let Some(default_output) = layer.default_output.clone() {
-            let mut output = default_output;
-            output.power = LightScenePower::On;
-            output.brightness = brightness;
-            layer.entries.push(LightSceneEntry {
-                target: LightSceneTargetRef::Node {
-                    node_id: node_id.to_string(),
-                },
-                output,
-            });
-            updated = true;
+            .get(&bound_scene_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", bound_scene_id))?;
+        if !updates_generated_scene {
+            scene.id = scene_id.clone();
+            scene.name = node_mood_scene_name(snapshot);
+            scene.description = None;
+            scene.source = SceneSource::User;
         }
-
-        if !updated {
-            return Err(anyhow::anyhow!(
-                "Scene '{}' has no light output to update for '{}'",
-                scene_id,
-                node_id
-            ));
-        }
-        scene.normalize();
+        update_scene_brightness_for_target(
+            &mut scene,
+            &scope_node_ids,
+            snapshot,
+            node_id,
+            brightness,
+        )?;
+        s.scenes.insert(scene_id.clone(), scene);
         if persist {
             persist_scenes_locked(&s);
         }
+    }
+
+    if !updates_generated_scene {
+        let mut profile_settings = snapshot.profile_settings.clone();
+        profile_settings.mood_enabled = Some(true);
+        profile_settings.mood_profile_id = None;
+        profile_settings.mood_scene_id = Some(scene_id.clone());
+        runtime.restore_node_state(
+            node_id,
+            RestoredNodeState {
+                rhythm_enabled: true,
+                disabled: snapshot.disabled,
+                time_offset_minutes: snapshot.time_offset_minutes,
+                brightness_offset: snapshot.brightness_offset,
+                soft_off: false,
+                mood_active: true,
+                standby_enabled: snapshot.standby_enabled,
+                hard_off: false,
+                profile_settings,
+            },
+        );
     }
 
     do_scene_apply_inner(
@@ -13118,6 +13171,52 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(output.brightness, 22);
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("node-mood-scene-room1")
+        );
+    }
+
+    #[test]
+    fn mood_brightness_does_not_mutate_public_scene() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&state, scene_for_light("imported-look", &device_id)).unwrap();
+        do_scene_apply(
+            &state,
+            "imported-look",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        do_set_node_brightness(&state, "room1", 22, false).unwrap();
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.last().unwrap().1.brightness, 22);
+
+        let s = state.lock().unwrap();
+        let public_scene = s.scenes.get("imported-look").unwrap();
+        assert_eq!(
+            public_scene.light.as_ref().unwrap().entries[0]
+                .output
+                .brightness,
+            72
+        );
+        let generated_scene = s.scenes.get("node-mood-scene-room1").unwrap();
+        assert_eq!(
+            generated_scene.light.as_ref().unwrap().entries[0]
+                .output
+                .brightness,
+            22
+        );
         assert_eq!(
             runtime
                 .engine_room_snapshot("room1")
