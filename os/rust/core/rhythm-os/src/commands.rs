@@ -39,7 +39,7 @@ use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
     factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
     factory_default_mode_config_map, factory_default_mode_transition_configs,
-    factory_default_power_save, factory_default_profile_bundle,
+    factory_default_power_save, factory_default_profile_bundle, factory_default_scene_map,
 };
 use crate::scenes::{
     light_scene_direct_node_id, LightSceneColor, LightSceneEntry, LightSceneLayer,
@@ -3366,11 +3366,25 @@ fn build_scene_application_plan_locked(
             &mut unresolved_node_ids,
         )?;
     }
-    if let Some(default_output) = &layer.default_output {
-        for node_id in &scope_node_ids {
-            if explicit_node_ids.contains(node_id) {
-                continue;
-            }
+    let implicit_node_ids: Vec<_> = scope_node_ids
+        .iter()
+        .filter(|node_id| !explicit_node_ids.contains(*node_id))
+        .collect();
+    if !layer.palette.is_empty() {
+        for (index, node_id) in implicit_node_ids.iter().enumerate() {
+            let output = &layer.palette[index % layer.palette.len()];
+            push_scene_light_command(
+                s,
+                layer.default_transition_ms,
+                transition_ms,
+                node_id,
+                output,
+                &mut commands,
+                &mut unresolved_node_ids,
+            )?;
+        }
+    } else if let Some(default_output) = &layer.default_output {
+        for node_id in implicit_node_ids {
             push_scene_light_command(
                 s,
                 layer.default_transition_ms,
@@ -4204,7 +4218,7 @@ fn factory_default_backup_configuration() -> BackupConfiguration {
             .collect(),
         mode_configs: factory_default_mode_config_map().into_values().collect(),
         mode_transitions: factory_default_mode_transition_configs(),
-        scenes: Vec::new(),
+        scenes: factory_default_scene_map().into_values().collect(),
         rooms: Vec::new(),
     }
 }
@@ -5267,6 +5281,7 @@ fn first_scene_output_for_node(scene: &SceneDefinition, node_id: &str) -> Option
         .iter()
         .find(|entry| entry.target.node_id() == node_id)
         .map(|entry| entry.output.clone())
+        .or_else(|| layer.palette.first().cloned())
         .or_else(|| layer.default_output.clone())
 }
 
@@ -5320,6 +5335,7 @@ fn update_node_mood_scene_color(
             light: Some(LightSceneLayer {
                 default_transition_ms: transition_ms,
                 default_output: None,
+                palette: Vec::new(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -5333,13 +5349,17 @@ fn update_node_mood_scene_color(
     };
     let existing_output = if snapshot.kind.is_room() {
         scene.light.as_ref().and_then(|layer| {
-            layer.default_output.clone().or_else(|| {
-                layer
-                    .entries
-                    .iter()
-                    .find(|entry| scope_node_ids.contains(entry.target.node_id()))
-                    .map(|entry| entry.output.clone())
-            })
+            layer
+                .default_output
+                .clone()
+                .or_else(|| layer.palette.first().cloned())
+                .or_else(|| {
+                    layer
+                        .entries
+                        .iter()
+                        .find(|entry| scope_node_ids.contains(entry.target.node_id()))
+                        .map(|entry| entry.output.clone())
+                })
         })
     } else {
         first_scene_output_for_node(&scene, node_id)
@@ -5348,9 +5368,11 @@ fn update_node_mood_scene_color(
     let layer = scene.light.get_or_insert_with(|| LightSceneLayer {
         default_transition_ms: transition_ms,
         default_output: None,
+        palette: Vec::new(),
         entries: Vec::new(),
     });
     if snapshot.kind.is_room() {
+        layer.palette.clear();
         layer.default_output = Some(output.clone());
         for entry in &mut layer.entries {
             if scope_node_ids.contains(entry.target.node_id()) {
@@ -5462,6 +5484,11 @@ fn update_node_mood_scene_brightness(
             if let Some(default_output) = &mut layer.default_output {
                 default_output.power = LightScenePower::On;
                 default_output.brightness = brightness;
+                updated = true;
+            }
+            for output in &mut layer.palette {
+                output.power = LightScenePower::On;
+                output.brightness = brightness;
                 updated = true;
             }
             for entry in &mut layer.entries {
@@ -12198,6 +12225,7 @@ mod tests {
             light: Some(crate::scenes::LightSceneLayer {
                 default_transition_ms: Some(700),
                 default_output: None,
+                palette: Vec::new(),
                 entries: vec![crate::scenes::LightSceneEntry {
                     target: crate::scenes::LightSceneTargetRef::Node {
                         node_id: device_id.to_string(),
@@ -12227,6 +12255,7 @@ mod tests {
             light: Some(crate::scenes::LightSceneLayer {
                 default_transition_ms: Some(900),
                 default_output: None,
+                palette: Vec::new(),
                 entries: vec![crate::scenes::LightSceneEntry {
                     target: crate::scenes::LightSceneTargetRef::Node {
                         node_id: device_id.to_string(),
@@ -12257,6 +12286,31 @@ mod tests {
                     color: Some(crate::scenes::LightSceneColor::Kelvin { kelvin }),
                     transition_ms: None,
                 }),
+                palette: Vec::new(),
+                entries: Vec::new(),
+            }),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn scene_with_palette(scene_id: &str, colors: &[Rgb]) -> SceneDefinition {
+        SceneDefinition {
+            id: scene_id.to_string(),
+            name: "Palette Scene".to_string(),
+            description: None,
+            source: crate::scenes::SceneSource::User,
+            light: Some(crate::scenes::LightSceneLayer {
+                default_transition_ms: Some(450),
+                default_output: None,
+                palette: colors
+                    .iter()
+                    .map(|rgb| crate::scenes::LightSceneOutput {
+                        power: LightScenePower::On,
+                        brightness: 66,
+                        color: Some(crate::scenes::LightSceneColor::Rgb { rgb: *rgb }),
+                        transition_ms: None,
+                    })
+                    .collect(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -12310,12 +12364,28 @@ mod tests {
         scene.id = "icy-glow".to_string();
         let listed: serde_json::Value =
             serde_json::from_str(&build_scenes(&state).unwrap()).unwrap();
-        assert_eq!(listed["scenes"].as_array().unwrap().len(), 1);
-        assert_eq!(listed["scenes"][0]["id"], "icy-glow");
+        let scene_ids: Vec<_> = listed["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|scene| scene["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(scene_ids.len(), factory_default_scene_map().len() + 1);
+        assert!(scene_ids.contains(&"icy-glow"));
 
         let listed_after_delete: serde_json::Value =
             serde_json::from_str(&do_scene_delete(&state, "icy-glow").unwrap()).unwrap();
-        assert!(listed_after_delete["scenes"].as_array().unwrap().is_empty());
+        let scene_ids_after_delete: Vec<_> = listed_after_delete["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|scene| scene["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            scene_ids_after_delete.len(),
+            factory_default_scene_map().len()
+        );
+        assert!(!scene_ids_after_delete.contains(&"icy-glow"));
         assert!(do_scene_delete(&state, "icy-glow").is_err());
     }
 
@@ -12496,7 +12566,10 @@ mod tests {
         let listed: serde_json::Value =
             serde_json::from_str(&do_scene_delete(&state, "icy-glow").unwrap()).unwrap();
 
-        assert!(listed["scenes"].as_array().unwrap().is_empty());
+        assert_eq!(
+            listed["scenes"].as_array().unwrap().len(),
+            factory_default_scene_map().len()
+        );
         assert!(!state.lock().unwrap().scenes.contains_key("icy-glow"));
         for node_id in ["room1", device_id.as_str()] {
             let snap = runtime.engine_room_snapshot(node_id).unwrap();
@@ -12530,6 +12603,51 @@ mod tests {
         assert_eq!(calls[0].1.brightness, 44);
         assert_eq!(calls[0].1.kelvin, 4100);
         assert_eq!(calls[0].1.transition_ms, Some(400));
+    }
+
+    #[test]
+    fn scene_palette_cycles_across_room_light_scope() {
+        let (state, runtime, _, _, _, _) = setup_mixed_room_with_hub_groups();
+        do_scene_upsert(
+            &state,
+            scene_with_palette(
+                "color-loop",
+                &[
+                    Rgb::new(255, 48, 112),
+                    Rgb::new(48, 220, 112),
+                    Rgb::new(40, 188, 255),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &state,
+                "color-loop",
+                SceneApplyRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(response.affected_node_ids.len(), 4);
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 4);
+        assert!(calls.iter().all(|(_, command)| command.is_direct_color));
+        assert!(calls.iter().all(|(_, command)| command.brightness == 66));
+        let applied_colors: Vec<_> = calls
+            .iter()
+            .map(|(_, command)| (command.rgb.r, command.rgb.g, command.rgb.b))
+            .collect();
+        assert!(applied_colors.contains(&(255, 48, 112)));
+        assert!(applied_colors.contains(&(48, 220, 112)));
+        assert!(applied_colors.contains(&(40, 188, 255)));
+        let unique_colors: std::collections::HashSet<_> = applied_colors.iter().copied().collect();
+        assert_eq!(unique_colors.len(), 3);
     }
 
     #[test]
@@ -13006,8 +13124,15 @@ mod tests {
         do_scene_upsert(&source_state, scene_for_light("icy-glow", &device_id)).unwrap();
 
         let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
-        assert_eq!(bundle.configuration.scenes.len(), 1);
-        assert_eq!(bundle.configuration.scenes[0].id, "icy-glow");
+        assert_eq!(
+            bundle.configuration.scenes.len(),
+            factory_default_scene_map().len() + 1
+        );
+        assert!(bundle
+            .configuration
+            .scenes
+            .iter()
+            .any(|scene| scene.id == "icy-glow"));
 
         let (target_state, _target_runtime) = setup_state(vec![]);
         do_backup_restore(&target_state, bundle).unwrap();
@@ -14153,6 +14278,10 @@ mod tests {
             bundle.profile.mode_transitions,
             factory_default_mode_transition_configs()
         );
+        assert_eq!(
+            bundle.profile.scenes,
+            s.scenes.values().cloned().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -14169,6 +14298,7 @@ mod tests {
             bundle.profile.mode_transitions,
             expected.profile.mode_transitions
         );
+        assert_eq!(bundle.profile.scenes, expected.profile.scenes);
     }
 
     #[test]
@@ -15424,6 +15554,10 @@ mod tests {
         reset_profiles.sort_by(|left, right| left.id.cmp(&right.id));
         let mut expected_profiles = expected.profile.profiles.clone();
         expected_profiles.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut reset_scenes = reset_bundle.profile.scenes.clone();
+        reset_scenes.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut expected_scenes = expected.profile.scenes.clone();
+        expected_scenes.sort_by(|left, right| left.id.cmp(&right.id));
 
         assert_eq!(reset_bundle.profile.power_save, expected.profile.power_save);
         assert_eq!(reset_profiles, expected_profiles);
@@ -15431,6 +15565,7 @@ mod tests {
             reset_bundle.profile.mode_transitions,
             expected.profile.mode_transitions
         );
+        assert_eq!(reset_scenes, expected_scenes);
     }
 
     #[test]
@@ -15799,7 +15934,11 @@ mod tests {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&build_state_snapshot(&state).unwrap()).unwrap();
-        assert_eq!(parsed["scenes"][0]["id"], "icy-glow");
+        assert!(parsed["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scene| scene["id"] == "icy-glow"));
 
         let room = parsed["nodes"]
             .as_array()

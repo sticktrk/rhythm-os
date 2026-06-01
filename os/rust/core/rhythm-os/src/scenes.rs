@@ -109,6 +109,11 @@ pub struct LightSceneLayer {
     /// do not have a more specific entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_output: Option<LightSceneOutput>,
+    /// Optional fallback palette for scene-addressable lights in the target
+    /// scope. Palette outputs are assigned in stable target order and cycle
+    /// when a room has more lights than palette entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub palette: Vec<LightSceneOutput>,
     #[serde(default)]
     pub entries: Vec<LightSceneEntry>,
 }
@@ -117,6 +122,9 @@ impl LightSceneLayer {
     pub fn normalize(&mut self) {
         if let Some(default_output) = &mut self.default_output {
             default_output.normalize();
+        }
+        for output in &mut self.palette {
+            output.normalize();
         }
         for entry in &mut self.entries {
             entry.output.normalize();

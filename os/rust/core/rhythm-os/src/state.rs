@@ -18,7 +18,7 @@ use crate::canonical::registry::CanonicalRegistry;
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_auto_update,
     factory_default_light_profile_config_map, factory_default_mode_config_map,
-    factory_default_mode_transition_configs, factory_default_power_save,
+    factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::storage::{Storage, StoredMotionTimerEntry};
@@ -640,7 +640,7 @@ impl Default for AppState {
             light_profile_configs: default_light_profile_configs(),
             mode_configs: default_mode_config_map(),
             mode_transition_configs: factory_default_mode_transition_configs(),
-            scenes: BTreeMap::new(),
+            scenes: default_scene_map(),
             light_scene_previews: HashMap::new(),
             active_mode: factory_default_active_mode(),
             last_active_mode_cause: ModeChangeCause::Manual,
@@ -729,6 +729,10 @@ fn default_light_profile_configs() -> BTreeMap<String, LightProfileConfig> {
 
 fn default_mode_config_map() -> BTreeMap<RhythmMode, ModeConfig> {
     factory_default_mode_config_map()
+}
+
+fn default_scene_map() -> BTreeMap<String, crate::scenes::SceneDefinition> {
+    factory_default_scene_map()
 }
 
 impl AppState {

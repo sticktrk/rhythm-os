@@ -5,6 +5,125 @@
   "description": "Developer-owned factory-default Rhythm lighting profile bundle.",
   "profile": {
     "power_save": true,
+    "scenes": [
+      {
+        "id": "color-carnival",
+        "name": "Color Carnival",
+        "description": "A multi-light palette that spreads saturated color across the room.",
+        "light": {
+          "default_transition_ms": 900,
+          "palette": [
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 255,
+                  "g": 48,
+                  "b": 112
+                }
+              }
+            },
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 255,
+                  "g": 132,
+                  "b": 32
+                }
+              }
+            },
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 255,
+                  "g": 220,
+                  "b": 64
+                }
+              }
+            },
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 48,
+                  "g": 220,
+                  "b": 112
+                }
+              }
+            },
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 40,
+                  "g": 188,
+                  "b": 255
+                }
+              }
+            },
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 156,
+                  "g": 72,
+                  "b": 255
+                }
+              }
+            }
+          ],
+          "entries": []
+        }
+      },
+      {
+        "id": "electric-lagoon",
+        "name": "Electric Lagoon",
+        "description": "Bright cyan-blue light with a clean party edge.",
+        "light": {
+          "default_transition_ms": 650,
+          "default_output": {
+            "brightness": 82,
+            "color": {
+              "kind": "rgb",
+              "rgb": {
+                "r": 0,
+                "g": 210,
+                "b": 255
+              }
+            }
+          },
+          "entries": []
+        }
+      },
+      {
+        "id": "berry-pop",
+        "name": "Berry Pop",
+        "description": "A punchy magenta-violet look for playful rooms.",
+        "light": {
+          "default_transition_ms": 700,
+          "default_output": {
+            "brightness": 70,
+            "color": {
+              "kind": "rgb",
+              "rgb": {
+                "r": 218,
+                "g": 46,
+                "b": 255
+              }
+            }
+          },
+          "entries": []
+        }
+      }
+    ],
     "mode_transitions": [
       {
         "id": "sleep_to_day",

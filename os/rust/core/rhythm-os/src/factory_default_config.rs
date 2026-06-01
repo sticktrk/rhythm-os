@@ -16,6 +16,7 @@ use rhythm_core::{
 };
 
 use crate::bundle::{BundleKind, ProfileBundle, BUNDLE_SCHEMA_VERSION};
+use crate::scenes::SceneDefinition;
 
 const FACTORY_DEFAULT_PROFILE_BUNDLE_JSON: &str =
     include_str!("../config/factory-default/default_profile_bundle.json");
@@ -23,6 +24,7 @@ const FACTORY_DEFAULT_PROFILE_BUNDLE_JSON: &str =
 static FACTORY_DEFAULT_PROFILE_BUNDLE: OnceLock<ProfileBundle> = OnceLock::new();
 static FACTORY_DEFAULT_LIGHT_PROFILE_CONFIGS: OnceLock<BTreeMap<String, LightProfileConfig>> =
     OnceLock::new();
+static FACTORY_DEFAULT_SCENES: OnceLock<BTreeMap<String, SceneDefinition>> = OnceLock::new();
 static FACTORY_DEFAULT_MODE_CONFIGS: OnceLock<BTreeMap<RhythmMode, ModeConfig>> = OnceLock::new();
 static FACTORY_DEFAULT_MODE_TRANSITIONS: OnceLock<Vec<ModeTransitionConfig>> = OnceLock::new();
 
@@ -76,6 +78,23 @@ fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
         }
     }
 
+    if bundle.profile.scenes.len() > 3 {
+        return Err(anyhow!(
+            "factory-default profile bundle must define at most 3 sample scenes"
+        ));
+    }
+
+    let mut seen_scene_ids = std::collections::HashSet::new();
+    for scene in &mut bundle.profile.scenes {
+        scene.normalize();
+        if !seen_scene_ids.insert(scene.id.clone()) {
+            return Err(anyhow!(
+                "factory-default profile bundle defines duplicate scene id '{}'",
+                scene.id
+            ));
+        }
+    }
+
     Ok(bundle)
 }
 
@@ -99,6 +118,17 @@ fn factory_default_light_profile_configs_ref() -> &'static BTreeMap<String, Ligh
             configs.insert(profile.id.clone(), profile);
         }
         configs
+    })
+}
+
+fn factory_default_scene_map_ref() -> &'static BTreeMap<String, SceneDefinition> {
+    FACTORY_DEFAULT_SCENES.get_or_init(|| {
+        factory_default_profile_bundle_ref()
+            .profile
+            .scenes
+            .iter()
+            .map(|scene| (scene.id.clone(), scene.clone()))
+            .collect()
     })
 }
 
@@ -154,6 +184,10 @@ pub fn factory_default_light_profile_config(id: &str) -> Option<LightProfileConf
     factory_default_light_profile_configs_ref().get(id).cloned()
 }
 
+pub fn factory_default_scene_map() -> BTreeMap<String, SceneDefinition> {
+    factory_default_scene_map_ref().clone()
+}
+
 pub fn factory_default_mode_config_map() -> BTreeMap<RhythmMode, ModeConfig> {
     factory_default_mode_config_map_ref().clone()
 }
@@ -206,6 +240,25 @@ mod tests {
 
         let bundle = factory_default_profile_bundle();
         assert_eq!(bundle.name.as_deref(), Some("Factory Default"));
+        assert_eq!(bundle.profile.scenes.len(), 3);
+
+        let scenes = factory_default_scene_map();
+        assert_eq!(scenes.len(), 3);
+        assert!(scenes.contains_key("color-carnival"));
+        assert!(scenes.contains_key("electric-lagoon"));
+        assert!(scenes.contains_key("berry-pop"));
+        let carnival = scenes.get("color-carnival").unwrap();
+        assert_eq!(carnival.name, "Color Carnival");
+        let palette = &carnival.light.as_ref().unwrap().palette;
+        assert_eq!(palette.len(), 6);
+        let unique_palette_colors: std::collections::HashSet<_> = palette
+            .iter()
+            .map(|output| match output.color {
+                Some(crate::scenes::LightSceneColor::Rgb { rgb }) => (rgb.r, rgb.g, rgb.b),
+                other => panic!("expected rgb palette color, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(unique_palette_colors.len(), 6);
 
         let profiles = factory_default_light_profile_config_map();
         assert_eq!(profiles.len(), 4);
