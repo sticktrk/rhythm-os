@@ -380,6 +380,40 @@ where
     }
 }
 
+fn room_command_log_label(runtime: &dyn RuntimeHandle, room_id: &str) -> String {
+    runtime
+        .engine_room_snapshot(room_id)
+        .map(|room| {
+            if room.name != room.id {
+                format!("{} ({})", room.name, room.id)
+            } else {
+                room.id
+            }
+        })
+        .unwrap_or_else(|| room_id.to_string())
+}
+
+fn adaptive_turn_on_log_message(room_label: &str, command: &LightingCommand) -> String {
+    format!(
+        "room_command_dispatch: room={} source=adaptive_turn_on {}",
+        room_label,
+        command.diagnostic_payload()
+    )
+}
+
+fn log_adaptive_turn_on_dispatch(runtime: &dyn RuntimeHandle, dispatch: &ManualDispatchPlan) {
+    if let ManualDispatchPlan::TurnOn {
+        target_id, command, ..
+    } = dispatch
+    {
+        log::info!(
+            target: "cmd",
+            "{}",
+            adaptive_turn_on_log_message(&room_command_log_label(runtime, target_id), command),
+        );
+    }
+}
+
 impl<C, T, S, R> RuntimeHandle for RhythmRuntime<C, T, S, R>
 where
     C: LightController + Send + Sync + 'static,
@@ -772,6 +806,7 @@ where
                 .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
             engine.plan_turn_on(room_id, current_hour)
         };
+        log_adaptive_turn_on_dispatch(self, &dispatch);
         dispatch_manual_plan(self, dispatch)
     }
 
@@ -1200,6 +1235,22 @@ mod tests {
                 .map(|command| command.brightness),
             Some(42)
         );
+    }
+
+    #[test]
+    fn adaptive_turn_on_log_message_includes_dispatch_values() {
+        let command = LightingCommand::with_transition(47, 1805, 30_000);
+        let line = adaptive_turn_on_log_message(
+            "Staircase (49e74494-5737-4da3-98ae-8d4e32087a14)",
+            &command,
+        );
+
+        assert!(line.contains("room_command_dispatch: room=Staircase"));
+        assert!(line.contains("source=adaptive_turn_on"));
+        assert!(line.contains("bri=47"));
+        assert!(line.contains("kelvin=1805"));
+        assert!(line.contains("transition_ms=Some(30000)"));
+        assert!(line.contains("direct_color=false"));
     }
 
     fn wait_for_any_lights_on_call(spy: &SpyLightController, room_id: &str) {

@@ -103,6 +103,34 @@ impl LightingCommand {
         kelvin_to_mireds(self.kelvin)
     }
 
+    /// Compact human-readable payload for command dispatch logs.
+    pub fn diagnostic_payload(&self) -> String {
+        if self.is_direct_color {
+            format!(
+                "bri={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=true",
+                self.brightness,
+                self.rgb.r,
+                self.rgb.g,
+                self.rgb.b,
+                self.xy.x,
+                self.xy.y,
+                self.transition_ms
+            )
+        } else {
+            format!(
+                "bri={} kelvin={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=false",
+                self.brightness,
+                self.kelvin,
+                self.rgb.r,
+                self.rgb.g,
+                self.rgb.b,
+                self.xy.x,
+                self.xy.y,
+                self.transition_ms
+            )
+        }
+    }
+
     /// Set the transition time and return self (builder pattern).
     pub fn transition(mut self, ms: u32) -> Self {
         self.transition_ms = Some(ms);
@@ -203,6 +231,31 @@ mod tests {
         assert_eq!(cmd.rgb, rgb);
         assert_eq!(cmd.xy, xy);
         assert_eq!(cmd.transition_ms, Some(500));
+    }
+
+    #[test]
+    fn diagnostic_payload_includes_kelvin_command_values() {
+        let cmd = LightingCommand::with_transition(47, 1805, 30_000);
+        let payload = cmd.diagnostic_payload();
+
+        assert!(payload.contains("bri=47"));
+        assert!(payload.contains("kelvin=1805"));
+        assert!(payload.contains("transition_ms=Some(30000)"));
+        assert!(payload.contains("direct_color=false"));
+    }
+
+    #[test]
+    fn diagnostic_payload_marks_direct_color_values() {
+        let rgb = Rgb::new(200, 30, 120);
+        let xy = XyColor { x: 0.45, y: 0.25 };
+        let cmd = LightingCommand::from_color(50, rgb, xy, Some(500));
+        let payload = cmd.diagnostic_payload();
+
+        assert!(payload.contains("bri=50"));
+        assert!(payload.contains("rgb=(200,30,120)"));
+        assert!(payload.contains("xy=(0.450,0.250)"));
+        assert!(payload.contains("direct_color=true"));
+        assert!(!payload.contains("kelvin="));
     }
 
     #[test]

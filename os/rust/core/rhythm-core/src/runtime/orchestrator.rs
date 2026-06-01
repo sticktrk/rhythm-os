@@ -330,34 +330,12 @@ where
 }
 
 fn log_manual_command_dispatch(target_id: &str, command: &crate::lighting::LightingCommand) {
-    if command.is_direct_color {
-        info!(
-            target: "cmd",
-            "room_command_dispatch: room={} bri={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=true",
-            target_id,
-            command.brightness,
-            command.rgb.r,
-            command.rgb.g,
-            command.rgb.b,
-            command.xy.x,
-            command.xy.y,
-            command.transition_ms,
-        );
-    } else {
-        info!(
-            target: "cmd",
-            "room_command_dispatch: room={} bri={} kelvin={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=false",
-            target_id,
-            command.brightness,
-            command.kelvin,
-            command.rgb.r,
-            command.rgb.g,
-            command.rgb.b,
-            command.xy.x,
-            command.xy.y,
-            command.transition_ms,
-        );
-    }
+    info!(
+        target: "cmd",
+        "room_command_dispatch: room={} {}",
+        target_id,
+        command.diagnostic_payload(),
+    );
 }
 
 #[cfg(test)]

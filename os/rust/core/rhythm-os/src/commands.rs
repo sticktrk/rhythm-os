@@ -4340,30 +4340,7 @@ fn room_command_log_label(runtime: &dyn RuntimeHandle, room_id: &str) -> String 
 }
 
 fn room_command_log_payload(command: &LightingCommand) -> String {
-    if command.is_direct_color {
-        format!(
-            "bri={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=true",
-            command.brightness,
-            command.rgb.r,
-            command.rgb.g,
-            command.rgb.b,
-            command.xy.x,
-            command.xy.y,
-            command.transition_ms
-        )
-    } else {
-        format!(
-            "bri={} kelvin={} rgb=({},{},{}) xy=({:.3},{:.3}) transition_ms={:?} direct_color=false",
-            command.brightness,
-            command.kelvin,
-            command.rgb.r,
-            command.rgb.g,
-            command.rgb.b,
-            command.xy.x,
-            command.xy.y,
-            command.transition_ms
-        )
-    }
+    command.diagnostic_payload()
 }
 
 pub(crate) fn log_room_command_dispatch(
