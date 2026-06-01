@@ -10,7 +10,6 @@ use rhythm_core::{rgb_to_xy, LightingCommand, Rgb, XyColor};
 use serde::{Deserialize, Serialize};
 
 pub const LIGHT_SCENE_SCHEMA_VERSION: u32 = 1;
-pub const LIGHT_SCENE_DIRECT_NODE_PREFIX: &str = "__rhythm_scene_direct__";
 pub const DEFAULT_LIGHT_SCENE_PREVIEW_MS: u64 = 30_000;
 
 fn default_schema_version() -> u32 {
@@ -27,11 +26,6 @@ fn default_light_scene_power() -> LightScenePower {
 
 fn default_light_scene_brightness() -> u8 {
     100
-}
-
-/// Stable synthetic composite route ID for direct device scene dispatch.
-pub fn light_scene_direct_node_id(node_id: &str) -> String {
-    format!("{LIGHT_SCENE_DIRECT_NODE_PREFIX}|node={node_id}")
 }
 
 /// Where a scene originated.
@@ -110,8 +104,9 @@ pub struct LightSceneLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_output: Option<LightSceneOutput>,
     /// Optional fallback palette for scene-addressable lights in the target
-    /// scope. Palette outputs are assigned in stable target order and cycle
-    /// when a room has more lights than palette entries.
+    /// scope. Room targets with per-device topology routes assign palette
+    /// outputs in stable target order; grouped room dispatch uses the first
+    /// palette output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub palette: Vec<LightSceneOutput>,
     #[serde(default)]

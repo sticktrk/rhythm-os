@@ -1850,18 +1850,22 @@ impl RoomTopologyStore {
         )
     }
 
-    /// Return the direct device dispatch route for a light node.
-    ///
-    /// Normal composite routing may intentionally collapse attached lights to
-    /// a hub-native group route. Scenes need per-device control, so callers use
-    /// this explicit route under a synthetic internal dispatch node.
-    pub fn direct_light_dispatch_route(
+    /// Return true when this light node's normal topology route targets the
+    /// underlying device instead of collapsing to a hub-native group.
+    pub fn light_node_uses_device_dispatch(
         &self,
         node_id: &str,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
-    ) -> Option<(HubKey, HubDispatchTarget)> {
-        let node = self.device_nodes.get(node_id)?;
-        self.device_dispatch_route(node, canonical_registry)
+    ) -> bool {
+        let Some(node) = self.device_nodes.get(node_id) else {
+            return false;
+        };
+        let route = if node.parent_id.is_some() {
+            self.attached_light_dispatch_route(node, canonical_registry)
+        } else {
+            self.device_dispatch_route(node, canonical_registry)
+        };
+        matches!(route, Some((_, HubDispatchTarget::Devices { .. })))
     }
 
     /// Build a routing table for the composite controller.
@@ -2658,6 +2662,7 @@ mod tests {
                 emit_node_id: room_id.clone(),
             }]
         );
+        assert!(store.light_node_uses_device_dispatch(&light_id, &registry));
     }
 
     #[test]
@@ -2747,6 +2752,7 @@ mod tests {
             )])
         );
         assert!(store.attached_light_uses_parent_dispatch(&light_id, &registry));
+        assert!(!store.light_node_uses_device_dispatch(&light_id, &registry));
     }
 
     #[test]
@@ -2803,6 +2809,7 @@ mod tests {
         expected_nodes.sort_by(|left, right| left.id.cmp(&right.id));
         assert_eq!(store.periodic_light_nodes(&registry), expected_nodes);
         assert!(!store.attached_light_uses_parent_dispatch(&light_one_id, &registry));
+        assert!(store.light_node_uses_device_dispatch(&light_one_id, &registry));
     }
 
     #[test]

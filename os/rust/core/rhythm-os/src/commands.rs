@@ -42,10 +42,10 @@ use crate::factory_default_config::{
     factory_default_power_save, factory_default_profile_bundle, factory_default_scene_map,
 };
 use crate::scenes::{
-    light_scene_direct_node_id, LightSceneColor, LightSceneEntry, LightSceneLayer,
-    LightSceneOutput, LightScenePower, LightScenePreviewSession, LightSceneTargetRef,
-    SceneApplyRequest, SceneApplyResponse, SceneDefinition, SceneDraftPreviewRequest,
-    ScenePreviewRequest, SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
+    LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput, LightScenePower,
+    LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest, SceneApplyResponse,
+    SceneDefinition, SceneDraftPreviewRequest, ScenePreviewRequest, SceneSource,
+    DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
@@ -3285,12 +3285,13 @@ fn light_scene_target_scope_node_ids(
 }
 
 fn light_scene_dispatch_node_id(s: &AppState, node_id: &str) -> Option<String> {
-    if s.composite_controller.is_some() {
-        s.topology
-            .direct_light_dispatch_route(node_id, &s.canonical_registry)
-            .map(|_| light_scene_direct_node_id(node_id))
-    } else {
+    if s.composite_controller.is_none()
+        || s.topology.get(node_id).is_some()
+        || s.topology.get_device_node(node_id).is_some()
+    {
         Some(node_id.to_string())
+    } else {
+        None
     }
 }
 
@@ -3366,34 +3367,67 @@ fn build_scene_application_plan_locked(
             &mut unresolved_node_ids,
         )?;
     }
+
     let implicit_node_ids: Vec<_> = scope_node_ids
         .iter()
         .filter(|node_id| !explicit_node_ids.contains(*node_id))
         .collect();
-    if !layer.palette.is_empty() {
-        for (index, node_id) in implicit_node_ids.iter().enumerate() {
-            let output = &layer.palette[index % layer.palette.len()];
+    let direct_palette_room = s.topology.get(target_id).is_some()
+        && explicit_node_ids.is_empty()
+        && !layer.palette.is_empty()
+        && !implicit_node_ids.is_empty()
+        && implicit_node_ids.iter().all(|node_id| {
+            s.topology
+                .light_node_uses_device_dispatch(node_id, &s.canonical_registry)
+        });
+    let room_default_dispatched = if s.topology.get(target_id).is_some()
+        && explicit_node_ids.is_empty()
+        && !direct_palette_room
+    {
+        if let Some(room_output) = layer.palette.first().or(layer.default_output.as_ref()) {
             push_scene_light_command(
                 s,
                 layer.default_transition_ms,
                 transition_ms,
-                node_id,
-                output,
+                target_id,
+                room_output,
                 &mut commands,
                 &mut unresolved_node_ids,
             )?;
+            true
+        } else {
+            false
         }
-    } else if let Some(default_output) = &layer.default_output {
-        for node_id in implicit_node_ids {
-            push_scene_light_command(
-                s,
-                layer.default_transition_ms,
-                transition_ms,
-                node_id,
-                default_output,
-                &mut commands,
-                &mut unresolved_node_ids,
-            )?;
+    } else {
+        false
+    };
+
+    if !room_default_dispatched {
+        if !layer.palette.is_empty() {
+            for (index, node_id) in implicit_node_ids.iter().enumerate() {
+                let output = &layer.palette[index % layer.palette.len()];
+                push_scene_light_command(
+                    s,
+                    layer.default_transition_ms,
+                    transition_ms,
+                    node_id,
+                    output,
+                    &mut commands,
+                    &mut unresolved_node_ids,
+                )?;
+            }
+        } else if let Some(default_output) = &layer.default_output {
+            for node_id in implicit_node_ids {
+                push_scene_light_command(
+                    s,
+                    layer.default_transition_ms,
+                    transition_ms,
+                    node_id,
+                    default_output,
+                    &mut commands,
+                    &mut unresolved_node_ids,
+                )?;
+            }
         }
     }
     commands.sort_by(|left, right| left.public_node_id.cmp(&right.public_node_id));
@@ -9889,15 +9923,6 @@ fn composite_node_labels(s: &AppState) -> HashMap<String, String> {
             .map(|device| device.name.clone())
             .unwrap_or_else(|| node.id.clone());
         labels.insert(node.id.clone(), label.clone());
-        if s.topology
-            .direct_light_dispatch_route(&node.id, &s.canonical_registry)
-            .is_some()
-        {
-            labels.insert(
-                light_scene_direct_node_id(&node.id),
-                format!("{label} Scene"),
-            );
-        }
     }
 
     for light_node in s.topology.periodic_light_nodes(&s.canonical_registry) {
@@ -9931,18 +9956,6 @@ pub fn rebuild_composite_routing(state: &SharedState) {
         };
         let active_hubs: HashSet<String> = s.hubs.keys().map(ToString::to_string).collect();
         let mut routing = s.topology.composite_routing(&s.canonical_registry);
-        for node in s.topology.device_nodes() {
-            let Some((hub_key, target)) = s
-                .topology
-                .direct_light_dispatch_route(&node.id, &s.canonical_registry)
-            else {
-                continue;
-            };
-            routing.insert(
-                light_scene_direct_node_id(&node.id),
-                vec![(hub_key.to_string(), target)],
-            );
-        }
         routing.retain(|_, targets| {
             targets.retain(|(hub_key, _)| active_hubs.contains(hub_key));
             !targets.is_empty()
@@ -9954,7 +9967,7 @@ pub fn rebuild_composite_routing(state: &SharedState) {
     let route_count = routing.len();
     composite.update_routing(routing);
     composite.update_node_labels(labels);
-    info!(target: "cmd", "Rebuilt composite routing: {} rooms, {} route entries (incl. hub aliases)",
+    info!(target: "cmd", "Rebuilt composite routing: {} rooms, {} route entries",
         room_count, route_count);
 }
 
@@ -12179,6 +12192,37 @@ mod tests {
         (state, runtime, device_id)
     }
 
+    fn setup_matter_room_with_two_lights() -> (SharedState, Arc<MockRuntime>, String, String) {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new(HubType::MATTER), "local");
+        let device_one_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "matter-light-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        let device_two_id =
+            insert_canonical_device(&state, hub_key, "matter-light-2", "Floor Lamp", "", "");
+        add_topology_room(&state, "room1", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s
+                .topology
+                .attach_device_user_override("room1", &device_one_id));
+            assert!(s
+                .topology
+                .attach_device_user_override("room1", &device_two_id));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&device_one_id, "room1"),
+            make_light_child_snapshot(&device_two_id, "room1"),
+        ]);
+
+        (state, runtime, device_one_id, device_two_id)
+    }
+
     fn setup_attached_hue_light_with_group_dispatch() -> (SharedState, Arc<MockRuntime>, String) {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         let hub_key = HubKey::new(HubType::new("hue"), "bridge");
@@ -12413,7 +12457,7 @@ mod tests {
     }
 
     #[test]
-    fn scene_apply_uses_direct_light_route_for_attached_grouped_light() {
+    fn scene_apply_uses_existing_light_route_for_attached_grouped_light() {
         let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
         state.lock().unwrap().composite_controller =
             Some(Arc::new(rhythm_core::CompositeController::new()));
@@ -12437,7 +12481,7 @@ mod tests {
 
         let calls = runtime.applied_commands();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, light_scene_direct_node_id(&device_id));
+        assert_eq!(calls[0].0, device_id);
         assert_eq!(calls[0].1.brightness, 72);
         assert_eq!(calls[0].1.kelvin, 6500);
         assert_eq!(calls[0].1.transition_ms, Some(250));
@@ -12485,10 +12529,7 @@ mod tests {
 
         assert_eq!(response.affected_node_ids, vec![device_id.clone()]);
         assert!(runtime.applied_commands().is_empty());
-        assert_eq!(
-            runtime.lights_off_calls(),
-            vec![(light_scene_direct_node_id(&device_id), Some(250))]
-        );
+        assert_eq!(runtime.lights_off_calls(), vec![(device_id, Some(250))]);
         assert_eq!(
             runtime
                 .engine_room_snapshot("room1")
@@ -12580,7 +12621,7 @@ mod tests {
 
     #[test]
     fn scene_default_output_applies_to_room_light_scope() {
-        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let (state, runtime, _device_id) = setup_attached_hue_light_with_group_dispatch();
         do_scene_upsert(&state, scene_with_default_output("room-mood", 44, 4100)).unwrap();
 
         let response: SceneApplyResponse = serde_json::from_str(
@@ -12596,17 +12637,17 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(response.affected_node_ids, vec![device_id.clone()]);
+        assert_eq!(response.affected_node_ids, vec!["room1".to_string()]);
         let calls = runtime.applied_commands();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, device_id);
+        assert_eq!(calls[0].0, "room1");
         assert_eq!(calls[0].1.brightness, 44);
         assert_eq!(calls[0].1.kelvin, 4100);
         assert_eq!(calls[0].1.transition_ms, Some(400));
     }
 
     #[test]
-    fn scene_palette_cycles_across_room_light_scope() {
+    fn scene_palette_applies_first_color_to_room_route() {
         let (state, runtime, _, _, _, _) = setup_mixed_room_with_hub_groups();
         do_scene_upsert(
             &state,
@@ -12634,20 +12675,66 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(response.affected_node_ids.len(), 4);
+        assert_eq!(response.affected_node_ids, vec!["room1".to_string()]);
         let calls = runtime.applied_commands();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "room1");
+        assert!(calls[0].1.is_direct_color);
+        assert_eq!(calls[0].1.brightness, 66);
+        assert_eq!(
+            (calls[0].1.rgb.r, calls[0].1.rgb.g, calls[0].1.rgb.b),
+            (255, 48, 112)
+        );
+    }
+
+    #[test]
+    fn scene_palette_cycles_across_matter_room_light_scope() {
+        let (state, runtime, device_one_id, device_two_id) = setup_matter_room_with_two_lights();
+        do_scene_upsert(
+            &state,
+            scene_with_palette(
+                "matter-color-loop",
+                &[
+                    Rgb::new(255, 48, 112),
+                    Rgb::new(48, 220, 112),
+                    Rgb::new(40, 188, 255),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &state,
+                "matter-color-loop",
+                SceneApplyRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(response.affected_node_ids.len(), 2);
+        assert!(response.affected_node_ids.contains(&device_one_id));
+        assert!(response.affected_node_ids.contains(&device_two_id));
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|(_, command)| command.is_direct_color));
         assert!(calls.iter().all(|(_, command)| command.brightness == 66));
-        let applied_colors: Vec<_> = calls
+        let called_ids: std::collections::HashSet<_> =
+            calls.iter().map(|(node_id, _)| node_id.as_str()).collect();
+        assert!(called_ids.contains(device_one_id.as_str()));
+        assert!(called_ids.contains(device_two_id.as_str()));
+        let applied_colors: std::collections::HashSet<_> = calls
             .iter()
             .map(|(_, command)| (command.rgb.r, command.rgb.g, command.rgb.b))
             .collect();
-        assert!(applied_colors.contains(&(255, 48, 112)));
-        assert!(applied_colors.contains(&(48, 220, 112)));
-        assert!(applied_colors.contains(&(40, 188, 255)));
-        let unique_colors: std::collections::HashSet<_> = applied_colors.iter().copied().collect();
-        assert_eq!(unique_colors.len(), 3);
+        assert_eq!(
+            applied_colors,
+            std::collections::HashSet::from([(255, 48, 112), (48, 220, 112)])
+        );
     }
 
     #[test]
@@ -12688,7 +12775,7 @@ mod tests {
 
     #[test]
     fn mood_scoped_color_creates_scene_not_hidden_profile() {
-        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let (state, runtime, _device_id) = setup_attached_hue_light_with_group_dispatch();
 
         do_set_node_color(
             &state,
@@ -12706,7 +12793,7 @@ mod tests {
 
         let calls = runtime.applied_commands();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, device_id);
+        assert_eq!(calls[0].0, "room1");
         assert!(calls[0].1.is_direct_color);
         assert_eq!(calls[0].1.rgb, Rgb::new(16, 80, 240));
         assert_eq!(calls[0].1.brightness, 39);
