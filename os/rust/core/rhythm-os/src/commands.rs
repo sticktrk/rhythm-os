@@ -1576,6 +1576,73 @@ fn node_state_dto_metadata(s: &AppState, node_id: &str) -> NodeStateDtoMetadata 
     }
 }
 
+fn scene_entry_targets_display_room(s: &AppState, entry_node_id: &str, room_id: &str) -> bool {
+    if entry_node_id == room_id {
+        return true;
+    }
+    s.topology
+        .get_device_node(entry_node_id)
+        .and_then(|node| node.parent_id.as_deref())
+        == Some(room_id)
+}
+
+fn first_scene_output_for_room_display(
+    s: &AppState,
+    scene: &SceneDefinition,
+    room_id: &str,
+) -> Option<LightSceneOutput> {
+    let layer = scene.light.as_ref()?;
+    layer
+        .default_output
+        .clone()
+        .or_else(|| layer.palette.first().cloned())
+        .or_else(|| {
+            layer
+                .entries
+                .iter()
+                .find(|entry| scene_entry_targets_display_room(s, entry.target.node_id(), room_id))
+                .map(|entry| entry.output.clone())
+        })
+        .or_else(|| layer.entries.first().map(|entry| entry.output.clone()))
+}
+
+fn mood_scene_display_output(
+    s: &AppState,
+    snap: &rhythm_core::NodeSnapshot,
+    room_state: RoomModeState,
+) -> Option<LightSceneOutput> {
+    if room_state != RoomModeState::Mood {
+        return None;
+    }
+    let scene_id = snap.profile_settings.mood_scene_id.as_deref()?;
+    let scene = s.scenes.get(scene_id)?;
+    let output = if snap.kind.is_room() {
+        first_scene_output_for_room_display(s, scene, &snap.id)
+    } else {
+        first_scene_output_for_node(scene, &snap.id)
+    }?;
+    (output.power == LightScenePower::On).then_some(output)
+}
+
+fn apply_mood_scene_display_values(
+    s: &AppState,
+    snap: &rhythm_core::NodeSnapshot,
+    room_state: RoomModeState,
+    brightness: &mut u8,
+    kelvin: &mut u16,
+) {
+    let Some(output) = mood_scene_display_output(s, snap, room_state) else {
+        return;
+    };
+    *brightness = output.brightness;
+    if let Some(LightSceneColor::Kelvin {
+        kelvin: scene_kelvin,
+    }) = output.color
+    {
+        *kelvin = scene_kelvin.clamp(500, 25_000);
+    }
+}
+
 fn build_node_state_dto_from_snapshot_parts(
     ctx: &NodeStateDtoBuildContext<'_>,
     snap: &rhythm_core::NodeSnapshot,
@@ -1623,7 +1690,7 @@ fn build_node_state_dto_from_snapshot_parts(
             snap.soft_off,
         ),
     );
-    let (brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
+    let (mut brightness, mut kelvin) = compute_room_display_values_for_settings_from_parts(
         RoomLightingContext {
             light_profile_configs: ctx.light_profile_configs,
             mode_configs: ctx.mode_configs,
@@ -1641,6 +1708,7 @@ fn build_node_state_dto_from_snapshot_parts(
             brightness_offset: snap.brightness_offset,
         },
     );
+    apply_mood_scene_display_values(ctx.state, snap, state, &mut brightness, &mut kelvin);
 
     let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
         if let Some(ms) = ctx.motion_snapshots.get(&snap.id) {
@@ -1770,24 +1838,26 @@ pub fn build_node_state_event(
         );
         let standby_enabled = snap.standby_enabled;
         let standby_active = snap.soft_off && !snap.hard_off;
-        let (curve_brightness, kelvin) = compute_room_display_values_for_settings_from_parts(
-            RoomLightingContext {
-                light_profile_configs: &s.light_profile_configs,
-                mode_configs: &mode_configs,
-                mode,
-                solar_noon: s.solar_noon_hour(),
-                latitude: s.latitude,
-                longitude: s.longitude,
-                timezone_name: s.timezone_name.as_deref(),
-                utc_offset: s.utc_offset_hours,
-            },
-            RoomLightingInput {
-                settings: &snap.profile_settings,
-                room_state,
-                time_offset_minutes: snap.time_offset_minutes,
-                brightness_offset: snap.brightness_offset,
-            },
-        );
+        let (mut curve_brightness, mut kelvin) =
+            compute_room_display_values_for_settings_from_parts(
+                RoomLightingContext {
+                    light_profile_configs: &s.light_profile_configs,
+                    mode_configs: &mode_configs,
+                    mode,
+                    solar_noon: s.solar_noon_hour(),
+                    latitude: s.latitude,
+                    longitude: s.longitude,
+                    timezone_name: s.timezone_name.as_deref(),
+                    utc_offset: s.utc_offset_hours,
+                },
+                RoomLightingInput {
+                    settings: &snap.profile_settings,
+                    room_state,
+                    time_offset_minutes: snap.time_offset_minutes,
+                    brightness_offset: snap.brightness_offset,
+                },
+            );
+        apply_mood_scene_display_values(&s, snap, room_state, &mut curve_brightness, &mut kelvin);
         (
             mode,
             room_state,
@@ -5190,10 +5260,10 @@ fn node_mood_scene_id(node_id: &str) -> String {
         if ch.is_ascii_alphanumeric() || ch == '-' {
             safe_id.push(ch);
         } else {
-            safe_id.push_str(&format!("_{byte:02x}"));
+            safe_id.push_str(&format!("-{byte:02x}"));
         }
     }
-    format!("node_mood_scene_{}", safe_id)
+    format!("node-mood-scene-{}", safe_id)
 }
 
 fn node_mood_scene_name(snapshot: &rhythm_core::NodeSnapshot) -> String {
@@ -5319,6 +5389,24 @@ fn first_scene_output_for_node(scene: &SceneDefinition, node_id: &str) -> Option
         .or_else(|| layer.default_output.clone())
 }
 
+fn first_scene_output_for_room_scope(
+    scene: &SceneDefinition,
+    scope_node_ids: &BTreeSet<String>,
+) -> Option<LightSceneOutput> {
+    let layer = scene.light.as_ref()?;
+    layer
+        .default_output
+        .clone()
+        .or_else(|| layer.palette.first().cloned())
+        .or_else(|| {
+            layer
+                .entries
+                .iter()
+                .find(|entry| scope_node_ids.contains(entry.target.node_id()))
+                .map(|entry| entry.output.clone())
+        })
+}
+
 fn mood_scene_color_output(
     existing: Option<LightSceneOutput>,
     rgb: Rgb,
@@ -5348,15 +5436,25 @@ fn update_node_mood_scene_color(
     transition_ms: Option<u32>,
     persist: bool,
 ) -> Result<()> {
-    let scene_id = {
+    let node_scene_id = node_mood_scene_id(node_id);
+    let (scene_id, seed_scene, current_scene_is_node_scene) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        snapshot
+        let current_scene_id = snapshot
             .profile_settings
             .mood_scene_id
             .as_ref()
             .filter(|scene_id| s.scenes.contains_key(*scene_id))
-            .cloned()
-            .unwrap_or_else(|| node_mood_scene_id(node_id))
+            .cloned();
+        let current_scene_is_node_scene = current_scene_id
+            .as_deref()
+            .is_some_and(|scene_id| scene_id == node_scene_id);
+        let seed_scene = current_scene_id
+            .as_ref()
+            .and_then(|scene_id| s.scenes.get(scene_id).cloned());
+        let scene_id = current_scene_id
+            .filter(|scene_id| scene_id == &node_scene_id)
+            .unwrap_or_else(|| node_scene_id.clone());
+        (scene_id, seed_scene, current_scene_is_node_scene)
     };
 
     let mut scene = {
@@ -5382,21 +5480,25 @@ fn update_node_mood_scene_color(
         BTreeSet::new()
     };
     let existing_output = if snapshot.kind.is_room() {
-        scene.light.as_ref().and_then(|layer| {
-            layer
-                .default_output
-                .clone()
-                .or_else(|| layer.palette.first().cloned())
-                .or_else(|| {
-                    layer
-                        .entries
-                        .iter()
-                        .find(|entry| scope_node_ids.contains(entry.target.node_id()))
-                        .map(|entry| entry.output.clone())
-                })
-        })
+        let node_output = first_scene_output_for_room_scope(&scene, &scope_node_ids);
+        let seed_output = seed_scene
+            .as_ref()
+            .and_then(|scene| first_scene_output_for_room_scope(scene, &scope_node_ids));
+        if current_scene_is_node_scene {
+            node_output.or(seed_output)
+        } else {
+            seed_output.or(node_output)
+        }
     } else {
-        first_scene_output_for_node(&scene, node_id)
+        let node_output = first_scene_output_for_node(&scene, node_id);
+        let seed_output = seed_scene
+            .as_ref()
+            .and_then(|scene| first_scene_output_for_node(scene, node_id));
+        if current_scene_is_node_scene {
+            node_output.or(seed_output)
+        } else {
+            seed_output.or(node_output)
+        }
     };
     let output = mood_scene_color_output(existing_output, rgb, xy, brightness, transition_ms);
     let layer = scene.light.get_or_insert_with(|| LightSceneLayer {
@@ -12774,6 +12876,36 @@ mod tests {
     }
 
     #[test]
+    fn scene_backed_mood_state_reports_scene_brightness() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(
+            &state,
+            scene_for_light_with_output("dim-glow", &device_id, 37, 3200),
+        )
+        .unwrap();
+        do_scene_apply(
+            &state,
+            "dim-glow",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        let node_state = build_node_state(&state, "room1").unwrap();
+        assert_eq!(node_state.brightness, 37);
+        assert_eq!(node_state.kelvin, 3200);
+
+        let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
+            runtime.engine_room_snapshot("room1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snap);
+        assert_eq!(event.brightness, 37);
+        assert_eq!(event.kelvin, 3200);
+    }
+
+    #[test]
     fn mood_scoped_color_creates_scene_not_hidden_profile() {
         let (state, runtime, _device_id) = setup_attached_hue_light_with_group_dispatch();
 
@@ -12816,7 +12948,7 @@ mod tests {
     }
 
     #[test]
-    fn mood_scoped_room_color_updates_explicit_scene_entries_and_preserves_brightness() {
+    fn mood_scoped_room_color_switches_from_scene_to_node_color_scene() {
         let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
         do_scene_upsert(&state, scene_for_light("imported-look", &device_id)).unwrap();
         let patch = RoomProfileSettingsPatch {
@@ -12856,12 +12988,97 @@ mod tests {
         assert_eq!(calls.last().unwrap().1.brightness, 72);
 
         let s = state.lock().unwrap();
-        let scene = s.scenes.get("imported-look").unwrap();
-        let entry_output = &scene.light.as_ref().unwrap().entries[0].output;
+        let imported_scene = s.scenes.get("imported-look").unwrap();
+        let imported_output = &imported_scene.light.as_ref().unwrap().entries[0].output;
+        assert_eq!(
+            imported_output.color,
+            Some(LightSceneColor::Kelvin { kelvin: 6500 })
+        );
+        assert_eq!(imported_output.brightness, 72);
+
+        let scene = s.scenes.get("node-mood-scene-room1").unwrap();
+        let entry_output = scene
+            .light
+            .as_ref()
+            .unwrap()
+            .default_output
+            .as_ref()
+            .unwrap();
         assert_eq!(entry_output.power, LightScenePower::On);
         assert_eq!(entry_output.brightness, 72);
         assert_eq!(
             entry_output.color,
+            Some(LightSceneColor::RgbXy {
+                rgb: Rgb::new(24, 120, 200),
+                xy: rhythm_core::rgb_to_xy(Rgb::new(24, 120, 200)),
+            })
+        );
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("node-mood-scene-room1")
+        );
+    }
+
+    #[test]
+    fn mood_scoped_room_color_uses_active_scene_brightness_when_generated_scene_exists() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+
+        do_set_node_color(
+            &state,
+            "room1",
+            NodeColorUpdate {
+                rgb: Rgb::new(16, 80, 240),
+                xy: None,
+                brightness: Some(15),
+                transition_ms: Some(275),
+                scope: NodeColorScope::Mood,
+            },
+            false,
+        )
+        .unwrap();
+        do_scene_upsert(&state, scene_for_light("imported-look", &device_id)).unwrap();
+        do_scene_apply(
+            &state,
+            "imported-look",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        do_set_node_color(
+            &state,
+            "room1",
+            NodeColorUpdate {
+                rgb: Rgb::new(24, 120, 200),
+                xy: None,
+                brightness: None,
+                transition_ms: Some(180),
+                scope: NodeColorScope::Mood,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.applied_commands().last().unwrap().1.brightness, 72);
+        let s = state.lock().unwrap();
+        let scene = s.scenes.get("node-mood-scene-room1").unwrap();
+        let output = scene
+            .light
+            .as_ref()
+            .unwrap()
+            .default_output
+            .as_ref()
+            .unwrap();
+        assert_eq!(output.brightness, 72);
+        assert_eq!(
+            output.color,
             Some(LightSceneColor::RgbXy {
                 rgb: Rgb::new(24, 120, 200),
                 xy: rhythm_core::rgb_to_xy(Rgb::new(24, 120, 200)),
