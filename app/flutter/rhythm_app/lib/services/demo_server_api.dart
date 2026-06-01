@@ -271,6 +271,118 @@ class DemoServerApi extends RhythmServerApi {
     };
   }
 
+  @override
+  Future<List<RhythmSceneDefinition>> getScenes() async => _demoScenes;
+
+  static RhythmLightSceneEntry _rgbEntry(
+    String nodeId,
+    int r,
+    int g,
+    int b, {
+    int brightness = 80,
+  }) =>
+      RhythmLightSceneEntry(
+        target: RhythmLightTarget.node(nodeId),
+        output: RhythmLightSceneOutput.on(
+          brightness: brightness,
+          color: RhythmLightColor.rgb(RhythmSceneRgbColor(r: r, g: g, b: b)),
+          transitionMs: 800,
+        ),
+      );
+
+  static RhythmLightSceneEntry _kelvinEntry(
+    String nodeId,
+    int kelvin, {
+    int brightness = 70,
+  }) =>
+      RhythmLightSceneEntry(
+        target: RhythmLightTarget.node(nodeId),
+        output: RhythmLightSceneOutput.on(
+          brightness: brightness,
+          color: RhythmLightColor.kelvin(kelvin),
+          transitionMs: 800,
+        ),
+      );
+
+  /// A handful of vivid demo scenes so Mood mode has presets to show without a
+  /// live server. Swatches in the picker are sampled from these colors.
+  static final List<RhythmSceneDefinition> _demoScenes = [
+    RhythmSceneDefinition(
+      id: 'demo_scene_sunset',
+      name: 'Sunset',
+      description: 'Warm amber fading into dusk pink',
+      light: RhythmLightScene(
+        defaultTransitionMs: 800,
+        entries: [
+          _rgbEntry('demo_living_ceiling', 255, 122, 48, brightness: 78),
+          _rgbEntry('demo_living_strip', 255, 56, 124, brightness: 70),
+        ],
+      ),
+    ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_lagoon',
+      name: 'Lagoon',
+      description: 'Cool ocean blues and teal',
+      light: RhythmLightScene(
+        defaultTransitionMs: 800,
+        entries: [
+          _rgbEntry('demo_living_ceiling', 0, 150, 255, brightness: 72),
+          _rgbEntry('demo_living_strip', 0, 214, 180, brightness: 66),
+          _rgbEntry('demo_floor_lamp', 90, 90, 255, brightness: 60),
+        ],
+      ),
+    ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_focus',
+      name: 'Focus',
+      description: 'Crisp, energizing daylight',
+      light: RhythmLightScene(
+        defaultTransitionMs: 600,
+        entries: [
+          _kelvinEntry('demo_office_desk', 5200, brightness: 100),
+          _rgbEntry('demo_kitchen_main', 188, 214, 255, brightness: 90),
+        ],
+      ),
+    ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_candlelight',
+      name: 'Candlelight',
+      description: 'Soft, low, golden warmth',
+      light: RhythmLightScene(
+        defaultTransitionMs: 1200,
+        entries: [
+          _kelvinEntry('demo_bedroom_left', 2000, brightness: 22),
+          _kelvinEntry('demo_bedroom_right', 2200, brightness: 18),
+        ],
+      ),
+    ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_forest',
+      name: 'Forest',
+      description: 'Fresh greens and moss',
+      light: RhythmLightScene(
+        defaultTransitionMs: 900,
+        entries: [
+          _rgbEntry('demo_kitchen_main', 40, 184, 92, brightness: 74),
+          _rgbEntry('demo_kitchen_island', 154, 204, 40, brightness: 64),
+        ],
+      ),
+    ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_nebula',
+      name: 'Nebula',
+      description: 'Electric violet and magenta',
+      light: RhythmLightScene(
+        defaultTransitionMs: 1000,
+        entries: [
+          _rgbEntry('demo_living_ceiling', 142, 58, 255, brightness: 68),
+          _rgbEntry('demo_living_strip', 255, 56, 184, brightness: 72),
+          _rgbEntry('demo_floor_lamp', 44, 92, 255, brightness: 58),
+        ],
+      ),
+    ),
+  ];
+
   DemoServerSnapshot snapshot() {
     ensureSeeded();
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;

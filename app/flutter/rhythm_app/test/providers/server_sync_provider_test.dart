@@ -100,6 +100,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         int? transitionMs,
         String? scope,
       })> nodeColorCalls = [];
+  List<RhythmSceneDefinition> scenes = const [];
+  final List<({String sceneId, String targetId, int? transitionMs})>
+      applySceneCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<
       ({
@@ -187,6 +190,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     int? brightness,
     int? transitionMs,
     String? scope,
+    RhythmNodeColorScope? colorScope,
   }) async {
     nodeColorCalls.add((
       nodeId: nodeId,
@@ -197,6 +201,27 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       transitionMs: transitionMs,
       scope: scope,
     ));
+  }
+
+  @override
+  Future<List<RhythmSceneDefinition>> getScenes() async => scenes;
+
+  @override
+  Future<RhythmSceneActionResult?> applyScene({
+    required String sceneId,
+    required String targetId,
+    int? transitionMs,
+  }) async {
+    applySceneCalls.add((
+      sceneId: sceneId,
+      targetId: targetId,
+      transitionMs: transitionMs,
+    ));
+    return RhythmSceneActionResult(
+      sceneId: sceneId,
+      targetId: targetId,
+      affectedNodeIds: [targetId],
+    );
   }
 
   @override
@@ -509,6 +534,37 @@ void _registerWidgetCleanup(WidgetTester tester) {
     await tester.pump();
   });
 }
+
+RhythmSceneDefinition _testScene(String id) => RhythmSceneDefinition(
+      id: id,
+      name: 'Test Scene',
+      light: const RhythmLightScene(
+        defaultOutput: RhythmLightSceneOutput.on(
+          brightness: 55,
+          color:
+              RhythmLightColor.rgb(RhythmSceneRgbColor(r: 240, g: 80, b: 24)),
+        ),
+      ),
+    );
+
+RhythmSceneDefinition _testPaletteScene(String id) => RhythmSceneDefinition(
+      id: id,
+      name: 'Palette Scene',
+      light: const RhythmLightScene(
+        palette: [
+          RhythmLightSceneOutput.on(
+            brightness: 42,
+            color:
+                RhythmLightColor.rgb(RhythmSceneRgbColor(r: 40, g: 90, b: 210)),
+          ),
+          RhythmLightSceneOutput.on(
+            brightness: 80,
+            color:
+                RhythmLightColor.rgb(RhythmSceneRgbColor(r: 250, g: 80, b: 40)),
+          ),
+        ],
+      ),
+    );
 
 void main() {
   group('ServerSyncProvider.pushHubCredentials', () {
@@ -1682,6 +1738,203 @@ void main() {
       expect(call.nodeId, 'room-1');
       expect(call.kelvin, 3200);
       expect(call.preserveBrightness, isTrue);
+    });
+  });
+
+  group('ServerSyncProvider mood scenes', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _FakeRhythmConnection connection;
+    late ServerSyncProvider provider;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _FakeRhythmConnection(api);
+      provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+    });
+
+    tearDown(() {
+      provider.dispose();
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('hides generated direct-color mood scenes from picker data', () async {
+      api.scenes = [
+        _testScene('evening-glow'),
+        _testScene('node-mood-scene-room-1'),
+      ];
+
+      final fetched = await provider.fetchScenes();
+
+      expect(fetched.map((scene) => scene.id), ['evening-glow']);
+      expect(provider.scenes.map((scene) => scene.id), ['evening-glow']);
+    });
+
+    test('applies a mood scene without issuing a duplicate preferences write',
+        () async {
+      api.scenes = [_testScene('evening-glow')];
+      await provider.fetchScenes();
+
+      final dispatched = provider.applyMoodScene(
+        'room-1',
+        'evening-glow',
+        color: (240, 80, 24),
+        transitionMs: 450,
+      );
+
+      expect(dispatched, isTrue);
+      expect(api.applySceneCalls, hasLength(1));
+      expect(api.applySceneCalls.single.sceneId, 'evening-glow');
+      expect(api.applySceneCalls.single.targetId, 'room-1');
+      expect(api.applySceneCalls.single.transitionMs, 450);
+      expect(api.nodePreferenceCalls, isEmpty);
+      expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
+      expect(roomProvider.getMoodColor('room-1'), (240, 80, 24));
+      expect(roomProvider.getMoodBrightness('room-1'), 55);
+    });
+
+    test('uses palette scenes for representative mood brightness', () async {
+      api.scenes = [_testPaletteScene('color-carnival')];
+      await provider.fetchScenes();
+
+      final dispatched = provider.applyMoodScene(
+        'room-1',
+        'color-carnival',
+      );
+
+      expect(dispatched, isTrue);
+      expect(provider.moodSceneIdForRoom('room-1'), 'color-carnival');
+      expect(roomProvider.getMoodBrightness('room-1'), 42);
+    });
+  });
+
+  group('ServerSyncProvider generated mood scene state', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _HelloRhythmConnection connection;
+    late ServerSyncProvider provider;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _HelloRhythmConnection(api);
+      provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+    });
+
+    tearDown(() {
+      provider.dispose();
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    test('treats generated mood scene ids as custom color state', () async {
+      connection.emitHello(RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'mood',
+            'profile_settings': {
+              'mood_scene_id': 'node-mood-scene-room-1',
+            },
+          },
+        ],
+      }));
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+    });
+
+    test('keeps public mood scene ids selectable', () async {
+      connection.emitHello(RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'mood',
+            'profile_settings': {
+              'mood_scene_id': 'evening-glow',
+            },
+          },
+        ],
+      }));
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
+    });
+
+    test('clears public scene selection after direct mood color', () async {
+      connection.emitHello(RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'mood',
+            'profile_settings': {
+              'mood_scene_id': 'evening-glow',
+            },
+          },
+        ],
+      }));
+
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
+
+      final dispatched = provider.dispatchNodeColor(
+        'room-1',
+        20,
+        80,
+        240,
+        scope: 'mood',
+      );
+
+      expect(dispatched, isTrue);
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+    });
+
+    test('shows selected scene before server state catches up', () async {
+      api.scenes = [_testScene('evening-glow')];
+      await provider.fetchScenes();
+      connection.emitHello(RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'mood',
+            'profile_settings': {
+              'mood_scene_id': 'node-mood-scene-room-1',
+            },
+          },
+        ],
+      }));
+
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+
+      final dispatched = provider.applyMoodScene(
+        'room-1',
+        'evening-glow',
+        color: (240, 80, 24),
+      );
+
+      expect(dispatched, isTrue);
+      expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
     });
   });
 

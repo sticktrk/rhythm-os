@@ -9,7 +9,7 @@ import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
 import 'device_detail_sheet.dart';
-import 'mood_color_sheet.dart';
+import 'mood_sheet.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
@@ -70,10 +70,7 @@ class _RoomCardState extends State<RoomCard> {
     if (newMode == RoomMode.mood &&
         roomProvider.getDisplayRoomState(widget.roomId) == RoomModeState.mood) {
       HapticFeedback.lightImpact();
-      _showMoodColorPicker(
-        roomProvider,
-        currentBrightness: _currentMoodBrightness(roomProvider),
-      );
+      _showMoodScenePicker();
       return;
     }
 
@@ -140,37 +137,50 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
-  int _currentMoodBrightness(RoomProvider roomProvider) =>
-      (_sliderBrightness ?? roomProvider.getMoodBrightness(widget.roomId) ?? 1)
-          .clamp(1, 100)
-          .toInt();
+  void _showMoodScenePicker() {
+    final sync = context.read<ServerSyncProvider>();
+    final roomProvider = context.read<RoomProvider>();
 
-  void _showMoodColorPicker(
-    RoomProvider roomProvider, {
-    required int currentBrightness,
-  }) {
     final existingColor = roomProvider.getMoodColor(widget.roomId) ??
         roomProvider.getRoomColor(widget.roomId);
     final initialColor = existingColor != null
         ? Color.fromARGB(
             255, existingColor.$1, existingColor.$2, existingColor.$3)
         : null;
+    final activeSceneId = sync.moodSceneIdForRoom(widget.roomId);
 
-    MoodColorSheet.show(
+    MoodSheet.show(
       context,
+      // Open straight to whichever kind of mood the room is currently using.
+      initialTab: activeSceneId != null ? MoodTab.scenes : MoodTab.color,
       initialColor: initialColor,
+      initialSceneId: activeSceneId,
+      initialScenes: sync.scenes,
+      scenesLoader: () => sync.fetchScenes(),
       onColorChanged: (color) {
         final r = (color.r * 255).round();
         final g = (color.g * 255).round();
         final b = (color.b * 255).round();
-        context.read<ServerSyncProvider>().dispatchNodeColor(
-              widget.roomId,
-              r,
-              g,
-              b,
-              scope: 'mood',
-              brightness: currentBrightness,
-            );
+        final moodBrightness = (roomProvider.getMoodBrightness(widget.roomId) ??
+                roomProvider.getBrightness(widget.roomId) ??
+                1)
+            .clamp(1, 100)
+            .toInt();
+        sync.dispatchNodeColor(
+          widget.roomId,
+          r,
+          g,
+          b,
+          scope: 'mood',
+          brightness: moodBrightness,
+        );
+      },
+      onSceneSelected: (scene) {
+        sync.applyMoodScene(
+          widget.roomId,
+          scene.id,
+          color: rhythmSceneRgb(scene),
+        );
       },
     );
   }
@@ -289,13 +299,15 @@ class _RoomCardState extends State<RoomCard> {
           isTransitioning
         ) = data;
         if (room == null) return const SizedBox.shrink();
-        final roomProvider = context.read<RoomProvider>();
 
         // Check if this room's hub is reachable.
         final hubConnected = context.select<ServerSyncProvider, bool>(
             (p) => p.isRoomHubConnected(room.source));
         final standbyEnabled = context.select<ServerSyncProvider, bool>(
             (p) => p.standbyEnabledForNode(widget.roomId));
+        // Scene currently bound as this room's mood (null = custom color mood).
+        final moodSceneId = context.select<ServerSyncProvider, String?>(
+            (p) => p.moodSceneIdForRoom(widget.roomId));
 
         // External reset bumps the generation counter — drop local overrides
         if (resetGen != _lastResetGen) {
@@ -330,13 +342,32 @@ class _RoomCardState extends State<RoomCard> {
         };
 
         final displayColor =
-            mode == RoomMode.mood ? serverColor ?? moodColor : serverColor;
+            mode == RoomMode.mood ? moodColor ?? serverColor : serverColor;
         final cctColor = _cctMode && _sliderKelvin != null
             ? ColorUtils.cctToColor(_sliderKelvin!)
             : displayColor != null
                 ? Color.fromARGB(
                     255, displayColor.$1, displayColor.$2, displayColor.$3)
                 : ColorUtils.cctToColor(kelvin);
+
+        // The room's mood palette: a scene's colors when scene-backed,
+        // otherwise the single custom mood color. Drives the mood glow and the
+        // palette badge so the card reflects whatever the mood actually is.
+        final moodPalette = <Color>[];
+        if (mode == RoomMode.mood) {
+          final scene = moodSceneId != null
+              ? context.read<ServerSyncProvider>().sceneById(moodSceneId)
+              : null;
+          if (scene != null) {
+            moodPalette.addAll(rhythmSceneSwatch(scene));
+          } else {
+            moodPalette.add(cctColor);
+          }
+        }
+        final moodPrimary =
+            moodPalette.isNotEmpty ? moodPalette.first : cctColor;
+        final moodSecondary =
+            moodPalette.length > 1 ? moodPalette[1] : moodPrimary;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
@@ -442,8 +473,8 @@ class _RoomCardState extends State<RoomCard> {
                                 center: const Alignment(0.7, -0.6),
                                 radius: 1.3,
                                 colors: [
-                                  cctColor.withValues(alpha: 0.45),
-                                  cctColor.withValues(alpha: 0.12),
+                                  moodPrimary.withValues(alpha: 0.45),
+                                  moodPrimary.withValues(alpha: 0.12),
                                   Colors.transparent,
                                 ],
                                 stops: const [0.0, 0.5, 1.0],
@@ -461,7 +492,7 @@ class _RoomCardState extends State<RoomCard> {
                                 center: const Alignment(-0.5, 0.9),
                                 radius: 0.9,
                                 colors: [
-                                  cctColor.withValues(alpha: 0.20),
+                                  moodSecondary.withValues(alpha: 0.24),
                                   Colors.transparent,
                                 ],
                               ),
@@ -571,11 +602,7 @@ class _RoomCardState extends State<RoomCard> {
                                     onTap: sliderActive
                                         ? () {
                                             if (mode == RoomMode.mood) {
-                                              _showMoodColorPicker(
-                                                roomProvider,
-                                                currentBrightness:
-                                                    displayBrightness,
-                                              );
+                                              _showMoodScenePicker();
                                             } else {
                                               _toggleSliderMode();
                                             }
@@ -628,27 +655,38 @@ class _RoomCardState extends State<RoomCard> {
                                               child: child,
                                             ),
                                           ),
-                                          child: Icon(
-                                            mode == RoomMode.mood
-                                                ? Icons.palette_rounded
-                                                : mode == RoomMode.standby
-                                                    ? Icons
-                                                        .lightbulb_outline_rounded
-                                                    : sliderInCctMode
-                                                        ? Icons.contrast_rounded
-                                                        : Icons
-                                                            .wb_sunny_rounded,
-                                            key: ValueKey(
-                                                '$mode-$sliderInCctMode'),
-                                            size: 17,
-                                            color: sliderInCctMode
-                                                ? ColorUtils.cctToColor(
-                                                    cctRange.clampKelvin(
-                                                        _sliderKelvin ??
-                                                            kelvin))
-                                                : iconColor.withValues(
-                                                    alpha: 0.7),
-                                          ),
+                                          child: mode == RoomMode.mood
+                                              // Live palette of the mood
+                                              // (single color or scene colors).
+                                              ? MoodPaletteBadge(
+                                                  key: const ValueKey(
+                                                      'mood-palette'),
+                                                  colors: moodPalette.isEmpty
+                                                      ? [cctColor]
+                                                      : moodPalette,
+                                                  size: 20,
+                                                  glow: false,
+                                                )
+                                              : Icon(
+                                                  mode == RoomMode.standby
+                                                      ? Icons
+                                                          .lightbulb_outline_rounded
+                                                      : sliderInCctMode
+                                                          ? Icons
+                                                              .contrast_rounded
+                                                          : Icons
+                                                              .wb_sunny_rounded,
+                                                  key: ValueKey(
+                                                      '$mode-$sliderInCctMode'),
+                                                  size: 17,
+                                                  color: sliderInCctMode
+                                                      ? ColorUtils.cctToColor(
+                                                          cctRange.clampKelvin(
+                                                              _sliderKelvin ??
+                                                                  kelvin))
+                                                      : iconColor.withValues(
+                                                          alpha: 0.7),
+                                                ),
                                         ),
                                       ),
                                     ),
@@ -1242,8 +1280,9 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
                                       // "Standby" is wider than the other
                                       // labels — shrink long labels so they
                                       // don't crowd the segment.
-                                      fontSize:
-                                          segments[i].label.length > 5 ? 9.5 : 12,
+                                      fontSize: segments[i].label.length > 5
+                                          ? 9.5
+                                          : 12,
                                       fontWeight: FontWeight.w600,
                                       letterSpacing: 0.3,
                                     ),

@@ -2993,9 +2993,10 @@ class _OtaUpdateOverlay extends StatefulWidget {
 }
 
 class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+  late AnimationController _spinController;
   String? _targetVersionLabel;
   bool _isBundleRepair = false;
   StreamSubscription<RhythmOtaUpdateProgress>? _otaProgressSub;
@@ -3022,6 +3023,13 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     _pulseAnimation = Tween<double>(begin: 0.3, end: 0.8).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    // Continuous clockwise spin for the circular-arrow hero icon
+    // (Restarting / reconnecting stages).
+    _spinController = AnimationController(
+      duration: const Duration(milliseconds: 1100),
+      vsync: this,
+    )..repeat();
 
     _otaProgressSub =
         widget.connection?.otaUpdateProgressEvents.listen((event) {
@@ -3051,6 +3059,7 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
     _otaProgressSub?.cancel();
     _connectionStateSub?.cancel();
     _pulseController.dispose();
+    _spinController.dispose();
     super.dispose();
   }
 
@@ -3309,6 +3318,8 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
         waitingForServerReady ? 'Reconnecting Server' : _otaTitle(activeIndex);
     final heroIcon =
         waitingForServerReady ? Icons.sync_rounded : _otaHeroIcon(activeIndex);
+    // The Restarting / reconnecting stages use a circular-arrow icon — spin it.
+    final spinHero = waitingForServerReady || activeIndex == 4;
     final percent = !waitingForServerReady && activeIndex == 1
         ? _latestProgress?.percent
         : null;
@@ -3344,7 +3355,12 @@ class _OtaUpdateOverlayState extends State<_OtaUpdateOverlay>
                       ),
                     ],
                   ),
-                  child: Icon(heroIcon, color: _teal, size: 38),
+                  child: spinHero
+                      ? RotationTransition(
+                          turns: _spinController,
+                          child: Icon(heroIcon, color: _teal, size: 38),
+                        )
+                      : Icon(heroIcon, color: _teal, size: 38),
                 );
               },
             ),
