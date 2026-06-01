@@ -5,6 +5,7 @@ import 'rhythm_hub_info.dart';
 import 'rhythm_input_binding.dart';
 import 'rhythm_review.dart';
 import 'rhythm_room.dart';
+import 'rhythm_scene.dart';
 import 'rhythm_settings.dart';
 
 /// Full state from the Rhythm server on connect (GET /api/state).
@@ -23,6 +24,7 @@ class RhythmHello {
   final List<RhythmModeTransitionConfig> transitions;
   final List<RhythmInputBinding> inputBindings;
   final List<RhythmCurveConfig> profiles;
+  final List<RhythmSceneDefinition> scenes;
   final Map<String, dynamic> location;
   final RhythmSettings? settings;
   final RhythmLightBreaker? lightBreaker;
@@ -50,6 +52,7 @@ class RhythmHello {
     this.transitions = const [],
     this.inputBindings = const [],
     this.profiles = const [],
+    this.scenes = const [],
     required this.location,
     this.settings,
     this.lightBreaker,
@@ -84,6 +87,11 @@ class RhythmHello {
         .map(jsonMap)
         .nonNulls
         .map(RhythmCurveConfig.fromJson)
+        .toList();
+    final scenes = ((json['scenes'] as List<dynamic>?) ?? const <dynamic>[])
+        .map(jsonMap)
+        .nonNulls
+        .map(RhythmSceneDefinition.fromJson)
         .toList();
     final activeProfileMap = jsonMap(json['active_profile']);
     final effectiveProfile =
@@ -123,6 +131,7 @@ class RhythmHello {
               .map(RhythmInputBinding.fromJson)
               .toList(),
       profiles: profiles,
+      scenes: scenes,
       location: location,
       settings:
           settingsJson != null ? RhythmSettings.fromJson(settingsJson) : null,

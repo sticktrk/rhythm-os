@@ -1,12 +1,26 @@
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
+import '../json_parsing.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_input_binding.dart';
 import '../models/rhythm_room.dart';
+import '../models/rhythm_scene.dart';
 import '../models/rhythm_settings.dart';
 import '../models/rhythm_time_info.dart';
+
+enum RhythmNodeColorScope {
+  preview,
+  mood,
+  auto;
+
+  String get wireValue => switch (this) {
+        RhythmNodeColorScope.preview => 'preview',
+        RhythmNodeColorScope.mood => 'mood',
+        RhythmNodeColorScope.auto => 'auto',
+      };
+}
 
 class RhythmDispatchMetadata {
   final bool queued;
@@ -186,12 +200,74 @@ class RhythmServerApi {
     ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
+  /// Apply a curve brightness modifier to a node.
+  ///
+  /// This adjusts the node's active lighting curve rather than issuing a
+  /// one-shot brightness command.
+  Future<RhythmRoomState?> nodeCurveBrightness({
+    required String nodeId,
+    required int brightness,
+  }) {
+    return _putNodeCurveModifier({
+      'node_id': nodeId,
+      'brightness': brightness,
+    });
+  }
+
+  /// Apply a curve brightness modifier to a room.
+  Future<RhythmRoomState?> roomCurveBrightness({
+    required String roomId,
+    required int brightness,
+  }) {
+    return nodeCurveBrightness(nodeId: roomId, brightness: brightness);
+  }
+
+  /// Move a node along its active curve to the requested color temperature.
+  ///
+  /// This is a curve modifier, not a one-shot device color-temperature write.
+  Future<RhythmRoomState?> nodeCurveColorTemperature({
+    required String nodeId,
+    required int kelvin,
+    bool preserveBrightness = true,
+  }) {
+    return _putNodeCurveModifier({
+      'node_id': nodeId,
+      'color_temperature': kelvin,
+      'preserve_brightness': preserveBrightness,
+    });
+  }
+
+  /// Move a room along its active curve to the requested color temperature.
+  Future<RhythmRoomState?> roomCurveColorTemperature({
+    required String roomId,
+    required int kelvin,
+    bool preserveBrightness = true,
+  }) {
+    return nodeCurveColorTemperature(
+      nodeId: roomId,
+      kelvin: kelvin,
+      preserveBrightness: preserveBrightness,
+    );
+  }
+
   /// Set node brightness via the server runtime.
+  ///
+  /// For scene-backed Mood, the server updates the bound scene brightness and
+  /// reapplies it. Use [nodeCurveBrightness] only when intentionally editing a
+  /// curve modifier.
   Future<void> nodeBrightness({
     required String nodeId,
     required int brightness,
   }) async {
-    await _safePut('api/nodes/brightness', data: {
+    await nodeBrightnessResult(nodeId: nodeId, brightness: brightness);
+  }
+
+  /// Set node brightness and return the authoritative node state when provided.
+  Future<RhythmRoomState?> nodeBrightnessResult({
+    required String nodeId,
+    required int brightness,
+  }) {
+    return _putNodeBrightness({
       'node_id': nodeId,
       'brightness': brightness,
     });
@@ -205,6 +281,14 @@ class RhythmServerApi {
     return nodeBrightness(nodeId: roomId, brightness: brightness);
   }
 
+  /// Set room brightness and return the authoritative node state when provided.
+  Future<RhythmRoomState?> roomBrightnessResult({
+    required String roomId,
+    required int brightness,
+  }) {
+    return nodeBrightnessResult(nodeId: roomId, brightness: brightness);
+  }
+
   /// Set node color via the server runtime.
   Future<void> nodeColor({
     required String nodeId,
@@ -214,13 +298,38 @@ class RhythmServerApi {
     int? brightness,
     int? transitionMs,
     String? scope,
+    RhythmNodeColorScope? colorScope,
   }) async {
-    await _safePut('api/nodes/color', data: {
+    await nodeColorResult(
+      nodeId: nodeId,
+      r: r,
+      g: g,
+      b: b,
+      brightness: brightness,
+      transitionMs: transitionMs,
+      scope: scope,
+      colorScope: colorScope,
+    );
+  }
+
+  /// Set node color and return the authoritative node state when provided.
+  Future<RhythmRoomState?> nodeColorResult({
+    required String nodeId,
+    required int r,
+    required int g,
+    required int b,
+    int? brightness,
+    int? transitionMs,
+    String? scope,
+    RhythmNodeColorScope? colorScope,
+  }) async {
+    return _putNodeColor({
       'node_id': nodeId,
       'rgb': {'r': r, 'g': g, 'b': b},
       if (brightness != null) 'brightness': brightness,
       if (transitionMs != null) 'transition_ms': transitionMs,
-      if (scope != null) 'scope': scope,
+      if (colorScope != null) 'scope': colorScope.wireValue,
+      if (colorScope == null && scope != null) 'scope': scope,
     });
   }
 
@@ -233,6 +342,7 @@ class RhythmServerApi {
     int? brightness,
     int? transitionMs,
     String? scope,
+    RhythmNodeColorScope? colorScope,
   }) {
     return nodeColor(
       nodeId: roomId,
@@ -242,7 +352,125 @@ class RhythmServerApi {
       brightness: brightness,
       transitionMs: transitionMs,
       scope: scope,
+      colorScope: colorScope,
     );
+  }
+
+  /// Set room color and return the authoritative node state when provided.
+  Future<RhythmRoomState?> roomColorResult({
+    required String roomId,
+    required int r,
+    required int g,
+    required int b,
+    int? brightness,
+    int? transitionMs,
+    String? scope,
+    RhythmNodeColorScope? colorScope,
+  }) {
+    return nodeColorResult(
+      nodeId: roomId,
+      r: r,
+      g: g,
+      b: b,
+      brightness: brightness,
+      transitionMs: transitionMs,
+      scope: scope,
+      colorScope: colorScope,
+    );
+  }
+
+  /// Apply brightness curve modifiers to multiple nodes in a single request.
+  Future<List<RhythmRoomState>> nodeCurveBrightnessBatch(
+      List<({String nodeId, int brightness})> items,
+      {int? dispatchSpacingMs}) async {
+    return (await nodeCurveBrightnessBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    ))
+        .states;
+  }
+
+  /// Apply brightness curve modifiers to multiple nodes in a single request.
+  Future<RhythmDispatchResult> nodeCurveBrightnessBatchResult(
+      List<({String nodeId, int brightness})> items,
+      {int? dispatchSpacingMs}) async {
+    if (items.isEmpty) return const RhythmDispatchResult();
+    return _putNodeCurveModifierBatch([
+      for (final i in items) {'node_id': i.nodeId, 'brightness': i.brightness}
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Apply color-temperature curve modifiers to multiple nodes in a single request.
+  Future<List<RhythmRoomState>> nodeCurveColorTemperatureBatch(
+      List<({String nodeId, int kelvin})> items,
+      {int? dispatchSpacingMs,
+      bool preserveBrightness = true}) async {
+    return (await nodeCurveColorTemperatureBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+      preserveBrightness: preserveBrightness,
+    ))
+        .states;
+  }
+
+  /// Apply color-temperature curve modifiers to multiple nodes in a single request.
+  Future<RhythmDispatchResult> nodeCurveColorTemperatureBatchResult(
+      List<({String nodeId, int kelvin})> items,
+      {int? dispatchSpacingMs,
+      bool preserveBrightness = true}) async {
+    if (items.isEmpty) return const RhythmDispatchResult();
+    return _putNodeCurveModifierBatch([
+      for (final i in items)
+        {
+          'node_id': i.nodeId,
+          'color_temperature': i.kelvin,
+          'preserve_brightness': preserveBrightness,
+        }
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Apply brightness curve modifiers to multiple rooms in a single request.
+  Future<List<RhythmRoomState>> roomCurveBrightnessBatch(
+      List<({String roomId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return nodeCurveBrightnessBatch([
+      for (final item in items)
+        (nodeId: item.roomId, brightness: item.brightness),
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Apply brightness curve modifiers to multiple rooms in a single request.
+  Future<RhythmDispatchResult> roomCurveBrightnessBatchResult(
+      List<({String roomId, int brightness})> items,
+      {int? dispatchSpacingMs}) {
+    return nodeCurveBrightnessBatchResult([
+      for (final item in items)
+        (nodeId: item.roomId, brightness: item.brightness),
+    ], dispatchSpacingMs: dispatchSpacingMs);
+  }
+
+  /// Apply color-temperature curve modifiers to multiple rooms in a single request.
+  Future<List<RhythmRoomState>> roomCurveColorTemperatureBatch(
+      List<({String roomId, int kelvin})> items,
+      {int? dispatchSpacingMs,
+      bool preserveBrightness = true}) {
+    return nodeCurveColorTemperatureBatch([
+      for (final item in items) (nodeId: item.roomId, kelvin: item.kelvin),
+    ],
+        dispatchSpacingMs: dispatchSpacingMs,
+        preserveBrightness: preserveBrightness);
+  }
+
+  /// Apply color-temperature curve modifiers to multiple rooms in a single request.
+  Future<RhythmDispatchResult> roomCurveColorTemperatureBatchResult(
+      List<({String roomId, int kelvin})> items,
+      {int? dispatchSpacingMs,
+      bool preserveBrightness = true}) {
+    return nodeCurveColorTemperatureBatchResult([
+      for (final item in items) (nodeId: item.roomId, kelvin: item.kelvin),
+    ],
+        dispatchSpacingMs: dispatchSpacingMs,
+        preserveBrightness: preserveBrightness);
   }
 
   /// Set brightness for multiple nodes in a single request.
@@ -261,20 +489,9 @@ class RhythmServerApi {
       List<({String nodeId, int brightness})> items,
       {int? dispatchSpacingMs}) async {
     if (items.isEmpty) return const RhythmDispatchResult();
-    try {
-      final response = await _dio.put(
-        'api/nodes/brightness',
-        data: _nodesBatchBody([
-          for (final i in items)
-            {'node_id': i.nodeId, 'brightness': i.brightness}
-        ], dispatchSpacingMs: dispatchSpacingMs),
-        options: Options(receiveTimeout: const Duration(seconds: 30)),
-      );
-      return _parseAndCacheDispatchResponse(response.data);
-    } catch (e) {
-      _log.warning('nodeBrightnessBatch failed', e);
-    }
-    return const RhythmDispatchResult();
+    return _putNodeBrightnessBatch([
+      for (final i in items) {'node_id': i.nodeId, 'brightness': i.brightness}
+    ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Set brightness for multiple rooms in a single request.
@@ -291,10 +508,10 @@ class RhythmServerApi {
   Future<RhythmDispatchResult> roomBrightnessBatchResult(
       List<({String roomId, int brightness})> items,
       {int? dispatchSpacingMs}) {
-    return nodeBrightnessBatchResult([
-      for (final item in items)
-        (nodeId: item.roomId, brightness: item.brightness),
-    ], dispatchSpacingMs: dispatchSpacingMs);
+    return roomCurveBrightnessBatchResult(
+      items,
+      dispatchSpacingMs: dispatchSpacingMs,
+    );
   }
 
   /// Set the time offset for a single node.
@@ -509,6 +726,154 @@ class RhythmServerApi {
     return nodeActionBatch([
       for (final nodeId in ids) (nodeId: nodeId, action: 'reset'),
     ]);
+  }
+
+  // =========================================================================
+  // Scenes
+  // =========================================================================
+
+  /// Fetch all scene definitions from the server.
+  Future<List<RhythmSceneDefinition>> getScenes() async {
+    try {
+      final response = await _dio.get('api/scenes');
+      return _parseScenesResponse(response.data);
+    } catch (e) {
+      _log.warning('getScenes failed', e);
+    }
+    return const [];
+  }
+
+  /// Upsert a scene with the scene ID from the request body.
+  Future<RhythmSceneDefinition?> upsertScene(
+    RhythmSceneDefinition scene,
+  ) async {
+    try {
+      final response = await _dio.post('api/scenes', data: scene.toJson());
+      return _parseSceneResponse(response.data);
+    } catch (e) {
+      _log.warning('upsertScene failed', e);
+    }
+    return null;
+  }
+
+  /// Upsert a scene with the path ID winning over the body ID.
+  Future<RhythmSceneDefinition?> putScene(
+    String id,
+    RhythmSceneDefinition scene,
+  ) async {
+    try {
+      final response = await _dio.put(
+        'api/scenes/${Uri.encodeComponent(id)}',
+        data: scene.toJson(),
+      );
+      return _parseSceneResponse(response.data);
+    } catch (e) {
+      _log.warning('putScene failed', e);
+    }
+    return null;
+  }
+
+  /// Delete a scene and return the authoritative scene list from the server.
+  Future<List<RhythmSceneDefinition>> deleteScene(String id) async {
+    try {
+      final response =
+          await _dio.delete('api/scenes/${Uri.encodeComponent(id)}');
+      return _parseScenesResponse(response.data);
+    } catch (e) {
+      _log.warning('deleteScene failed', e);
+    }
+    return const [];
+  }
+
+  /// Apply a saved scene to a target node or room.
+  Future<RhythmSceneActionResult?> applyScene({
+    required String sceneId,
+    required String targetId,
+    int? transitionMs,
+  }) {
+    return _postSceneAction(
+      'api/scenes/${Uri.encodeComponent(sceneId)}/apply',
+      {
+        'target_id': targetId,
+        if (transitionMs != null) 'transition_ms': transitionMs,
+      },
+      logName: 'applyScene',
+    );
+  }
+
+  /// Preview a saved scene temporarily.
+  Future<RhythmSceneActionResult?> previewScene({
+    required String sceneId,
+    required String targetId,
+    int? transitionMs,
+    int? durationMs,
+  }) {
+    return _postSceneAction(
+      'api/scenes/${Uri.encodeComponent(sceneId)}/preview',
+      {
+        'target_id': targetId,
+        if (transitionMs != null) 'transition_ms': transitionMs,
+        if (durationMs != null) 'duration_ms': durationMs,
+      },
+      logName: 'previewScene',
+    );
+  }
+
+  /// Preview an unsaved draft scene temporarily.
+  Future<RhythmSceneActionResult?> previewDraftScene({
+    required RhythmSceneDefinition scene,
+    required String targetId,
+    int? transitionMs,
+    int? durationMs,
+  }) {
+    return _postSceneAction(
+      'api/scenes/preview',
+      {
+        'scene': scene.toJson(),
+        'target_id': targetId,
+        if (transitionMs != null) 'transition_ms': transitionMs,
+        if (durationMs != null) 'duration_ms': durationMs,
+      },
+      logName: 'previewDraftScene',
+    );
+  }
+
+  /// Commit a currently active scene preview.
+  Future<RhythmSceneActionResult?> commitScenePreview(String previewId) {
+    return _postSceneAction(
+      'api/scene-previews/${Uri.encodeComponent(previewId)}/commit',
+      const <String, dynamic>{},
+      logName: 'commitScenePreview',
+    );
+  }
+
+  /// Cancel a currently active scene preview and restore previous output.
+  Future<RhythmSceneActionResult?> cancelScenePreview(String previewId) {
+    return _postSceneAction(
+      'api/scene-previews/${Uri.encodeComponent(previewId)}/cancel',
+      const <String, dynamic>{},
+      logName: 'cancelScenePreview',
+    );
+  }
+
+  /// Bind a node to a scene-backed Mood and enter Mood state.
+  Future<void> nodeMoodSceneSet({
+    required String nodeId,
+    required String sceneId,
+  }) {
+    return nodePreferencesSet(
+      nodeId: nodeId,
+      state: RoomModeState.mood,
+      profileSettings: {'mood_scene_id': sceneId},
+    );
+  }
+
+  /// Bind a room to a scene-backed Mood and enter Mood state.
+  Future<void> roomMoodSceneSet({
+    required String roomId,
+    required String sceneId,
+  }) {
+    return nodeMoodSceneSet(nodeId: roomId, sceneId: sceneId);
   }
 
 // =========================================================================
@@ -1517,6 +1882,138 @@ class RhythmServerApi {
     } catch (e) {
       _log.warning('PUT $path failed', e);
     }
+  }
+
+  Future<RhythmRoomState?> _putNodeBrightness(
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final response = await _dio.put(
+        'api/nodes/brightness',
+        data: data,
+        queryParameters: null,
+      );
+      return _parseAndCacheSingleState(response.data);
+    } catch (e) {
+      _log.warning('nodeBrightness failed', e);
+    }
+    return null;
+  }
+
+  Future<RhythmDispatchResult> _putNodeBrightnessBatch(
+    List<Map<String, dynamic>> nodes, {
+    int? dispatchSpacingMs,
+  }) async {
+    if (nodes.isEmpty) return const RhythmDispatchResult();
+    try {
+      final response = await _dio.put(
+        'api/nodes/brightness',
+        data: _nodesBatchBody(nodes, dispatchSpacingMs: dispatchSpacingMs),
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
+      );
+      return _parseAndCacheDispatchResponse(response.data);
+    } catch (e) {
+      _log.warning('nodeBrightnessBatch failed', e);
+    }
+    return const RhythmDispatchResult();
+  }
+
+  Future<RhythmRoomState?> _putNodeColor(
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final response = await _dio.put(
+        'api/nodes/color',
+        data: data,
+        queryParameters: null,
+      );
+      return _parseAndCacheSingleState(response.data);
+    } catch (e) {
+      _log.warning('nodeColor failed', e);
+    }
+    return null;
+  }
+
+  Future<RhythmRoomState?> _putNodeCurveModifier(
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final response = await _dio.put('api/nodes/curve', data: data);
+      return _parseAndCacheSingleState(response.data);
+    } catch (e) {
+      _log.warning('nodeCurveModifier failed', e);
+    }
+    return null;
+  }
+
+  Future<RhythmDispatchResult> _putNodeCurveModifierBatch(
+    List<Map<String, dynamic>> nodes, {
+    int? dispatchSpacingMs,
+  }) async {
+    if (nodes.isEmpty) return const RhythmDispatchResult();
+    try {
+      final response = await _dio.put(
+        'api/nodes/curve',
+        data: _nodesBatchBody(nodes, dispatchSpacingMs: dispatchSpacingMs),
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
+      );
+      return _parseAndCacheDispatchResponse(response.data);
+    } catch (e) {
+      _log.warning('nodeCurveModifierBatch failed', e);
+    }
+    return const RhythmDispatchResult();
+  }
+
+  Future<RhythmSceneActionResult?> _postSceneAction(
+    String path,
+    Map<String, dynamic> data, {
+    required String logName,
+  }) async {
+    try {
+      final response = await _dio.post(path, data: data);
+      final responseJson = jsonMap(response.data);
+      if (responseJson == null) return null;
+      return RhythmSceneActionResult.fromJson(responseJson);
+    } catch (e) {
+      _log.warning('$logName failed', e);
+    }
+    return null;
+  }
+
+  RhythmSceneDefinition? _parseSceneResponse(dynamic responseData) {
+    final sceneJson = jsonMap(responseData);
+    if (sceneJson == null) return null;
+    return RhythmSceneDefinition.fromJson(sceneJson);
+  }
+
+  List<RhythmSceneDefinition> _parseScenesResponse(dynamic responseData) {
+    final scenes = responseData is List<dynamic>
+        ? responseData
+        : jsonMap(responseData)?['scenes'] as List<dynamic>?;
+    if (scenes == null) return const [];
+    return scenes
+        .map(jsonMap)
+        .nonNulls
+        .map(RhythmSceneDefinition.fromJson)
+        .toList();
+  }
+
+  RhythmRoomState? _parseAndCacheSingleState(dynamic responseData) {
+    final data = responseData as Map<String, dynamic>?;
+    final nodes =
+        data?['nodes'] as List<dynamic>? ?? data?['rooms'] as List<dynamic>?;
+    Map<String, dynamic>? nodeJson;
+    if (nodes != null && nodes.isNotEmpty) {
+      nodeJson = nodes[0] as Map<String, dynamic>?;
+    } else if (data != null && data.containsKey('rhythm_enabled')) {
+      nodeJson = data;
+    }
+    if (nodeJson == null || !nodeJson.containsKey('rhythm_enabled')) {
+      return null;
+    }
+    final state = RhythmRoomState.fromJson(nodeJson);
+    _onStatesReceived?.call([state]);
+    return state;
   }
 
   String _formatDate(DateTime date) {

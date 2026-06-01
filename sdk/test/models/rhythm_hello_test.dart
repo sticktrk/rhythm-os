@@ -64,6 +64,23 @@ void main() {
             'curve': {'type': 'constant', 'brightness': 1, 'color_temp': 0},
           },
         ],
+        'scenes': [
+          {
+            'id': 'icy-glow',
+            'name': 'Icy Glow',
+            'source': {'kind': 'user'},
+            'light': {
+              'default_transition_ms': 400,
+              'default_output': {
+                'power': 'on',
+                'brightness': 72,
+                'color': {'kind': 'kelvin', 'kelvin': 6500},
+              },
+              'entries': const [],
+            },
+            'extensions': const {},
+          },
+        ],
         'location': {'lat': 40.7128, 'lon': -74.006},
         'settings': {
           'power_save': true,
@@ -94,6 +111,9 @@ void main() {
       expect(hello.mode!.activeConfig?.idleProfileId, 'sleep_idle');
       expect(hello.profiles, hasLength(4));
       expect(hello.profiles.last.id, 'sleep_idle');
+      expect(hello.scenes, hasLength(1));
+      expect(hello.scenes.single.id, 'icy-glow');
+      expect(hello.scenes.single.light.defaultOutput?.color?.kelvin, 6500);
     });
 
     test('parses node-first state payloads from /api/state', () {
@@ -149,6 +169,7 @@ void main() {
       expect(hello.listenPort, isNull);
       expect(hello.rooms, isEmpty);
       expect(hello.activeProfile, isEmpty);
+      expect(hello.scenes, isEmpty);
       expect(hello.location, isEmpty);
       expect(hello.settings, isNull);
     });

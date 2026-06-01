@@ -182,6 +182,7 @@ class RhythmNodeProfileSettings {
   final String? profileId;
   final bool? moodEnabled;
   final String? moodProfileId;
+  final String? moodSceneId;
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
   final Map<String, dynamic> raw;
@@ -190,6 +191,7 @@ class RhythmNodeProfileSettings {
     this.profileId,
     this.moodEnabled,
     this.moodProfileId,
+    this.moodSceneId,
     this.fadeSetting,
     this.motionTimeoutSetting,
     this.raw = const <String, dynamic>{},
@@ -202,6 +204,7 @@ class RhythmNodeProfileSettings {
       profileId == null &&
       moodEnabled == null &&
       moodProfileId == null &&
+      moodSceneId == null &&
       fadeSetting == null &&
       motionTimeoutSetting == null &&
       raw.isEmpty;
@@ -211,16 +214,22 @@ class RhythmNodeProfileSettings {
       ..remove('profile_id')
       ..remove('mood_enabled')
       ..remove('mood_profile_id')
+      ..remove('mood_scene_id')
+      ..remove('active_light_scene_id')
       ..remove('idle_profile_id')
       ..remove('fade_ms')
       ..remove('motion_timeout_secs');
     final moodProfileId = json['mood_profile_id'] as String? ??
         json['idle_profile_id'] as String?;
+    final moodSceneId = json['mood_scene_id'] as String? ??
+        json['active_light_scene_id'] as String?;
     return RhythmNodeProfileSettings(
       profileId: json['profile_id'] as String?,
       moodEnabled: json['mood_enabled'] as bool?,
       moodProfileId:
           moodProfileId == null || moodProfileId.isEmpty ? null : moodProfileId,
+      moodSceneId:
+          moodSceneId == null || moodSceneId.isEmpty ? null : moodSceneId,
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
       raw: raw,
@@ -232,6 +241,7 @@ class RhythmNodeProfileSettings {
         if (profileId != null) 'profile_id': profileId,
         if (moodEnabled != null) 'mood_enabled': moodEnabled,
         if (moodProfileId != null) 'mood_profile_id': moodProfileId,
+        if (moodSceneId != null) 'mood_scene_id': moodSceneId,
         if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
         if (motionTimeoutSetting != null)
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),

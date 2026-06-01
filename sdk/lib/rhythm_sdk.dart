@@ -23,6 +23,7 @@ export 'src/models/rhythm_input_event.dart';
 export 'src/models/rhythm_pairing.dart';
 export 'src/models/rhythm_review.dart';
 export 'src/models/rhythm_room.dart';
+export 'src/models/rhythm_scene.dart';
 export 'src/models/rhythm_settings.dart';
 export 'src/models/rhythm_step_sequences.dart';
 export 'src/models/rhythm_time_info.dart';

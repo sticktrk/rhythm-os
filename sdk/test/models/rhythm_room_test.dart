@@ -192,6 +192,7 @@ void main() {
           'profile_settings': {
             'mood_enabled': true,
             'mood_profile_id': 'room-1_mood',
+            'mood_scene_id': 'icy-glow',
             'motion_timeout_secs': 123,
           },
         });
@@ -216,6 +217,7 @@ void main() {
         expect(room.standbyActive, isFalse);
         expect(room.profileSettings?.moodEnabled, isTrue);
         expect(room.profileSettings?.moodProfileId, 'room-1_mood');
+        expect(room.profileSettings?.moodSceneId, 'icy-glow');
         expect(room.profileSettings?.motionTimeoutSecs, 123);
       });
 
@@ -225,6 +227,7 @@ void main() {
             'profile_id': 'sleep',
             'mood_enabled': false,
             'mood_profile_id': 'sleep_mood',
+            'mood_scene_id': 'sleep-scene',
             'fade_ms': {'mode': 'fixed', 'value': 1200},
             'motion_timeout_secs': {'mode': 'fixed', 'value': 300},
           },
@@ -233,8 +236,22 @@ void main() {
         expect(room.profileSettings?.profileId, 'sleep');
         expect(room.profileSettings?.moodEnabled, isFalse);
         expect(room.profileSettings?.moodProfileId, 'sleep_mood');
+        expect(room.profileSettings?.moodSceneId, 'sleep-scene');
         expect(room.profileSettings?.fadeMs, 1200);
         expect(room.profileSettings?.motionTimeoutSecs, 300);
+      });
+
+      test('parses legacy active_light_scene_id as mood_scene_id', () {
+        final room = RhythmRoom.fromJson({
+          'profile_settings': {
+            'active_light_scene_id': 'legacy-scene',
+          },
+        });
+
+        expect(room.profileSettings?.moodSceneId, 'legacy-scene');
+        expect(room.profileSettings?.toJson(), {
+          'mood_scene_id': 'legacy-scene',
+        });
       });
 
       test('prefers profile_settings over legacy room_profile', () {
@@ -512,6 +529,7 @@ void main() {
           'profile_settings': {
             'mood_enabled': true,
             'mood_profile_id': 'node-42_mood',
+            'mood_scene_id': 'icy-glow',
             'motion_timeout_secs': 77,
           },
         });
@@ -530,6 +548,7 @@ void main() {
         expect(state.standbyActive, isFalse);
         expect(state.profileSettings?.moodEnabled, isTrue);
         expect(state.profileSettings?.moodProfileId, 'node-42_mood');
+        expect(state.profileSettings?.moodSceneId, 'icy-glow');
         expect(state.profileSettings?.motionTimeoutSecs, 77);
       });
 
@@ -541,6 +560,7 @@ void main() {
             'profile_id': 'sleep',
             'mood_enabled': true,
             'mood_profile_id': 'room-1_mood',
+            'mood_scene_id': 'room-1_scene',
             'fade_ms': {'mode': 'fixed', 'value': 900},
             'motion_timeout_secs': {'mode': 'fixed', 'value': 180},
           },
@@ -549,6 +569,7 @@ void main() {
         expect(state.profileSettings?.profileId, 'sleep');
         expect(state.profileSettings?.moodEnabled, isTrue);
         expect(state.profileSettings?.moodProfileId, 'room-1_mood');
+        expect(state.profileSettings?.moodSceneId, 'room-1_scene');
         expect(state.profileSettings?.fadeMs, 900);
         expect(state.profileSettings?.motionTimeoutSecs, 180);
       });

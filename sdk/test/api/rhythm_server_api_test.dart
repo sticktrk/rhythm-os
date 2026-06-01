@@ -1180,6 +1180,236 @@ void main() {
     });
   });
 
+  group('scene endpoints', () {
+    Map<String, dynamic> sceneJson({String id = 'icy-glow'}) => {
+          'id': id,
+          'name': 'Icy Glow',
+          'description': null,
+          'source': {'kind': 'user'},
+          'light': {
+            'default_transition_ms': 400,
+            'default_output': {
+              'power': 'on',
+              'brightness': 72,
+              'color': {'kind': 'kelvin', 'kelvin': 6500},
+            },
+            'entries': const [],
+          },
+          'extensions': const {},
+        };
+
+    test('getScenes parses the scenes wrapper', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes'),
+            statusCode: 200,
+            data: {
+              'scenes': [sceneJson()],
+            },
+          ));
+
+      final scenes = await api.getScenes();
+
+      expect(scenes, hasLength(1));
+      expect(scenes.single.id, 'icy-glow');
+      expect(scenes.single.light.defaultOutput?.color?.kelvin, 6500);
+      verify(() => dio.get('api/scenes')).called(1);
+    });
+
+    test('upsertScene posts the scene definition', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/scenes'),
+                statusCode: 200,
+                data: sceneJson(),
+              ));
+
+      final scene = RhythmSceneDefinition.fromJson(sceneJson());
+      final saved = await api.upsertScene(scene);
+
+      expect(saved?.id, 'icy-glow');
+      verify(() => dio.post('api/scenes', data: sceneJson())).called(1);
+    });
+
+    test('putScene uses path id while sending the body scene', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/scenes/path-id'),
+                statusCode: 200,
+                data: sceneJson(id: 'path-id'),
+              ));
+
+      final scene = RhythmSceneDefinition.fromJson(sceneJson(id: 'body-id'));
+      final saved = await api.putScene('path-id', scene);
+
+      expect(saved?.id, 'path-id');
+      verify(() => dio.put(
+            'api/scenes/path-id',
+            data: sceneJson(id: 'body-id'),
+          )).called(1);
+    });
+
+    test('deleteScene returns the authoritative scenes list', () async {
+      when(() => dio.delete(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes/icy-glow'),
+            statusCode: 200,
+            data: {
+              'scenes': [sceneJson(id: 'other-scene')],
+            },
+          ));
+
+      final scenes = await api.deleteScene('icy-glow');
+
+      expect(scenes.single.id, 'other-scene');
+      verify(() => dio.delete('api/scenes/icy-glow')).called(1);
+    });
+
+    test('applyScene posts target and parses affected nodes', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/scenes/icy-glow/apply'),
+                statusCode: 200,
+                data: {
+                  'scene_id': 'icy-glow',
+                  'target_id': 'room1',
+                  'affected_node_ids': ['light-node-1'],
+                  'unresolved_node_ids': const [],
+                },
+              ));
+
+      final result = await api.applyScene(
+        sceneId: 'icy-glow',
+        targetId: 'room1',
+        transitionMs: 250,
+      );
+
+      expect(result?.sceneId, 'icy-glow');
+      expect(result?.targetId, 'room1');
+      expect(result?.affectedNodeIds, ['light-node-1']);
+      verify(() => dio.post(
+            'api/scenes/icy-glow/apply',
+            data: {'target_id': 'room1', 'transition_ms': 250},
+          )).called(1);
+    });
+
+    test('previewScene posts duration and returns preview id', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/scenes/icy-glow/preview'),
+                statusCode: 200,
+                data: {
+                  'scene_id': 'icy-glow',
+                  'target_id': 'room1',
+                  'affected_node_ids': ['light-node-1'],
+                  'unresolved_node_ids': const [],
+                  'preview_id': 'preview-2',
+                },
+              ));
+
+      final result = await api.previewScene(
+        sceneId: 'icy-glow',
+        targetId: 'room1',
+        durationMs: 30000,
+      );
+
+      expect(result?.previewId, 'preview-2');
+      expect(result?.hasPreviewId, isTrue);
+      verify(() => dio.post(
+            'api/scenes/icy-glow/preview',
+            data: {'target_id': 'room1', 'duration_ms': 30000},
+          )).called(1);
+    });
+
+    test('previewDraftScene sends unsaved scene in the request body', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/scenes/preview'),
+                statusCode: 200,
+                data: {
+                  'scene_id': 'draft-scene',
+                  'target_id': 'room1',
+                  'affected_node_ids': const [],
+                  'unresolved_node_ids': const [],
+                  'preview_id': 'draft-preview',
+                },
+              ));
+
+      final scene =
+          RhythmSceneDefinition.fromJson(sceneJson(id: 'draft-scene'));
+      final result = await api.previewDraftScene(
+        scene: scene,
+        targetId: 'room1',
+        transitionMs: 250,
+      );
+
+      expect(result?.previewId, 'draft-preview');
+      verify(() => dio.post(
+            'api/scenes/preview',
+            data: {
+              'scene': sceneJson(id: 'draft-scene'),
+              'target_id': 'room1',
+              'transition_ms': 250,
+            },
+          )).called(1);
+    });
+
+    test('commit and cancel preview use preview token endpoints', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((invocation) async {
+        final path = invocation.positionalArguments.single as String;
+        return Response(
+          requestOptions: RequestOptions(path: path),
+          statusCode: 200,
+          data: {
+            'scene_id': 'icy-glow',
+            'target_id': 'room1',
+            'affected_node_ids': const [],
+            'unresolved_node_ids': const [],
+            if (path.endsWith('/commit')) 'preview_id': 'preview-1',
+          },
+        );
+      });
+
+      final committed = await api.commitScenePreview('preview-1');
+      final canceled = await api.cancelScenePreview('preview-2');
+
+      expect(committed?.sceneId, 'icy-glow');
+      expect(canceled?.sceneId, 'icy-glow');
+      verify(() => dio.post(
+            'api/scene-previews/preview-1/commit',
+            data: const <String, dynamic>{},
+          )).called(1);
+      verify(() => dio.post(
+            'api/scene-previews/preview-2/cancel',
+            data: const <String, dynamic>{},
+          )).called(1);
+    });
+
+    test('nodeMoodSceneSet writes mood_scene_id and enters Mood', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 204,
+          ));
+
+      await api.nodeMoodSceneSet(nodeId: 'room1', sceneId: 'icy-glow');
+
+      verify(() => dio.put(
+            'api/nodes/preferences',
+            data: {
+              'node_id': 'room1',
+              'state': 'mood',
+              'profile_settings': {'mood_scene_id': 'icy-glow'},
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Fire-and-forget methods (don't throw on DioException)
   // ---------------------------------------------------------------------------
@@ -1195,6 +1425,189 @@ void main() {
 
       // Should complete without throwing.
       await api.roomBrightness(roomId: 'r1', brightness: 50);
+    });
+
+    test('nodeCurveBrightness posts a curve modifier payload', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/nodes/curve'),
+                statusCode: 200,
+                data: {
+                  'node_id': 'node-1',
+                  'rhythm_enabled': true,
+                  'time_offset': 0.0,
+                  'brightness_offset': -10.0,
+                  'state': 'active',
+                  'lights_on': true,
+                  'brightness': 45,
+                  'kelvin': 3200,
+                },
+              ));
+
+      final state = await api.nodeCurveBrightness(
+        nodeId: 'node-1',
+        brightness: 45,
+      );
+
+      expect(state, isNotNull);
+      expect(state!.nodeId, 'node-1');
+      expect(state.brightness, 45);
+      verify(() => dio.put('api/nodes/curve', data: {
+            'node_id': 'node-1',
+            'brightness': 45,
+          })).called(1);
+      expect(cacheUpdates.single.single.nodeId, 'node-1');
+    });
+
+    test('nodeBrightness uses the authoritative brightness endpoint', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/brightness'),
+            statusCode: 200,
+          ));
+
+      await api.nodeBrightness(nodeId: 'node-1', brightness: 50);
+
+      verify(() => dio.put(
+            'api/nodes/brightness',
+            data: {
+              'node_id': 'node-1',
+              'brightness': 50,
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
+    test('nodeBrightnessResult parses returned state', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/brightness'),
+            statusCode: 200,
+            data: {
+              'nodes': [
+                {
+                  'node_id': 'node-1',
+                  'rhythm_enabled': true,
+                  'time_offset': 0.0,
+                  'brightness_offset': 0.0,
+                  'state': 'mood',
+                  'brightness': 50,
+                },
+              ],
+            },
+          ));
+
+      final state = await api.nodeBrightnessResult(
+        nodeId: 'node-1',
+        brightness: 50,
+      );
+
+      expect(state?.nodeId, 'node-1');
+      expect(state?.state, RoomModeState.mood);
+      expect(state?.brightness, 50);
+      expect(cacheUpdates.single.single.nodeId, 'node-1');
+    });
+
+    test('nodeBrightnessBatch posts nodes to the brightness endpoint',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/brightness'),
+            statusCode: 200,
+            data: {'nodes': <dynamic>[]},
+          ));
+
+      await api.nodeBrightnessBatchResult([
+        (nodeId: 'node-1', brightness: 42),
+        (nodeId: 'node-2', brightness: 64),
+      ], dispatchSpacingMs: 20);
+
+      verify(() => dio.put(
+            'api/nodes/brightness',
+            data: {
+              'nodes': [
+                {'node_id': 'node-1', 'brightness': 42},
+                {'node_id': 'node-2', 'brightness': 64},
+              ],
+              'dispatch_spacing_ms': 20,
+            },
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('nodeCurveColorTemperature posts a curve modifier payload', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/nodes/curve'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {
+                      'node_id': 'node-1',
+                      'rhythm_enabled': true,
+                      'time_offset': -180.0,
+                      'brightness_offset': 8.0,
+                      'state': 'active',
+                      'lights_on': true,
+                      'brightness': 55,
+                      'kelvin': 3000,
+                    },
+                  ],
+                },
+              ));
+
+      final state = await api.nodeCurveColorTemperature(
+        nodeId: 'node-1',
+        kelvin: 3000,
+      );
+
+      expect(state, isNotNull);
+      expect(state!.kelvin, 3000);
+      verify(() => dio.put('api/nodes/curve', data: {
+            'node_id': 'node-1',
+            'color_temperature': 3000,
+            'preserve_brightness': true,
+          })).called(1);
+      expect(cacheUpdates.single.single.kelvin, 3000);
+    });
+
+    test('nodeCurveBrightnessBatch posts nodes to the curve endpoint',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/curve'),
+            statusCode: 200,
+            data: {'nodes': <dynamic>[]},
+          ));
+
+      await api.nodeCurveBrightnessBatchResult([
+        (nodeId: 'node-1', brightness: 42),
+        (nodeId: 'node-2', brightness: 64),
+      ], dispatchSpacingMs: 20);
+
+      verify(() => dio.put(
+            'api/nodes/curve',
+            data: {
+              'nodes': [
+                {'node_id': 'node-1', 'brightness': 42},
+                {'node_id': 'node-2', 'brightness': 64},
+              ],
+              'dispatch_spacing_ms': 20,
+            },
+            options: any(named: 'options'),
+          )).called(1);
     });
 
     test('nodeColor sends normalized rgb payload with mood scope', () async {
@@ -1225,6 +1638,75 @@ void main() {
               'brightness': 12,
               'transition_ms': 300,
               'scope': 'mood',
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
+    test('nodeColor can update mood scene color without brightness', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/color'),
+            statusCode: 200,
+          ));
+
+      await api.nodeColor(
+        nodeId: 'room-1',
+        r: 1,
+        g: 2,
+        b: 3,
+        colorScope: RhythmNodeColorScope.mood,
+      );
+
+      verify(() => dio.put(
+            'api/nodes/color',
+            data: {
+              'node_id': 'room-1',
+              'rgb': {'r': 1, 'g': 2, 'b': 3},
+              'scope': 'mood',
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
+    test('nodeColorResult parses returned state', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/color'),
+            statusCode: 200,
+            data: {
+              'node_id': 'room-1',
+              'rhythm_enabled': true,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'state': 'mood',
+              'color': {'r': 1, 'g': 2, 'b': 3},
+            },
+          ));
+
+      final state = await api.nodeColorResult(
+        nodeId: 'room-1',
+        r: 1,
+        g: 2,
+        b: 3,
+        colorScope: RhythmNodeColorScope.auto,
+      );
+
+      expect(state?.nodeId, 'room-1');
+      expect(state?.state, RoomModeState.mood);
+      expect(state?.color?.r, 1);
+      verify(() => dio.put(
+            'api/nodes/color',
+            data: {
+              'node_id': 'room-1',
+              'rgb': {'r': 1, 'g': 2, 'b': 3},
+              'scope': 'auto',
             },
             queryParameters: null,
           )).called(1);

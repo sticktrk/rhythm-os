@@ -167,7 +167,7 @@ class RhythmDiagnosticsApi {
   /// Reboot the device.
   Future<bool> reboot() async {
     try {
-      await _dio.post('api/system/reboot');
+      await _dio.post('api/restart');
       return true;
     } catch (e) {
       _log.warning('reboot failed', e);
