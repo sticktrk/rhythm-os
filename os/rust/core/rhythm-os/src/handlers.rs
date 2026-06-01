@@ -774,11 +774,25 @@ fn parse_profile_settings_patch(
         )),
     };
 
+    let mood_scene_value = body
+        .get("mood_scene_id")
+        .or_else(|| body.get("active_light_scene_id"));
+    let mood_scene_id = match mood_scene_value {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => Some(Some(
+            v.as_str()
+                .ok_or_else(|| format!("{field_name}.mood_scene_id must be a string or null"))?
+                .to_string(),
+        )),
+    };
+
     Ok(Some(commands::RoomProfileSettingsPatch {
         clear_all: false,
         profile_id,
         mood_enabled,
         mood_profile_id,
+        mood_scene_id,
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
     }))
@@ -1307,6 +1321,98 @@ pub fn handle_get_profiles(state: &SharedState) -> ApiResponse {
     match commands::build_profiles(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_scenes(state: &SharedState) -> ApiResponse {
+    match commands::build_scenes(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_post_scene(state: &SharedState, body: &Value) -> ApiResponse {
+    let scene: crate::scenes::SceneDefinition = match serde_json::from_value(body.clone()) {
+        Ok(scene) => scene,
+        Err(e) => return ApiResponse::bad_request(&format!("Invalid scene: {}", e)),
+    };
+    match commands::do_scene_upsert(state, scene) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_put_scene(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
+    let mut scene: crate::scenes::SceneDefinition = match serde_json::from_value(body.clone()) {
+        Ok(scene) => scene,
+        Err(e) => return ApiResponse::bad_request(&format!("Invalid scene: {}", e)),
+    };
+    scene.id = scene_id.to_string();
+    match commands::do_scene_upsert(state, scene) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_delete_scene(state: &SharedState, scene_id: &str) -> ApiResponse {
+    match commands::do_scene_delete(state, scene_id) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
+    let request: crate::scenes::SceneApplyRequest = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(e) => return ApiResponse::bad_request(&format!("Invalid scene apply request: {}", e)),
+    };
+    match commands::do_scene_apply(state, scene_id, request) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
+    let request: crate::scenes::ScenePreviewRequest = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(e) => {
+            return ApiResponse::bad_request(&format!("Invalid scene preview request: {}", e));
+        }
+    };
+    match commands::do_scene_preview(state, scene_id, request) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_post_scene_draft_preview(state: &SharedState, body: &Value) -> ApiResponse {
+    let request: crate::scenes::SceneDraftPreviewRequest =
+        match serde_json::from_value(body.clone()) {
+            Ok(request) => request,
+            Err(e) => {
+                return ApiResponse::bad_request(&format!(
+                    "Invalid scene draft preview request: {}",
+                    e
+                ));
+            }
+        };
+    match commands::do_scene_draft_preview(state, request) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_post_scene_preview_commit(state: &SharedState, preview_id: &str) -> ApiResponse {
+    match commands::do_scene_preview_commit(state, preview_id) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_post_scene_preview_cancel(state: &SharedState, preview_id: &str) -> ApiResponse {
+    match commands::do_scene_preview_cancel(state, preview_id) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
 
@@ -2934,6 +3040,81 @@ mod tests {
             } => assert_eq!(dispatch_spacing, Duration::ZERO),
             other => panic!("unexpected work item: {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    #[test]
+    fn parse_profile_settings_patch_accepts_legacy_scene_alias() {
+        let patch = parse_profile_settings_patch(
+            Some(&json!({"active_light_scene_id": "icy-glow"})),
+            "profile_settings",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            patch
+                .mood_scene_id
+                .as_ref()
+                .and_then(|value| value.as_deref()),
+            Some("icy-glow")
+        );
+    }
+
+    #[test]
+    fn node_preferences_accepts_legacy_scene_alias() {
+        let state = handler_state_with_runtime();
+        state.lock().unwrap().scenes.insert(
+            "icy-glow".into(),
+            crate::scenes::SceneDefinition {
+                id: "icy-glow".into(),
+                name: "Icy Glow".into(),
+                description: None,
+                source: crate::scenes::SceneSource::User,
+                light: None,
+                extensions: Default::default(),
+            },
+        );
+        let rx = attach_work_queue(&state);
+
+        let r = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "active_light_scene_id": "icy-glow"
+                }
+            }),
+            false,
+        );
+
+        assert_eq!(r.status, 200);
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            WorkItem::SetNodePreferences {
+                room_profile: Some(patch),
+                ..
+            } => assert_eq!(
+                patch
+                    .mood_scene_id
+                    .as_ref()
+                    .and_then(|value| value.as_deref()),
+                Some("icy-glow")
+            ),
+            other => panic!("unexpected work item: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn scene_draft_preview_rejects_invalid_body() {
+        let state = handler_state_with_runtime();
+        let r = handle_post_scene_draft_preview(
+            &state,
+            &json!({
+                "target_id": "room1"
+            }),
+        );
+
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Invalid scene draft preview request"));
     }
 
     // ---- Simple handlers ----

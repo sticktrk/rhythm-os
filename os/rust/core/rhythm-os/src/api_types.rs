@@ -11,6 +11,7 @@ use rhythm_core::{
 use serde::Serialize;
 
 use crate::canonical::triage::{TriageKind, TriageStatus};
+use crate::scenes::SceneDefinition;
 use crate::topology::{DevicePlacement, HubRoomBinding, InputBinding, NodeControlKind};
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,8 @@ pub struct RoomProfileSettingsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mood_profile_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mood_scene_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fade_ms: Option<TimerSetting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_timeout_secs: Option<TimerSetting>,
@@ -48,6 +51,7 @@ impl RoomProfileSettingsDto {
             profile_id: settings.profile_id.clone(),
             mood_enabled,
             mood_profile_id: settings.mood_profile_id.clone(),
+            mood_scene_id: settings.mood_scene_id.clone(),
             fade_ms: settings.fade_ms.clone(),
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
         }
@@ -152,6 +156,7 @@ pub struct StateSnapshot {
     pub light_breaker: LightBreakerDto,
     pub mode: ModeSettingsDto,
     pub transitions: Vec<ModeTransitionConfig>,
+    pub scenes: Vec<SceneDefinition>,
     pub input_bindings: Vec<InputBinding>,
     pub profiles: Vec<LightProfileConfig>,
     pub review: ReviewSummaryDto,
@@ -1172,6 +1177,7 @@ mod tests {
                 configs: rhythm_core::default_mode_configs(),
             },
             transitions: rhythm_core::default_mode_transition_configs(),
+            scenes: vec![],
             input_bindings: vec![],
             profiles: vec![
                 rhythm_core::default_rhythm_profile(),
@@ -1278,6 +1284,7 @@ mod tests {
                 configs: rhythm_core::default_mode_configs(),
             },
             transitions: rhythm_core::default_mode_transition_configs(),
+            scenes: vec![],
             input_bindings: vec![],
             profiles: vec![
                 rhythm_core::default_rhythm_profile(),

@@ -14,6 +14,7 @@ use serde_json::Value;
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
 use crate::hub::HubType;
+use crate::scenes::SceneDefinition;
 use crate::storage::StoredLocation;
 use crate::topology::RoomTopologyStore;
 
@@ -46,6 +47,8 @@ pub struct ProfileBundleData {
     pub power_save: bool,
     #[serde(default)]
     pub profiles: Vec<LightProfileConfig>,
+    #[serde(default)]
+    pub scenes: Vec<SceneDefinition>,
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
 }
@@ -133,6 +136,8 @@ pub struct BackupConfiguration {
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
     #[serde(default)]
+    pub scenes: Vec<SceneDefinition>,
+    #[serde(default)]
     pub rooms: Vec<BackupConfigurationRoom>,
 }
 
@@ -149,6 +154,7 @@ impl Default for BackupConfiguration {
             profiles: Vec::new(),
             mode_configs: Vec::new(),
             mode_transitions: Vec::new(),
+            scenes: Vec::new(),
             rooms: Vec::new(),
         }
     }

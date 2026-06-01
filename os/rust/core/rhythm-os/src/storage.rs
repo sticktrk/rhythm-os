@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::canonical::identity::HubKey;
 use crate::hub::HubCredentials;
+use crate::scenes::StoredScenes;
 
 /// Abstract persistence interface.
 ///
@@ -30,6 +31,12 @@ pub trait Storage: Send + Sync {
     fn save_location(&self, loc: &StoredLocation) -> Result<()>;
     fn load_settings(&self) -> Result<StoredSettings>;
     fn save_settings(&self, settings: &StoredSettings) -> Result<()>;
+    fn load_scenes(&self) -> Result<Option<StoredScenes>> {
+        Ok(None)
+    }
+    fn save_scenes(&self, _scenes: &StoredScenes) -> Result<()> {
+        Ok(())
+    }
     fn load_motion_timers(&self) -> Result<Option<StoredMotionTimers>> {
         Ok(None)
     }
@@ -608,6 +615,31 @@ impl Storage for FileStorage {
         self.write_atomic("settings.json", data.as_bytes())
     }
 
+    fn load_scenes(&self) -> Result<Option<StoredScenes>> {
+        let path = self.file_path("scenes.json");
+        match self.read_json::<StoredScenes>("scenes.json") {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load scenes {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(target: "sys", "No persisted scenes at {}", path.display());
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_scenes(&self, scenes: &StoredScenes) -> Result<()> {
+        let data = serde_json::to_string_pretty(scenes)?;
+        self.write_atomic("scenes.json", data.as_bytes())
+    }
+
     fn load_motion_timers(&self) -> Result<Option<StoredMotionTimers>> {
         let path = self.file_path("motion_timers.json");
         match self.read_json::<StoredMotionTimers>("motion_timers.json") {
@@ -855,6 +887,7 @@ impl Storage for FileStorage {
             "light_profiles.json",
             "location.json",
             "settings.json",
+            "scenes.json",
             "motion_timers.json",
             "hub_credentials.json",
             "canonical_registry.json",
@@ -1017,6 +1050,23 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             Ok(None) => {}
             Err(e) => {
                 debug!(target: "sys", "No persisted motion timers loaded: {}", e);
+            }
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_scenes() {
+            Ok(Some(stored)) => {
+                s.scenes.clear();
+                for mut scene in stored.scenes {
+                    scene.normalize();
+                    s.scenes.insert(scene.id.clone(), scene);
+                }
+                info!(target: "sys", "Loaded scenes: {}", s.scenes.len());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!(target: "sys", "No persisted scenes loaded: {}", e);
             }
         }
     }
@@ -1666,6 +1716,65 @@ mod tests {
             assert_eq!(loaded.profiles.len(), 1);
             assert_eq!(loaded.profiles[0].id, rhythm_core::RHYTHM_PROFILE_ID);
             assert!((loaded.solar_noon_hour - 13.25).abs() < 0.01);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn scenes_save_load_roundtrip() {
+            let (storage, path) = temp_storage();
+            let stored = crate::scenes::StoredScenes {
+                schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                scenes: vec![crate::scenes::SceneDefinition {
+                    id: "icy-glow".into(),
+                    name: "Icy Glow".into(),
+                    description: None,
+                    source: crate::scenes::SceneSource::Imported {
+                        provider: "hue".into(),
+                        external_id: Some("icy_glow".into()),
+                    },
+                    light: None,
+                    extensions: std::collections::BTreeMap::new(),
+                }],
+            };
+
+            storage.save_scenes(&stored).unwrap();
+            let loaded = storage.load_scenes().unwrap().unwrap();
+
+            assert_eq!(
+                loaded.schema_version,
+                crate::scenes::LIGHT_SCENE_SCHEMA_VERSION
+            );
+            assert_eq!(loaded.scenes.len(), 1);
+            assert_eq!(loaded.scenes[0].id, "icy-glow");
+            assert_eq!(loaded.scenes[0].name, "Icy Glow");
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_loads_and_normalizes_scenes() {
+            let (storage, path) = temp_storage();
+            storage
+                .save_scenes(&crate::scenes::StoredScenes {
+                    schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                    scenes: vec![crate::scenes::SceneDefinition {
+                        id: String::new(),
+                        name: "Icy Glow".into(),
+                        description: None,
+                        source: crate::scenes::SceneSource::User,
+                        light: None,
+                        extensions: std::collections::BTreeMap::new(),
+                    }],
+                })
+                .unwrap();
+
+            let mut state = crate::state::AppState {
+                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                ..Default::default()
+            };
+            load_persisted_state(&mut state);
+
+            assert!(state.scenes.contains_key("icy-glow"));
+            assert_eq!(state.scenes["icy-glow"].name, "Icy Glow");
             cleanup(&path);
         }
 

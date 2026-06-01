@@ -292,6 +292,10 @@ pub struct AppState {
     pub mode_configs: BTreeMap<RhythmMode, ModeConfig>,
     /// Configured mode-to-mode rendered-output transitions.
     pub mode_transition_configs: Vec<ModeTransitionConfig>,
+    /// Stored scene definitions keyed by scene ID.
+    pub scenes: BTreeMap<String, crate::scenes::SceneDefinition>,
+    /// Ephemeral light scene previews keyed by preview ID.
+    pub light_scene_previews: HashMap<String, crate::scenes::LightScenePreviewSession>,
     /// The currently active global mode.
     pub active_mode: RhythmMode,
     /// Cause of the most recent active mode change.
@@ -636,6 +640,8 @@ impl Default for AppState {
             light_profile_configs: default_light_profile_configs(),
             mode_configs: default_mode_config_map(),
             mode_transition_configs: factory_default_mode_transition_configs(),
+            scenes: BTreeMap::new(),
+            light_scene_previews: HashMap::new(),
             active_mode: factory_default_active_mode(),
             last_active_mode_cause: ModeChangeCause::Manual,
             last_active_mode_transition_id: None,
@@ -734,6 +740,24 @@ impl AppState {
     /// Get the configured mode transitions.
     pub fn mode_transition_configs(&self) -> Vec<ModeTransitionConfig> {
         self.mode_transition_configs.clone()
+    }
+
+    pub fn stored_scenes(&self) -> crate::scenes::StoredScenes {
+        crate::scenes::StoredScenes {
+            schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+            scenes: self.scenes.values().cloned().collect(),
+        }
+    }
+
+    pub fn scene_preview_blocks_node(&self, node_id: &str, now_epoch_ms: u64) -> bool {
+        self.light_scene_previews.values().any(|preview| {
+            preview.expires_at_epoch_ms >= now_epoch_ms
+                && (preview.target_node_id == node_id
+                    || preview
+                        .affected_node_ids
+                        .iter()
+                        .any(|affected| affected == node_id))
+        })
     }
 
     /// Replace the configured mode transitions.

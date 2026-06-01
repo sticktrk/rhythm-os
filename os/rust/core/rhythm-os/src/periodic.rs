@@ -165,54 +165,69 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
     eligible_room_ids.sort();
     eligible_room_ids.dedup();
 
-    if !has_composite_controller {
-        return eligible_room_ids
+    let mut dispatch_nodes = if !has_composite_controller {
+        eligible_room_ids
             .into_iter()
             .map(|room_id| PeriodicDispatchNode {
                 node_id: room_id.clone(),
                 settings_node_id: room_id.clone(),
                 emit_node_id: room_id,
             })
-            .collect();
-    }
-
-    let eligible_lookup: HashSet<String> = eligible_room_ids.iter().cloned().collect();
-    let mut derived_by_room: HashMap<String, Vec<crate::topology::TopologyLightNode>> =
-        HashMap::new();
-    for node in state
-        .topology
-        .periodic_light_nodes(&state.canonical_registry)
-    {
-        if eligible_lookup.contains(&node.source_node_id) {
-            derived_by_room
-                .entry(node.source_node_id.clone())
-                .or_default()
-                .push(node);
-        }
-    }
-
-    let mut dispatch_nodes = Vec::new();
-    for room_id in eligible_room_ids {
-        match derived_by_room.remove(&room_id) {
-            Some(mut nodes) => {
-                nodes.sort_by(|left, right| left.id.cmp(&right.id));
-                dispatch_nodes.extend(nodes.into_iter().map(|node| PeriodicDispatchNode {
-                    node_id: node.id,
-                    settings_node_id: room_id.clone(),
-                    emit_node_id: node.emit_node_id,
-                }));
+            .collect()
+    } else {
+        let eligible_lookup: HashSet<String> = eligible_room_ids.iter().cloned().collect();
+        let mut derived_by_room: HashMap<String, Vec<crate::topology::TopologyLightNode>> =
+            HashMap::new();
+        for node in state
+            .topology
+            .periodic_light_nodes(&state.canonical_registry)
+        {
+            if eligible_lookup.contains(&node.source_node_id) {
+                derived_by_room
+                    .entry(node.source_node_id.clone())
+                    .or_default()
+                    .push(node);
             }
-            None if state.topology.get(&room_id).is_none() => {
-                dispatch_nodes.push(PeriodicDispatchNode {
-                    node_id: room_id.clone(),
-                    settings_node_id: room_id.clone(),
-                    emit_node_id: room_id.clone(),
-                });
-            }
-            None => {}
         }
-    }
 
+        let mut dispatch_nodes = Vec::new();
+        for room_id in eligible_room_ids {
+            match derived_by_room.remove(&room_id) {
+                Some(mut nodes) => {
+                    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+                    dispatch_nodes.extend(nodes.into_iter().map(|node| PeriodicDispatchNode {
+                        node_id: node.id,
+                        settings_node_id: room_id.clone(),
+                        emit_node_id: node.emit_node_id,
+                    }));
+                }
+                None if state.topology.get(&room_id).is_none() => {
+                    dispatch_nodes.push(PeriodicDispatchNode {
+                        node_id: room_id.clone(),
+                        settings_node_id: room_id.clone(),
+                        emit_node_id: room_id.clone(),
+                    });
+                }
+                None => {}
+            }
+        }
+        dispatch_nodes
+    };
+
+    let active_scene_node_ids: HashSet<&str> = room_snapshots
+        .iter()
+        .filter(|node| node.mood_active && node.profile_settings.mood_scene_id.is_some())
+        .map(|node| node.id.as_str())
+        .collect();
+    let now_epoch_ms = crate::state::current_epoch_ms();
+    dispatch_nodes.retain(|node| {
+        !state.scene_preview_blocks_node(&node.node_id, now_epoch_ms)
+            && !state.scene_preview_blocks_node(&node.settings_node_id, now_epoch_ms)
+            && !state.scene_preview_blocks_node(&node.emit_node_id, now_epoch_ms)
+            && !active_scene_node_ids.contains(node.node_id.as_str())
+            && !active_scene_node_ids.contains(node.settings_node_id.as_str())
+            && !active_scene_node_ids.contains(node.emit_node_id.as_str())
+    });
     dispatch_nodes
 }
 
@@ -2215,6 +2230,28 @@ mod tests {
                 emit_node_id: "room-a".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn periodic_dispatch_nodes_skip_previewed_nodes_without_composite() {
+        let mut state = crate::state::AppState::default();
+        let now = crate::state::current_epoch_ms();
+        state.light_scene_previews.insert(
+            "preview-1".to_string(),
+            crate::scenes::LightScenePreviewSession {
+                id: "preview-1".to_string(),
+                scene_id: "icy-glow".to_string(),
+                target_node_id: "room-a".to_string(),
+                affected_node_ids: vec!["room-a".to_string()],
+                previous_mood_scene_id: None,
+                draft_scene: None,
+                started_at_epoch_ms: now,
+                expires_at_epoch_ms: now + 30_000,
+            },
+        );
+        let snapshots = vec![make_room("room-a", 0.0)];
+
+        assert!(periodic_dispatch_nodes_from_state(&state, &snapshots).is_empty());
     }
 
     #[test]

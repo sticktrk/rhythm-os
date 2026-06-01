@@ -114,6 +114,19 @@ fn shared_routes() -> Router<SharedState> {
             put(put_input_binding).delete(delete_input_binding),
         )
         .route("/api/profiles", get(get_profiles))
+        .route("/api/scenes", get(get_scenes).post(post_scene))
+        .route("/api/scenes/preview", post(post_scene_draft_preview))
+        .route("/api/scenes/:id", put(put_scene).delete(delete_scene))
+        .route("/api/scenes/:id/apply", post(post_scene_apply))
+        .route("/api/scenes/:id/preview", post(post_scene_preview))
+        .route(
+            "/api/scene-previews/:id/commit",
+            post(post_scene_preview_commit),
+        )
+        .route(
+            "/api/scene-previews/:id/cancel",
+            post(post_scene_preview_cancel),
+        )
         .route(
             "/api/hub/credentials",
             put(put_hub_credentials).delete(delete_hub),
@@ -415,6 +428,63 @@ async fn delete_input_binding(
 
 async fn get_profiles(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_profiles(&state)
+}
+
+async fn get_scenes(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_scenes(&state)
+}
+
+async fn post_scene(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_scene(&state, &body)).await
+}
+
+async fn put_scene(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_scene(&state, &id, &body)).await
+}
+
+async fn delete_scene(State(state): State<SharedState>, Path(id): Path<String>) -> ApiResponse {
+    run_blocking(move || handlers::handle_delete_scene(&state, &id)).await
+}
+
+async fn post_scene_apply(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_scene_apply(&state, &id, &body)).await
+}
+
+async fn post_scene_preview(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_scene_preview(&state, &id, &body)).await
+}
+
+async fn post_scene_draft_preview(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_scene_draft_preview(&state, &body)).await
+}
+
+async fn post_scene_preview_commit(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_scene_preview_commit(&state, &id)).await
+}
+
+async fn post_scene_preview_cancel(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_scene_preview_cancel(&state, &id)).await
 }
 
 async fn put_node_preferences(

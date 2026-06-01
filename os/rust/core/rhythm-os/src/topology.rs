@@ -1850,6 +1850,20 @@ impl RoomTopologyStore {
         )
     }
 
+    /// Return the direct device dispatch route for a light node.
+    ///
+    /// Normal composite routing may intentionally collapse attached lights to
+    /// a hub-native group route. Scenes need per-device control, so callers use
+    /// this explicit route under a synthetic internal dispatch node.
+    pub fn direct_light_dispatch_route(
+        &self,
+        node_id: &str,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Option<(HubKey, HubDispatchTarget)> {
+        let node = self.device_nodes.get(node_id)?;
+        self.device_dispatch_route(node, canonical_registry)
+    }
+
     /// Build a routing table for the composite controller.
     ///
     /// Maps each Rhythm room ID to the typed dispatch routes required by the

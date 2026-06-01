@@ -28,6 +28,7 @@ pub mod provisioning;
 pub mod registry;
 pub mod room_sync;
 pub mod routes;
+pub mod scenes;
 pub mod state;
 pub mod storage;
 pub mod topology;

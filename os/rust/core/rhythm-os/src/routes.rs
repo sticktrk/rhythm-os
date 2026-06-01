@@ -146,6 +146,34 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET"],
     },
     SharedRoute {
+        path: "/api/scenes",
+        methods: &["GET", "POST"],
+    },
+    SharedRoute {
+        path: "/api/scenes/preview",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/scenes/:id",
+        methods: &["PUT", "DELETE"],
+    },
+    SharedRoute {
+        path: "/api/scenes/:id/apply",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/scenes/:id/preview",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/scene-previews/:id/commit",
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: "/api/scene-previews/:id/cancel",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: "/api/hub/credentials",
         methods: &["PUT", "DELETE"],
     },

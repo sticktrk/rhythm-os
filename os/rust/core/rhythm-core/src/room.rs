@@ -830,6 +830,17 @@ pub struct RoomProfileSettings {
     )]
     pub mood_profile_id: Option<String>,
 
+    /// Optional scene to render when this node enters Mood.
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            alias = "active_light_scene_id",
+            skip_serializing_if = "Option::is_none"
+        )
+    )]
+    pub mood_scene_id: Option<String>,
+
     /// Optional per-room fade override.
     #[cfg_attr(
         feature = "serde",
@@ -851,6 +862,7 @@ impl RoomProfileSettings {
         self.profile_id.is_none()
             && self.mood_enabled.is_none()
             && self.mood_profile_id.is_none()
+            && self.mood_scene_id.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
     }
@@ -888,6 +900,10 @@ impl RoomProfileSettings {
                 .mood_profile_id
                 .clone()
                 .or_else(|| parent.mood_profile_id.clone()),
+            mood_scene_id: self
+                .mood_scene_id
+                .clone()
+                .or_else(|| parent.mood_scene_id.clone()),
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
                 .motion_timeout_secs
@@ -1495,6 +1511,7 @@ mod tests {
             profile_id: Some("sleep".into()),
             mood_enabled: None,
             mood_profile_id: None,
+            mood_scene_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
         };
@@ -1508,6 +1525,19 @@ mod tests {
             config.motion_timeout_secs,
             TimerSetting::Fixed { value: 42 }
         );
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_room_profile_settings_accepts_legacy_scene_alias() {
+        let settings: RoomProfileSettings =
+            serde_json::from_str(r#"{"active_light_scene_id":"icy-glow"}"#).unwrap();
+
+        assert_eq!(settings.mood_scene_id.as_deref(), Some("icy-glow"));
+
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["mood_scene_id"], "icy-glow");
+        assert!(json.get("active_light_scene_id").is_none());
     }
 
     #[test]

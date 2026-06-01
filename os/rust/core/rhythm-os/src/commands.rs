@@ -5,7 +5,7 @@
 //! operation (registry update, engine update, persistence), and returns
 //! a result that the transport layer can format into a response.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,10 +14,10 @@ use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
-    ButtonAction, HubDispatchTarget, InputEvent, LightDirectColor, LightNodeKind,
-    LightProfileConfig, LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig,
-    ModeTransitionConfig, ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb,
-    RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
+    ButtonAction, HubDispatchTarget, InputEvent, LightNodeKind, LightProfileConfig,
+    LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig,
+    ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb, RhythmMode, RoomModeState,
+    RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
 };
 use serde_json::Value;
 
@@ -40,6 +40,12 @@ use crate::factory_default_config::{
     factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
     factory_default_mode_config_map, factory_default_mode_transition_configs,
     factory_default_power_save, factory_default_profile_bundle,
+};
+use crate::scenes::{
+    light_scene_direct_node_id, LightSceneColor, LightSceneEntry, LightSceneLayer,
+    LightSceneOutput, LightScenePower, LightScenePreviewSession, LightSceneTargetRef,
+    SceneApplyRequest, SceneApplyResponse, SceneDefinition, SceneDraftPreviewRequest,
+    ScenePreviewRequest, SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
@@ -895,6 +901,7 @@ pub struct RoomProfileSettingsPatch {
     pub profile_id: Option<Option<String>>,
     pub mood_enabled: Option<Option<bool>>,
     pub mood_profile_id: Option<Option<String>>,
+    pub mood_scene_id: Option<Option<String>>,
     pub fade_ms: Option<Option<TimerSetting>>,
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
 }
@@ -915,6 +922,9 @@ impl RoomProfileSettingsPatch {
         if let Some(mood_profile_id) = &self.mood_profile_id {
             settings.mood_profile_id = mood_profile_id.clone();
         }
+        if let Some(mood_scene_id) = &self.mood_scene_id {
+            settings.mood_scene_id = mood_scene_id.clone();
+        }
         if let Some(fade_ms) = &self.fade_ms {
             settings.fade_ms = fade_ms.clone();
         }
@@ -928,6 +938,7 @@ impl RoomProfileSettingsPatch {
             || self.profile_id.is_some()
             || self.mood_enabled.is_some()
             || self.mood_profile_id.is_some()
+            || self.mood_scene_id.is_some()
             || self.fade_ms.is_some()
             || self.motion_timeout_secs.is_some()
     }
@@ -1036,14 +1047,16 @@ fn light_node_uses_parent_dispatch(s: &AppState, node_id: &str, kind: LightNodeK
 
 fn semantic_lights_on_override(
     _power_save: bool,
-    _settings: &RoomProfileSettings,
+    settings: &RoomProfileSettings,
     hard_off: bool,
     mood_active: bool,
     soft_off: bool,
 ) -> Option<bool> {
     if hard_off {
         Some(false)
-    } else if mood_active || soft_off {
+    } else if mood_active && settings.mood_scene_id.is_none() {
+        Some(true)
+    } else if soft_off {
         Some(true)
     } else {
         None
@@ -1922,6 +1935,14 @@ fn persist_light_profiles_locked(s: &AppState) {
     }
 }
 
+fn persist_scenes_locked(s: &AppState) {
+    if let Some(ref storage) = s.storage {
+        if let Err(e) = storage.save_scenes(&s.stored_scenes()) {
+            warn!(target: "cmd", "Failed to save scenes: {}", e);
+        }
+    }
+}
+
 fn persist_settings_locked(s: &AppState) {
     if let Some(ref storage) = s.storage {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
@@ -2174,6 +2195,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         light_breaker_dto,
         mode_dto,
         transitions_dto,
+        scenes_dto,
         input_bindings_dto,
         profiles_dto,
         firmware_version,
@@ -2305,6 +2327,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             build_light_breaker_dto_inner(&s),
             build_mode_dto_inner(&s),
             build_transitions_dto_inner(&s),
+            s.scenes.values().cloned().collect::<Vec<_>>(),
             build_input_bindings_dto_inner(&s),
             build_profiles_dto_inner(&s),
             s.firmware_version,
@@ -2397,6 +2420,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         light_breaker: light_breaker_dto,
         mode: mode_dto,
         transitions: transitions_dto.transitions,
+        scenes: scenes_dto,
         input_bindings: input_bindings_dto.bindings,
         profiles: profiles_dto.profiles,
         review: review_dto,
@@ -3186,6 +3210,650 @@ pub fn build_profiles(state: &SharedState) -> Result<String> {
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize profiles: {}", e))
 }
 
+#[derive(Clone)]
+enum SceneLightDispatch {
+    On(LightingCommand),
+    Off(Option<u32>),
+}
+
+#[derive(Clone)]
+struct SceneLightCommand {
+    public_node_id: String,
+    dispatch_node_id: String,
+    dispatch: SceneLightDispatch,
+}
+
+struct SceneApplicationPlan {
+    commands: Vec<SceneLightCommand>,
+    affected_node_ids: Vec<String>,
+    unresolved_node_ids: Vec<String>,
+}
+
+fn light_scene_target_scope_node_ids(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    target_id: &str,
+) -> BTreeSet<String> {
+    let mut node_ids = BTreeSet::new();
+
+    if s.topology.get(target_id).is_some() {
+        for node in s.topology.device_nodes() {
+            if node.parent_id.as_deref() != Some(target_id) {
+                continue;
+            }
+            let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
+                continue;
+            };
+            if device.device_type == DeviceType::Light {
+                node_ids.insert(node.id.clone());
+            }
+        }
+        if !node_ids.is_empty() {
+            return node_ids;
+        }
+    }
+
+    if let Some(node) = s.topology.get_device_node(target_id) {
+        if s.canonical_registry
+            .get(&node.canonical_device_id)
+            .is_some_and(|device| device.device_type == DeviceType::Light)
+        {
+            node_ids.insert(node.id.clone());
+            return node_ids;
+        }
+    }
+
+    let Some(target) = runtime.engine_effective_node_snapshot(target_id) else {
+        return node_ids;
+    };
+    if target.kind.is_room() {
+        for node in runtime.engine_all_effective_node_snapshots() {
+            if node.parent_id.as_deref() == Some(target.id.as_str())
+                && node.kind.is_light_addressable()
+            {
+                node_ids.insert(node.id);
+            }
+        }
+        if node_ids.is_empty() {
+            node_ids.insert(target.id);
+        }
+    } else if target.kind.is_light_addressable() {
+        node_ids.insert(target.id);
+    }
+
+    node_ids
+}
+
+fn light_scene_dispatch_node_id(s: &AppState, node_id: &str) -> Option<String> {
+    if s.composite_controller.is_some() {
+        s.topology
+            .direct_light_dispatch_route(node_id, &s.canonical_registry)
+            .map(|_| light_scene_direct_node_id(node_id))
+    } else {
+        Some(node_id.to_string())
+    }
+}
+
+fn push_scene_light_command(
+    s: &AppState,
+    layer_transition_ms: Option<u32>,
+    request_transition_ms: Option<u32>,
+    node_id: &str,
+    output: &crate::scenes::LightSceneOutput,
+    commands: &mut Vec<SceneLightCommand>,
+    unresolved_node_ids: &mut Vec<String>,
+) -> Result<()> {
+    let Some(dispatch_node_id) = light_scene_dispatch_node_id(s, node_id) else {
+        unresolved_node_ids.push(node_id.to_string());
+        return Ok(());
+    };
+    let mut output = output.clone();
+    if let Some(transition_ms) = request_transition_ms {
+        output.transition_ms = Some(transition_ms);
+    }
+    let dispatch = match output
+        .to_command(layer_transition_ms)
+        .map_err(|e| anyhow::anyhow!("Invalid light scene output for '{}': {}", node_id, e))?
+    {
+        Some(command) => SceneLightDispatch::On(command),
+        None => SceneLightDispatch::Off(output.transition_ms(layer_transition_ms)),
+    };
+    commands.push(SceneLightCommand {
+        public_node_id: node_id.to_string(),
+        dispatch_node_id,
+        dispatch,
+    });
+    Ok(())
+}
+
+fn build_scene_application_plan_locked(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    scene: &SceneDefinition,
+    target_id: &str,
+    transition_ms: Option<u32>,
+) -> Result<SceneApplicationPlan> {
+    let layer = scene
+        .light
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Scene '{}' has no light layer", scene.id))?;
+    let scope_node_ids = light_scene_target_scope_node_ids(s, runtime, target_id);
+    if scope_node_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Target '{}' has no light scene-addressable nodes",
+            target_id
+        ));
+    }
+
+    let mut commands = Vec::new();
+    let mut unresolved_node_ids = Vec::new();
+    let mut explicit_node_ids = BTreeSet::new();
+    for entry in &layer.entries {
+        let node_id = match &entry.target {
+            LightSceneTargetRef::Node { node_id } => node_id,
+        };
+        if !scope_node_ids.contains(node_id) {
+            continue;
+        }
+        explicit_node_ids.insert(node_id.clone());
+        push_scene_light_command(
+            s,
+            layer.default_transition_ms,
+            transition_ms,
+            node_id,
+            &entry.output,
+            &mut commands,
+            &mut unresolved_node_ids,
+        )?;
+    }
+    if let Some(default_output) = &layer.default_output {
+        for node_id in &scope_node_ids {
+            if explicit_node_ids.contains(node_id) {
+                continue;
+            }
+            push_scene_light_command(
+                s,
+                layer.default_transition_ms,
+                transition_ms,
+                node_id,
+                default_output,
+                &mut commands,
+                &mut unresolved_node_ids,
+            )?;
+        }
+    }
+    commands.sort_by(|left, right| left.public_node_id.cmp(&right.public_node_id));
+    unresolved_node_ids.sort();
+    unresolved_node_ids.dedup();
+
+    let affected_node_ids: Vec<_> = commands
+        .iter()
+        .map(|command| command.public_node_id.clone())
+        .collect();
+    if affected_node_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Scene '{}' has no routable light entries for target '{}'",
+            scene.id,
+            target_id
+        ));
+    }
+
+    Ok(SceneApplicationPlan {
+        commands,
+        affected_node_ids,
+        unresolved_node_ids,
+    })
+}
+
+fn set_scene_committed_state(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    scene_id: &str,
+    target_id: &str,
+    affected_node_ids: &[String],
+) {
+    let mut state_node_ids: BTreeSet<String> = BTreeSet::new();
+    if runtime
+        .engine_effective_node_snapshot(target_id)
+        .is_some_and(|snap| snap.kind.is_room())
+    {
+        state_node_ids.insert(target_id.to_string());
+    } else {
+        state_node_ids.extend(affected_node_ids.iter().cloned());
+    }
+
+    for node_id in state_node_ids {
+        let Some(snap) = runtime.engine_node_snapshot(&node_id) else {
+            continue;
+        };
+        let mut profile_settings = snap.profile_settings.clone();
+        profile_settings.mood_scene_id = Some(scene_id.to_string());
+        runtime.restore_node_state(
+            &node_id,
+            RestoredNodeState {
+                rhythm_enabled: true,
+                disabled: snap.disabled,
+                time_offset_minutes: snap.time_offset_minutes,
+                brightness_offset: snap.brightness_offset,
+                soft_off: false,
+                mood_active: true,
+                standby_enabled: snap.standby_enabled,
+                hard_off: false,
+                profile_settings,
+            },
+        );
+    }
+
+    clear_room_mode_transition(state, target_id);
+    queue_motion_timer_clear(state, target_id);
+}
+
+fn clear_scene_preview_sessions_locked(
+    s: &mut AppState,
+    target_id: &str,
+    affected_node_ids: &[String],
+) {
+    s.light_scene_previews.retain(|_, preview| {
+        preview.target_node_id != target_id
+            && !preview
+                .affected_node_ids
+                .iter()
+                .any(|node_id| affected_node_ids.iter().any(|affected| affected == node_id))
+    });
+}
+
+fn dispatch_scene_plan(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    plan: &SceneApplicationPlan,
+) -> Result<()> {
+    for command in &plan.commands {
+        let lights_on = match &command.dispatch {
+            SceneLightDispatch::On(lighting_command) => {
+                log_room_command_dispatch(
+                    runtime.as_ref(),
+                    &command.dispatch_node_id,
+                    lighting_command,
+                );
+                runtime.apply_room_command(&command.dispatch_node_id, lighting_command.clone())?;
+                true
+            }
+            SceneLightDispatch::Off(transition_ms) => {
+                runtime.lights_off_room(&command.dispatch_node_id, *transition_ms)?;
+                false
+            }
+        };
+        update_lights_on_cache_for_runtime_node(state, runtime, &command.public_node_id, lights_on);
+        emit_node_state_event_after_apply(state, runtime, &command.public_node_id);
+    }
+    Ok(())
+}
+
+fn do_scene_apply_definition_inner(
+    state: &SharedState,
+    mut scene: SceneDefinition,
+    request: SceneApplyRequest,
+    commit_state: bool,
+    persist_state: bool,
+    preview_id: Option<String>,
+) -> Result<SceneApplyResponse> {
+    scene.normalize();
+    let target_id = resolve_node_id(state, &request.target_id);
+    let (runtime, plan) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = s
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+        let plan = build_scene_application_plan_locked(
+            &s,
+            &runtime,
+            &scene,
+            &target_id,
+            request.transition_ms,
+        )?;
+        (runtime, plan)
+    };
+
+    dispatch_scene_plan(state, &runtime, &plan)?;
+
+    if commit_state {
+        set_scene_committed_state(
+            state,
+            &runtime,
+            &scene.id,
+            &target_id,
+            &plan.affected_node_ids,
+        );
+        if let Ok(mut s) = state.lock() {
+            clear_scene_preview_sessions_locked(&mut s, &target_id, &plan.affected_node_ids);
+        }
+        if persist_state {
+            persist_rooms(state);
+        }
+    }
+
+    Ok(SceneApplyResponse {
+        scene_id: scene.id,
+        target_id,
+        affected_node_ids: plan.affected_node_ids,
+        unresolved_node_ids: plan.unresolved_node_ids,
+        preview_id,
+    })
+}
+
+fn do_scene_apply_inner(
+    state: &SharedState,
+    scene_id: &str,
+    request: SceneApplyRequest,
+    commit_state: bool,
+    persist_state: bool,
+    preview_id: Option<String>,
+) -> Result<SceneApplyResponse> {
+    let scene = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes
+            .get(scene_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?
+    };
+    do_scene_apply_definition_inner(
+        state,
+        scene,
+        request,
+        commit_state,
+        persist_state,
+        preview_id,
+    )
+}
+
+pub fn build_scenes(state: &SharedState) -> Result<String> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    serde_json::to_string(&serde_json::json!({
+        "scenes": s.scenes.values().cloned().collect::<Vec<_>>()
+    }))
+    .map_err(|e| anyhow::anyhow!("serialize scenes: {}", e))
+}
+
+pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Result<String> {
+    scene.normalize();
+    let response_scene = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes.insert(scene.id.clone(), scene.clone());
+        persist_scenes_locked(&s);
+        scene
+    };
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+    serde_json::to_string(&response_scene).map_err(|e| anyhow::anyhow!("serialize scene: {}", e))
+}
+
+pub fn do_scene_delete(state: &SharedState, scene_id: &str) -> Result<String> {
+    let runtime = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.scenes.remove(scene_id).is_none() {
+            return Err(anyhow::anyhow!("Scene '{}' not found", scene_id));
+        }
+        s.light_scene_previews
+            .retain(|_, preview| preview.scene_id != scene_id);
+        persist_scenes_locked(&s);
+        s.hub_runtime()
+    };
+
+    if let Some(runtime) = runtime {
+        for snap in runtime.engine_all_node_snapshots() {
+            if snap.profile_settings.mood_scene_id.as_deref() != Some(scene_id) {
+                continue;
+            }
+            let mut profile_settings = snap.profile_settings.clone();
+            profile_settings.mood_scene_id = None;
+            runtime.restore_node_state(
+                &snap.id,
+                RestoredNodeState {
+                    rhythm_enabled: snap.rhythm_enabled,
+                    disabled: snap.disabled,
+                    time_offset_minutes: snap.time_offset_minutes,
+                    brightness_offset: snap.brightness_offset,
+                    soft_off: false,
+                    mood_active: false,
+                    standby_enabled: snap.standby_enabled,
+                    hard_off: false,
+                    profile_settings,
+                },
+            );
+            let _ = runtime.turn_on_room(&snap.id);
+            update_lights_on_cache_for_runtime_node(state, &runtime, &snap.id, true);
+            emit_node_state_event_after_apply(state, &runtime, &snap.id);
+        }
+        persist_rooms(state);
+    }
+
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+    build_scenes(state)
+}
+
+pub fn do_scene_apply(
+    state: &SharedState,
+    scene_id: &str,
+    request: SceneApplyRequest,
+) -> Result<String> {
+    let response = do_scene_apply_inner(state, scene_id, request, true, true, None)?;
+    serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
+}
+
+fn record_scene_preview_session(
+    state: &SharedState,
+    preview_id: String,
+    target_id: String,
+    response: &SceneApplyResponse,
+    duration_ms: Option<u64>,
+    draft_scene: Option<SceneDefinition>,
+) -> Result<()> {
+    let previous_mood_scene_id = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+            .and_then(|runtime| runtime.engine_effective_node_snapshot(&target_id))
+            .and_then(|snap| snap.profile_settings.mood_scene_id)
+    };
+    let now = current_epoch_ms();
+    let duration_ms = duration_ms
+        .unwrap_or(DEFAULT_LIGHT_SCENE_PREVIEW_MS)
+        .clamp(1_000, 10 * 60_000);
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    clear_scene_preview_sessions_locked(&mut s, &target_id, &response.affected_node_ids);
+    s.light_scene_previews.insert(
+        preview_id.clone(),
+        LightScenePreviewSession {
+            id: preview_id,
+            scene_id: response.scene_id.clone(),
+            target_node_id: target_id,
+            affected_node_ids: response.affected_node_ids.clone(),
+            previous_mood_scene_id,
+            draft_scene,
+            started_at_epoch_ms: now,
+            expires_at_epoch_ms: now.saturating_add(duration_ms),
+        },
+    );
+    Ok(())
+}
+
+pub fn do_scene_preview(
+    state: &SharedState,
+    scene_id: &str,
+    request: ScenePreviewRequest,
+) -> Result<String> {
+    let preview_id = crate::canonical::identity::generate_uuid_public();
+    let target_id = resolve_node_id(state, &request.target_id);
+    let apply_request = SceneApplyRequest {
+        target_id: target_id.clone(),
+        transition_ms: request.transition_ms,
+    };
+    let response = do_scene_apply_inner(
+        state,
+        scene_id,
+        apply_request,
+        false,
+        false,
+        Some(preview_id.clone()),
+    )?;
+    record_scene_preview_session(
+        state,
+        preview_id,
+        target_id,
+        &response,
+        request.duration_ms,
+        None,
+    )?;
+
+    serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene preview: {}", e))
+}
+
+pub fn do_scene_draft_preview(
+    state: &SharedState,
+    request: SceneDraftPreviewRequest,
+) -> Result<String> {
+    let preview_id = crate::canonical::identity::generate_uuid_public();
+    let target_id = resolve_node_id(state, &request.target_id);
+    let mut scene = request.scene;
+    scene.normalize();
+    let apply_request = SceneApplyRequest {
+        target_id: target_id.clone(),
+        transition_ms: request.transition_ms,
+    };
+    let response = do_scene_apply_definition_inner(
+        state,
+        scene.clone(),
+        apply_request,
+        false,
+        false,
+        Some(preview_id.clone()),
+    )?;
+    record_scene_preview_session(
+        state,
+        preview_id,
+        target_id,
+        &response,
+        request.duration_ms,
+        Some(scene),
+    )?;
+
+    serde_json::to_string(&response)
+        .map_err(|e| anyhow::anyhow!("serialize scene draft preview: {}", e))
+}
+
+pub fn do_scene_preview_commit(state: &SharedState, preview_id: &str) -> Result<String> {
+    let preview = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.light_scene_previews
+            .get(preview_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?
+    };
+    if let Some(mut draft_scene) = preview.draft_scene.clone() {
+        draft_scene.normalize();
+        {
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            s.scenes.insert(draft_scene.id.clone(), draft_scene.clone());
+            persist_scenes_locked(&s);
+        }
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+    }
+    do_scene_apply(
+        state,
+        &preview.scene_id,
+        SceneApplyRequest {
+            target_id: preview.target_node_id,
+            transition_ms: None,
+        },
+    )
+}
+
+pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<String> {
+    let preview = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.light_scene_previews
+            .remove(preview_id)
+            .ok_or_else(|| anyhow::anyhow!("Scene preview '{}' not found", preview_id))?
+    };
+
+    if let Some(previous_scene_id) = preview.previous_mood_scene_id.clone() {
+        if state
+            .lock()
+            .ok()
+            .is_some_and(|s| s.scenes.contains_key(&previous_scene_id))
+        {
+            let _ = do_scene_apply_inner(
+                state,
+                &previous_scene_id,
+                SceneApplyRequest {
+                    target_id: preview.target_node_id.clone(),
+                    transition_ms: None,
+                },
+                false,
+                false,
+                None,
+            );
+        }
+    } else if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
+        if let Some(snap) = runtime.engine_effective_node_snapshot(&preview.target_node_id) {
+            let result = if snap.hard_off {
+                runtime.lights_off_room(&preview.target_node_id, None)
+            } else if snap.soft_off {
+                runtime.soft_off_tick_room(&preview.target_node_id)
+            } else if snap.mood_active {
+                apply_mood_scene_or_tick(
+                    state,
+                    &runtime,
+                    &preview.target_node_id,
+                    snap.profile_settings.mood_scene_id.as_deref(),
+                    false,
+                )
+            } else {
+                runtime.turn_on_room(&preview.target_node_id)
+            };
+            if let Err(e) = result {
+                warn!(
+                    target: "cmd",
+                    "scene_preview_cancel: failed to restore '{}': {}",
+                    preview.target_node_id,
+                    e
+                );
+            }
+            update_lights_on_cache_for_runtime_node(state, &runtime, &preview.target_node_id, true);
+            emit_node_state_event_after_apply(state, &runtime, &preview.target_node_id);
+        }
+    }
+
+    serde_json::to_string(&serde_json::json!({
+        "preview_id": preview.id,
+        "cancelled": true
+    }))
+    .map_err(|e| anyhow::anyhow!("serialize scene preview cancel: {}", e))
+}
+
+fn apply_mood_scene_or_tick(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    mood_scene_id: Option<&str>,
+    persist_state: bool,
+) -> Result<()> {
+    if let Some(scene_id) = mood_scene_id {
+        do_scene_apply_inner(
+            state,
+            scene_id,
+            SceneApplyRequest {
+                target_id: node_id.to_string(),
+                transition_ms: None,
+            },
+            true,
+            persist_state,
+            None,
+        )?;
+        return Ok(());
+    }
+
+    runtime.mood_tick_room(node_id)
+}
+
 fn source_room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
     let source = if let Some(runtime) = runtime {
@@ -3411,6 +4079,7 @@ fn profile_bundle_data_from_state(s: &AppState) -> ProfileBundleData {
     ProfileBundleData {
         power_save: s.power_save,
         profiles: s.light_profile_configs.values().cloned().collect(),
+        scenes: s.scenes.values().cloned().collect(),
         mode_transitions: s.mode_transition_configs(),
     }
 }
@@ -3433,6 +4102,7 @@ fn backup_configuration_from_parts(
         profiles: s.light_profile_configs.values().cloned().collect(),
         mode_configs: s.mode_configs(),
         mode_transitions: s.mode_transition_configs(),
+        scenes: s.scenes.values().cloned().collect(),
         rooms,
     }
 }
@@ -3534,6 +4204,7 @@ fn factory_default_backup_configuration() -> BackupConfiguration {
             .collect(),
         mode_configs: factory_default_mode_config_map().into_values().collect(),
         mode_transitions: factory_default_mode_transition_configs(),
+        scenes: Vec::new(),
         rooms: Vec::new(),
     }
 }
@@ -4464,6 +5135,27 @@ fn node_mood_profile_name(snapshot: &rhythm_core::NodeSnapshot) -> String {
     }
 }
 
+fn node_mood_scene_id(node_id: &str) -> String {
+    let mut safe_id = String::with_capacity(node_id.len());
+    for byte in node_id.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            safe_id.push(ch);
+        } else {
+            safe_id.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    format!("node_mood_scene_{}", safe_id)
+}
+
+fn node_mood_scene_name(snapshot: &rhythm_core::NodeSnapshot) -> String {
+    if snapshot.name.trim().is_empty() || snapshot.name == snapshot.id {
+        "Mood".to_string()
+    } else {
+        format!("{} Mood", snapshot.name)
+    }
+}
+
 fn set_fixed_profile_brightness(config: &mut LightProfileConfig, brightness: u8) {
     let brightness = brightness.clamp(1, 100);
     config.min_brightness = brightness;
@@ -4471,36 +5163,6 @@ fn set_fixed_profile_brightness(config: &mut LightProfileConfig, brightness: u8)
     config.max_dim_steps = 1;
     if let rhythm_core::LightCurveShape::Constant { brightness, .. } = &mut config.curve {
         *brightness = 1.0;
-    }
-}
-
-fn fixed_profile_brightness(config: &LightProfileConfig) -> u8 {
-    config
-        .max_brightness
-        .max(config.min_brightness)
-        .clamp(1, 100)
-}
-
-fn set_fixed_profile_color(
-    config: &mut LightProfileConfig,
-    rgb: Rgb,
-    xy: XyColor,
-    brightness: Option<u8>,
-    transition_ms: Option<u32>,
-) {
-    let brightness = brightness
-        .map(|brightness| brightness.clamp(1, 100))
-        .unwrap_or_else(|| fixed_profile_brightness(config));
-    set_fixed_profile_brightness(config, brightness);
-    config.curve = rhythm_core::LightCurveShape::Constant {
-        brightness: 1.0,
-        color_temp: 0.0,
-        direct_color: Some(LightDirectColor { xy, rgb }),
-    };
-    if let Some(transition_ms) = transition_ms {
-        config.fade_ms = TimerSetting::Fixed {
-            value: transition_ms,
-        };
     }
 }
 
@@ -4598,6 +5260,272 @@ fn do_set_node_mood_brightness(
     })
 }
 
+fn first_scene_output_for_node(scene: &SceneDefinition, node_id: &str) -> Option<LightSceneOutput> {
+    let layer = scene.light.as_ref()?;
+    layer
+        .entries
+        .iter()
+        .find(|entry| entry.target.node_id() == node_id)
+        .map(|entry| entry.output.clone())
+        .or_else(|| layer.default_output.clone())
+}
+
+fn mood_scene_color_output(
+    existing: Option<LightSceneOutput>,
+    rgb: Rgb,
+    xy: XyColor,
+    brightness: Option<u8>,
+    transition_ms: Option<u32>,
+) -> LightSceneOutput {
+    LightSceneOutput {
+        power: LightScenePower::On,
+        brightness: brightness
+            .or_else(|| existing.as_ref().map(|output| output.brightness))
+            .unwrap_or(1)
+            .clamp(1, 100),
+        color: Some(LightSceneColor::RgbXy { rgb, xy }),
+        transition_ms: transition_ms.or_else(|| existing.and_then(|output| output.transition_ms)),
+    }
+}
+
+fn update_node_mood_scene_color(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    snapshot: &rhythm_core::NodeSnapshot,
+    rgb: Rgb,
+    xy: XyColor,
+    brightness: Option<u8>,
+    transition_ms: Option<u32>,
+    persist: bool,
+) -> Result<()> {
+    let scene_id = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        snapshot
+            .profile_settings
+            .mood_scene_id
+            .as_ref()
+            .filter(|scene_id| s.scenes.contains_key(*scene_id))
+            .cloned()
+            .unwrap_or_else(|| node_mood_scene_id(node_id))
+    };
+
+    let mut scene = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes.get(&scene_id).cloned().unwrap_or(SceneDefinition {
+            id: scene_id.clone(),
+            name: node_mood_scene_name(snapshot),
+            description: None,
+            source: SceneSource::User,
+            light: Some(LightSceneLayer {
+                default_transition_ms: transition_ms,
+                default_output: None,
+                entries: Vec::new(),
+            }),
+            extensions: BTreeMap::new(),
+        })
+    };
+    let scope_node_ids = if snapshot.kind.is_room() {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        light_scene_target_scope_node_ids(&s, runtime, node_id)
+    } else {
+        BTreeSet::new()
+    };
+    let existing_output = if snapshot.kind.is_room() {
+        scene.light.as_ref().and_then(|layer| {
+            layer.default_output.clone().or_else(|| {
+                layer
+                    .entries
+                    .iter()
+                    .find(|entry| scope_node_ids.contains(entry.target.node_id()))
+                    .map(|entry| entry.output.clone())
+            })
+        })
+    } else {
+        first_scene_output_for_node(&scene, node_id)
+    };
+    let output = mood_scene_color_output(existing_output, rgb, xy, brightness, transition_ms);
+    let layer = scene.light.get_or_insert_with(|| LightSceneLayer {
+        default_transition_ms: transition_ms,
+        default_output: None,
+        entries: Vec::new(),
+    });
+    if snapshot.kind.is_room() {
+        layer.default_output = Some(output.clone());
+        for entry in &mut layer.entries {
+            if scope_node_ids.contains(entry.target.node_id()) {
+                entry.output = mood_scene_color_output(
+                    Some(entry.output.clone()),
+                    rgb,
+                    xy,
+                    brightness,
+                    transition_ms,
+                );
+            }
+        }
+    } else if let Some(entry) = layer
+        .entries
+        .iter_mut()
+        .find(|entry| entry.target.node_id() == node_id)
+    {
+        entry.output = output;
+    } else {
+        layer.entries.push(LightSceneEntry {
+            target: LightSceneTargetRef::Node {
+                node_id: node_id.to_string(),
+            },
+            output,
+        });
+    }
+    scene.normalize();
+    let normalized_scene_id = scene.id.clone();
+
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes.insert(scene.id.clone(), scene);
+        if persist {
+            persist_scenes_locked(&s);
+        }
+    }
+
+    let mut profile_settings = snapshot.profile_settings.clone();
+    profile_settings.mood_enabled = Some(true);
+    profile_settings.mood_profile_id = None;
+    profile_settings.mood_scene_id = Some(normalized_scene_id.clone());
+    runtime.restore_node_state(
+        node_id,
+        RestoredNodeState {
+            rhythm_enabled: true,
+            disabled: snapshot.disabled,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+            soft_off: false,
+            mood_active: true,
+            standby_enabled: snapshot.standby_enabled,
+            hard_off: false,
+            profile_settings,
+        },
+    );
+    clear_room_mode_transition(state, node_id);
+    queue_motion_timer_clear(state, node_id);
+    do_scene_apply_inner(
+        state,
+        &normalized_scene_id,
+        SceneApplyRequest {
+            target_id: node_id.to_string(),
+            transition_ms: None,
+        },
+        true,
+        false,
+        None,
+    )?;
+    update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
+    emit_node_state_event_after_apply(state, runtime, node_id);
+
+    if persist {
+        persist_rooms(state);
+    }
+
+    Ok(())
+}
+
+fn update_node_mood_scene_brightness(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    snapshot: &rhythm_core::NodeSnapshot,
+    brightness: u8,
+    persist: bool,
+) -> Result<()> {
+    let scene_id = snapshot
+        .profile_settings
+        .mood_scene_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' has no mood scene", node_id))?;
+    let scope_node_ids = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        light_scene_target_scope_node_ids(&s, runtime, node_id)
+    };
+
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let scene = s
+            .scenes
+            .get_mut(&scene_id)
+            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?;
+        let layer = scene
+            .light
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Scene '{}' has no light layer", scene_id))?;
+        let mut updated = false;
+        if snapshot.kind.is_room() {
+            if let Some(default_output) = &mut layer.default_output {
+                default_output.power = LightScenePower::On;
+                default_output.brightness = brightness;
+                updated = true;
+            }
+            for entry in &mut layer.entries {
+                if scope_node_ids.contains(entry.target.node_id()) {
+                    entry.output.power = LightScenePower::On;
+                    entry.output.brightness = brightness;
+                    updated = true;
+                }
+            }
+        } else if let Some(entry) = layer
+            .entries
+            .iter_mut()
+            .find(|entry| entry.target.node_id() == node_id)
+        {
+            entry.output.power = LightScenePower::On;
+            entry.output.brightness = brightness;
+            updated = true;
+        } else if let Some(default_output) = layer.default_output.clone() {
+            let mut output = default_output;
+            output.power = LightScenePower::On;
+            output.brightness = brightness;
+            layer.entries.push(LightSceneEntry {
+                target: LightSceneTargetRef::Node {
+                    node_id: node_id.to_string(),
+                },
+                output,
+            });
+            updated = true;
+        }
+
+        if !updated {
+            return Err(anyhow::anyhow!(
+                "Scene '{}' has no light output to update for '{}'",
+                scene_id,
+                node_id
+            ));
+        }
+        scene.normalize();
+        if persist {
+            persist_scenes_locked(&s);
+        }
+    }
+
+    do_scene_apply_inner(
+        state,
+        &scene_id,
+        SceneApplyRequest {
+            target_id: node_id.to_string(),
+            transition_ms: None,
+        },
+        true,
+        false,
+        None,
+    )?;
+    update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
+    emit_node_state_event_after_apply(state, runtime, node_id);
+
+    if persist {
+        persist_rooms(state);
+    }
+
+    Ok(())
+}
+
 pub fn do_set_node_color(
     state: &SharedState,
     node_id: &str,
@@ -4631,9 +5559,17 @@ pub fn do_set_node_color(
     };
 
     if persist_as_mood {
-        update_node_mood_profile(state, &runtime, node_id, &snap, persist, |profile| {
-            set_fixed_profile_color(profile, update.rgb, xy, brightness, update.transition_ms)
-        })?;
+        update_node_mood_scene_color(
+            state,
+            &runtime,
+            node_id,
+            &snap,
+            update.rgb,
+            xy,
+            brightness,
+            update.transition_ms,
+            persist,
+        )?;
         return build_node_state(state, node_id).and_then(|node_state| {
             serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
         });
@@ -5675,10 +6611,17 @@ fn validate_imported_backup_configuration(configuration: &BackupConfiguration) -
     validate_mode_configs(&configuration.mode_configs)?;
 
     let valid_profile_ids = valid_import_profile_ids(&configuration.profiles);
+    let scenes = normalized_scene_map(configuration.scenes.clone())?;
+    let valid_scene_ids = valid_scene_ids_from_map(&scenes);
 
     for room in &configuration.rooms {
         room_flags_for_target_state(room.state)?;
-        validate_room_profile_settings(&room.id, &room.room_profile, &valid_profile_ids)?;
+        validate_room_profile_settings(
+            &room.id,
+            &room.room_profile,
+            &valid_profile_ids,
+            Some(&valid_scene_ids),
+        )?;
     }
 
     Ok(())
@@ -5691,10 +6634,29 @@ fn valid_import_profile_ids(profiles: &[LightProfileConfig]) -> HashSet<String> 
         .collect()
 }
 
+fn normalized_scene_map(scenes: Vec<SceneDefinition>) -> Result<BTreeMap<String, SceneDefinition>> {
+    let mut out = BTreeMap::new();
+    for mut scene in scenes {
+        scene.normalize();
+        if scene.id.trim().is_empty() {
+            return Err(anyhow::anyhow!("Scene id cannot be empty"));
+        }
+        if out.insert(scene.id.clone(), scene).is_some() {
+            return Err(anyhow::anyhow!("Duplicate scene id"));
+        }
+    }
+    Ok(out)
+}
+
+fn valid_scene_ids_from_map(scenes: &BTreeMap<String, SceneDefinition>) -> HashSet<String> {
+    scenes.keys().cloned().collect()
+}
+
 fn validate_room_profile_settings(
     room_id: &str,
     room_profile: &RoomProfileSettings,
     valid_profile_ids: &HashSet<String>,
+    valid_scene_ids: Option<&HashSet<String>>,
 ) -> Result<()> {
     if let Some(profile_id) = room_profile.profile_id.as_deref() {
         if rhythm_core::is_builtin_state_profile_id(profile_id) {
@@ -5721,6 +6683,23 @@ fn validate_room_profile_settings(
             ));
         }
     }
+    if let Some(scene_id) = room_profile.mood_scene_id.as_deref() {
+        if scene_id.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Room '{}' references an empty mood scene id",
+                room_id
+            ));
+        }
+        if let Some(valid_scene_ids) = valid_scene_ids {
+            if !valid_scene_ids.contains(scene_id) {
+                return Err(anyhow::anyhow!(
+                    "Room '{}' references unknown mood scene '{}'",
+                    room_id,
+                    scene_id
+                ));
+            }
+        }
+    }
 
     Ok(())
 }
@@ -5731,6 +6710,7 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
         profile_id: Some(room.room_profile.profile_id.clone()),
         mood_enabled: Some(room.room_profile.mood_enabled),
         mood_profile_id: Some(room.room_profile.mood_profile_id.clone()),
+        mood_scene_id: Some(room.room_profile.mood_scene_id.clone()),
         fade_ms: Some(room.room_profile.fade_ms.clone()),
         motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
     }
@@ -5827,13 +6807,16 @@ pub fn do_profile_bundle_import(
     let profile = bundle.profile;
 
     let imported_profiles = profile.profiles;
+    let imported_scenes = normalized_scene_map(profile.scenes)?;
     let imported_power_save = profile.power_save;
     let imported_mode_transitions = profile.mode_transitions;
 
     let (profiles_to_apply, runtimes) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.replace_light_profile_configs(imported_profiles);
+        s.scenes = imported_scenes;
         persist_light_profiles_locked(&s);
+        persist_scenes_locked(&s);
         (
             s.light_profile_configs
                 .values()
@@ -5872,8 +6855,9 @@ pub fn do_profile_bundle_import(
 
     info!(
         target: "cmd",
-        "profile_bundle_import: profiles={} transitions={}",
+        "profile_bundle_import: profiles={} scenes={} transitions={}",
         profiles_to_apply.len(),
+        state.lock().ok().map(|s| s.scenes.len()).unwrap_or(0),
         state
             .lock()
             .ok()
@@ -5898,12 +6882,15 @@ fn apply_backup_configuration(
     let imported_active_mode = configuration.active_mode;
     let imported_mode_configs = configuration.mode_configs;
     let imported_mode_transitions = configuration.mode_transitions;
+    let imported_scenes = normalized_scene_map(configuration.scenes)?;
     let imported_rooms = configuration.rooms;
 
     let (profiles_to_apply, runtimes) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.replace_light_profile_configs(imported_profiles);
+        s.scenes = imported_scenes;
         persist_light_profiles_locked(&s);
+        persist_scenes_locked(&s);
         (
             s.light_profile_configs
                 .values()
@@ -5947,8 +6934,9 @@ fn apply_backup_configuration(
 
     info!(
         target: "cmd",
-        "backup_configuration_import: profiles={} modes={} transitions={} rooms_applied={} rooms_skipped={}",
+        "backup_configuration_import: profiles={} scenes={} modes={} transitions={} rooms_applied={} rooms_skipped={}",
         profiles_to_apply.len(),
+        state.lock().ok().map(|s| s.scenes.len()).unwrap_or(0),
         state.lock().ok().map(|s| s.mode_configs().len()).unwrap_or(0),
         state
             .lock()
@@ -5977,8 +6965,15 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
 
     validate_imported_backup_configuration(&bundle.configuration)?;
     let valid_profile_ids = valid_import_profile_ids(&bundle.configuration.profiles);
+    let scene_ids =
+        valid_scene_ids_from_map(&normalized_scene_map(bundle.configuration.scenes.clone())?);
     for room in bundle.installation.rooms.iter() {
-        validate_room_profile_settings(&room.id, &room.profile_settings, &valid_profile_ids)?;
+        validate_room_profile_settings(
+            &room.id,
+            &room.profile_settings,
+            &valid_profile_ids,
+            Some(&scene_ids),
+        )?;
     }
 
     do_hub_disconnect(state)?;
@@ -6497,6 +7492,19 @@ pub fn do_set_node_brightness(
         .engine_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     if snapshot.mood_active && !snapshot.hard_off {
+        if snapshot.profile_settings.mood_scene_id.is_some() {
+            info!(
+                target: "cmd",
+                "set_node_brightness: {} updating mood scene brightness",
+                node_id
+            );
+            update_node_mood_scene_brightness(
+                state, &runtime, node_id, &snapshot, brightness, persist,
+            )?;
+            return build_node_state(state, node_id).and_then(|node_state| {
+                serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+            });
+        }
         info!(
             target: "cmd",
             "set_node_brightness: {} updating mood profile brightness",
@@ -8026,7 +9034,7 @@ pub fn do_node_preferences_set(
         room_profile.is_some()
     );
 
-    let (runtime, valid_profile_ids) = {
+    let (runtime, valid_profile_ids, valid_scene_ids) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -8034,6 +9042,7 @@ pub fn do_node_preferences_set(
                 .keys()
                 .cloned()
                 .collect::<HashSet<_>>(),
+            s.scenes.keys().cloned().collect::<HashSet<_>>(),
         )
     };
 
@@ -8120,6 +9129,11 @@ pub fn do_node_preferences_set(
             ));
         }
     }
+    if let Some(scene_id) = profile_settings.mood_scene_id.as_deref() {
+        if !valid_scene_ids.contains(scene_id) {
+            return Err(anyhow::anyhow!("Unknown light scene: {}", scene_id));
+        }
+    }
 
     // Mood and Standby need rhythm enabled unless the caller explicitly pauses it.
     let rhythm_enabled = if (soft_off || mood_active) && requested_rhythm_enabled != Some(false) {
@@ -8163,8 +9177,14 @@ pub fn do_node_preferences_set(
     } else if mood_active && !prev_mood_active {
         refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering mood", node_id);
-        if let Err(e) = runtime.mood_tick_room(node_id) {
-            warn!(target: "cmd", "mood_tick for '{}' failed: {}", node_id, e);
+        if let Err(e) = apply_mood_scene_or_tick(
+            state,
+            &runtime,
+            node_id,
+            profile_settings.mood_scene_id.as_deref(),
+            false,
+        ) {
+            warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
         }
     } else if soft_off && !prev_soft_off {
         refresh_lights_on = true;
@@ -8189,8 +9209,14 @@ pub fn do_node_preferences_set(
             }
             RoomModeState::Mood => {
                 info!(target: "cmd", "node_preferences_set: {} leaving hard_off to mood", node_id);
-                if let Err(e) = runtime.mood_tick_room(node_id) {
-                    warn!(target: "cmd", "mood_tick for '{}' failed: {}", node_id, e);
+                if let Err(e) = apply_mood_scene_or_tick(
+                    state,
+                    &runtime,
+                    node_id,
+                    profile_settings.mood_scene_id.as_deref(),
+                    false,
+                ) {
+                    warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::Standby => {
@@ -8206,8 +9232,14 @@ pub fn do_node_preferences_set(
             RoomModeState::Mood => {
                 refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to mood", node_id);
-                if let Err(e) = runtime.mood_tick_room(node_id) {
-                    warn!(target: "cmd", "mood_tick for '{}' failed: {}", node_id, e);
+                if let Err(e) = apply_mood_scene_or_tick(
+                    state,
+                    &runtime,
+                    node_id,
+                    profile_settings.mood_scene_id.as_deref(),
+                    false,
+                ) {
+                    warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
                 }
             }
             RoomModeState::Standby => {
@@ -8260,6 +9292,7 @@ pub struct QueuedNodePreferencesPatch {
 fn validate_room_profile_settings_patch(
     room_profile: Option<&RoomProfileSettingsPatch>,
     valid_profile_ids: &HashSet<String>,
+    valid_scene_ids: &HashSet<String>,
 ) -> Result<()> {
     if let Some(profile_id) = room_profile
         .and_then(|patch| patch.profile_id.as_ref())
@@ -8283,6 +9316,14 @@ fn validate_room_profile_settings_patch(
                 "Unknown mood light profile: {}",
                 profile_id
             ));
+        }
+    }
+    if let Some(scene_id) = room_profile
+        .and_then(|patch| patch.mood_scene_id.as_ref())
+        .and_then(|scene_id| scene_id.as_deref())
+    {
+        if !valid_scene_ids.contains(scene_id) {
+            return Err(anyhow::anyhow!("Unknown light scene: {}", scene_id));
         }
     }
     Ok(())
@@ -8330,7 +9371,7 @@ pub fn queue_node_preferences_batch(
     persist_after: bool,
     dispatch_spacing: Duration,
 ) -> Result<()> {
-    let (runtime, valid_profile_ids) = {
+    let (runtime, valid_profile_ids, valid_scene_ids) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         if s.work_tx.is_none() {
             return Err(anyhow::anyhow!("Node dispatch queue unavailable"));
@@ -8341,6 +9382,7 @@ pub fn queue_node_preferences_batch(
                 .keys()
                 .cloned()
                 .collect::<HashSet<_>>(),
+            s.scenes.keys().cloned().collect::<HashSet<_>>(),
         )
     };
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
@@ -8350,7 +9392,11 @@ pub fn queue_node_preferences_batch(
         runtime
             .engine_node_snapshot(&update.node_id)
             .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", update.node_id))?;
-        validate_room_profile_settings_patch(update.room_profile.as_ref(), &valid_profile_ids)?;
+        validate_room_profile_settings_patch(
+            update.room_profile.as_ref(),
+            &valid_profile_ids,
+            &valid_scene_ids,
+        )?;
         work_items.push(WorkItem::SetNodePreferences {
             command_id: crate::logging::next_command_id("node-preferences"),
             node_id: update.node_id,
@@ -8815,7 +9861,16 @@ fn composite_node_labels(s: &AppState) -> HashMap<String, String> {
             .get(&node.canonical_device_id)
             .map(|device| device.name.clone())
             .unwrap_or_else(|| node.id.clone());
-        labels.insert(node.id.clone(), label);
+        labels.insert(node.id.clone(), label.clone());
+        if s.topology
+            .direct_light_dispatch_route(&node.id, &s.canonical_registry)
+            .is_some()
+        {
+            labels.insert(
+                light_scene_direct_node_id(&node.id),
+                format!("{label} Scene"),
+            );
+        }
     }
 
     for light_node in s.topology.periodic_light_nodes(&s.canonical_registry) {
@@ -8849,6 +9904,18 @@ pub fn rebuild_composite_routing(state: &SharedState) {
         };
         let active_hubs: HashSet<String> = s.hubs.keys().map(ToString::to_string).collect();
         let mut routing = s.topology.composite_routing(&s.canonical_registry);
+        for node in s.topology.device_nodes() {
+            let Some((hub_key, target)) = s
+                .topology
+                .direct_light_dispatch_route(&node.id, &s.canonical_registry)
+            else {
+                continue;
+            };
+            routing.insert(
+                light_scene_direct_node_id(&node.id),
+                vec![(hub_key.to_string(), target)],
+            );
+        }
         routing.retain(|_, targets| {
             targets.retain(|(hub_key, _)| active_hubs.contains(hub_key));
             !targets.is_empty()
@@ -11117,6 +12184,962 @@ mod tests {
         (state, runtime, device_id)
     }
 
+    fn scene_for_light_with_output(
+        scene_id: &str,
+        device_id: &str,
+        brightness: u8,
+        kelvin: u16,
+    ) -> SceneDefinition {
+        SceneDefinition {
+            id: scene_id.to_string(),
+            name: "Icy Glow".to_string(),
+            description: None,
+            source: crate::scenes::SceneSource::User,
+            light: Some(crate::scenes::LightSceneLayer {
+                default_transition_ms: Some(700),
+                default_output: None,
+                entries: vec![crate::scenes::LightSceneEntry {
+                    target: crate::scenes::LightSceneTargetRef::Node {
+                        node_id: device_id.to_string(),
+                    },
+                    output: crate::scenes::LightSceneOutput {
+                        power: LightScenePower::On,
+                        brightness,
+                        color: Some(crate::scenes::LightSceneColor::Kelvin { kelvin }),
+                        transition_ms: None,
+                    },
+                }],
+            }),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn scene_for_light(scene_id: &str, device_id: &str) -> SceneDefinition {
+        scene_for_light_with_output(scene_id, device_id, 72, 6500)
+    }
+
+    fn scene_for_light_power_off(scene_id: &str, device_id: &str) -> SceneDefinition {
+        SceneDefinition {
+            id: scene_id.to_string(),
+            name: "Lights Out".to_string(),
+            description: None,
+            source: crate::scenes::SceneSource::User,
+            light: Some(crate::scenes::LightSceneLayer {
+                default_transition_ms: Some(900),
+                default_output: None,
+                entries: vec![crate::scenes::LightSceneEntry {
+                    target: crate::scenes::LightSceneTargetRef::Node {
+                        node_id: device_id.to_string(),
+                    },
+                    output: crate::scenes::LightSceneOutput {
+                        power: LightScenePower::Off,
+                        brightness: 100,
+                        color: None,
+                        transition_ms: None,
+                    },
+                }],
+            }),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn scene_with_default_output(scene_id: &str, brightness: u8, kelvin: u16) -> SceneDefinition {
+        SceneDefinition {
+            id: scene_id.to_string(),
+            name: "Room Mood".to_string(),
+            description: None,
+            source: crate::scenes::SceneSource::User,
+            light: Some(crate::scenes::LightSceneLayer {
+                default_transition_ms: Some(400),
+                default_output: Some(crate::scenes::LightSceneOutput {
+                    power: LightScenePower::On,
+                    brightness,
+                    color: Some(crate::scenes::LightSceneColor::Kelvin { kelvin }),
+                    transition_ms: None,
+                }),
+                entries: Vec::new(),
+            }),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn setup_standalone_matter_light() -> (SharedState, Arc<MockRuntime>, String) {
+        let (state, runtime) = setup_state(Vec::new());
+        let device_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "matter-standalone-1",
+            "Standalone Lamp",
+            "",
+            "",
+        );
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .ensure_standalone_device(&device_id);
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_standalone_light_snapshot(&device_id));
+
+        (state, runtime, device_id)
+    }
+
+    #[test]
+    fn scenes_crud_normalizes_lists_and_deletes() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let mut scene = SceneDefinition {
+            id: String::new(),
+            name: " Icy Glow ".to_string(),
+            description: Some("Cool imported look".to_string()),
+            source: crate::scenes::SceneSource::Imported {
+                provider: "hue".to_string(),
+                external_id: Some("icy_glow".to_string()),
+            },
+            light: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let json = do_scene_upsert(&state, scene.clone()).unwrap();
+        let created: SceneDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(created.id, "icy-glow");
+        assert_eq!(created.name, "Icy Glow");
+
+        scene.id = "icy-glow".to_string();
+        let listed: serde_json::Value =
+            serde_json::from_str(&build_scenes(&state).unwrap()).unwrap();
+        assert_eq!(listed["scenes"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["scenes"][0]["id"], "icy-glow");
+
+        let listed_after_delete: serde_json::Value =
+            serde_json::from_str(&do_scene_delete(&state, "icy-glow").unwrap()).unwrap();
+        assert!(listed_after_delete["scenes"].as_array().unwrap().is_empty());
+        assert!(do_scene_delete(&state, "icy-glow").is_err());
+    }
+
+    #[test]
+    fn scene_apply_uses_public_node_for_standalone_light_without_composite() {
+        let (state, runtime, device_id) = setup_standalone_matter_light();
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+
+        let json = do_scene_apply(
+            &state,
+            "icy-glow",
+            SceneApplyRequest {
+                target_id: device_id.clone(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+        let response: SceneApplyResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(response.affected_node_ids, vec![device_id.clone()]);
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, device_id);
+        assert_eq!(calls[0].1.transition_ms, Some(700));
+    }
+
+    #[test]
+    fn scene_apply_uses_direct_light_route_for_attached_grouped_light() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+
+        let json = do_scene_apply(
+            &state,
+            "icy-glow",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: Some(250),
+            },
+        )
+        .unwrap();
+        let response: SceneApplyResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(response.scene_id, "icy-glow");
+        assert_eq!(response.affected_node_ids, vec![device_id.clone()]);
+        assert!(response.unresolved_node_ids.is_empty());
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, light_scene_direct_node_id(&device_id));
+        assert_eq!(calls[0].1.brightness, 72);
+        assert_eq!(calls[0].1.kelvin, 6500);
+        assert_eq!(calls[0].1.transition_ms, Some(250));
+
+        let device = runtime.engine_room_snapshot(&device_id).unwrap();
+        assert_eq!(device.profile_settings.mood_scene_id, None);
+        assert!(!device.mood_active);
+        let room = runtime.engine_room_snapshot("room1").unwrap();
+        assert_eq!(
+            room.profile_settings.mood_scene_id.as_deref(),
+            Some("icy-glow")
+        );
+        assert!(room.mood_active);
+
+        let s = state.lock().unwrap();
+        let snapshots = runtime.engine_all_node_snapshots();
+        let dispatch_nodes = crate::periodic::periodic_dispatch_nodes_from_state(&s, &snapshots);
+        assert!(
+            dispatch_nodes
+                .iter()
+                .all(|node| node.node_id != device_id && node.settings_node_id != "room1"),
+            "committed scene nodes should be skipped by periodic dispatch: {dispatch_nodes:?}"
+        );
+    }
+
+    #[test]
+    fn scene_apply_can_turn_light_output_off() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(&state, scene_for_light_power_off("lights-out", &device_id)).unwrap();
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &state,
+                "lights-out",
+                SceneApplyRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: Some(250),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(response.affected_node_ids, vec![device_id.clone()]);
+        assert!(runtime.applied_commands().is_empty());
+        assert_eq!(
+            runtime.lights_off_calls(),
+            vec![(light_scene_direct_node_id(&device_id), Some(250))]
+        );
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("lights-out")
+        );
+    }
+
+    #[test]
+    fn room_scene_exit_does_not_leave_child_scene_state_blocking_periodic() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+        do_scene_apply(
+            &state,
+            "icy-glow",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            Some(RoomModeState::Active),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let room = runtime.engine_room_snapshot("room1").unwrap();
+        assert!(!room.mood_active);
+        assert_eq!(
+            room.profile_settings.mood_scene_id.as_deref(),
+            Some("icy-glow")
+        );
+        let device = runtime.engine_room_snapshot(&device_id).unwrap();
+        assert!(!device.mood_active);
+        assert_eq!(device.profile_settings.mood_scene_id, None);
+
+        let s = state.lock().unwrap();
+        let snapshots = runtime.engine_all_node_snapshots();
+        let dispatch_nodes = crate::periodic::periodic_dispatch_nodes_from_state(&s, &snapshots);
+        assert!(
+            dispatch_nodes
+                .iter()
+                .any(|node| node.settings_node_id == "room1"),
+            "leaving the room scene should let periodic dispatch resume: {dispatch_nodes:?}"
+        );
+    }
+
+    #[test]
+    fn scene_delete_clears_committed_mood_scene_state() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+        do_scene_apply(
+            &state,
+            "icy-glow",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        let listed: serde_json::Value =
+            serde_json::from_str(&do_scene_delete(&state, "icy-glow").unwrap()).unwrap();
+
+        assert!(listed["scenes"].as_array().unwrap().is_empty());
+        assert!(!state.lock().unwrap().scenes.contains_key("icy-glow"));
+        for node_id in ["room1", device_id.as_str()] {
+            let snap = runtime.engine_room_snapshot(node_id).unwrap();
+            assert_eq!(snap.profile_settings.mood_scene_id, None);
+            assert!(!snap.mood_active);
+        }
+    }
+
+    #[test]
+    fn scene_default_output_applies_to_room_light_scope() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&state, scene_with_default_output("room-mood", 44, 4100)).unwrap();
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &state,
+                "room-mood",
+                SceneApplyRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(response.affected_node_ids, vec![device_id.clone()]);
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, device_id);
+        assert_eq!(calls[0].1.brightness, 44);
+        assert_eq!(calls[0].1.kelvin, 4100);
+        assert_eq!(calls[0].1.transition_ms, Some(400));
+    }
+
+    #[test]
+    fn node_preferences_entering_mood_applies_bound_scene() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+        let patch = RoomProfileSettingsPatch {
+            mood_scene_id: Some(Some("icy-glow".to_string())),
+            ..Default::default()
+        };
+
+        do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            Some(&patch),
+            false,
+        )
+        .unwrap();
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, device_id);
+        assert_eq!(calls[0].1.kelvin, 6500);
+        let room = runtime.engine_room_snapshot("room1").unwrap();
+        assert!(room.mood_active);
+        assert_eq!(
+            room.profile_settings.mood_scene_id.as_deref(),
+            Some("icy-glow")
+        );
+        let device = runtime.engine_room_snapshot(&calls[0].0).unwrap();
+        assert!(!device.mood_active);
+        assert_eq!(device.profile_settings.mood_scene_id, None);
+    }
+
+    #[test]
+    fn mood_scoped_color_creates_scene_not_hidden_profile() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+
+        do_set_node_color(
+            &state,
+            "room1",
+            NodeColorUpdate {
+                rgb: Rgb::new(16, 80, 240),
+                xy: None,
+                brightness: Some(39),
+                transition_ms: Some(275),
+                scope: NodeColorScope::Mood,
+            },
+            false,
+        )
+        .unwrap();
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, device_id);
+        assert!(calls[0].1.is_direct_color);
+        assert_eq!(calls[0].1.rgb, Rgb::new(16, 80, 240));
+        assert_eq!(calls[0].1.brightness, 39);
+        assert_eq!(calls[0].1.transition_ms, Some(275));
+
+        let room = runtime.engine_room_snapshot("room1").unwrap();
+        assert!(room.mood_active);
+        assert_eq!(
+            room.profile_settings.mood_scene_id.as_deref(),
+            Some("node-mood-scene-room1")
+        );
+        assert_eq!(room.profile_settings.mood_profile_id, None);
+        let s = state.lock().unwrap();
+        assert!(s.scenes.contains_key("node-mood-scene-room1"));
+        assert!(
+            !s.light_profile_configs
+                .contains_key(&node_mood_profile_id("room1")),
+            "new Mood color edits should not create legacy hidden mood profiles"
+        );
+    }
+
+    #[test]
+    fn mood_scoped_room_color_updates_explicit_scene_entries_and_preserves_brightness() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&state, scene_for_light("imported-look", &device_id)).unwrap();
+        let patch = RoomProfileSettingsPatch {
+            mood_scene_id: Some(Some("imported-look".to_string())),
+            ..Default::default()
+        };
+        do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            Some(&patch),
+            false,
+        )
+        .unwrap();
+
+        do_set_node_color(
+            &state,
+            "room1",
+            NodeColorUpdate {
+                rgb: Rgb::new(24, 120, 200),
+                xy: None,
+                brightness: None,
+                transition_ms: Some(180),
+                scope: NodeColorScope::Mood,
+            },
+            false,
+        )
+        .unwrap();
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.last().unwrap().1.is_direct_color);
+        assert_eq!(calls.last().unwrap().1.rgb, Rgb::new(24, 120, 200));
+        assert_eq!(calls.last().unwrap().1.brightness, 72);
+
+        let s = state.lock().unwrap();
+        let scene = s.scenes.get("imported-look").unwrap();
+        let entry_output = &scene.light.as_ref().unwrap().entries[0].output;
+        assert_eq!(entry_output.power, LightScenePower::On);
+        assert_eq!(entry_output.brightness, 72);
+        assert_eq!(
+            entry_output.color,
+            Some(LightSceneColor::RgbXy {
+                rgb: Rgb::new(24, 120, 200),
+                xy: rhythm_core::rgb_to_xy(Rgb::new(24, 120, 200)),
+            })
+        );
+    }
+
+    #[test]
+    fn mood_brightness_updates_bound_scene() {
+        let (state, runtime, _device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_set_node_color(
+            &state,
+            "room1",
+            NodeColorUpdate {
+                rgb: Rgb::new(16, 80, 240),
+                xy: None,
+                brightness: Some(39),
+                transition_ms: Some(275),
+                scope: NodeColorScope::Mood,
+            },
+            false,
+        )
+        .unwrap();
+
+        do_set_node_brightness(&state, "room1", 22, false).unwrap();
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.last().unwrap().1.brightness, 22);
+        let s = state.lock().unwrap();
+        let scene = s.scenes.get("node-mood-scene-room1").unwrap();
+        let output = scene
+            .light
+            .as_ref()
+            .unwrap()
+            .default_output
+            .as_ref()
+            .unwrap();
+        assert_eq!(output.brightness, 22);
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("node-mood-scene-room1")
+        );
+    }
+
+    #[test]
+    fn scene_draft_preview_commit_saves_scene_and_sets_mood_scene() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let draft_scene = scene_for_light_with_output("draft-glow", &device_id, 27, 3000);
+
+        let preview: SceneApplyResponse = serde_json::from_str(
+            &do_scene_draft_preview(
+                &state,
+                SceneDraftPreviewRequest {
+                    target_id: "room1".to_string(),
+                    scene: draft_scene,
+                    transition_ms: Some(123),
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(preview.scene_id, "draft-glow");
+        assert!(preview.preview_id.is_some());
+        assert!(!state.lock().unwrap().scenes.contains_key("draft-glow"));
+        assert_eq!(runtime.applied_commands().len(), 1);
+        assert_eq!(runtime.applied_commands()[0].1.transition_ms, Some(123));
+
+        let committed: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview_commit(&state, preview.preview_id.as_deref().unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(committed.scene_id, "draft-glow");
+        assert!(state.lock().unwrap().scenes.contains_key("draft-glow"));
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("draft-glow")
+        );
+        assert_eq!(runtime.applied_commands().len(), 2);
+    }
+
+    #[test]
+    fn scene_draft_preview_cancel_keeps_draft_ephemeral() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let draft_scene = scene_for_light_with_output("draft-glow", &device_id, 27, 3000);
+
+        let preview: SceneApplyResponse = serde_json::from_str(
+            &do_scene_draft_preview(
+                &state,
+                SceneDraftPreviewRequest {
+                    target_id: "room1".to_string(),
+                    scene: draft_scene,
+                    transition_ms: Some(123),
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let cancel: serde_json::Value = serde_json::from_str(
+            &do_scene_preview_cancel(&state, preview.preview_id.as_deref().unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cancel["cancelled"], true);
+        assert!(!state.lock().unwrap().scenes.contains_key("draft-glow"));
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+        assert_eq!(runtime.applied_commands().len(), 1);
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id,
+            None
+        );
+    }
+
+    #[test]
+    fn scene_preview_applies_without_committing_and_suppresses_periodic_dispatch() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+
+        let json = do_scene_preview(
+            &state,
+            "icy-glow",
+            ScenePreviewRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+                duration_ms: Some(30_000),
+            },
+        )
+        .unwrap();
+        let response: SceneApplyResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(response.preview_id.is_some());
+        assert_eq!(runtime.applied_commands().len(), 1);
+        assert!(runtime.restore_calls().is_empty());
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_scene_previews.len(), 1);
+        let snapshots = runtime.engine_all_node_snapshots();
+        let dispatch_nodes = crate::periodic::periodic_dispatch_nodes_from_state(&s, &snapshots);
+        assert!(
+            dispatch_nodes
+                .iter()
+                .all(|node| node.node_id != device_id && node.settings_node_id != "room1"),
+            "previewed scene nodes should be skipped by periodic dispatch: {dispatch_nodes:?}"
+        );
+    }
+
+    #[test]
+    fn scene_preview_replaces_overlapping_preview_session() {
+        let (state, _runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(
+            &state,
+            scene_for_light_with_output("warm-glow", &device_id, 35, 2700),
+        )
+        .unwrap();
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+
+        let first: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview(
+                &state,
+                "warm-glow",
+                ScenePreviewRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let second: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview(
+                &state,
+                "icy-glow",
+                ScenePreviewRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(state.lock().unwrap().light_scene_previews.len(), 1);
+        assert!(do_scene_preview_cancel(&state, first.preview_id.as_deref().unwrap()).is_err());
+        assert!(do_scene_preview_cancel(&state, second.preview_id.as_deref().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn scene_preview_commit_commits_scene_and_removes_preview_session() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+
+        let preview: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview(
+                &state,
+                "icy-glow",
+                ScenePreviewRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let committed: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview_commit(&state, preview.preview_id.as_deref().unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(committed.scene_id, "icy-glow");
+        assert_eq!(runtime.applied_commands().len(), 2);
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("icy-glow")
+        );
+    }
+
+    #[test]
+    fn scene_preview_cancel_restores_previous_committed_scene_output() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(
+            &state,
+            scene_for_light_with_output("warm-glow", &device_id, 35, 2700),
+        )
+        .unwrap();
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+        do_scene_apply(
+            &state,
+            "warm-glow",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+        let preview: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview(
+                &state,
+                "icy-glow",
+                ScenePreviewRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        do_scene_preview_cancel(&state, preview.preview_id.as_deref().unwrap()).unwrap();
+
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.last().unwrap().1.kelvin, 2700);
+        assert_eq!(calls.last().unwrap().1.brightness, 35);
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("warm-glow")
+        );
+    }
+
+    #[test]
+    fn scene_preview_cancel_without_previous_scene_removes_session_without_committing() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+        let preview: SceneApplyResponse = serde_json::from_str(
+            &do_scene_preview(
+                &state,
+                "icy-glow",
+                ScenePreviewRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: None,
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let cancel: serde_json::Value = serde_json::from_str(
+            &do_scene_preview_cancel(&state, preview.preview_id.as_deref().unwrap()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(cancel["cancelled"], true);
+        assert!(state.lock().unwrap().light_scene_previews.is_empty());
+        assert_eq!(runtime.applied_commands().len(), 1);
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id,
+            None
+        );
+    }
+
+    #[test]
+    fn backup_bundle_round_trips_scenes() {
+        let (source_state, _source_runtime, device_id) =
+            setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&source_state, scene_for_light("icy-glow", &device_id)).unwrap();
+
+        let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        assert_eq!(bundle.configuration.scenes.len(), 1);
+        assert_eq!(bundle.configuration.scenes[0].id, "icy-glow");
+
+        let (target_state, _target_runtime) = setup_state(vec![]);
+        do_backup_restore(&target_state, bundle).unwrap();
+
+        let target = target_state.lock().unwrap();
+        assert!(target.scenes.contains_key("icy-glow"));
+        assert_eq!(target.scenes["icy-glow"].name, "Icy Glow");
+    }
+
+    #[test]
+    fn profile_bundle_import_and_export_round_trips_scenes() {
+        let (state, _runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let scene = scene_for_light("icy-glow", &device_id);
+
+        let exported: ProfileBundle = serde_json::from_str(
+            &do_profile_bundle_import(
+                &state,
+                ProfileBundleImportPayload::Profile(ProfileBundleData {
+                    power_save: true,
+                    profiles: Vec::new(),
+                    scenes: vec![scene],
+                    mode_transitions: Vec::new(),
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(exported.profile.scenes.len(), 1);
+        assert_eq!(exported.profile.scenes[0].id, "icy-glow");
+        assert!(state.lock().unwrap().scenes.contains_key("icy-glow"));
+    }
+
+    #[test]
+    fn backup_restore_rejects_unknown_mood_scene_reference() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let mut rooms = rhythm_core::RoomManager::new();
+        let room = rooms.get_or_create("office", "Office");
+        room.profile_settings.mood_scene_id = Some("missing-scene".to_string());
+
+        let err = do_backup_restore(
+            &state,
+            BackupBundle {
+                schema_version: BUNDLE_SCHEMA_VERSION,
+                kind: BundleKind::BackupBundle,
+                created_at: "2026-04-16T00:00:00Z".into(),
+                secrets_included: false,
+                configuration: BackupConfiguration::default(),
+                installation: BackupInstallation {
+                    location: None,
+                    rooms,
+                    topology: crate::topology::RoomTopologyStore::new(),
+                    canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                    hub_credentials: Vec::new(),
+                    hub_registries: Vec::new(),
+                    integration_files: Vec::new(),
+                },
+                runtime_state: BackupRuntimeState {
+                    active_mode: RhythmMode::Day,
+                    last_change_cause: ModeChangeCause::Manual,
+                    last_change_transition_id: None,
+                    last_change_epoch_ms: None,
+                },
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("unknown mood scene"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn node_preferences_validate_mood_scene_reference() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let missing_patch = RoomProfileSettingsPatch {
+            mood_scene_id: Some(Some("missing-scene".to_string())),
+            ..Default::default()
+        };
+        let err = do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            None,
+            Some(&missing_patch),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unknown light scene"));
+
+        do_scene_upsert(
+            &state,
+            SceneDefinition {
+                id: "known-scene".to_string(),
+                name: "Known Scene".to_string(),
+                description: None,
+                source: crate::scenes::SceneSource::User,
+                light: None,
+                extensions: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let known_patch = RoomProfileSettingsPatch {
+            mood_scene_id: Some(Some("known-scene".to_string())),
+            ..Default::default()
+        };
+        do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            None,
+            Some(&known_patch),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            _runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("known-scene")
+        );
+    }
+
     fn setup_mixed_room_with_hub_groups() -> (
         SharedState,
         Arc<MockRuntime>,
@@ -12166,6 +14189,7 @@ mod tests {
             profile: ProfileBundleData {
                 power_save: true,
                 profiles: vec![focus.clone()],
+                scenes: vec![],
                 mode_transitions: vec![transition.clone()],
             },
         });
@@ -12427,6 +14451,7 @@ mod tests {
             profile_id: Some("focus".into()),
             mood_enabled: None,
             mood_profile_id: None,
+            mood_scene_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 3_210 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 654 }),
         };
@@ -12454,6 +14479,7 @@ mod tests {
                     ModeConfig::default_for_mode(RhythmMode::Sleep),
                 ],
                 mode_transitions: vec![transition.clone()],
+                scenes: vec![],
                 rooms: vec![],
             },
             installation: BackupInstallation {
@@ -12619,6 +14645,7 @@ mod tests {
                     ModeConfig::default_for_mode(RhythmMode::Sleep),
                 ],
                 mode_transitions: Vec::new(),
+                scenes: Vec::new(),
                 rooms: Vec::new(),
             },
             installation: BackupInstallation {
@@ -13128,6 +15155,7 @@ mod tests {
                 profiles: vec![],
                 mode_configs: vec![],
                 mode_transitions: vec![],
+                scenes: vec![],
                 rooms: vec![],
             },
             installation: BackupInstallation {
@@ -13214,6 +15242,7 @@ mod tests {
             profile_id: Some("missing_profile".into()),
             mood_enabled: None,
             mood_profile_id: None,
+            mood_scene_id: None,
             fade_ms: None,
             motion_timeout_secs: None,
         };
@@ -13232,6 +15261,7 @@ mod tests {
                     profiles: vec![],
                     mode_configs: vec![],
                     mode_transitions: vec![],
+                    scenes: vec![],
                     rooms: vec![],
                 },
                 installation: BackupInstallation {
@@ -13381,6 +15411,7 @@ mod tests {
             ProfileBundleImportPayload::Profile(ProfileBundleData {
                 power_save: true,
                 profiles: vec![focus],
+                scenes: vec![],
                 mode_transitions: vec![],
             }),
         )
@@ -13750,6 +15781,33 @@ mod tests {
         assert!(parsed["nodes"][0]["transitioning"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn build_state_snapshot_includes_scenes_and_mood_scene_id() {
+        let (state, _runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
+        do_scene_apply(
+            &state,
+            "icy-glow",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&build_state_snapshot(&state).unwrap()).unwrap();
+        assert_eq!(parsed["scenes"][0]["id"], "icy-glow");
+
+        let room = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "room1")
+            .unwrap();
+        assert_eq!(room["profile_settings"]["mood_scene_id"], "icy-glow");
     }
 
     #[test]

@@ -118,7 +118,21 @@ fn mood_color_scope_enters_mood_and_periodic_does_not_overwrite_it() {
     assert!(snap.mood_active);
     assert!(!snap.soft_off);
     assert!(!snap.hard_off);
-    assert!(snap.profile_settings.mood_profile_id.is_some());
+    assert!(snap.profile_settings.mood_profile_id.is_none());
+    let mood_scene_id = snap
+        .profile_settings
+        .mood_scene_id
+        .as_deref()
+        .expect("mood color should create a scene");
+    assert!(
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .scenes
+            .contains_key(mood_scene_id),
+        "mood scene should be stored for later Mood entry"
+    );
 
     let node_state = commands::build_node_state(&harness.state, &resolved).expect("node state");
     let parsed = serde_json::to_value(node_state).unwrap();
