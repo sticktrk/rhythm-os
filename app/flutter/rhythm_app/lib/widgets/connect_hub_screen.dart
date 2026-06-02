@@ -29,6 +29,7 @@ import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../services/analytics_service.dart';
 import '../services/ble_provisioning_service.dart';
+import '../services/local_rhythm_server_service.dart';
 import '../services/recent_servers_service.dart';
 
 /// Which empty-state variant to show.
@@ -234,6 +235,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   final _manualIpFocus = FocusNode();
   bool _isManualConnecting = false;
   String? _manualConnectError;
+  bool _isStartingLocalServer = false;
+  String? _localServerError;
 
   // RhythmServer branding
   static const _teal = Color(0xFF00BCD4);
@@ -850,6 +853,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     if (!mounted) return;
 
     if (isHealthy) {
+      if (!LocalRhythmServerService.instance
+          .isLocalEndpoint(hub.address, hub.port)) {
+        try {
+          await LocalRhythmServerService.instance.stop();
+        } catch (error) {
+          debugPrint('Local Rhythm Server stop failed: $error');
+        }
+      }
+
       final result = await _persistDiscoveredServerHub(hub, authToken);
 
       if (!mounted) return;
@@ -911,17 +923,97 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           savedHub.token?.trim() != token) {
         final updatedHub = savedHub.copyWith(token: token);
         final updated = await homeProvider.updateHub(updatedHub);
-        return updated ? updatedHub : null;
+        if (!updated) return null;
+        await _removeOtherServerHubs(homeProvider, keepHubId: updatedHub.id);
+        return updatedHub;
       }
+      await _removeOtherServerHubs(homeProvider, keepHubId: savedHub.id);
       return savedHub;
     }
 
-    return homeProvider.addServerHub(
+    final hub = await homeProvider.addServerHub(
       name: discovered.name ?? 'RhythmServer',
       host: discovered.address,
       port: discovered.port,
       token: authToken,
     );
+    if (hub != null) {
+      await _removeOtherServerHubs(homeProvider, keepHubId: hub.id);
+    }
+    return hub;
+  }
+
+  Future<void> _removeOtherServerHubs(
+    HomeProvider homeProvider, {
+    required String keepHubId,
+  }) async {
+    final others = homeProvider.currentHomeHubs
+        .where((hub) => hub.type == HubType.server && hub.id != keepHubId)
+        .toList(growable: false);
+    for (final hub in others) {
+      await homeProvider.deleteHub(hub.id);
+    }
+  }
+
+  Future<void> _startLocalRhythmServer() async {
+    if (_isStartingLocalServer) return;
+    if (!kIsWeb) HapticFeedback.mediumImpact();
+
+    setState(() {
+      _isStartingLocalServer = true;
+      _localServerError = null;
+    });
+
+    try {
+      await LocalRhythmServerService.instance.start(
+        port: localRhythmServerDefaultPort,
+      );
+
+      final hub = DiscoveredHub(
+        host: localRhythmServerHost,
+        port: localRhythmServerDefaultPort,
+        address: localRhythmServerHost,
+        name: 'This Mac',
+        type: HubType.server,
+      );
+      final result = await _persistDiscoveredServerHub(hub, null);
+      if (!mounted) return;
+
+      if (result == null) {
+        setState(() {
+          _isStartingLocalServer = false;
+          _localServerError = 'Could not save the local server';
+        });
+        return;
+      }
+
+      await RecentServersService.instance.record(
+        name: result.name,
+        host: localRhythmServerHost,
+        port: localRhythmServerDefaultPort,
+        token: result.token,
+      );
+
+      if (!mounted) return;
+      setState(() => _isStartingLocalServer = false);
+      if (!kIsWeb) HapticFeedback.heavyImpact();
+      await SuccessModal.show(
+        context,
+        roomCount: 0,
+        hubType: 'RhythmServer',
+      );
+
+      if (mounted && widget.isModal) {
+        Navigator.of(context).pop();
+      }
+    } catch (error) {
+      debugPrint('Local Rhythm Server start failed: $error');
+      if (!mounted) return;
+      setState(() {
+        _isStartingLocalServer = false;
+        _localServerError = 'Could not start the local server';
+      });
+    }
   }
 
   Future<String?> _resolveAuthTokenForDiscoveredHub(DiscoveredHub hub) async {
@@ -1954,9 +2046,80 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
         children: [
+          if (LocalRhythmServerService.instance.canManageLocalServer) ...[
+            _buildLocalServerButton(),
+            const SizedBox(height: 10),
+          ],
           // Manual IP sits with the "find an existing box" family
           _buildCompactManualIp(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildLocalServerButton() {
+    final isBusy = _isStartingLocalServer;
+    final hasError = _localServerError != null;
+
+    return GestureDetector(
+      onTap: isBusy ? null : _startLocalRhythmServer,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        height: 46,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: _teal.withValues(alpha: isBusy ? 0.08 : 0.12),
+          border: Border.all(
+            color: hasError
+                ? Colors.red.withValues(alpha: 0.36)
+                : _teal.withValues(alpha: isBusy ? 0.22 : 0.34),
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: isBusy
+                  ? CircularProgressIndicator(
+                      strokeWidth: 1.8,
+                      color: _teal.withValues(alpha: 0.8),
+                    )
+                  : Icon(
+                      Icons.computer_rounded,
+                      color: _teal.withValues(alpha: 0.9),
+                      size: 18,
+                    ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                hasError
+                    ? _localServerError!
+                    : isBusy
+                        ? 'Starting Local Rhythm Server...'
+                        : 'Start Local Rhythm Server',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: hasError
+                      ? Colors.red.withValues(alpha: 0.82)
+                      : CelestialColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.1,
+                ),
+              ),
+            ),
+            Icon(
+              Icons.arrow_forward_rounded,
+              color: _teal.withValues(alpha: isBusy ? 0.35 : 0.85),
+              size: 18,
+            ),
+          ],
+        ),
       ),
     );
   }

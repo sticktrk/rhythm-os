@@ -19,6 +19,7 @@ import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
+import '../services/local_rhythm_server_service.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
 
@@ -865,23 +866,61 @@ class ServerSyncProvider extends ChangeNotifier {
           'ServerSync: connectIfAvailable — connecting to ${serverHub.endpoint.host}:${serverHub.endpoint.port}');
       _serverHub = serverHub;
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
-      final host = serverHub.endpoint.host;
-      final port = serverHub.endpoint.port;
       final pendingHub = serverHub;
       Future.microtask(() async {
         _roomProvider.clearTransientState();
+        await _syncLocalServerProcessForHub(pendingHub);
+        if (_serverHub?.id != pendingHub.id) return;
         final auth = await _prepareServerHubAuth(pendingHub);
         if (_serverHub?.id != pendingHub.id) return;
         _serverHub = auth.hub;
-        _connection.connect(host, port: port, authToken: auth.authToken);
+        _connection.connect(
+          auth.hub.endpoint.host,
+          port: auth.hub.endpoint.port,
+          authToken: auth.authToken,
+        );
       });
     } else if (_serverHub != null) {
       debugPrint('ServerSync: connectIfAvailable — hub removed, disconnecting');
+      final removedHub = _serverHub;
       _serverHub = null;
       Future.microtask(() async {
+        final localServer = LocalRhythmServerService.instance;
+        if (removedHub != null &&
+            localServer.isLocalEndpoint(
+              removedHub.endpoint.host,
+              removedHub.endpoint.port,
+            )) {
+          await _stopLocalServer();
+        }
         await _roomProvider.clearAllRooms();
         _connection.disconnect();
       });
+    }
+  }
+
+  Future<void> _syncLocalServerProcessForHub(Hub hub) async {
+    final localServer = LocalRhythmServerService.instance;
+    if (localServer.isLocalEndpoint(hub.endpoint.host, hub.endpoint.port)) {
+      try {
+        await localServer.start(port: hub.endpoint.port);
+      } catch (error) {
+        debugPrint('ServerSync: local Rhythm Server start failed: $error');
+      }
+      return;
+    }
+
+    await _stopLocalServer();
+  }
+
+  Future<void> _stopLocalServer() async {
+    final localServer = LocalRhythmServerService.instance;
+    if (!localServer.canManageLocalServer) return;
+
+    try {
+      await localServer.stop();
+    } catch (error) {
+      debugPrint('ServerSync: local Rhythm Server stop failed: $error');
     }
   }
 

@@ -94,6 +94,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     required int b,
     int? brightness,
     int? transitionMs,
+    RhythmNodeColorScope? colorScope,
     String? scope,
   }) async {
     nodeColorCalls.add((
