@@ -1022,7 +1022,12 @@ class ServerSyncProvider extends ChangeNotifier {
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
     _inputBindings = [...hello.inputBindings];
-    _scenes = [...hello.scenes];
+    // Only replace the cached scenes when this hello actually carries them —
+    // incremental state pushes (e.g. after binding a mood scene) can arrive
+    // with an empty list and would otherwise wipe the gallery.
+    if (hello.scenes.isNotEmpty || _scenes.isEmpty) {
+      _scenes = [...hello.scenes];
+    }
     _optimisticMoodSceneIds.clear();
     _modeConfigs = [...?hello.mode?.configs];
     _profiles = [...hello.profiles];
