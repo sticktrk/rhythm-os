@@ -1232,6 +1232,116 @@ mod tests {
         }
     }
 
+    struct DefaultOnlyStorage;
+
+    impl Storage for DefaultOnlyStorage {
+        fn load_rooms(&self) -> Result<RoomManager> {
+            Ok(RoomManager::new())
+        }
+
+        fn save_rooms(&self, _rooms: &RoomManager) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_light_profiles(&self) -> Result<StoredLightProfiles> {
+            Ok(StoredLightProfiles {
+                solar_noon_hour: 12.0,
+                profiles: Vec::new(),
+            })
+        }
+
+        fn save_light_profiles(&self, _config: &StoredLightProfiles) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_location(&self) -> Result<StoredLocation> {
+            Ok(StoredLocation {
+                latitude: None,
+                longitude: None,
+                utc_offset_hours: 0.0,
+                timezone_name: None,
+            })
+        }
+
+        fn save_location(&self, _loc: &StoredLocation) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_settings(&self) -> Result<StoredSettings> {
+            Ok(StoredSettings {
+                power_save: false,
+                light_breaker_enabled: true,
+                active_mode: RhythmMode::Day,
+                last_active_mode_cause: ModeChangeCause::default(),
+                last_active_mode_transition_id: None,
+                last_active_mode_change_utc_ms: None,
+                modes: Vec::new(),
+                mode_transitions: Vec::new(),
+                auto_update: true,
+            })
+        }
+
+        fn save_settings(&self, _settings: &StoredSettings) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
+            Ok(Vec::new())
+        }
+
+        fn save_all_hub_credentials(&self, _creds: &[HubCredentials]) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_hub_registry_for(&self, _key: &HubKey) -> Result<Option<Value>> {
+            Ok(None)
+        }
+
+        fn save_hub_registry_for(&self, _key: &HubKey, _data: &Value) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn storage_default_extension_methods_are_noops() {
+        let storage = DefaultOnlyStorage;
+        let auth = crate::auth::StoredApiAuth::default();
+        let wifi = crate::provisioning::WifiCredentials {
+            ssid: "Test".to_string(),
+            password: "secret".to_string(),
+        };
+
+        assert_eq!(StoredMotionTimers::default().schema_version, 1);
+        assert!(storage.load_scenes().unwrap().is_none());
+        storage.save_scenes(&StoredScenes::default()).unwrap();
+        assert!(storage.load_motion_timers().unwrap().is_none());
+        storage
+            .save_motion_timers(&StoredMotionTimers::default())
+            .unwrap();
+        storage.clear_hub_registries().unwrap();
+        assert!(storage
+            .load_integration_backup_files(true)
+            .unwrap()
+            .is_empty());
+        storage.restore_integration_backup_files(&[]).unwrap();
+        assert!(storage.load_canonical_registry().unwrap().is_none());
+        storage
+            .save_canonical_registry(&serde_json::json!({}))
+            .unwrap();
+        assert!(storage.load_topology().unwrap().is_none());
+        storage.save_topology(&serde_json::json!({})).unwrap();
+        assert!(storage
+            .load_commissioning_wifi_credentials()
+            .unwrap()
+            .is_none());
+        storage.save_commissioning_wifi_credentials(&wifi).unwrap();
+        storage.clear_commissioning_wifi_credentials().unwrap();
+        assert!(storage.load_api_auth().unwrap().is_none());
+        storage.save_api_auth(&auth).unwrap();
+        storage.clear_api_auth().unwrap();
+        storage.clear_factory_reset_state().unwrap();
+    }
+
     // ---- StoredLightProfiles tests (no feature gate needed) ----
 
     #[test]
@@ -2266,6 +2376,71 @@ mod tests {
                 std::fs::read_to_string(path.join("matter").join("existing.json")).unwrap(),
                 "existing"
             );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn restore_integration_backup_files_rejects_empty_absolute_and_unsupported_paths() {
+            let (storage, path) = temp_storage();
+            for candidate in ["", "/matter/fabric.json", "hue/fabric.json"] {
+                let error = storage
+                    .restore_integration_backup_files(&[crate::bundle::BackupIntegrationFile {
+                        path: candidate.to_string(),
+                        content: "data".to_string(),
+                        secret: true,
+                    }])
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("integration backup path"),
+                    "unexpected error for {candidate:?}: {error:#}"
+                );
+            }
+            cleanup(&path);
+        }
+
+        #[test]
+        fn optional_json_files_return_none_when_missing_or_corrupt() {
+            let (storage, path) = temp_storage();
+            let hub_key = HubKey::new(crate::hub::HubType::new("hue"), "192.168.1.60");
+
+            assert!(storage.load_scenes().unwrap().is_none());
+            std::fs::write(path.join("scenes.json"), "{").unwrap();
+            assert!(storage.load_scenes().unwrap().is_none());
+
+            assert!(storage.load_motion_timers().unwrap().is_none());
+            std::fs::write(path.join("motion_timers.json"), "{").unwrap();
+            assert!(storage.load_motion_timers().unwrap().is_none());
+
+            assert!(storage.load_hub_registry_for(&hub_key).unwrap().is_none());
+            std::fs::write(path.join("hub_registry_hue_192_168_1_60.json"), "{").unwrap();
+            assert!(storage.load_hub_registry_for(&hub_key).unwrap().is_none());
+
+            assert!(storage.load_canonical_registry().unwrap().is_none());
+            std::fs::write(path.join("canonical_registry.json"), "{").unwrap();
+            assert!(storage.load_canonical_registry().unwrap().is_none());
+
+            assert!(storage.load_topology().unwrap().is_none());
+            std::fs::write(path.join("topology.json"), "{").unwrap();
+            assert!(storage.load_topology().unwrap().is_none());
+
+            assert!(storage
+                .load_commissioning_wifi_credentials()
+                .unwrap()
+                .is_none());
+            std::fs::write(path.join("commissioning_wifi.json"), "{").unwrap();
+            assert!(storage
+                .load_commissioning_wifi_credentials()
+                .unwrap()
+                .is_none());
+            storage.clear_commissioning_wifi_credentials().unwrap();
+            storage.clear_commissioning_wifi_credentials().unwrap();
+
+            assert!(storage.load_api_auth().unwrap().is_none());
+            std::fs::write(path.join("auth.json"), "{").unwrap();
+            assert!(storage.load_api_auth().unwrap().is_none());
+            storage.clear_api_auth().unwrap();
+            storage.clear_api_auth().unwrap();
+
             cleanup(&path);
         }
 

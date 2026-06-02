@@ -482,6 +482,260 @@ fn materialize_unassigned_canonical_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Mutex, OnceLock};
+
+    use rhythm_os::hub::HubEvent;
+    use rhythm_os::provisioning::WifiCredentials;
+    use rhythm_os::storage::{FileStorage, Storage};
+
+    use crate::cloud_profiles::CloudMatterProfileCatalog;
+    use crate::controller::MatterDeviceRegistry;
+    use crate::transport::{
+        MatterAttributeReport, MatterColorMode, MatterDeviceInfo, MatterGroup, MatterGroupMember,
+        MatterLevelCommandVariant, MatterLevelStepMode,
+    };
+
+    #[derive(Default)]
+    struct FakeMatterTransport {
+        commission_requests: Mutex<Vec<MatterCommissionRequest>>,
+        commission_error: Mutex<Option<String>>,
+        subscriptions: Mutex<Vec<Vec<MatterSubscriptionTarget>>>,
+        subscription_error: Mutex<Option<String>>,
+    }
+
+    impl FakeMatterTransport {
+        fn with_commission_error(error: impl Into<String>) -> Self {
+            Self {
+                commission_error: Mutex::new(Some(error.into())),
+                ..Self::default()
+            }
+        }
+
+        fn with_subscription_error(error: impl Into<String>) -> Self {
+            Self {
+                subscription_error: Mutex::new(Some(error.into())),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl MatterTransport for FakeMatterTransport {
+        fn commission_light(
+            &self,
+            request: &MatterCommissionRequest,
+        ) -> Result<CommissionedDevice> {
+            self.commission_requests
+                .lock()
+                .unwrap()
+                .push(request.clone());
+            if let Some(error) = self.commission_error.lock().unwrap().clone() {
+                anyhow::bail!(error);
+            }
+            Ok(commissioned_device(request.node_id))
+        }
+
+        fn decommission_device(&self, _node_id: u64, _force: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+            Ok(commissioned_device(node_id))
+        }
+
+        fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn configure_group(&self, _group: &MatterGroup) -> Result<()> {
+            Ok(())
+        }
+
+        fn remove_group(&self, _group_id: u16, _members: &[MatterGroupMember]) -> Result<()> {
+            Ok(())
+        }
+
+        fn identify_light(&self, _node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_brightness(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _level: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn run_level_command(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _command: MatterLevelCommandVariant,
+            _level_or_step: u8,
+            _step_mode: Option<MatterLevelStepMode>,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_color_temperature(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _kelvin: u16,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_xy(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _x: f32,
+            _y: f32,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_hue_saturation(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _hue: u8,
+            _saturation: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_on_off(&self, _node_id: u64, _endpoint: u16) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn subscribe_on_off(
+            &self,
+            targets: &[MatterSubscriptionTarget],
+            _min_interval_secs: u16,
+            _max_interval_secs: u16,
+        ) -> Result<()> {
+            self.subscriptions.lock().unwrap().push(targets.to_vec());
+            if let Some(error) = self.subscription_error.lock().unwrap().clone() {
+                anyhow::bail!(error);
+            }
+            Ok(())
+        }
+
+        fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn state() -> SharedState {
+        Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()))
+    }
+
+    fn unique_data_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rhythm-matter-commissioning-{name}-{nanos}"))
+    }
+
+    fn state_with_storage(name: &str) -> (SharedState, std::path::PathBuf) {
+        let path = unique_data_dir(name);
+        let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
+        let state = state();
+        state.lock().unwrap().storage = Some(Box::new(storage));
+        (state, path)
+    }
+
+    fn wifi(ssid: &str, password: &str) -> WifiCredentials {
+        WifiCredentials {
+            ssid: ssid.to_string(),
+            password: password.to_string(),
+        }
+    }
+
+    fn save_wifi(path: &std::path::Path, creds: &WifiCredentials) {
+        let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
+        storage.save_commissioning_wifi_credentials(creds).unwrap();
+    }
+
+    fn commissioned_device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Acme".to_string(),
+            product_name: "Color Lamp".to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: Some(format!("serial-{node_id}")),
+            light_endpoint: 2,
+            color_modes: vec![
+                MatterColorMode::ColorTemperature,
+                MatterColorMode::Xy,
+                MatterColorMode::HueSaturation,
+            ],
+            min_kelvin: Some(2200),
+            max_kelvin: Some(6500),
+        }
+    }
+
+    fn hub_data() -> (Arc<MatterHubData>, std::sync::mpsc::Receiver<HubEvent>) {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        (
+            Arc::new(MatterHubData {
+                transport: OnceLock::new(),
+                capture_dir: OnceLock::new(),
+                registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
+                fabric_id: "default".to_string(),
+                commissioned: Mutex::new(Vec::new()),
+                next_node_id: AtomicU64::new(10),
+                device_caps: Mutex::new(HashMap::new()),
+                device_quirks: Mutex::new(HashMap::new()),
+                cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
+                decommissioning: Mutex::new(HashSet::new()),
+                recently_decommissioned: Mutex::new(HashMap::new()),
+                event_tx,
+            }),
+            event_rx,
+        )
+    }
+
+    fn install_transport(
+        hub_data: &Arc<MatterHubData>,
+        transport: Arc<FakeMatterTransport>,
+    ) -> Arc<FakeMatterTransport> {
+        let transport_dyn: Arc<dyn MatterTransport> = transport.clone();
+        assert!(hub_data.transport.set(transport_dyn).is_ok());
+        transport
+    }
+
+    fn pairing_request() -> MatterPairingParams {
+        MatterPairingParams::from_value(&serde_json::json!({
+            "setup_payload": "MT:Y.K908OC16750648G00",
+            "session_id": "pair-1",
+            "rendezvous": "ble"
+        }))
+        .unwrap()
+    }
+
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
 
     #[test]
     fn pairing_params_accept_raw_mt_payload() {
@@ -503,6 +757,45 @@ mod tests {
         assert_eq!(request.setup_payload, "MT:Y.K908OC16750648G00");
         assert_eq!(request.node_id, 123);
         assert_eq!(request.rendezvous, MatterCommissioningRendezvous::Ble);
+    }
+
+    #[test]
+    fn pairing_params_trim_validate_and_default_manual_codes_to_on_network() {
+        let parsed = MatterPairingParams::from_value(&serde_json::json!({
+            "setup_payload": " 12345678901 ",
+            "session_id": "   ",
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.setup_payload, "12345678901");
+        assert_eq!(parsed.session_id, None);
+        assert_eq!(parsed.network, MatterCommissioningNetwork::Wifi);
+        assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::OnNetwork);
+
+        assert_eq!(
+            string_error(MatterPairingParams::from_value(&serde_json::json!({}))),
+            "Missing 'setup_payload' in pairing params"
+        );
+        assert_eq!(
+            string_error(MatterPairingParams::from_value(&serde_json::json!({
+                "setup_payload": " ",
+            }))),
+            "Missing 'setup_payload' in pairing params"
+        );
+        assert_eq!(
+            string_error(MatterPairingParams::from_value(&serde_json::json!({
+                "setup_payload": "MT:payload",
+                "network": "thread",
+            }))),
+            "Unsupported Matter network 'thread'; only 'wifi' is currently supported"
+        );
+        assert_eq!(
+            string_error(MatterPairingParams::from_value(&serde_json::json!({
+                "setup_payload": "MT:payload",
+                "rendezvous": "nfc",
+            }))),
+            "Unsupported Matter rendezvous 'nfc'; expected 'auto', 'ble', or 'on_network'"
+        );
     }
 
     #[test]
@@ -589,5 +882,188 @@ mod tests {
 
         assert!(message.contains("BlueZ"));
         assert!(!message.contains("BluezEndpoint.cpp"));
+    }
+
+    #[test]
+    fn wifi_credentials_load_from_storage_or_platform_and_persist_recovered_values() {
+        let state = state();
+        assert_eq!(
+            string_error(load_commissioning_wifi_credentials(&state)),
+            "Matter Wi-Fi commissioning requires stored appliance Wi-Fi credentials; provision the appliance over Wi-Fi before pairing Matter lights"
+        );
+
+        let stored_wifi = wifi("StoredNet", "stored-secret");
+        let (stored_state, stored_path) = state_with_storage("stored");
+        save_wifi(&stored_path, &stored_wifi);
+
+        let loaded = load_commissioning_wifi_credentials(&stored_state).unwrap();
+        assert_eq!(loaded.ssid, stored_wifi.ssid);
+        assert_eq!(loaded.password, stored_wifi.password);
+        std::fs::remove_dir_all(stored_path).ok();
+
+        let recovered_wifi = wifi("PlatformNet", "platform-secret");
+        let (platform_state, platform_path) = state_with_storage("platform");
+        platform_state
+            .lock()
+            .unwrap()
+            .commissioning_wifi_credentials_provider = Some(Arc::new({
+            let recovered_wifi = recovered_wifi.clone();
+            move || Ok(Some(recovered_wifi.clone()))
+        }));
+
+        let loaded = load_commissioning_wifi_credentials(&platform_state).unwrap();
+        assert_eq!(loaded.ssid, recovered_wifi.ssid);
+        assert_eq!(loaded.password, recovered_wifi.password);
+
+        let storage = FileStorage::new(platform_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            storage.load_commissioning_wifi_credentials().unwrap(),
+            Some(recovered_wifi)
+        );
+        std::fs::remove_dir_all(platform_path).ok();
+    }
+
+    #[test]
+    fn ensure_matter_hub_connected_reports_missing_provider_when_not_bootstrapped() {
+        let state = state();
+        assert_eq!(
+            string_error(ensure_matter_hub_connected(&state)),
+            "No hub provider registered"
+        );
+    }
+
+    #[test]
+    fn pair_device_success_records_fabric_state_metadata_subscription_and_event() {
+        let (state, path) = state_with_storage("pair-success");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let (hub_data, event_rx) = hub_data();
+        let transport = install_transport(&hub_data, Arc::new(FakeMatterTransport::default()));
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Complete);
+        let paired = session.device.unwrap();
+        assert_eq!(paired.device_id, "matter-10-2");
+        assert_eq!(paired.name, "Acme Color Lamp");
+        assert_eq!(paired.device_type, DeviceType::Light);
+
+        let requests = transport.commission_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].node_id, 10);
+        assert_eq!(requests[0].wifi_credentials.ssid, "PairNet");
+        assert_eq!(requests[0].wifi_credentials.password, "pair-secret");
+        assert_eq!(requests[0].rendezvous, MatterCommissioningRendezvous::Ble);
+        drop(requests);
+
+        assert_eq!(
+            transport.subscriptions.lock().unwrap().as_slice(),
+            &[vec![MatterSubscriptionTarget {
+                node_id: 10,
+                endpoint: 2
+            }]]
+        );
+        assert_eq!(hub_data.commissioned.lock().unwrap()[0].node_id, 10);
+        assert!(hub_data
+            .device_caps
+            .lock()
+            .unwrap()
+            .contains_key("matter-10-2"));
+        assert!(hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .contains_key("matter-10-2"));
+
+        let matter_key = HubKey::new(HubType::new("matter"), "local");
+        let state_guard = state.lock().unwrap();
+        let canonical = state_guard
+            .canonical_registry
+            .find_by_native_id(&matter_key, "matter-10-2")
+            .expect("paired device should be in canonical registry");
+        assert!(state_guard
+            .topology
+            .get_device_node(&canonical.id)
+            .is_some());
+        drop(state_guard);
+
+        match event_rx.try_recv().unwrap() {
+            HubEvent::DevicePaired {
+                hub_key,
+                device_id,
+                name,
+                device_type,
+            } => {
+                assert_eq!(hub_key, Some(matter_key));
+                assert_eq!(device_id, "matter-10");
+                assert_eq!(name, "Acme Color Lamp");
+                assert_eq!(device_type, DeviceType::Light);
+            }
+            other => panic!("expected device paired event, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn pair_device_failure_reports_summarized_error_without_recording_device() {
+        let (state, path) = state_with_storage("pair-failure");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let (hub_data, _event_rx) = hub_data();
+        let transport = Arc::new(FakeMatterTransport::with_commission_error(
+            "ConnectionDelegate timeout",
+        ));
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Failed);
+        assert!(session.device.is_none());
+        assert!(session
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("timed out while discovering the bulb"));
+        assert_eq!(transport.commission_requests.lock().unwrap().len(), 1);
+        assert!(hub_data.commissioned.lock().unwrap().is_empty());
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn pair_device_success_continues_when_subscription_registration_fails() {
+        let (state, path) = state_with_storage("pair-subscription-failure");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let (hub_data, _event_rx) = hub_data();
+        let transport = install_transport(
+            &hub_data,
+            Arc::new(FakeMatterTransport::with_subscription_error(
+                "subscription unavailable",
+            )),
+        );
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Complete);
+        assert_eq!(transport.subscriptions.lock().unwrap().len(), 1);
+        assert_eq!(hub_data.commissioned.lock().unwrap()[0].node_id, 10);
+
+        std::fs::remove_dir_all(path).ok();
     }
 }

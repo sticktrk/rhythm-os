@@ -283,6 +283,59 @@ mod tests {
     }
 
     #[test]
+    fn summarize_json_scalars_do_not_log_secret_values() {
+        assert_eq!(summarize_json_for_log(&serde_json::Value::Null), "null");
+        assert_eq!(summarize_json_for_log(&serde_json::json!(true)), "bool");
+        assert_eq!(summarize_json_for_log(&serde_json::json!(123)), "number");
+        assert_eq!(
+            summarize_json_for_log(&serde_json::json!("secret-token")),
+            "string"
+        );
+    }
+
+    #[test]
+    fn summarize_json_object_truncates_long_key_lists() {
+        let summary = summarize_json_for_log(&serde_json::json!({
+            "a": 1,
+            "b": 2,
+            "c": 3,
+            "d": 4,
+            "e": 5,
+            "f": 6,
+            "g": 7,
+        }));
+
+        assert_eq!(summary, "object(keys=[a,b,c,d,e,f,...],len=7)");
+    }
+
+    #[test]
+    fn command_ids_are_monotonic_and_prefixed() {
+        let first = next_command_id("test");
+        let second = next_command_id("test");
+
+        let first_num = first.strip_prefix("test-").unwrap().parse::<u64>().unwrap();
+        let second_num = second
+            .strip_prefix("test-")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(second_num, first_num + 1);
+    }
+
+    #[test]
+    fn build_log_clock_requires_location_for_fixed_offset() {
+        assert!(build_log_clock(None, -4.0, false).is_none());
+        assert!(matches!(
+            build_log_clock(None, -4.0, true),
+            Some(LogClock::FixedOffset(_))
+        ));
+        assert!(matches!(
+            build_log_clock(Some("America/New_York"), -4.0, false),
+            Some(LogClock::Timezone(_))
+        ));
+    }
+
+    #[test]
     fn format_timestamp_uses_rhythm_timezone_override() {
         let now_utc = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 4, 23, 19, 32, 47)
             .single()
@@ -304,5 +357,17 @@ mod tests {
         let timestamp = format_timestamp_for_log(now_utc, Some(&clock));
 
         assert_eq!(timestamp, "2026-04-23T14:32:47.000000-05:00");
+    }
+
+    #[test]
+    fn update_log_clock_sets_configured_clock() {
+        update_log_clock_from_location(None, 2.0, true);
+        assert!(matches!(
+            configured_log_clock(),
+            Some(LogClock::FixedOffset(_))
+        ));
+
+        update_log_clock_from_location(None, 0.0, false);
+        assert!(configured_log_clock().is_none());
     }
 }

@@ -12149,6 +12149,21 @@ mod tests {
         (state, runtime)
     }
 
+    fn setup_state_with_empty_registry() -> (SharedState, Arc<MockRuntime>, HubKey) {
+        let (state, runtime) = setup_state(Vec::new());
+        let registry: Arc<Mutex<dyn HubRegistry>> =
+            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+
+        let hub_key = {
+            let mut app = state.lock().unwrap();
+            let hub_key = app.hubs.keys().next().cloned().unwrap();
+            app.hubs.get_mut(&hub_key).unwrap().registry = Some(registry);
+            hub_key
+        };
+
+        (state, runtime, hub_key)
+    }
+
     fn add_button_device_node(state: &SharedState, native_id: &str) -> String {
         let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
         let identity = crate::canonical::identity::DiscoveredIdentity {
@@ -12172,6 +12187,848 @@ mod tests {
         };
         s.topology.ensure_standalone_device(&canonical_id);
         canonical_id
+    }
+
+    #[test]
+    fn pure_room_state_helpers_normalize_legacy_flags_and_validate_targets() {
+        let settings = RoomProfileSettings::default();
+
+        assert_eq!(
+            room_mode_state_for_settings(false, &settings, true, true, true, true),
+            RoomModeState::HardOff
+        );
+        assert_eq!(
+            room_mode_state_for_settings(false, &settings, false, false, false, true),
+            RoomModeState::Warning
+        );
+        assert_eq!(
+            room_mode_state_for_settings(false, &settings, false, true, true, false),
+            RoomModeState::Mood
+        );
+        assert_eq!(
+            persistent_room_state_for_settings(false, &settings, false, false, true),
+            RoomModeState::Standby
+        );
+        assert_eq!(
+            room_state_for_mood_setting(false, &settings, RoomModeState::Wake),
+            RoomModeState::Wake
+        );
+        assert!(room_mood_enabled(false, &settings));
+        assert!(room_mood_active(false, &settings, false, true, true));
+        assert!(!room_mood_active(false, &settings, true, true, false));
+
+        assert_eq!(
+            normalize_legacy_state_flags(true, false, false),
+            (true, false, false)
+        );
+        assert_eq!(
+            normalize_legacy_state_flags(true, true, false),
+            (false, true, false)
+        );
+        assert_eq!(
+            normalize_legacy_state_flags(true, true, true),
+            (false, false, true)
+        );
+
+        assert_eq!(
+            room_flags_for_target_state(RoomModeState::Active).unwrap(),
+            (false, false, false)
+        );
+        assert_eq!(
+            room_flags_for_target_state(RoomModeState::Mood).unwrap(),
+            (false, true, false)
+        );
+        assert_eq!(
+            room_flags_for_target_state(RoomModeState::Standby).unwrap(),
+            (true, false, false)
+        );
+        assert_eq!(
+            room_flags_for_target_state(RoomModeState::HardOff).unwrap(),
+            (false, false, true)
+        );
+        assert!(room_flags_for_target_state(RoomModeState::Wake)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be set directly"));
+        assert!(room_flags_for_target_state(RoomModeState::Warning)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be set directly"));
+    }
+
+    #[test]
+    fn restored_node_state_from_snapshot_applies_legacy_flag_precedence() {
+        let mut snap = make_light_child_snapshot("light-1", "room-1");
+        snap.rhythm_enabled = false;
+        snap.disabled = true;
+        snap.time_offset_minutes = 15.0;
+        snap.brightness_offset = -5.0;
+        snap.soft_off = true;
+        snap.mood_active = true;
+        snap.hard_off = true;
+        snap.standby_enabled = true;
+
+        let restored =
+            restored_node_state_from_snapshot(&rhythm_core::NodeSnapshot::from_room_snapshot(snap));
+
+        assert!(!restored.rhythm_enabled);
+        assert!(restored.disabled);
+        assert_eq!(restored.time_offset_minutes, 15.0);
+        assert_eq!(restored.brightness_offset, -5.0);
+        assert!(!restored.soft_off);
+        assert!(!restored.mood_active);
+        assert!(restored.hard_off);
+        assert!(restored.standby_enabled);
+    }
+
+    #[test]
+    fn selected_mode_transition_handles_none_auto_exact_and_errors() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.set_mode_transition_configs(vec![
+                rhythm_core::ModeTransitionConfig::new(RhythmMode::Day, RhythmMode::Sleep, 1_000)
+                    .with_id("manual-day-sleep")
+                    .with_trigger(ModeTransitionTrigger::Manual),
+                rhythm_core::ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 2_000)
+                    .with_id("sleep-day")
+                    .with_trigger(ModeTransitionTrigger::Scheduled(
+                        rhythm_core::ModeTransitionTime::from_hour_minute(7, 0).unwrap(),
+                    )),
+            ]);
+        }
+
+        assert!(selected_mode_transition(
+            &state,
+            RhythmMode::Day,
+            RhythmMode::Sleep,
+            &ModeTransitionSelection::None,
+        )
+        .unwrap()
+        .is_none());
+
+        let auto = selected_mode_transition(
+            &state,
+            RhythmMode::Day,
+            RhythmMode::Sleep,
+            &ModeTransitionSelection::Auto,
+        )
+        .unwrap()
+        .expect("auto should prefer matching manual transition");
+        assert_eq!(auto.id, "manual_day_sleep");
+
+        let exact = selected_mode_transition(
+            &state,
+            RhythmMode::Sleep,
+            RhythmMode::Day,
+            &ModeTransitionSelection::Exact {
+                id: "sleep_day".to_string(),
+            },
+        )
+        .unwrap()
+        .expect("exact transition should resolve");
+        assert_eq!(exact.duration_ms, TimerSetting::Fixed { value: 2_000 });
+
+        assert!(selected_mode_transition(
+            &state,
+            RhythmMode::Day,
+            RhythmMode::Sleep,
+            &ModeTransitionSelection::Exact {
+                id: "missing".to_string(),
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Unknown transition"));
+
+        assert!(selected_mode_transition(
+            &state,
+            RhythmMode::Day,
+            RhythmMode::Sleep,
+            &ModeTransitionSelection::Exact {
+                id: "sleep_day".to_string(),
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("expected Day->Sleep"));
+    }
+
+    #[test]
+    fn automation_action_validation_and_cycle_selection_cover_edge_cases() {
+        assert_eq!(
+            next_mode_in_cycle(RhythmMode::Day, &[RhythmMode::Day, RhythmMode::Sleep]).unwrap(),
+            RhythmMode::Sleep
+        );
+        assert_eq!(
+            next_mode_in_cycle(RhythmMode::Sleep, &[RhythmMode::Day, RhythmMode::Sleep]).unwrap(),
+            RhythmMode::Day
+        );
+        assert_eq!(
+            next_mode_in_cycle(RhythmMode::Day, &[RhythmMode::Sleep, RhythmMode::Day]).unwrap(),
+            RhythmMode::Sleep
+        );
+        assert!(next_mode_in_cycle(RhythmMode::Day, &[RhythmMode::Day])
+            .unwrap_err()
+            .to_string()
+            .contains("at least two modes"));
+
+        assert!(validate_automation_action(&AutomationAction::ModeSet {
+            mode: RhythmMode::Sleep,
+            transition: ModeTransitionSelection::None,
+        })
+        .is_ok());
+        assert!(validate_automation_action(&AutomationAction::ModeCycle {
+            modes: vec![RhythmMode::Day],
+            transition: ModeTransitionSelection::Auto,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("at least two modes"));
+        assert!(validate_automation_action(&AutomationAction::ModeCycle {
+            modes: vec![RhythmMode::Day, RhythmMode::Day],
+            transition: ModeTransitionSelection::Auto,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate mode"));
+    }
+
+    #[test]
+    fn mode_output_scope_and_display_helpers_cover_state_specific_branches() {
+        let scope = ModeOutputApplyScope::all_visible();
+        assert!(scope.includes(RoomModeState::Active));
+        assert!(scope.includes(RoomModeState::Mood));
+        assert!(scope.includes(RoomModeState::Standby));
+        assert!(scope.includes(RoomModeState::Wake));
+        assert!(scope.includes(RoomModeState::Warning));
+        assert!(!scope.includes(RoomModeState::HardOff));
+        assert!(ModeOutputApplyScope::default().is_empty());
+
+        let previous = ModeConfig::default_for_mode(RhythmMode::Day);
+        let mut idle_updated = previous.clone();
+        idle_updated.idle_profile_id = Some(rhythm_core::DAY_IDLE_PROFILE_ID.into());
+        assert_eq!(
+            mode_output_apply_scope(false, &previous, &idle_updated),
+            ModeOutputApplyScope {
+                active: false,
+                idle: true,
+                wake: false,
+                warning: false,
+            }
+        );
+
+        let mut wake_updated = previous.clone();
+        wake_updated.wake_profile_id = Some(rhythm_core::DAY_IDLE_PROFILE_ID.into());
+        assert_eq!(
+            mode_output_apply_scope(false, &previous, &wake_updated),
+            ModeOutputApplyScope {
+                active: false,
+                idle: false,
+                wake: true,
+                warning: false,
+            }
+        );
+
+        let mut warning_updated = previous.clone();
+        warning_updated.warning_profile_id = Some(rhythm_core::DAY_IDLE_PROFILE_ID.into());
+        assert_eq!(
+            mode_output_apply_scope(false, &previous, &warning_updated),
+            ModeOutputApplyScope {
+                active: false,
+                idle: false,
+                wake: false,
+                warning: true,
+            }
+        );
+
+        let mut active_updated = previous.clone();
+        active_updated.active_profile_id = Some(rhythm_core::SLEEP_PROFILE_ID.into());
+        assert_eq!(
+            mode_output_apply_scope(false, &previous, &active_updated),
+            ModeOutputApplyScope::all_visible()
+        );
+        assert_eq!(
+            mode_output_apply_scope(true, &previous, &previous),
+            ModeOutputApplyScope::all_visible()
+        );
+
+        let profiles = factory_default_light_profile_config_map();
+        let mode_configs = vec![ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+            idle_profile_id: None,
+            wake_profile_id: None,
+            warning_profile_id: None,
+            room_defaults: vec![],
+        }];
+        assert_eq!(
+            resolved_active_profile_id_for_mode_from_parts(
+                &profiles,
+                &mode_configs,
+                RhythmMode::Day
+            ),
+            rhythm_core::RHYTHM_PROFILE_ID
+        );
+        assert_eq!(
+            resolved_active_profile_id_for_mode_from_parts(&profiles, &[], RhythmMode::Sleep),
+            rhythm_core::SLEEP_PROFILE_ID
+        );
+
+        let lighting = RoomLightingContext {
+            light_profile_configs: &profiles,
+            mode_configs: &mode_configs,
+            mode: RhythmMode::Day,
+            solar_noon: 12.0,
+            latitude: None,
+            longitude: None,
+            timezone_name: None,
+            utc_offset: 0.0,
+        };
+        let settings = RoomProfileSettings::default();
+        let hard_off = compute_room_display_values_for_settings_from_parts(
+            lighting,
+            RoomLightingInput {
+                settings: &settings,
+                room_state: RoomModeState::HardOff,
+                time_offset_minutes: 0.0,
+                brightness_offset: 75.0,
+            },
+        );
+        assert_eq!(hard_off, (0, 0));
+
+        let active = compute_room_display_values_for_settings_from_parts(
+            lighting,
+            RoomLightingInput {
+                settings: &settings,
+                room_state: RoomModeState::Active,
+                time_offset_minutes: 0.0,
+                brightness_offset: 75.0,
+            },
+        );
+        let warning = compute_room_display_values_for_settings_from_parts(
+            lighting,
+            RoomLightingInput {
+                settings: &settings,
+                room_state: RoomModeState::Warning,
+                time_offset_minutes: 0.0,
+                brightness_offset: 75.0,
+            },
+        );
+        assert!(warning.0 > 0);
+        assert!(warning.0 < active.0);
+        assert!((1_000..=10_000).contains(&warning.1));
+    }
+
+    #[test]
+    fn pure_profile_output_helpers_cover_wrap_fallback_and_direct_color_paths() {
+        let rhythm = factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID).unwrap();
+        let day_idle = factory_default_idle_profile_config_for_mode(RhythmMode::Day);
+
+        assert!(absorb_light_profile_time_offset(&day_idle, 12.0, 30.0, 6.0, 18.0).is_none());
+        assert!(absorb_light_profile_time_offset(&rhythm, 12.0, 30.0, 6.0, 18.0).is_none());
+        assert!(absorb_light_profile_time_offset(&rhythm, 23.0, 60.0, 0.0, 12.0).is_some());
+        assert!(absorb_light_profile_time_offset(&rhythm, 1.0, 60.0, 12.0, 24.0).is_some());
+        assert!(absorb_light_profile_time_offset(&rhythm, 1.0, 600.0, 6.0, 18.0).is_none());
+
+        assert_eq!(node_mood_profile_id("room 1/x"), "node_mood_room_201_2fx");
+        assert_eq!(
+            node_mood_scene_id("room 1/x"),
+            "node-mood-scene-room-201-2fx"
+        );
+
+        let same_name_snapshot =
+            rhythm_core::NodeSnapshot::from_room_snapshot(make_snapshot("room-1", false, false));
+        assert_eq!(node_mood_profile_name(&same_name_snapshot), "Mood");
+        assert_eq!(node_mood_scene_name(&same_name_snapshot), "Mood");
+
+        let mut named = make_snapshot("room-1", false, false);
+        named.name = "Desk".to_string();
+        let named_snapshot = rhythm_core::NodeSnapshot::from_room_snapshot(named);
+        assert_eq!(node_mood_profile_name(&named_snapshot), "Desk Mood");
+        assert_eq!(node_mood_scene_name(&named_snapshot), "Desk Mood");
+
+        let kelvin_values = rhythm_core::LightingValues::new(3_000, 44, 12.0, 0.0, 500, 60);
+        let kelvin_command = build_room_command_from_values(&kelvin_values, 33, 250);
+        assert!(!kelvin_command.is_direct_color);
+        assert_eq!(kelvin_command.brightness, 33);
+        assert_eq!(kelvin_command.kelvin, 3_000);
+        assert_eq!(kelvin_command.transition_ms, Some(250));
+
+        let direct_values = rhythm_core::LightingValues::from_color(
+            Rgb::new(12, 34, 56),
+            XyColor::new(0.2, 0.3),
+            66,
+            12.0,
+            0.0,
+            500,
+            60,
+        );
+        let direct_command = build_room_command_from_values(&direct_values, 55, 125);
+        assert!(direct_command.is_direct_color);
+        assert_eq!(direct_command.brightness, 55);
+        assert_eq!(direct_command.rgb, Rgb::new(12, 34, 56));
+        assert_eq!(direct_command.xy, XyColor::new(0.2, 0.3));
+        assert_eq!(direct_command.transition_ms, Some(125));
+
+        let profiles = factory_default_light_profile_config_map();
+        let lighting = RoomLightingContext {
+            light_profile_configs: &profiles,
+            mode_configs: &[],
+            mode: RhythmMode::Day,
+            solar_noon: 12.0,
+            latitude: None,
+            longitude: None,
+            timezone_name: None,
+            utc_offset: 0.0,
+        };
+        let mut settings = RoomProfileSettings {
+            profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.to_string()),
+            fade_ms: Some(TimerSetting::Fixed { value: 345 }),
+            ..Default::default()
+        };
+        let active = resolved_profile_config_for_room_state_from_parts(
+            lighting,
+            &settings,
+            RoomModeState::Active,
+        );
+        assert_eq!(active.id, rhythm_core::RHYTHM_PROFILE_ID);
+        assert_eq!(active.fade_ms, TimerSetting::Fixed { value: 345 });
+
+        settings.mood_profile_id = Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.to_string());
+        let mood = resolved_profile_config_for_room_state_from_parts(
+            lighting,
+            &settings,
+            RoomModeState::Mood,
+        );
+        assert_eq!(mood.id, rhythm_core::SLEEP_IDLE_PROFILE_ID);
+
+        let warning_config = ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.to_string()),
+            idle_profile_id: None,
+            wake_profile_id: None,
+            warning_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.to_string()),
+            room_defaults: vec![],
+        };
+        let warning_configs = [warning_config];
+        let lighting_with_warning = RoomLightingContext {
+            mode_configs: &warning_configs,
+            ..lighting
+        };
+        let warning = resolved_profile_config_for_room_state_from_parts(
+            lighting_with_warning,
+            &RoomProfileSettings::default(),
+            RoomModeState::Warning,
+        );
+        assert_eq!(warning.id, rhythm_core::DAY_IDLE_PROFILE_ID);
+
+        let sample_at = chrono::NaiveDate::from_ymd_opt(2026, 6, 1)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        assert!(resolve_room_output_for_state_at_from_parts(
+            lighting,
+            RoomLightingInput {
+                settings: &RoomProfileSettings::default(),
+                room_state: RoomModeState::HardOff,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+            },
+            sample_at,
+        )
+        .is_none());
+        let warning_output = resolve_room_output_for_state_at_from_parts(
+            lighting,
+            RoomLightingInput {
+                settings: &RoomProfileSettings::default(),
+                room_state: RoomModeState::Warning,
+                time_offset_minutes: 0.0,
+                brightness_offset: 75.0,
+            },
+            sample_at,
+        )
+        .unwrap();
+        assert!(warning_output.1 > 0);
+        assert!(warning_output.1 < 100);
+    }
+
+    #[test]
+    fn room_profile_patch_apply_to_clears_and_updates_each_field() {
+        let mut settings = RoomProfileSettings {
+            profile_id: Some("custom".to_string()),
+            mood_enabled: Some(true),
+            mood_profile_id: Some("mood".to_string()),
+            mood_scene_id: Some("scene".to_string()),
+            fade_ms: Some(TimerSetting::Fixed { value: 100 }),
+            motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
+        };
+
+        let clear_all = RoomProfileSettingsPatch {
+            clear_all: true,
+            ..Default::default()
+        };
+        assert!(clear_all.touches_profile_settings());
+        clear_all.apply_to(&mut settings);
+        assert_eq!(settings, RoomProfileSettings::default());
+        assert!(!RoomProfileSettingsPatch::default().touches_profile_settings());
+
+        let update = RoomProfileSettingsPatch {
+            profile_id: Some(Some("rhythm".to_string())),
+            mood_enabled: Some(Some(false)),
+            mood_profile_id: Some(Some("day_idle".to_string())),
+            mood_scene_id: Some(Some("relax".to_string())),
+            fade_ms: Some(Some(TimerSetting::Fixed { value: 250 })),
+            motion_timeout_secs: Some(Some(TimerSetting::Fixed { value: 45 })),
+            ..Default::default()
+        };
+        assert!(update.touches_profile_settings());
+        update.apply_to(&mut settings);
+        assert_eq!(settings.profile_id.as_deref(), Some("rhythm"));
+        assert_eq!(settings.mood_enabled, Some(false));
+        assert_eq!(settings.mood_profile_id.as_deref(), Some("day_idle"));
+        assert_eq!(settings.mood_scene_id.as_deref(), Some("relax"));
+        assert_eq!(settings.fade_ms, Some(TimerSetting::Fixed { value: 250 }));
+        assert_eq!(
+            settings.motion_timeout_secs,
+            Some(TimerSetting::Fixed { value: 45 })
+        );
+
+        let clear_fields = RoomProfileSettingsPatch {
+            profile_id: Some(None),
+            mood_enabled: Some(None),
+            mood_profile_id: Some(None),
+            mood_scene_id: Some(None),
+            fade_ms: Some(None),
+            motion_timeout_secs: Some(None),
+            ..Default::default()
+        };
+        clear_fields.apply_to(&mut settings);
+        assert_eq!(settings, RoomProfileSettings::default());
+    }
+
+    #[test]
+    fn triage_copy_and_retry_dto_cover_status_matrix() {
+        use crate::canonical::triage::{TriageKind, TriageStatus};
+
+        assert_eq!(
+            triage_entry_summary(TriageKind::DeviceMerge, TriageStatus::Pending),
+            "Review whether these endpoints represent the same physical device"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::DeviceMerge, TriageStatus::Confirmed),
+            "Device merge confirmed"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::DeviceMerge, TriageStatus::NewDevice),
+            "Kept as a separate device"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::DeviceMerge, TriageStatus::Dismissed),
+            "Device merge proposal dismissed"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::RoomBinding, TriageStatus::Pending),
+            "Review whether this hub room should merge into an existing Rhythm room"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::RoomBinding, TriageStatus::Confirmed),
+            "Room binding confirmed"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::RoomBinding, TriageStatus::KeptSeparate),
+            "Kept as a separate room"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::RoomBinding, TriageStatus::NewDevice),
+            "Kept as a separate room"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::RoomBinding, TriageStatus::Dismissed),
+            "Room binding proposal dismissed"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::UnassignedDevice, TriageStatus::Pending),
+            "Assign this device to a Rhythm room"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::UnassignedDevice, TriageStatus::Confirmed),
+            "Room assignment resolved"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::UnassignedDevice, TriageStatus::Dismissed),
+            "Unassigned-device review dismissed"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::HubConfigured, TriageStatus::Pending),
+            "Native hub automation is still configured for this device"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::HubConfigured, TriageStatus::Confirmed),
+            "Native hub automation was cleared"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::HubConfigured, TriageStatus::Dismissed),
+            "Hub-configured conflict dismissed"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::UnassignedDevice, TriageStatus::AutoResolved),
+            "Resolved automatically"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::HubConfigured, TriageStatus::KeptSeparate),
+            "Kept separate"
+        );
+        assert_eq!(
+            triage_entry_summary(TriageKind::UnassignedDevice, TriageStatus::NewDevice),
+            "Kept separate"
+        );
+
+        assert_eq!(
+            triage_entry_guidance(TriageKind::DeviceMerge, TriageStatus::Pending).as_deref(),
+            Some("Confirm the merge only if both endpoints represent the same physical device.")
+        );
+        assert_eq!(
+            triage_entry_guidance(TriageKind::RoomBinding, TriageStatus::Pending).as_deref(),
+            Some("Bind the rooms only if they should act as one Rhythm room across hubs.")
+        );
+        assert_eq!(
+            triage_entry_guidance(TriageKind::UnassignedDevice, TriageStatus::Pending).as_deref(),
+            Some(
+                "Assign the device to a room so automations, topology, and control routing stay stable."
+            )
+        );
+        assert_eq!(
+            triage_entry_guidance(TriageKind::HubConfigured, TriageStatus::Pending).as_deref(),
+            Some(
+                "Remove the native hub automation for this device in the hub app so Rhythm can control it predictably."
+            )
+        );
+        assert_eq!(
+            triage_entry_guidance(TriageKind::HubConfigured, TriageStatus::Confirmed),
+            None
+        );
+
+        let now = std::time::Instant::now();
+        let retry = crate::state::HubStartupRetryState {
+            attempt_count: 3,
+            first_failure_at: now,
+            first_failure_epoch_ms: 1_000,
+            last_failure_epoch_ms: 2_000,
+            next_retry_at: Some(now + Duration::from_secs(5)),
+            next_retry_epoch_ms: Some(3_000),
+            last_error: "connection refused".to_string(),
+            manual_retry_required: false,
+        };
+        let dto = build_hub_startup_retry_dto(&retry);
+        assert_eq!(dto.status, "scheduled");
+        assert_eq!(dto.attempt_count, 3);
+        assert_eq!(dto.first_failure_epoch_ms, 1_000);
+        assert_eq!(dto.last_failure_epoch_ms, 2_000);
+        assert_eq!(dto.next_retry_epoch_ms, Some(3_000));
+        assert_eq!(dto.last_error.as_deref(), Some("connection refused"));
+
+        let manual = crate::state::HubStartupRetryState {
+            manual_retry_required: true,
+            next_retry_at: None,
+            next_retry_epoch_ms: None,
+            ..retry
+        };
+        let dto = build_hub_startup_retry_dto(&manual);
+        assert_eq!(dto.status, "manual_retry_required");
+        assert_eq!(dto.next_retry_epoch_ms, None);
+    }
+
+    #[test]
+    fn automation_toggle_and_set_execute_mode_changes() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        state.lock().unwrap().active_mode = RhythmMode::Day;
+
+        do_execute_automation_action(
+            &state,
+            &AutomationAction::ModeToggle {
+                first_mode: RhythmMode::Day,
+                second_mode: RhythmMode::Sleep,
+                transition: ModeTransitionSelection::None,
+            },
+        )
+        .unwrap();
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Sleep);
+
+        do_execute_automation_action(
+            &state,
+            &AutomationAction::ModeToggle {
+                first_mode: RhythmMode::Day,
+                second_mode: RhythmMode::Sleep,
+                transition: ModeTransitionSelection::None,
+            },
+        )
+        .unwrap();
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+
+        do_execute_automation_action(
+            &state,
+            &AutomationAction::ModeSet {
+                mode: RhythmMode::Sleep,
+                transition: ModeTransitionSelection::None,
+            },
+        )
+        .unwrap();
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Sleep);
+    }
+
+    #[test]
+    fn parse_buttons_filters_invalid_entries_and_room_params_validate_json() {
+        let buttons = parse_buttons(&serde_json::json!({
+            "buttons": [
+                {"button_id": "top", "control_id": 1},
+                {"button_id": "bad-control", "control_id": "1"},
+                {"control_id": 2},
+                {"button_id": "bottom", "control_id": 255},
+                {"button_id": "wrapped", "control_id": 300}
+            ]
+        }));
+        assert_eq!(
+            buttons,
+            vec![
+                ("top".to_string(), 1),
+                ("bottom".to_string(), 255),
+                ("wrapped".to_string(), 44),
+            ]
+        );
+        assert!(parse_buttons(&serde_json::json!({})).is_empty());
+
+        let params = RoomParams::from_json(&serde_json::json!({
+            "id": "room-1",
+            "state": "standby",
+            "device_ids": ["a", 5, "b"]
+        }))
+        .unwrap();
+        assert_eq!(params.id, "room-1");
+        assert_eq!(params.name, "room-1");
+        assert_eq!(params.grouped_light_id, "");
+        assert_eq!(params.state, Some(RoomModeState::Standby));
+        assert_eq!(params.device_ids, vec!["a".to_string(), "b".to_string()]);
+
+        let missing_id_error = match RoomParams::from_json(&serde_json::json!({})) {
+            Ok(_) => panic!("expected missing id error"),
+            Err(error) => error,
+        };
+        assert!(missing_id_error.to_string().contains("Missing room.id"));
+        let invalid_state_error = match RoomParams::from_json(&serde_json::json!({
+            "id": "room-1",
+            "state": "not-a-state",
+        })) {
+            Ok(_) => panic!("expected invalid state error"),
+            Err(error) => error,
+        };
+        assert!(invalid_state_error
+            .to_string()
+            .contains("Invalid room.state"));
+    }
+
+    #[test]
+    fn clear_ephemeral_state_helpers_are_idempotent() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let node_id = "node-1";
+        let now = std::time::Instant::now();
+        {
+            let mut s = state.lock().unwrap();
+            let dispatch_generation = s.light_dispatch_generation;
+            s.room_mode_transitions.insert(
+                node_id.to_string(),
+                crate::state::RoomModeTransition {
+                    ends_at: now + Duration::from_secs(5),
+                    periodic_resume_at: now + Duration::from_secs(5),
+                },
+            );
+            s.room_observed_power.insert(
+                node_id.to_string(),
+                ObservedPowerState::new(true, ObservedPowerSource::Command),
+            );
+            s.motion_snapshots.insert(
+                node_id.to_string(),
+                MotionSnapshot {
+                    motion_active: true,
+                    motion_owned: true,
+                    remaining_secs: Some(30),
+                    timeout_secs: 60,
+                    warning_active: true,
+                },
+            );
+            s.pending_periodic_ticks.insert(
+                node_id.to_string(),
+                crate::state::PendingPeriodicTick::new(12.0, dispatch_generation),
+            );
+            s.pending_motion_clear.push(node_id.to_string());
+            s.pending_motion_seed.push(crate::state::MotionSeedEntry {
+                source_node_id: node_id.to_string(),
+                target_node_id: "room-1".to_string(),
+                is_active: true,
+                stopped_at_epoch_ms: None,
+                motion_owned: Some(true),
+                warning_active: true,
+            });
+            s.pending_motion_seed.push(crate::state::MotionSeedEntry {
+                source_node_id: "sensor-2".to_string(),
+                target_node_id: node_id.to_string(),
+                is_active: false,
+                stopped_at_epoch_ms: Some(1),
+                motion_owned: Some(false),
+                warning_active: false,
+            });
+        }
+
+        clear_room_mode_transition(&state, node_id);
+        clear_room_mode_transition(&state, node_id);
+        queue_motion_timer_clear(&state, node_id);
+        queue_motion_timer_clear(&state, node_id);
+
+        let mut s = state.lock().unwrap();
+        assert!(!s.room_mode_transitions.contains_key(node_id));
+        assert_eq!(
+            s.pending_motion_clear
+                .iter()
+                .filter(|pending: &&String| pending.as_str() == node_id)
+                .count(),
+            1
+        );
+
+        clear_removed_node_ephemeral_state(&mut s, node_id);
+        assert!(!s.room_observed_power.contains_key(node_id));
+        assert!(!s.motion_snapshots.contains_key(node_id));
+        assert!(!s.pending_periodic_ticks.contains_key(node_id));
+        assert!(!s
+            .pending_motion_clear
+            .iter()
+            .any(|pending| pending == node_id));
+        assert!(s
+            .pending_motion_seed
+            .iter()
+            .all(|seed| seed.source_node_id != node_id && seed.target_node_id != node_id));
+    }
+
+    #[test]
+    fn compute_room_display_values_clamps_brightness_offsets() {
+        let config = rhythm_core::default_rhythm_profile();
+
+        let (low_brightness, low_kelvin) = compute_room_display_values(
+            &config,
+            12.0,
+            Some(35.0),
+            Some(-78.0),
+            Some("America/New_York"),
+            -4.0,
+            0.0,
+            -500.0,
+        );
+        assert_eq!(low_brightness, 1);
+        assert!((1_000..=10_000).contains(&low_kelvin));
+
+        let (high_brightness, high_kelvin) =
+            compute_room_display_values(&config, 12.0, None, None, None, 0.0, 120.0, 500.0);
+        assert_eq!(high_brightness, 100);
+        assert!((1_000..=10_000).contains(&high_kelvin));
     }
 
     #[test]
@@ -12208,6 +13065,120 @@ mod tests {
             "day length should be positive, got {}",
             sun_times.day_length
         );
+    }
+
+    #[test]
+    fn room_set_creates_registry_topology_and_runtime_room() {
+        let (state, runtime, hub_key) = setup_state_with_empty_registry();
+        let params = RoomParams {
+            id: "hub-room-1".to_string(),
+            name: "Kitchen".to_string(),
+            grouped_light_id: "grouped-kitchen".to_string(),
+            rhythm_enabled: false,
+            disabled: true,
+            state: Some(RoomModeState::Mood),
+            device_ids: vec!["light-1".to_string(), "light-2".to_string()],
+        };
+
+        let room: serde_json::Value =
+            serde_json::from_str(&do_room_set(&state, &params, &hub_key, false, true).unwrap())
+                .unwrap();
+
+        let engine_room_id = room["id"].as_str().unwrap();
+        assert_ne!(engine_room_id, "hub-room-1");
+        assert_eq!(room["state"], "mood");
+        assert_eq!(
+            room["rhythm_enabled"], true,
+            "Mood rooms need rhythm enabled"
+        );
+
+        let snap = runtime.engine_room_snapshot(engine_room_id).unwrap();
+        assert_eq!(snap.name, "Kitchen");
+        assert!(snap.mood_active);
+        assert!(!snap.soft_off);
+        assert!(!snap.hard_off);
+        assert!(snap.rhythm_enabled);
+        assert!(snap.disabled);
+
+        let s = state.lock().unwrap();
+        let topology_room = s.topology.get(engine_room_id).unwrap();
+        assert_eq!(topology_room.name, "Kitchen");
+        assert!(topology_room
+            .hub_room_bindings
+            .iter()
+            .any(|binding| binding.hub_room_id == "hub-room-1"));
+        assert!(s
+            .hub_registry_for(&hub_key)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .room_matches(
+                "hub-room-1",
+                "Kitchen",
+                "grouped-kitchen",
+                &["light-1".to_string(), "light-2".to_string()],
+            ));
+    }
+
+    #[test]
+    fn room_set_unchanged_skips_registry_write_when_syncing_without_runtime_apply() {
+        let (state, runtime) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
+        let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
+        let params = RoomParams {
+            id: "r1".to_string(),
+            name: "r1".to_string(),
+            grouped_light_id: String::new(),
+            rhythm_enabled: false,
+            disabled: false,
+            state: None,
+            device_ids: Vec::new(),
+        };
+
+        let result = do_room_set(&state, &params, &hub_key, false, false).unwrap();
+
+        assert_eq!(result, "");
+        assert!(runtime.restore_calls().is_empty());
+        assert_eq!(runtime.engine_all_room_snapshots().len(), 1);
+    }
+
+    #[test]
+    fn room_set_errors_when_deferred_runtime_initializer_does_not_install_runtime() {
+        let runtime = Arc::new(MockRuntime::new(Vec::new(), 12.0));
+        let mut app = AppState::default();
+        let hub_type = HubType::new("matter");
+        let hub_key = HubKey::new(hub_type.clone(), "local");
+        let registry: Arc<Mutex<dyn HubRegistry>> =
+            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+        app.ensure_runtime_fn = Some(Arc::new(|_| Ok(())));
+        let state: SharedState = Arc::new(Mutex::new(app));
+        let params = RoomParams {
+            id: "matter-room-1".to_string(),
+            name: "Matter Room".to_string(),
+            grouped_light_id: "matter-room-1".to_string(),
+            rhythm_enabled: true,
+            disabled: false,
+            state: Some(RoomModeState::Active),
+            device_ids: Vec::new(),
+        };
+
+        let err = do_room_set(&state, &params, &hub_key, false, true).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Runtime initialization completed without installing a runtime"));
+        assert!(runtime.engine_all_room_snapshots().is_empty());
     }
 
     fn setup_state_with_deferred_runtime() -> (SharedState, Arc<MockRuntime>, HubKey) {
@@ -12514,6 +13485,211 @@ mod tests {
             }),
             extensions: BTreeMap::new(),
         }
+    }
+
+    fn scene_without_light(scene_id: &str) -> SceneDefinition {
+        SceneDefinition {
+            id: scene_id.to_string(),
+            name: "No Light".to_string(),
+            description: None,
+            source: crate::scenes::SceneSource::User,
+            light: None,
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn empty_light_scene(scene_id: &str) -> SceneDefinition {
+        SceneDefinition {
+            id: scene_id.to_string(),
+            name: "Empty Light".to_string(),
+            description: None,
+            source: crate::scenes::SceneSource::User,
+            light: Some(crate::scenes::LightSceneLayer {
+                default_transition_ms: None,
+                default_output: None,
+                palette: Vec::new(),
+                entries: Vec::new(),
+            }),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn scene_output_selection_helpers_cover_node_room_and_fallback_order() {
+        let default_scene = scene_with_default_output("default-scene", 44, 4100);
+        let palette_scene = scene_with_palette("palette-scene", &[Rgb::new(10, 20, 30)]);
+        let entry_scene = scene_for_light_with_output("entry-scene", "device-a", 72, 6500);
+        let no_light = scene_without_light("no-light");
+        let scope = BTreeSet::from(["device-a".to_string()]);
+
+        assert!(first_scene_output_for_node(&no_light, "device-a").is_none());
+        assert_eq!(
+            first_scene_output_for_node(&entry_scene, "device-a")
+                .unwrap()
+                .brightness,
+            72
+        );
+        assert_eq!(
+            first_scene_output_for_node(&palette_scene, "missing")
+                .unwrap()
+                .brightness,
+            66
+        );
+        assert_eq!(
+            first_scene_output_for_node(&default_scene, "missing")
+                .unwrap()
+                .brightness,
+            44
+        );
+
+        assert!(first_scene_output_for_room_scope(&no_light, &scope).is_none());
+        assert_eq!(
+            first_scene_output_for_room_scope(&default_scene, &scope)
+                .unwrap()
+                .brightness,
+            44
+        );
+        assert_eq!(
+            first_scene_output_for_room_scope(&palette_scene, &scope)
+                .unwrap()
+                .brightness,
+            66
+        );
+        assert_eq!(
+            first_scene_output_for_room_scope(&entry_scene, &scope)
+                .unwrap()
+                .brightness,
+            72
+        );
+    }
+
+    #[test]
+    fn mood_scene_color_output_preserves_existing_values_and_clamps_updates() {
+        let existing = LightSceneOutput {
+            power: LightScenePower::Off,
+            brightness: 80,
+            color: Some(LightSceneColor::Kelvin { kelvin: 3500 }),
+            transition_ms: Some(333),
+        };
+
+        let preserved = mood_scene_color_output(
+            Some(existing),
+            Rgb::new(8, 16, 32),
+            XyColor::new(0.2, 0.3),
+            None,
+            None,
+        );
+        assert_eq!(preserved.power, LightScenePower::On);
+        assert_eq!(preserved.brightness, 80);
+        assert_eq!(preserved.transition_ms, Some(333));
+        assert_eq!(
+            preserved.color,
+            Some(LightSceneColor::RgbXy {
+                rgb: Rgb::new(8, 16, 32),
+                xy: XyColor::new(0.2, 0.3),
+            })
+        );
+
+        let clamped = mood_scene_color_output(
+            None,
+            Rgb::new(1, 2, 3),
+            XyColor::new(0.1, 0.1),
+            Some(0),
+            Some(125),
+        );
+        assert_eq!(clamped.brightness, 1);
+        assert_eq!(clamped.transition_ms, Some(125));
+    }
+
+    #[test]
+    fn update_scene_brightness_for_target_covers_room_device_and_errors() {
+        let room =
+            rhythm_core::NodeSnapshot::from_room_snapshot(make_snapshot("room1", false, false));
+        let device = rhythm_core::NodeSnapshot::from_room_snapshot(make_standalone_light_snapshot(
+            "device-a",
+        ));
+        let mut scope = BTreeSet::new();
+        scope.insert("device-a".to_string());
+
+        let mut room_scene = scene_with_default_output("room-scene", 44, 4100);
+        {
+            let layer = room_scene.light.as_mut().unwrap();
+            layer.palette.push(LightSceneOutput {
+                power: LightScenePower::Off,
+                brightness: 12,
+                color: None,
+                transition_ms: None,
+            });
+            layer.entries.push(LightSceneEntry {
+                target: LightSceneTargetRef::Node {
+                    node_id: "device-a".to_string(),
+                },
+                output: LightSceneOutput {
+                    power: LightScenePower::Off,
+                    brightness: 13,
+                    color: None,
+                    transition_ms: None,
+                },
+            });
+            layer.entries.push(LightSceneEntry {
+                target: LightSceneTargetRef::Node {
+                    node_id: "device-b".to_string(),
+                },
+                output: LightSceneOutput {
+                    power: LightScenePower::Off,
+                    brightness: 14,
+                    color: None,
+                    transition_ms: None,
+                },
+            });
+        }
+
+        update_scene_brightness_for_target(&mut room_scene, &scope, &room, "room1", 22).unwrap();
+        let layer = room_scene.light.as_ref().unwrap();
+        assert_eq!(layer.default_output.as_ref().unwrap().brightness, 22);
+        assert_eq!(layer.palette[0].brightness, 22);
+        assert_eq!(layer.entries[0].output.brightness, 22);
+        assert_eq!(layer.entries[1].output.brightness, 14);
+
+        let mut device_scene = scene_for_light("device-scene", "device-a");
+        update_scene_brightness_for_target(&mut device_scene, &scope, &device, "device-a", 33)
+            .unwrap();
+        assert_eq!(
+            device_scene.light.as_ref().unwrap().entries[0]
+                .output
+                .brightness,
+            33
+        );
+
+        let mut fallback_scene = scene_with_default_output("fallback-scene", 55, 2700);
+        update_scene_brightness_for_target(&mut fallback_scene, &scope, &device, "device-a", 34)
+            .unwrap();
+        let fallback_entries = &fallback_scene.light.as_ref().unwrap().entries;
+        assert_eq!(fallback_entries.len(), 1);
+        assert_eq!(fallback_entries[0].target.node_id(), "device-a");
+        assert_eq!(fallback_entries[0].output.brightness, 34);
+
+        assert!(update_scene_brightness_for_target(
+            &mut scene_without_light("missing-light"),
+            &scope,
+            &device,
+            "device-a",
+            40,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("has no light layer"));
+
+        assert!(update_scene_brightness_for_target(
+            &mut empty_light_scene("empty-light"),
+            &scope,
+            &device,
+            "device-a",
+            40,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("has no light output"));
     }
 
     fn setup_standalone_matter_light() -> (SharedState, Arc<MockRuntime>, String) {
@@ -16293,6 +17469,138 @@ mod tests {
             .unwrap();
         assert!(plain_room.get("motion_active").is_none());
         assert!(plain_room.get("timeout_secs").is_none());
+    }
+
+    #[test]
+    fn build_rooms_state_falls_back_to_persisted_rooms_without_runtime() {
+        let storage = TestStorage::default();
+        let mut rooms = rhythm_core::RoomManager::new();
+        {
+            let room = rooms.get_or_create("kitchen", "Kitchen");
+            room.rhythm_enabled = true;
+            room.time_offset_minutes = 18.0;
+            room.brightness_offset = 12.0;
+            room.soft_off = true;
+            room.standby_enabled = true;
+            room.profile_settings = rhythm_core::RoomProfileSettings {
+                mood_enabled: Some(true),
+                mood_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                fade_ms: Some(TimerSetting::Fixed { value: 1_234 }),
+                motion_timeout_secs: Some(TimerSetting::Fixed { value: 456 }),
+                ..Default::default()
+            };
+        }
+        {
+            let room = rooms.get_or_create("office", "Office");
+            room.rhythm_enabled = false;
+            room.hard_off = true;
+            room.brightness_offset = -7.0;
+        }
+        storage.inner.lock().unwrap().rooms = rooms;
+
+        let state: SharedState = Arc::new(Mutex::new(AppState {
+            storage: Some(Box::new(storage)),
+            power_save: true,
+            ..Default::default()
+        }));
+
+        let result = build_rooms_state(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["hub_connected"], false);
+        let rooms = parsed["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), 2);
+
+        let kitchen = rooms.iter().find(|room| room["id"] == "kitchen").unwrap();
+        assert_eq!(kitchen["rhythm_enabled"], true);
+        assert_eq!(kitchen["time_offset"], 18.0);
+        assert_eq!(kitchen["brightness_offset"], 12.0);
+        assert_eq!(kitchen["lights_on"], false);
+        assert_eq!(kitchen["observed_power"]["fresh"], false);
+        assert_eq!(kitchen["transitioning"], false);
+        assert_eq!(kitchen["mood_enabled"], true);
+        assert_eq!(kitchen["mood_active"], false);
+        assert_eq!(kitchen["standby_enabled"], true);
+        assert_eq!(kitchen["standby_active"], true);
+        assert!(kitchen["brightness"].as_u64().is_some());
+        assert!(kitchen["kelvin"].as_u64().is_some());
+        assert!(kitchen.get("motion_active").is_none());
+        assert_eq!(kitchen["profile_settings"]["mood_profile_id"], "sleep");
+        assert_eq!(kitchen["profile_settings"]["fade_ms"]["value"], 1234);
+        assert_eq!(
+            kitchen["profile_settings"]["motion_timeout_secs"]["value"],
+            456
+        );
+
+        let office = rooms.iter().find(|room| room["id"] == "office").unwrap();
+        assert_eq!(office["state"], "hard_off");
+        assert_eq!(office["rhythm_enabled"], false);
+        assert_eq!(office["brightness_offset"], -7.0);
+        assert_eq!(office["standby_active"], false);
+    }
+
+    #[test]
+    fn query_builders_cover_defaults_config_and_no_runtime_errors() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+
+        let settings = build_settings_dto(&state).unwrap();
+        assert!(settings.auto_update);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&build_settings(&state).unwrap()).unwrap()
+                ["auto_update"],
+            true
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&build_light_breaker(&state).unwrap())
+                .unwrap()["enabled"],
+            true
+        );
+
+        let mode = build_mode_dto(&state).unwrap();
+        assert_eq!(mode.active, RhythmMode::Day);
+        assert!(!mode.configs.is_empty());
+        let mode_json: serde_json::Value =
+            serde_json::from_str(&build_mode(&state).unwrap()).unwrap();
+        assert_eq!(mode_json["active"], "day");
+        assert!(mode_json["last_change"]["epoch_ms"].as_i64().is_some());
+
+        let transitions = build_transitions_dto(&state).unwrap();
+        assert!(!transitions.transitions.is_empty());
+        let transitions_json: serde_json::Value =
+            serde_json::from_str(&build_transitions(&state).unwrap()).unwrap();
+        assert!(transitions_json["transitions"].is_array());
+
+        let bindings = build_input_bindings_dto(&state).unwrap();
+        assert!(bindings.bindings.is_empty());
+        let bindings_json: serde_json::Value =
+            serde_json::from_str(&build_input_bindings(&state).unwrap()).unwrap();
+        assert_eq!(bindings_json["bindings"].as_array().unwrap().len(), 0);
+
+        let profiles = build_profiles_dto(&state).unwrap();
+        assert!(profiles
+            .profiles
+            .iter()
+            .any(|profile| profile.id == rhythm_core::RHYTHM_PROFILE_ID));
+        let profiles_json: serde_json::Value =
+            serde_json::from_str(&build_profiles(&state).unwrap()).unwrap();
+        assert!(profiles_json["profiles"].as_array().unwrap().len() >= 2);
+
+        let default_config: serde_json::Value =
+            serde_json::from_str(&build_config(&state, None).unwrap()).unwrap();
+        assert_eq!(default_config["id"], rhythm_core::RHYTHM_PROFILE_ID);
+        assert!(build_config(&state, Some("missing-profile"))
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown light profile"));
+
+        assert!(build_node_state(&state, "missing-node")
+            .unwrap_err()
+            .to_string()
+            .contains("No runtime available"));
+        assert!(build_room_rhythm_state(&state, "missing-room")
+            .unwrap_err()
+            .to_string()
+            .contains("No runtime available"));
     }
 
     #[test]

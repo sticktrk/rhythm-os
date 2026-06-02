@@ -259,6 +259,176 @@ pub fn parse_device_id(device_id: &str) -> Option<(u64, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    use rhythm_os::state::AppState;
+
+    use crate::provider::matter_credentials;
+    use crate::transport::{
+        CommissionedDevice, MatterAttributeReport, MatterColorMode, MatterCommissionRequest,
+        MatterGroup, MatterGroupMember,
+    };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct FakeMatterTransport {
+        devices: Vec<MatterDeviceInfo>,
+        probe_failures: HashMap<u64, String>,
+        subscribe_calls: AtomicUsize,
+    }
+
+    impl FakeMatterTransport {
+        fn new(devices: Vec<MatterDeviceInfo>, probe_failures: HashMap<u64, String>) -> Self {
+            Self {
+                devices,
+                probe_failures,
+                subscribe_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl MatterTransport for FakeMatterTransport {
+        fn commission_light(
+            &self,
+            _request: &MatterCommissionRequest,
+        ) -> Result<CommissionedDevice> {
+            anyhow::bail!("not used")
+        }
+
+        fn decommission_device(&self, _node_id: u64, _force: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>> {
+            Ok(self.devices.clone())
+        }
+
+        fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+            if let Some(error) = self.probe_failures.get(&node_id) {
+                anyhow::bail!("{}", error);
+            }
+            Ok(commissioned_device(node_id, 2))
+        }
+
+        fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn configure_group(&self, _group: &MatterGroup) -> Result<()> {
+            Ok(())
+        }
+
+        fn remove_group(&self, _group_id: u16, _members: &[MatterGroupMember]) -> Result<()> {
+            Ok(())
+        }
+
+        fn identify_light(&self, _node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_brightness(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _level: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_color_temperature(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _kelvin: u16,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_xy(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _x: f32,
+            _y: f32,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_hue_saturation(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _hue: u8,
+            _saturation: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_on_off(&self, _node_id: u64, _endpoint: u16) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn subscribe_on_off(
+            &self,
+            _targets: &[MatterSubscriptionTarget],
+            _min_interval_secs: u16,
+            _max_interval_secs: u16,
+        ) -> Result<()> {
+            self.subscribe_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anyhow::bail!("subscriptions disabled in test")
+        }
+
+        fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn shared_state(prefix: &str) -> SharedState {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "rhythm-matter-lifecycle-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            id
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().data_dir = dir.to_string_lossy().to_string();
+        state
+    }
+
+    fn device_info(node_id: u64) -> MatterDeviceInfo {
+        MatterDeviceInfo {
+            node_id,
+            vendor_name: format!("Vendor {node_id}"),
+            product_name: format!("Lamp {node_id}"),
+            reachable: true,
+        }
+    }
+
+    fn commissioned_device(node_id: u64, endpoint: u16) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: format!("Vendor {node_id}"),
+            product_name: format!("Lamp {node_id}"),
+            vendor_id: 100,
+            product_id: 200,
+            serial_number: Some(format!("serial-{node_id}")),
+            light_endpoint: endpoint,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        }
+    }
 
     #[test]
     fn parse_simple_device_id() {
@@ -304,5 +474,60 @@ mod tests {
         ];
 
         assert_eq!(next_node_id_seed(&commissioned), 106);
+    }
+
+    #[test]
+    fn connect_matter_builds_hub_data_from_commissioned_devices_and_tags_events() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
+        let state = shared_state("connect");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(key.clone(), matter_credentials("local", "fabric-test"));
+
+        let mut probe_failures = HashMap::new();
+        probe_failures.insert(12, "probe failed".to_string());
+        let transport = Arc::new(FakeMatterTransport::new(
+            vec![device_info(10), device_info(12)],
+            probe_failures,
+        ));
+
+        let (hub, event_rx) = connect_matter(&state, transport.clone()).unwrap();
+
+        assert_eq!(hub.hub_key, key);
+        let data = hub.data::<Arc<MatterHubData>>().unwrap();
+        assert_eq!(data.fabric_id, "fabric-test");
+        assert_eq!(data.commissioned.lock().unwrap().len(), 2);
+        assert_eq!(
+            data.next_node_id.load(std::sync::atomic::Ordering::SeqCst),
+            13
+        );
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-10-2"));
+        assert!(!data.device_caps.lock().unwrap().contains_key("matter-12-2"));
+
+        let event = event_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(event.hub_key(), Some(&key));
+        for _ in 0..20 {
+            if transport
+                .subscribe_calls
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            transport
+                .subscribe_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 }

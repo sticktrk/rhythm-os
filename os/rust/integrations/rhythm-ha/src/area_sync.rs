@@ -1036,6 +1036,162 @@ impl DeviceEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use rhythm_os::discovery::HubDiscovery;
+    use tokio::net::TcpListener;
+
+    fn spawn_fake_ha_ws() -> (HaConnectionConfig, std::thread::JoinHandle<()>) {
+        let (port_tx, port_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                port_tx.send(listener.local_addr().unwrap().port()).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(
+                serde_json::json!({"type": "auth_required"}).to_string(),
+            ))
+            .await
+            .unwrap();
+
+            let auth = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&auth).unwrap()["access_token"],
+                "test-token"
+            );
+            ws.send(Message::Text(
+                serde_json::json!({"type": "auth_ok"}).to_string(),
+            ))
+            .await
+            .unwrap();
+
+            let mut ids = HashMap::<String, u64>::new();
+            while ids.len() < 4 {
+                let msg = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                let json: Value = serde_json::from_str(&msg).unwrap();
+                ids.insert(
+                    json["type"].as_str().unwrap().to_string(),
+                    json["id"].as_u64().unwrap(),
+                );
+            }
+
+            let response = |request_type: &str, result: Value| {
+                serde_json::json!({
+                    "id": ids[request_type],
+                    "type": "result",
+                    "success": true,
+                    "result": result,
+                })
+                .to_string()
+            };
+            ws.send(Message::Text(response(
+                "config/area_registry/list",
+                serde_json::json!([
+                    {"area_id": "kitchen", "name": "Kitchen"},
+                    {"area_id": "office", "name": "Office"}
+                ]),
+            )))
+            .await
+            .unwrap();
+            ws.send(Message::Text(response(
+                "config/entity_registry/list",
+                serde_json::json!([
+                    {"entity_id": "light.kitchen_ceiling", "device_id": "dev-light"},
+                    {"entity_id": "light.kitchen_group", "area_id": "kitchen", "device_id": "dev-virtual", "platform": "group"},
+                    {"entity_id": "light.office_virtual", "area_id": "office", "device_id": "dev-nohw"},
+                    {"entity_id": "binary_sensor.kitchen_motion", "device_id": "dev-motion", "original_device_class": "motion"},
+                    {"entity_id": "binary_sensor.kitchen_occupancy", "area_id": "kitchen", "original_device_class": "occupancy"},
+                    {"entity_id": "binary_sensor.kitchen_battery", "area_id": "kitchen"},
+                    {"entity_id": "event.kitchen_remote_button_1", "device_id": "dev-remote", "platform": "zha"},
+                    {"entity_id": "event.kitchen_remote_button_2", "device_id": "dev-remote", "platform": "zha"}
+                ]),
+            )))
+            .await
+            .unwrap();
+            ws.send(Message::Text(response(
+                "config/device_registry/list",
+                serde_json::json!([
+                    {
+                        "id": "dev-light",
+                        "area_id": "kitchen",
+                        "name": "Kitchen Ceiling",
+                        "manufacturer": "Signify",
+                        "model": "Hue Bulb",
+                        "connections": [["mac", "00:17:88:01:02:03:04"]]
+                    },
+                    {"id": "dev-virtual", "area_id": "kitchen", "name": "Kitchen Group"},
+                    {"id": "dev-nohw", "area_id": "office", "name": "Office Virtual Light"},
+                    {
+                        "id": "dev-motion",
+                        "area_id": "kitchen",
+                        "name": "Kitchen Motion",
+                        "manufacturer": "Aqara",
+                        "model": "Motion Sensor",
+                        "serial_number": "motion-123"
+                    },
+                    {
+                        "id": "dev-remote",
+                        "area_id": "kitchen",
+                        "name_by_user": "Kitchen Remote",
+                        "manufacturer": "Signify",
+                        "model": "RWL022",
+                        "identifiers": [["zha", "00:17:88:01:0a:b2:c3:d4"]]
+                    },
+                    {
+                        "id": "dev-scene-switch",
+                        "area_id": "kitchen",
+                        "name": "Wall Scene Switch",
+                        "manufacturer": "Lutron",
+                        "model": "Pico Remote",
+                        "serial_number": "switch-456"
+                    }
+                ]),
+            )))
+            .await
+            .unwrap();
+            ws.send(Message::Text(response(
+                "get_states",
+                serde_json::json!([
+                    {
+                        "entity_id": "binary_sensor.kitchen_motion",
+                        "state": "on",
+                        "attributes": {"device_class": "motion"}
+                    },
+                    {
+                        "entity_id": "binary_sensor.kitchen_occupancy",
+                        "state": "off",
+                        "attributes": {"device_class": "occupancy"}
+                    },
+                    {
+                        "entity_id": "binary_sensor.kitchen_battery",
+                        "state": "off",
+                        "attributes": {"device_class": "battery"}
+                    }
+                ]),
+            )))
+            .await
+            .unwrap();
+
+            while let Some(Ok(msg)) = ws.next().await {
+                if matches!(msg, Message::Close(_)) {
+                    break;
+                }
+            }
+            });
+        });
+        let port = port_rx.recv().unwrap();
+
+        (
+            HaConnectionConfig {
+                host: "127.0.0.1".to_string(),
+                port,
+                token: "test-token".to_string(),
+                use_ssl: false,
+            },
+            handle,
+        )
+    }
 
     #[test]
     fn test_sync_areas_to_registry_creates_rooms() {
@@ -1082,6 +1238,83 @@ mod tests {
         let second = sync_areas_to_registry(&areas, &mut registry);
         assert_eq!(second, 0);
         assert_eq!(registry.rooms().len(), 1);
+    }
+
+    #[test]
+    fn ha_discovery_maps_full_registry_data_from_websocket() {
+        let (config, server) = spawn_fake_ha_ws();
+        let discovery = HaDiscovery::new(config);
+
+        let mut rooms = discovery.discover_rooms().unwrap();
+        rooms.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(rooms[0].id, "kitchen");
+        assert_eq!(rooms[0].name, "Kitchen");
+        assert_eq!(rooms[0].grouped_light_id, "kitchen");
+        assert_eq!(
+            rooms[0].device_ids,
+            vec![
+                "light.kitchen_ceiling".to_string(),
+                "light.kitchen_group".to_string()
+            ]
+        );
+        assert_eq!(rooms[1].id, "office");
+
+        let devices = discovery.discover_devices().unwrap();
+        assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Motion
+                && device.device_id == "binary_sensor.kitchen_motion"
+                && device.room_id.as_deref() == Some("kitchen")
+        }));
+        assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Button
+                && device.device_id == "00:17:88:01:0a:b2:c3:d4"
+                && device.buttons
+                    == vec![
+                        ("event.kitchen_remote_button_1".to_string(), 1),
+                        ("event.kitchen_remote_button_2".to_string(), 2),
+                    ]
+        }));
+        assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Button
+                && device.device_id == "dev-scene-switch"
+                && device.buttons.is_empty()
+        }));
+
+        let identities = discovery.discover_identities().unwrap();
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Light
+                && identity.native_id == "light.kitchen_ceiling"
+                && identity.name == "Kitchen Ceiling"
+                && identity.hardware_ids == vec![HardwareId::mac("00:17:88:01:02:03:04")]
+        }));
+        assert!(!identities
+            .iter()
+            .any(|identity| identity.native_id == "light.kitchen_group"));
+        assert!(!identities
+            .iter()
+            .any(|identity| identity.native_id == "light.office_virtual"));
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Motion
+                && identity.native_id == "binary_sensor.kitchen_motion"
+                && identity.hardware_ids == vec![HardwareId::serial("motion-123")]
+        }));
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Button
+                && identity.native_id == "00:17:88:01:0a:b2:c3:d4"
+                && identity.name == "Kitchen Remote"
+        }));
+
+        let mut motion = discovery.discover_motion_state().unwrap();
+        motion.sort_by(|left, right| left.sensor_id.cmp(&right.sensor_id));
+        assert_eq!(motion.len(), 2);
+        assert_eq!(motion[0].sensor_id, "binary_sensor.kitchen_motion");
+        assert!(motion[0].is_active);
+        assert_eq!(motion[1].sensor_id, "binary_sensor.kitchen_occupancy");
+        assert!(!motion[1].is_active);
+
+        discovery.release_resources();
+        server.join().unwrap();
     }
 
     #[test]

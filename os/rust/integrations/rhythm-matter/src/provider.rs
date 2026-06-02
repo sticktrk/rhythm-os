@@ -86,3 +86,99 @@ where
         connect_fn,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use rhythm_os::canonical::identity::HubKey;
+    use rhythm_os::hub::HubType;
+
+    fn active_hub(address: &str) -> (ActiveHub, Receiver<HubEvent>) {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let hub_type = HubType::new("matter");
+        let hub_key = HubKey::new(hub_type.clone(), address);
+        (
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn matter_credentials_round_trip_fabric_id() {
+        let creds = matter_credentials("local", "fabric-a");
+
+        assert_eq!(
+            creds.hub_type.as_ref().map(|ty| ty.as_str()),
+            Some("matter")
+        );
+        assert_eq!(creds.address, "local");
+        assert_eq!(matter_fabric_id(&creds), Some("fabric-a"));
+    }
+
+    #[test]
+    fn configure_matter_hub_defaults_fabric_and_skips_same_credentials() {
+        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let calls = Arc::new(Mutex::new(0usize));
+        let first_calls = calls.clone();
+
+        configure_matter_hub("local", "not valid json", &state, move |_| {
+            *first_calls.lock().unwrap() += 1;
+            Ok(active_hub("local"))
+        })
+        .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let key = HubKey::new(HubType::new("matter"), "local");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .hub_credentials
+                .get(&key)
+                .and_then(matter_fabric_id),
+            Some("default")
+        );
+
+        configure_matter_hub("local", r#"{"fabric_id":"default"}"#, &state, |_| {
+            panic!("same Matter credentials should short-circuit")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_matter_hub_reconfigures_when_fabric_changes() {
+        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+
+        configure_matter_hub("local", r#"{"fabric_id":"fabric-a"}"#, &state, |_| {
+            Ok(active_hub("local"))
+        })
+        .unwrap();
+        configure_matter_hub("local", r#"{"fabric_id":"fabric-b"}"#, &state, |_| {
+            Ok(active_hub("local"))
+        })
+        .unwrap();
+
+        let key = HubKey::new(HubType::new("matter"), "local");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .hub_credentials
+                .get(&key)
+                .and_then(matter_fabric_id),
+            Some("fabric-b")
+        );
+    }
+}

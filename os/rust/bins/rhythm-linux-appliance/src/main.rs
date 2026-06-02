@@ -705,19 +705,64 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        beta_build_enables_matter_attestation_bypass, boot_success_health,
-        dev_mode_explicitly_disabled_value, extract_serial_suffix, periodic_startup_action,
-        startup_wifi_restore_action, BootSuccessHealth, PeriodicStartupAction,
-        StartupWifiRestoreAction, STARTUP_WIFI_RESTORE_TIMEOUT,
+        apply_beta_build_defaults, beta_build_enables_matter_attestation_bypass,
+        boot_success_health, dev_mode_explicitly_disabled, dev_mode_explicitly_disabled_value,
+        env_value_is_falsey, extract_serial_suffix, install_factory_reset_hook,
+        periodic_startup_action, run_bootstate_script_action, save_commissioning_wifi_credentials,
+        set_env_default, startup_wifi_restore_action, BootSuccessHealth, PeriodicStartupAction,
+        StartupWifiRestoreAction, RHYTHM_DEV_MODE_ENV, RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
+        STARTUP_WIFI_RESTORE_TIMEOUT, VERSION,
     };
     use crate::time_sync::clock_is_sane_at;
     use chrono::{TimeZone, Utc};
     use rhythm_os::canonical::identity::HubKey;
     use rhythm_os::hub::{ActiveHub, HubCredentials, HubType};
+    use rhythm_os::provisioning::WifiCredentials;
     use rhythm_os::state::{AppState, SharedState};
+    use rhythm_os::storage::{FileStorage, Storage};
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvRestore {
+        values: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn new(names: &[&'static str]) -> Self {
+            Self {
+                values: names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in &self.values {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-appliance-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn extract_serial_suffix_takes_last_eight_hex_chars() {
@@ -756,6 +801,79 @@ mod tests {
         assert_eq!(
             extract_serial_suffix("ça123456789fé"),
             Some("3456789f".to_string())
+        );
+    }
+
+    #[test]
+    fn env_default_helpers_treat_empty_values_as_unset_and_preserve_existing_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let key = "RHYTHM_TEST_APPLIANCE_ENV_DEFAULT";
+        let _restore = EnvRestore::new(&[key]);
+
+        std::env::remove_var(key);
+        assert!(set_env_default(key, "one"));
+        assert_eq!(std::env::var(key).as_deref(), Ok("one"));
+
+        std::env::set_var(key, "already-set");
+        assert!(!set_env_default(key, "two"));
+        assert_eq!(std::env::var(key).as_deref(), Ok("already-set"));
+
+        std::env::set_var(key, "");
+        assert!(set_env_default(key, "filled"));
+        assert_eq!(std::env::var(key).as_deref(), Ok("filled"));
+    }
+
+    #[test]
+    fn dev_mode_falsey_helpers_trim_and_ignore_case() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::new(&[RHYTHM_DEV_MODE_ENV]);
+
+        for value in ["0", " false ", "NO", "off"] {
+            assert!(env_value_is_falsey(value), "{value:?} should be falsey");
+            std::env::set_var(RHYTHM_DEV_MODE_ENV, value);
+            assert!(dev_mode_explicitly_disabled());
+        }
+
+        for value in ["", "1", "true", "dev"] {
+            assert!(!env_value_is_falsey(value), "{value:?} should stay truthy");
+            std::env::set_var(RHYTHM_DEV_MODE_ENV, value);
+            assert!(!dev_mode_explicitly_disabled());
+        }
+    }
+
+    #[test]
+    fn beta_default_application_respects_version_env_and_existing_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            RHYTHM_DEV_MODE_ENV,
+            RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
+        ]);
+
+        std::env::remove_var(RHYTHM_DEV_MODE_ENV);
+        std::env::remove_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV);
+        let applied = apply_beta_build_defaults();
+        if beta_build_enables_matter_attestation_bypass(VERSION) {
+            assert!(applied);
+            assert_eq!(
+                std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).as_deref(),
+                Ok("1")
+            );
+        } else {
+            assert!(!applied);
+            assert!(std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).is_err());
+        }
+
+        std::env::set_var(RHYTHM_DEV_MODE_ENV, "0");
+        std::env::remove_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV);
+        assert!(!apply_beta_build_defaults());
+        assert!(std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).is_err());
+
+        std::env::remove_var(RHYTHM_DEV_MODE_ENV);
+        std::env::set_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "manual");
+        assert!(!apply_beta_build_defaults());
+        assert_eq!(
+            std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).as_deref(),
+            Ok("manual")
         );
     }
 
@@ -844,6 +962,55 @@ mod tests {
     }
 
     #[test]
+    fn install_factory_reset_hook_captures_state_and_registers_callback() {
+        let root = unique_test_dir("factory-reset-hook");
+        let state = test_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.data_dir = root.display().to_string();
+            s.firmware_version = "0.4.251-beta";
+        }
+
+        install_factory_reset_hook(&state).unwrap();
+
+        assert!(state.lock().unwrap().after_factory_reset_fn.is_some());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn save_commissioning_wifi_credentials_persists_when_storage_is_configured() {
+        let root = unique_test_dir("wifi-save");
+        let state = test_state();
+        state.lock().unwrap().storage =
+            Some(Box::new(FileStorage::new(root.to_str().unwrap()).unwrap()));
+        let creds = WifiCredentials {
+            ssid: "Kitchen AP".to_string(),
+            password: "correct horse battery staple".to_string(),
+        };
+
+        save_commissioning_wifi_credentials(&state, &creds, "test");
+
+        let loaded = FileStorage::new(root.to_str().unwrap())
+            .unwrap()
+            .load_commissioning_wifi_credentials()
+            .unwrap();
+        assert_eq!(loaded, Some(creds));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn save_commissioning_wifi_credentials_handles_missing_storage_without_panicking() {
+        let state = test_state();
+        let creds = WifiCredentials {
+            ssid: "No Storage".to_string(),
+            password: "password".to_string(),
+        };
+
+        save_commissioning_wifi_credentials(&state, &creds, "test");
+        assert!(state.lock().unwrap().storage.is_none());
+    }
+
+    #[test]
     fn boot_success_health_waits_for_periodic_loop() {
         let state = test_state();
 
@@ -870,6 +1037,19 @@ mod tests {
         assert_eq!(
             boot_success_health(&state),
             BootSuccessHealth::Waiting("hub_bootstrap_running")
+        );
+    }
+
+    #[test]
+    fn boot_success_health_waits_for_hub_sync_to_finish() {
+        let state = test_state();
+        mark_periodic_ready(&state);
+        let key = HubKey::new(HubType::new("hue"), "192.0.2.11");
+        state.lock().unwrap().begin_hub_sync(&key);
+
+        assert_eq!(
+            boot_success_health(&state),
+            BootSuccessHealth::Waiting("hub_sync_in_progress")
         );
     }
 
@@ -920,6 +1100,43 @@ mod tests {
 
         state.lock().unwrap().set_hub_connected(&key, true);
         assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
+    }
+
+    #[test]
+    fn boot_success_health_ignores_redacted_hub_credentials() {
+        let state = test_state();
+        mark_periodic_ready(&state);
+        let mut credentials = HubCredentials::new("hue", "192.0.2.12", serde_json::json!({}));
+        credentials.secrets_redacted = true;
+        let key = credentials.hub_key().unwrap();
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(key, credentials);
+
+        assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
+    }
+
+    #[test]
+    fn run_bootstate_script_action_handles_success_failure_and_missing_script() {
+        let root = unique_test_dir("bootstate-script");
+        let script = root.join("bootstate.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ \"$1\" = success ]; then exit 0; fi\nexit 7\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let script = script.to_str().unwrap();
+
+        run_bootstate_script_action(script, "success");
+        run_bootstate_script_action(script, "fail");
+        run_bootstate_script_action("/tmp/rhythm-definitely-missing-bootstate", "success");
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -2935,6 +2935,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MotionTimerTestStorage {
         saved_motion_timers: Arc<Mutex<Vec<StoredMotionTimers>>>,
+        fail_saves: bool,
     }
 
     impl crate::storage::Storage for MotionTimerTestStorage {
@@ -2974,6 +2975,9 @@ mod tests {
         }
 
         fn save_motion_timers(&self, timers: &StoredMotionTimers) -> anyhow::Result<()> {
+            if self.fail_saves {
+                return Err(anyhow::anyhow!("motion timer save failed"));
+            }
             self.saved_motion_timers
                 .lock()
                 .unwrap()
@@ -3284,6 +3288,173 @@ mod tests {
         fn active_light_profile_id(&self) -> String {
             rhythm_core::RHYTHM_PROFILE_ID.to_string()
         }
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRuntime {
+        snapshots: Vec<RoomSnapshot>,
+        events: Arc<Mutex<Vec<InputEvent>>>,
+        dim_calls: Arc<Mutex<Vec<(String, f32)>>>,
+        turn_on_calls: Arc<Mutex<Vec<String>>>,
+        apply_calls: Arc<Mutex<Vec<String>>>,
+        lights_off_calls: Arc<Mutex<Vec<(String, Option<u32>)>>>,
+        brightness_calls: Arc<Mutex<Vec<(String, u8)>>>,
+        handle_event_turns_on: bool,
+        fail_handle_event: bool,
+        fail_dim: bool,
+        fail_turn_on: bool,
+        fail_apply: bool,
+        fail_lights_off: bool,
+        fail_brightness: bool,
+    }
+
+    impl RecordingRuntime {
+        fn with_snapshots(snapshots: Vec<RoomSnapshot>) -> Self {
+            Self {
+                snapshots,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl RuntimeHandle for RecordingRuntime {
+        fn handle_event(&self, event: &InputEvent) -> anyhow::Result<bool> {
+            self.events.lock().unwrap().push(event.clone());
+            if self.fail_handle_event {
+                return Err(anyhow::anyhow!("handle-event failed"));
+            }
+            Ok(self.handle_event_turns_on)
+        }
+
+        fn sync_rooms(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_solar(&self, _: rhythm_core::SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_mode_configs(&self, _: Vec<rhythm_core::ModeConfig>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+            self.snapshots
+                .iter()
+                .find(|snap| snap.id == room_id)
+                .cloned()
+        }
+
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            self.snapshots.clone()
+        }
+
+        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+
+        fn add_room(&self, _: &str, _: &str) {}
+
+        fn remove_room(&self, _: &str) {}
+
+        fn dim_room(&self, room_id: &str, factor: f32) -> anyhow::Result<()> {
+            self.dim_calls
+                .lock()
+                .unwrap()
+                .push((room_id.to_string(), factor));
+            if self.fail_dim {
+                return Err(anyhow::anyhow!("dim failed"));
+            }
+            Ok(())
+        }
+
+        fn turn_on_room(&self, room_id: &str) -> anyhow::Result<()> {
+            self.turn_on_calls.lock().unwrap().push(room_id.to_string());
+            if self.fail_turn_on {
+                return Err(anyhow::anyhow!("turn-on failed"));
+            }
+            Ok(())
+        }
+
+        fn apply_room_command(
+            &self,
+            room_id: &str,
+            _: rhythm_core::LightingCommand,
+        ) -> anyhow::Result<()> {
+            self.apply_calls.lock().unwrap().push(room_id.to_string());
+            if self.fail_apply {
+                return Err(anyhow::anyhow!("apply failed"));
+            }
+            Ok(())
+        }
+
+        fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> anyhow::Result<()> {
+            self.lights_off_calls
+                .lock()
+                .unwrap()
+                .push((room_id.to_string(), transition_ms));
+            if self.fail_lights_off {
+                return Err(anyhow::anyhow!("lights-off failed"));
+            }
+            Ok(())
+        }
+
+        fn set_power_save(&self, _: bool) -> Vec<String> {
+            vec![]
+        }
+
+        fn is_power_save(&self) -> bool {
+            false
+        }
+
+        fn set_room_brightness(&self, room_id: &str, brightness: u8) -> anyhow::Result<()> {
+            self.brightness_calls
+                .lock()
+                .unwrap()
+                .push((room_id.to_string(), brightness));
+            if self.fail_brightness {
+                return Err(anyhow::anyhow!("brightness failed"));
+            }
+            Ok(())
+        }
+
+        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
+
+        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn current_hour(&self) -> f32 {
+            12.0
+        }
+
+        fn set_light_profile(&self, _: &str) -> bool {
+            true
+        }
+
+        fn active_light_profile_id(&self) -> String {
+            rhythm_core::RHYTHM_PROFILE_ID.to_string()
+        }
+
         fn available_light_profiles(&self) -> Vec<(String, String)> {
             vec![]
         }
@@ -3938,6 +4109,160 @@ mod tests {
     }
 
     #[test]
+    fn untagged_hub_events_emit_unresolved_status_and_callbacks() {
+        let state = make_state();
+        let mut event_rx = subscribe_events(&state);
+        let heartbeat_calls = Arc::new(AtomicUsize::new(0));
+        let disconnect_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let mut s = state.lock().unwrap();
+            s.on_hub_heartbeat = Some({
+                let heartbeat_calls = heartbeat_calls.clone();
+                Arc::new(move || {
+                    heartbeat_calls.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+            s.on_hub_disconnect = Some({
+                let disconnect_calls = disconnect_calls.clone();
+                Arc::new(move || {
+                    disconnect_calls.fetch_add(1, Ordering::SeqCst);
+                })
+            });
+        }
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected { hub_key: None },
+            &mut motion,
+        );
+        match event_rx.try_recv().unwrap() {
+            crate::server_event::ServerEvent::HubStatus {
+                hub_type,
+                address,
+                connected,
+            } => {
+                assert_eq!(hub_type, None);
+                assert_eq!(address, None);
+                assert!(connected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: None,
+                room_id: "native-room".into(),
+                action: ButtonAction::Reset,
+                device_id: None,
+            },
+            &mut motion,
+        );
+        match event_rx.try_recv().unwrap() {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                hub_type,
+                address,
+                source_room_id,
+                native_device_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unresolved);
+                assert_eq!(hub_type, None);
+                assert_eq!(address, None);
+                assert_eq!(source_room_id.as_deref(), Some("native-room"));
+                assert_eq!(native_device_id, None);
+                assert_eq!(button_action, Some(ButtonAction::Reset));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: None,
+                room_id: "native-room".into(),
+                sensor_id: "sensor-a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+        match event_rx.try_recv().unwrap() {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                route,
+                hub_type,
+                address,
+                source_room_id,
+                native_sensor_id,
+                detected,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::Unresolved);
+                assert_eq!(hub_type, None);
+                assert_eq!(address, None);
+                assert_eq!(source_room_id.as_deref(), Some("native-room"));
+                assert_eq!(native_sensor_id, "sensor-a");
+                assert!(detected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::LightPower {
+                hub_key: None,
+                device_id: "light-a".into(),
+                lights_on: true,
+            },
+            &mut motion,
+        );
+        assert!(event_rx.try_recv().is_err());
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Heartbeat { hub_key: None },
+            &mut motion,
+        );
+        assert_eq!(heartbeat_calls.load(Ordering::SeqCst), 1);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: None,
+                reason: "stream ended".into(),
+            },
+            &mut motion,
+        );
+        match event_rx.try_recv().unwrap() {
+            crate::server_event::ServerEvent::HubStatus {
+                hub_type,
+                address,
+                connected,
+            } => {
+                assert_eq!(hub_type, None);
+                assert_eq!(address, None);
+                assert!(!connected);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert_eq!(disconnect_calls.load(Ordering::SeqCst), 1);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::DevicePaired {
+                hub_key: None,
+                device_id: "device-a".into(),
+                name: "Device A".into(),
+                device_type: DeviceType::Light,
+            },
+            &mut motion,
+        );
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn unroutable_button_event_broadcasts_native_button_id() {
         let state = make_state();
         let hub_key = HubKey::new(HubType::new("test"), "hub.local");
@@ -4474,6 +4799,448 @@ mod tests {
             "SetNodePreferences stalled on periodic slot: elapsed {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn worker_items_cover_no_runtime_and_stale_generation_skips() {
+        let state = make_state();
+        process_work_item(
+            &state,
+            WorkItem::QueuedNodeAction {
+                command_id: "missing-runtime-action".into(),
+                node_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("button-a".into()),
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &state,
+            WorkItem::ApplyNodeCommand {
+                command_id: "stale-apply".into(),
+                node_id: "room_a".into(),
+                command: rhythm_core::LightingCommand::new(40, 3000),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: 1,
+            },
+        );
+        process_work_item(
+            &state,
+            WorkItem::LightsOffRoom {
+                command_id: "stale-off".into(),
+                node_id: "room_a".into(),
+                transition_ms: Some(250),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: 1,
+            },
+        );
+
+        {
+            let mut s = state.lock().unwrap();
+            s.pending_periodic_ticks.insert(
+                "room_a".into(),
+                crate::state::PendingPeriodicTick::new(12.0, 0),
+            );
+        }
+        process_work_item(
+            &state,
+            WorkItem::PeriodicNodeTick {
+                command_id: "missing-runtime-periodic".into(),
+                node_id: "room_a".into(),
+                settings_node_id: "room_a".into(),
+                current_hour: 12.0,
+                emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: 0,
+            },
+        );
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .pending_periodic_ticks
+                .contains_key("room_a"),
+            "missing-runtime periodic ticks should clear their pending marker"
+        );
+        process_work_item(
+            &state,
+            WorkItem::DeferredPersist {
+                node_id: "room_a".into(),
+            },
+        );
+        process_work_item(&state, WorkItem::DeferredPersistState);
+    }
+
+    #[test]
+    fn inline_node_actions_cover_success_failure_and_missing_runtime() {
+        let no_runtime = make_state();
+        assert!(!process_button_inline(
+            &no_runtime,
+            "room_a",
+            ButtonAction::OnPress,
+            Some("button-a"),
+            "missing-runtime-button",
+        ));
+        assert!(!dim_node_inline(&no_runtime, "room_a", 0.5));
+        assert!(!turn_on_node_inline(&no_runtime, "room_a"));
+
+        let runtime = Arc::new(RecordingRuntime {
+            handle_event_turns_on: true,
+            ..RecordingRuntime::with_snapshots(vec![room_snapshot_with_flags(
+                "room_a", false, false,
+            )])
+        });
+        let events = runtime.events.clone();
+        let dim_calls = runtime.dim_calls.clone();
+        let turn_on_calls = runtime.turn_on_calls.clone();
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            let now = Instant::now();
+            s.room_mode_transitions.insert(
+                "room_a".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: now + Duration::from_secs(1),
+                    periodic_resume_at: now + Duration::from_secs(2),
+                },
+            );
+        }
+
+        assert!(process_button_inline(
+            &state,
+            "room_a",
+            ButtonAction::OnPress,
+            Some("button-a"),
+            "inline-button",
+        ));
+        assert!(dim_node_inline(&state, "room_a", 0.35));
+        {
+            let mut s = state.lock().unwrap();
+            let now = Instant::now();
+            s.room_mode_transitions.insert(
+                "room_a".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: now + Duration::from_secs(1),
+                    periodic_resume_at: now + Duration::from_secs(2),
+                },
+            );
+        }
+        assert!(turn_on_node_inline(&state, "room_a"));
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].room_id, "room_a");
+        assert_eq!(events[0].action, ButtonAction::OnPress);
+        assert_eq!(events[0].device_id.as_deref(), Some("button-a"));
+        assert_eq!(
+            dim_calls.lock().unwrap().as_slice(),
+            &[("room_a".to_string(), 0.35)]
+        );
+        assert_eq!(
+            turn_on_calls.lock().unwrap().as_slice(),
+            &["room_a".to_string()]
+        );
+        assert!(!state
+            .lock()
+            .unwrap()
+            .room_mode_transitions
+            .contains_key("room_a"));
+
+        let failing_runtime = Arc::new(RecordingRuntime {
+            fail_handle_event: true,
+            fail_dim: true,
+            fail_turn_on: true,
+            ..RecordingRuntime::with_snapshots(vec![room_snapshot_with_flags(
+                "room_a", false, false,
+            )])
+        });
+        let failing_state = make_state_with_runtime(failing_runtime);
+        assert!(!process_button_inline(
+            &failing_state,
+            "room_a",
+            ButtonAction::OffPress,
+            None,
+            "inline-button-fail",
+        ));
+        assert!(!dim_node_inline(&failing_state, "room_a", 0.25));
+        assert!(!turn_on_node_inline(&failing_state, "room_a"));
+    }
+
+    #[test]
+    fn button_ingress_queues_deferred_persist_after_inline_success() {
+        let runtime = Arc::new(RecordingRuntime {
+            handle_event_turns_on: true,
+            ..RecordingRuntime::with_snapshots(vec![room_snapshot_with_flags(
+                "room_a", false, false,
+            )])
+        });
+        let events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        state.lock().unwrap().work_tx = Some(tx);
+
+        run_button_ingress_action(
+            &state,
+            "room_a",
+            ButtonAction::OnPress,
+            Some("button-a"),
+            "button-ingress",
+            true,
+        );
+
+        match rx.try_recv().expect("deferred persist should enqueue") {
+            WorkItem::DeferredPersist { node_id } => assert_eq!(node_id, "room_a"),
+            _ => panic!("unexpected work item"),
+        }
+        assert_eq!(events.lock().unwrap().len(), 1);
+
+        run_button_ingress_action(
+            &state,
+            "room_a",
+            ButtonAction::OffPress,
+            None,
+            "button-ingress-no-persist",
+            false,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "persist_after=false should not enqueue a deferred persist"
+        );
+        assert_eq!(events.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn worker_dispatch_items_cover_success_and_runtime_errors() {
+        let runtime = Arc::new(RecordingRuntime {
+            handle_event_turns_on: true,
+            ..RecordingRuntime::with_snapshots(vec![room_snapshot_with_flags(
+                "room_a", false, false,
+            )])
+        });
+        let events = runtime.events.clone();
+        let brightness_calls = runtime.brightness_calls.clone();
+        let apply_calls = runtime.apply_calls.clone();
+        let lights_off_calls = runtime.lights_off_calls.clone();
+        let state = make_state_with_runtime(runtime);
+        let generation = state.lock().unwrap().light_dispatch_generation;
+
+        process_work_item(
+            &state,
+            WorkItem::QueuedNodeAction {
+                command_id: "queued-success".into(),
+                node_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("button-a".into()),
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &state,
+            WorkItem::SetNodeBrightness {
+                command_id: "brightness-success".into(),
+                node_id: "room_a".into(),
+                brightness: 64,
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &state,
+            WorkItem::SetNodeCurveModifier {
+                command_id: "modifier-success".into(),
+                node_id: "room_a".into(),
+                modifier: commands::NodeCurveModifier::Brightness(72),
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &state,
+            WorkItem::LightsOffRoom {
+                command_id: "off-success".into(),
+                node_id: "room_a".into(),
+                transition_ms: Some(250),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: generation,
+            },
+        );
+        process_work_item(
+            &state,
+            WorkItem::ApplyNodeCommand {
+                command_id: "apply-success".into(),
+                node_id: "room_a".into(),
+                command: rhythm_core::LightingCommand::new(50, 3200),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: generation,
+            },
+        );
+
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(
+            brightness_calls.lock().unwrap().as_slice(),
+            &[("room_a".to_string(), 64), ("room_a".to_string(), 72)]
+        );
+        assert_eq!(
+            lights_off_calls.lock().unwrap().as_slice(),
+            &[("room_a".to_string(), Some(250))]
+        );
+        assert_eq!(
+            apply_calls.lock().unwrap().as_slice(),
+            &["room_a".to_string()]
+        );
+
+        let failing_runtime = Arc::new(RecordingRuntime {
+            fail_handle_event: true,
+            fail_brightness: true,
+            fail_lights_off: true,
+            fail_apply: true,
+            ..RecordingRuntime::with_snapshots(vec![room_snapshot_with_flags(
+                "room_a", false, false,
+            )])
+        });
+        let fail_events = failing_runtime.events.clone();
+        let fail_brightness = failing_runtime.brightness_calls.clone();
+        let fail_lights_off = failing_runtime.lights_off_calls.clone();
+        let fail_apply = failing_runtime.apply_calls.clone();
+        let failing_state = make_state_with_runtime(failing_runtime);
+        let fail_generation = failing_state.lock().unwrap().light_dispatch_generation;
+
+        process_work_item(
+            &failing_state,
+            WorkItem::QueuedNodeAction {
+                command_id: "queued-fail".into(),
+                node_id: "room_a".into(),
+                action: ButtonAction::OffPress,
+                device_id: None,
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &failing_state,
+            WorkItem::SetNodeBrightness {
+                command_id: "brightness-fail".into(),
+                node_id: "room_a".into(),
+                brightness: 20,
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &failing_state,
+            WorkItem::SetNodeCurveModifier {
+                command_id: "modifier-fail".into(),
+                node_id: "room_a".into(),
+                modifier: commands::NodeCurveModifier::Brightness(33),
+                dispatch_spacing: Duration::ZERO,
+                persist_after: false,
+            },
+        );
+        process_work_item(
+            &failing_state,
+            WorkItem::LightsOffRoom {
+                command_id: "off-fail".into(),
+                node_id: "room_a".into(),
+                transition_ms: None,
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: fail_generation,
+            },
+        );
+        process_work_item(
+            &failing_state,
+            WorkItem::ApplyNodeCommand {
+                command_id: "apply-fail".into(),
+                node_id: "room_a".into(),
+                command: rhythm_core::LightingCommand::new(40, 2800),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: fail_generation,
+            },
+        );
+
+        assert_eq!(fail_events.lock().unwrap().len(), 1);
+        assert_eq!(
+            fail_brightness.lock().unwrap().as_slice(),
+            &[("room_a".to_string(), 20), ("room_a".to_string(), 33)]
+        );
+        assert_eq!(
+            fail_lights_off.lock().unwrap().as_slice(),
+            &[("room_a".to_string(), None)]
+        );
+        assert_eq!(
+            fail_apply.lock().unwrap().as_slice(),
+            &["room_a".to_string()]
+        );
+    }
+
+    #[test]
+    fn periodic_worker_skip_paths_clear_current_pending_marker() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![],
+            periodic_tick_node_calls: calls.clone(),
+            apply_room_command_calls: Arc::new(AtomicUsize::new(0)),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
+        });
+        let state = make_state_with_runtime(runtime);
+        let generation = state.lock().unwrap().light_dispatch_generation;
+        {
+            let mut s = state.lock().unwrap();
+            s.pending_periodic_ticks.insert(
+                "room_a".into(),
+                crate::state::PendingPeriodicTick::new(13.0, generation),
+            );
+        }
+
+        process_work_item(
+            &state,
+            WorkItem::PeriodicNodeTick {
+                command_id: "stale-settings".into(),
+                node_id: "room_a".into(),
+                settings_node_id: "missing-settings".into(),
+                current_hour: 12.0,
+                emit_parent_node_id: Some("parent-room".into()),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: generation,
+            },
+        );
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(!state
+            .lock()
+            .unwrap()
+            .pending_periodic_ticks
+            .contains_key("room_a"));
+
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = false;
+            s.pending_periodic_ticks.insert(
+                "room_b".into(),
+                crate::state::PendingPeriodicTick::new(14.0, generation),
+            );
+        }
+        process_work_item(
+            &state,
+            WorkItem::PeriodicNodeTick {
+                command_id: "breaker-disabled".into(),
+                node_id: "room_b".into(),
+                settings_node_id: "room_b".into(),
+                current_hour: 12.0,
+                emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation: generation,
+            },
+        );
+        assert!(!state
+            .lock()
+            .unwrap()
+            .pending_periodic_ticks
+            .contains_key("room_b"));
     }
 
     #[test]
@@ -5659,6 +6426,7 @@ mod tests {
         let app = crate::state::AppState {
             storage: Some(Box::new(MotionTimerTestStorage {
                 saved_motion_timers: saved.clone(),
+                ..Default::default()
             })),
             ..Default::default()
         };
@@ -5690,6 +6458,7 @@ mod tests {
         let app = crate::state::AppState {
             storage: Some(Box::new(MotionTimerTestStorage {
                 saved_motion_timers: saved.clone(),
+                ..Default::default()
             })),
             ..Default::default()
         };
@@ -5713,6 +6482,200 @@ mod tests {
 
         assert!(saved.lock().unwrap().is_empty());
         assert!(persistence.dirty);
+    }
+
+    #[test]
+    fn motion_persistence_clears_dirty_without_storage_and_noops_when_clean() {
+        let state = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let motion = MotionTimerState::new();
+        let mut persistence = MotionTimerPersistence::new();
+
+        persistence.persist_now(&state, &motion);
+        assert!(persistence.last_attempt_at.is_none());
+        assert!(!persistence.dirty);
+
+        persistence.mark_dirty();
+        persistence.persist_now(&state, &motion);
+        assert!(persistence.last_attempt_at.is_some());
+        assert!(!persistence.dirty);
+        assert!(persistence.last_saved.is_none());
+    }
+
+    #[test]
+    fn motion_persistence_failed_save_stays_dirty_for_retry() {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let app = crate::state::AppState {
+            storage: Some(Box::new(MotionTimerTestStorage {
+                saved_motion_timers: saved.clone(),
+                fail_saves: true,
+            })),
+            ..Default::default()
+        };
+        let state = Arc::new(Mutex::new(app));
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "sensor_a".into(),
+            MotionSourceState {
+                source_node_id: "sensor_a".into(),
+                target_node_id: "room_a".into(),
+                stopped_at: None,
+                stopped_at_epoch_ms: None,
+            },
+        );
+
+        let mut persistence = MotionTimerPersistence::new();
+        persistence.mark_dirty();
+        persistence.persist_now(&state, &motion);
+
+        assert!(saved.lock().unwrap().is_empty());
+        assert!(persistence.dirty);
+        assert!(persistence.last_saved.is_none());
+    }
+
+    #[test]
+    fn stopped_at_epoch_ms_for_storage_derives_epoch_when_needed() {
+        let source = MotionSourceState {
+            source_node_id: "sensor_a".into(),
+            target_node_id: "room_a".into(),
+            stopped_at: Some(Instant::now() - Duration::from_secs(3)),
+            stopped_at_epoch_ms: None,
+        };
+
+        let derived = stopped_at_epoch_ms_for_storage(&source).unwrap();
+        let age_ms = current_epoch_ms().saturating_sub(derived);
+
+        assert!((2_000..=5_000).contains(&age_ms), "age_ms={age_ms}");
+    }
+
+    #[test]
+    fn restored_motion_timer_staleness_uses_default_timeout_and_zero_disables() {
+        let state = make_state();
+        let old_epoch = current_epoch_ms().saturating_sub(25_000);
+
+        state.lock().unwrap().default_motion_timeout_secs = 0;
+        assert!(!restored_motion_timer_too_stale(
+            &state, "room_a", old_epoch
+        ));
+
+        state.lock().unwrap().default_motion_timeout_secs = 10;
+        assert!(restored_motion_timer_too_stale(&state, "room_a", old_epoch));
+
+        let fresh_epoch = current_epoch_ms().saturating_sub(5_000);
+        assert!(!restored_motion_timer_too_stale(
+            &state,
+            "room_a",
+            fresh_epoch
+        ));
+    }
+
+    #[test]
+    fn observed_lights_for_motion_reactivation_filters_command_and_stale_values() {
+        let state = make_state();
+
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            true,
+            crate::state::ObservedPowerSource::Command,
+        );
+        assert_eq!(
+            observed_room_lights_on_for_motion_reactivation(&state, "room_a"),
+            Some(true)
+        );
+
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            false,
+            crate::state::ObservedPowerSource::Command,
+        );
+        assert_eq!(
+            observed_room_lights_on_for_motion_reactivation(&state, "room_a"),
+            None
+        );
+
+        {
+            let mut s = state.lock().unwrap();
+            s.room_observed_power.insert(
+                "room_a".into(),
+                crate::state::ObservedPowerState {
+                    lights_on: false,
+                    observed_at_epoch_ms: current_epoch_ms().saturating_sub(10 * 60 * 1_000),
+                    source: crate::state::ObservedPowerSource::SyncPoll,
+                },
+            );
+        }
+        assert_eq!(
+            observed_room_lights_on_for_motion_reactivation(&state, "room_a"),
+            None
+        );
+
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            false,
+            crate::state::ObservedPowerSource::LiveSubscription,
+        );
+        assert_eq!(
+            observed_room_lights_on_for_motion_reactivation(&state, "room_a"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn sync_motion_snapshots_emits_updates_and_clear_events() {
+        let mut app = crate::state::AppState {
+            default_motion_timeout_secs: 45,
+            ..Default::default()
+        };
+        app.motion_snapshots.insert(
+            "room_a".to_string(),
+            MotionSnapshot {
+                motion_active: false,
+                motion_owned: false,
+                remaining_secs: None,
+                timeout_secs: 45,
+                warning_active: false,
+            },
+        );
+        let state = Arc::new(Mutex::new(app));
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "sensor_a".into(),
+            MotionSourceState {
+                source_node_id: "sensor_a".into(),
+                target_node_id: "room_a".into(),
+                stopped_at: None,
+                stopped_at_epoch_ms: None,
+            },
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        sync_motion_snapshots(&state, &motion);
+
+        let event = event_rx.try_recv().expect("motion timer update event");
+        match event {
+            crate::server_event::ServerEvent::MotionTimer { timers } => {
+                assert_eq!(timers.len(), 1);
+                assert_eq!(timers[0].node_id, "room_a");
+                assert!(timers[0].motion_active);
+                assert!(timers[0].motion_owned);
+                assert_eq!(timers[0].timeout_secs, 45);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        sync_motion_snapshots(&state, &MotionTimerState::new());
+
+        let event = event_rx.try_recv().expect("motion timer clear event");
+        match event {
+            crate::server_event::ServerEvent::MotionTimer { timers } => {
+                assert!(timers.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(state.lock().unwrap().motion_snapshots.is_empty());
     }
 
     #[test]

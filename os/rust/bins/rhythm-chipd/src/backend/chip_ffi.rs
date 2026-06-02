@@ -446,6 +446,141 @@ impl ChipBridgeMode {
     }
 }
 
+#[cfg(all(test, not(rhythm_chipd_chip_ffi)))]
+mod tests {
+    use super::*;
+    use rhythm_matter::transport::{
+        MatterCommissioningNetwork, MatterCommissioningRendezvous,
+        MatterCommissioningWifiCredentials,
+    };
+
+    fn commissioning_state() -> CommissioningState {
+        CommissioningState {
+            fabric_id: "fabric".to_string(),
+            operational_fabric_id: 123,
+            ipk_hex: "00112233445566778899aabbccddeeff".to_string(),
+            storage_path: std::env::temp_dir().join("rhythm-chip-ffi-test.ini"),
+        }
+    }
+
+    fn commission_request() -> MatterCommissionRequest {
+        MatterCommissionRequest {
+            setup_payload: "MT:TEST".to_string(),
+            node_id: 1,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::Auto,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "Rhythm".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
+    fn group() -> MatterGroup {
+        MatterGroup {
+            group_id: 55,
+            name: "Kitchen".to_string(),
+            members: vec![MatterGroupMember {
+                node_id: 1,
+                endpoint: 1,
+            }],
+        }
+    }
+
+    fn unsupported<T>(result: Result<T>, operation: &str) {
+        let err = match result {
+            Ok(_) => panic!("stub operation should be unsupported"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains(operation),
+            "expected operation name {operation:?} in {message:?}"
+        );
+        assert!(
+            message.contains("built without the optional direct CHIP FFI bridge"),
+            "expected stub reason in {message:?}"
+        );
+    }
+
+    #[test]
+    fn stub_controller_initializes_and_reports_unsupported_operations() {
+        let state = commissioning_state();
+        let mut controller = ChipFfiController::initialize(&state, Some(0), &[]).unwrap();
+        let request = commission_request();
+        let group = group();
+        let members = group.members.clone();
+        let targets = vec![MatterSubscriptionTarget {
+            node_id: 1,
+            endpoint: 1,
+        }];
+
+        unsupported(controller.commission_light(&request), "commission_light");
+        unsupported(controller.probe_light(1), "probe_light");
+        unsupported(
+            controller.decommission_device(1, false),
+            "decommission_device",
+        );
+        unsupported(controller.set_on_off(1, 1, true), "set_on_off");
+        unsupported(controller.configure_group(&group), "configure_group");
+        unsupported(controller.remove_group(55, &members), "remove_group");
+        unsupported(controller.set_group_on_off(55, true), "set_group_on_off");
+        unsupported(controller.identify_group(55, 2), "identify_group");
+        unsupported(
+            controller.set_group_brightness(55, 128, Some(250)),
+            "set_group_brightness",
+        );
+        unsupported(
+            controller.set_group_color_temperature(55, 2700, Some(250)),
+            "set_group_color_temperature",
+        );
+        unsupported(controller.set_group_xy(55, 0.3, 0.4, None), "set_group_xy");
+        unsupported(
+            controller.set_group_hue_saturation(55, 12, 34, None),
+            "set_group_hue_saturation",
+        );
+        unsupported(controller.identify_light(1, 1, 2), "identify_light");
+        unsupported(
+            controller.set_brightness(1, 1, 128, Some(250)),
+            "set_brightness",
+        );
+        unsupported(
+            controller.run_level_command(
+                1,
+                1,
+                MatterLevelCommandVariant::StepWithOnOff,
+                10,
+                Some(MatterLevelStepMode::Up),
+                Some(250),
+            ),
+            "run_level_command",
+        );
+        unsupported(
+            controller.set_color_temperature(1, 1, 2700, None),
+            "set_color_temperature",
+        );
+        unsupported(controller.set_xy(1, 1, 0.3, 0.4, None), "set_xy");
+        unsupported(
+            controller.set_hue_saturation(1, 1, 12, 34, None),
+            "set_hue_saturation",
+        );
+        unsupported(controller.read_on_off(1, 1), "read_on_off");
+        unsupported(
+            controller.read_light_capability_snapshot(1, 1),
+            "read_light_capability_snapshot",
+        );
+        unsupported(controller.read_light_state(1, 1), "read_light_state");
+        unsupported(
+            controller.subscribe_on_off(&targets, 1, 30),
+            "subscribe_on_off",
+        );
+        unsupported(
+            controller.drain_attribute_reports(),
+            "drain_attribute_reports",
+        );
+    }
+}
+
 #[cfg(rhythm_chipd_chip_ffi)]
 impl Drop for ChipFfiController {
     fn drop(&mut self) {

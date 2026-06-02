@@ -3,8 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(not(test))]
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(not(test))]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rhythm_os::canonical::identity::HubKey;
@@ -1745,9 +1748,13 @@ fn readback_snapshot(transport: &Arc<dyn MatterTransport>, node_id: u64, endpoin
     }
 }
 
+#[cfg(not(test))]
 fn sleep_ms(ms: u64) {
     thread::sleep(Duration::from_millis(ms));
 }
+
+#[cfg(test)]
+fn sleep_ms(_ms: u64) {}
 
 fn sanitize_id(value: &str) -> String {
     value
@@ -1766,6 +1773,20 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::{Arc, Mutex};
+
+    use rhythm_devices::{DeviceQuirk, LightCapabilities, LightType};
+    use rhythm_os::hub::{ActiveHub, HubType};
+    use rhythm_os::registry::HubDeviceRegistry;
+    use rhythm_os::state::{AppState, SharedState};
+    use serde_json::json;
+
+    use crate::cloud_profiles::CloudMatterProfileCatalog;
+    use crate::test_support::SpyTransport;
+    use crate::transport::{MatterDeviceInfo, MatterTransport};
 
     fn commissioned_device(min_kelvin: Option<u16>, max_kelvin: Option<u16>) -> CommissionedDevice {
         CommissionedDevice {
@@ -1780,6 +1801,100 @@ mod tests {
             min_kelvin,
             max_kelvin,
         }
+    }
+
+    fn commissioned_device_with_modes(color_modes: Vec<MatterColorMode>) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id: 42,
+            vendor_name: "Vendor".to_string(),
+            product_name: "Bulb".to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes,
+            min_kelvin: Some(2000),
+            max_kelvin: Some(6500),
+        }
+    }
+
+    fn unique_data_dir() -> PathBuf {
+        std::env::temp_dir()
+            .join("rhythm-matter-bulb-test")
+            .join(format!("{}-{}", std::process::id(), now_unix_ms()))
+    }
+
+    fn test_state_with_transport(
+        transport: Arc<SpyTransport>,
+    ) -> (SharedState, Arc<MatterHubData>, PathBuf) {
+        let data_dir = unique_data_dir();
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let transport_cell = std::sync::OnceLock::new();
+        let transport_obj: Arc<dyn MatterTransport> = transport;
+        let _ = transport_cell.set(transport_obj);
+
+        let mut device_caps = HashMap::new();
+        device_caps.insert(
+            "matter-42".to_string(),
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(MatterHubData {
+            transport: transport_cell,
+            capture_dir: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "local-test".to_string(),
+            commissioned: Mutex::new(vec![MatterDeviceInfo {
+                node_id: 42,
+                vendor_name: "Vendor".to_string(),
+                product_name: "Bulb".to_string(),
+                reachable: true,
+            }]),
+            next_node_id: AtomicU64::new(43),
+            device_caps: Mutex::new(device_caps),
+            device_quirks: Mutex::new(HashMap::new()),
+            cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
+            decommissioning: Mutex::new(HashSet::new()),
+            recently_decommissioned: Mutex::new(HashMap::new()),
+            event_tx,
+        });
+
+        let hub_type = HubType::new("matter");
+        let hub_key = HubKey::new(hub_type.clone(), "local");
+        let state = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut state = state.lock().unwrap();
+            state.data_dir = data_dir.to_string_lossy().to_string();
+            state.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(hub_data.clone()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            state.set_hub_connected(&hub_key, true);
+        }
+
+        (state, hub_data, data_dir)
+    }
+
+    fn bulb_test_state() -> (SharedState, Arc<MatterHubData>, PathBuf) {
+        let transport = Arc::new(SpyTransport::new());
+        transport.set_probe_device(commissioned_device_with_modes(vec![
+            MatterColorMode::ColorTemperature,
+            MatterColorMode::Xy,
+            MatterColorMode::HueSaturation,
+        ]));
+        transport.set_on_off_state(42, false);
+        test_state_with_transport(transport)
     }
 
     #[test]
@@ -1799,6 +1914,234 @@ mod tests {
         assert_eq!(
             color_temperature_targets(Some(&device)),
             (3080, 6120, "default_sane_range")
+        );
+    }
+
+    #[test]
+    fn run_bulb_test_exercises_command_matrix() {
+        let (state, _hub_data, _data_dir) = bulb_test_state();
+
+        for test in [
+            "identify",
+            "turn_off",
+            "brightness_without_on",
+            "brightness_with_on",
+            "level_move_to_level",
+            "level_move_to_level_with_onoff",
+            "level_step",
+            "level_step_with_onoff",
+            "dim_low",
+            "dim_ramp",
+            "brightness_steps",
+            "color_temperature",
+            "color_temperature_cool",
+            "xy_color",
+            "xy_green",
+            "xy_blue",
+            "hue_sat_red",
+            "hue_sat_green",
+            "hue_sat_blue",
+            "ct_to_xy",
+            "xy_to_ct",
+            "ct_to_hue_sat",
+            "hue_sat_to_ct",
+            "on_level_restore",
+            "power_on_behavior",
+            "rapid_commands",
+            "rapid_50ms",
+            "read_on_off",
+        ] {
+            let report = run_bulb_test(
+                &state,
+                &json!({
+                    "device_id": "matter-42",
+                    "test": test,
+                }),
+            )
+            .unwrap();
+
+            assert_eq!(report["test"], test);
+            assert_eq!(report["device_id"], "matter-42");
+            assert!(
+                report["command_count"].as_u64().unwrap() > 0,
+                "{test} should record at least one command"
+            );
+            assert!(
+                matches!(report["status"].as_str(), Some("ok" | "partial")),
+                "{test} should return a structured report"
+            );
+        }
+    }
+
+    #[test]
+    fn run_bulb_test_reports_unknown_test_and_missing_fields() {
+        let (state, _hub_data, _data_dir) = bulb_test_state();
+
+        let unknown = run_bulb_test(
+            &state,
+            &json!({
+                "device_id": "matter-42",
+                "test": "not_a_real_test",
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown.contains("Unknown Matter bulb test"));
+
+        let missing_device = run_bulb_test(&state, &json!({"test": "identify"}))
+            .unwrap_err()
+            .to_string();
+        assert!(missing_device.contains("Missing device_id"));
+
+        let missing_test = run_bulb_test(&state, &json!({"device_id": "matter-42"}))
+            .unwrap_err()
+            .to_string();
+        assert!(missing_test.contains("Missing test"));
+    }
+
+    #[test]
+    fn rapid_burst_selects_best_available_color_path() {
+        let transport = Arc::new(SpyTransport::new());
+        let transport_obj: Arc<dyn MatterTransport> = transport.clone();
+        let mut commands = Vec::new();
+
+        let xy = commissioned_device_with_modes(vec![MatterColorMode::Xy]);
+        run_rapid_burst(
+            &mut commands,
+            &transport_obj,
+            42,
+            1,
+            Some(&xy),
+            0,
+            2700,
+            6500,
+        );
+        assert_eq!(commands[0]["payload"]["sequence_kind"], "xy_colors");
+
+        commands.clear();
+        let ct = commissioned_device_with_modes(vec![MatterColorMode::ColorTemperature]);
+        run_rapid_burst(
+            &mut commands,
+            &transport_obj,
+            42,
+            1,
+            Some(&ct),
+            0,
+            2700,
+            6500,
+        );
+        assert_eq!(
+            commands[0]["payload"]["sequence_kind"],
+            "color_temperature_steps"
+        );
+
+        commands.clear();
+        let dimming_only = commissioned_device_with_modes(Vec::new());
+        run_rapid_burst(
+            &mut commands,
+            &transport_obj,
+            42,
+            1,
+            Some(&dimming_only),
+            0,
+            2700,
+            6500,
+        );
+        assert_eq!(commands[0]["payload"]["sequence_kind"], "brightness_levels");
+    }
+
+    #[test]
+    fn claimed_capabilities_include_raw_snapshot_when_available() {
+        let device = commissioned_device_with_modes(vec![
+            MatterColorMode::ColorTemperature,
+            MatterColorMode::Xy,
+        ]);
+        let raw = json!({
+            "endpoint_list": [1, 2],
+            "server_clusters": ["OnOff", "LevelControl", "ColorControl"],
+            "client_clusters": [],
+            "device_type_list": ["extended_color_light"],
+            "accepted_command_lists": {
+                "level_control": ["MoveToLevelWithOnOff"],
+                "color_control": ["MoveToColorTemperature"]
+            },
+            "attribute_lists": {"onoff": ["OnOff"]},
+            "level_control": {
+                "feature_map": 1,
+                "current_level": 128
+            },
+            "color_control": {
+                "feature_map": 2,
+                "color_capabilities": 16,
+                "color_temp_physical_min_mireds": 153,
+                "color_temp_physical_max_mireds": 500,
+                "current_x": 12000,
+                "current_y": 13000,
+                "current_hue": 4,
+                "current_saturation": 200
+            }
+        });
+
+        let claims = claimed_capabilities(42, 2, Some(&device), None, Some(&raw));
+
+        assert_eq!(claims["selected_endpoint"], 2);
+        assert_eq!(claims["endpoint_list"], json!([1, 2]));
+        assert_eq!(claims["raw_attribute_reads_available"], true);
+        assert_eq!(claims["unavailable_raw_claims"], json!([]));
+        assert_eq!(claims["color_temperature"], true);
+        assert_eq!(claims["xy_color"], true);
+        assert_eq!(claims["hue_saturation"], false);
+        assert_eq!(claims["current_level"], 128);
+    }
+
+    #[test]
+    fn save_bulb_test_report_persists_and_applies_local_overrides() {
+        let (state, hub_data, _data_dir) = bulb_test_state();
+
+        let result = save_bulb_test_report(
+            &state,
+            &json!({
+                "device_id": "matter-42",
+                "report_id": "../Needs XY!*",
+                "schema_version": 7,
+                "quirks": ["needs_xy_not_ct"],
+                "capability_hints": {
+                    "min_brightness": 0,
+                    "supports_transition": false
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(result["status"], "saved");
+        assert_eq!(result["report_id"], "NeedsXY");
+        assert_eq!(result["device_id"], "matter-42");
+        assert_eq!(result["applied_local"], true);
+        assert!(PathBuf::from(result["local_path"].as_str().unwrap()).exists());
+
+        let quirks = hub_data.device_quirks.lock().unwrap();
+        assert_eq!(
+            quirks.get("matter-42"),
+            Some(&vec![DeviceQuirk::NeedsXyNotCt])
+        );
+        drop(quirks);
+
+        let caps = hub_data.device_caps.lock().unwrap();
+        let updated = caps.get("matter-42").unwrap();
+        assert_eq!(updated.min_brightness, Some(1));
+        assert!(!updated.supports_transition);
+
+        let overrides = crate::local_quirks::load_overrides_for_state(&state);
+        assert_eq!(
+            overrides.quirks.get("matter-42"),
+            Some(&vec![DeviceQuirk::NeedsXyNotCt])
+        );
+        assert_eq!(
+            overrides
+                .capabilities
+                .get("matter-42")
+                .and_then(|caps| caps.min_brightness),
+            Some(1)
         );
     }
 }

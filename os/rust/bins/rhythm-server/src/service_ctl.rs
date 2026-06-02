@@ -341,3 +341,258 @@ fn linux_uninstall() -> Result<(), String> {
     println!("\nrhythm-server uninstalled.");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-service-ctl-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn with_home<T>(home: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home);
+        let result = f();
+        if let Some(previous) = previous {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        result
+    }
+
+    fn with_home_and_path<T>(
+        home: &std::path::Path,
+        path_prefix: &std::path::Path,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_home = std::env::var("HOME").ok();
+        let previous_path = std::env::var("PATH").ok();
+        let previous_fail_start = std::env::var("SYSTEMCTL_FAIL_START").ok();
+        let previous_fail_stop = std::env::var("SYSTEMCTL_FAIL_STOP").ok();
+        let previous_active = std::env::var("SYSTEMCTL_ACTIVE").ok();
+        let previous_pid = std::env::var("SYSTEMCTL_PID").ok();
+
+        std::env::set_var("HOME", home);
+        let path = previous_path
+            .as_deref()
+            .map(|path| format!("{}:{path}", path_prefix.display()))
+            .unwrap_or_else(|| path_prefix.display().to_string());
+        std::env::set_var("PATH", path);
+
+        let result = f();
+
+        if let Some(previous) = previous_home {
+            std::env::set_var("HOME", previous);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(previous) = previous_path {
+            std::env::set_var("PATH", previous);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        if let Some(previous) = previous_fail_start {
+            std::env::set_var("SYSTEMCTL_FAIL_START", previous);
+        } else {
+            std::env::remove_var("SYSTEMCTL_FAIL_START");
+        }
+        if let Some(previous) = previous_fail_stop {
+            std::env::set_var("SYSTEMCTL_FAIL_STOP", previous);
+        } else {
+            std::env::remove_var("SYSTEMCTL_FAIL_STOP");
+        }
+        if let Some(previous) = previous_active {
+            std::env::set_var("SYSTEMCTL_ACTIVE", previous);
+        } else {
+            std::env::remove_var("SYSTEMCTL_ACTIVE");
+        }
+        if let Some(previous) = previous_pid {
+            std::env::set_var("SYSTEMCTL_PID", previous);
+        } else {
+            std::env::remove_var("SYSTEMCTL_PID");
+        }
+
+        result
+    }
+
+    #[cfg(unix)]
+    fn install_fake_systemctl(bin_dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = bin_dir.join("systemctl");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" = "--user" ]; then
+  shift
+fi
+case "$1" in
+  start)
+    if [ -n "$SYSTEMCTL_FAIL_START" ]; then
+      echo "start failed" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  stop)
+    if [ -n "$SYSTEMCTL_FAIL_STOP" ]; then
+      echo "stop failed" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  disable|daemon-reload)
+    exit 0
+    ;;
+  is-active)
+    echo "${SYSTEMCTL_ACTIVE:-active}"
+    exit 0
+    ;;
+  show)
+    echo "${SYSTEMCTL_PID:-4242}"
+    exit 0
+    ;;
+  *)
+    echo "unexpected $1" >&2
+    exit 9
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+
+    #[test]
+    fn gui_domain_and_target_use_current_uid_and_service_label() {
+        let expected_domain = format!("gui/{}", unsafe { libc::getuid() });
+        assert_eq!(gui_domain(), expected_domain);
+        assert_eq!(gui_target(), format!("{}/{}", expected_domain, PLIST_LABEL));
+    }
+
+    #[test]
+    fn plist_path_uses_home_and_requires_existing_launch_agent() {
+        let home = unique_test_dir("plist");
+        with_home(&home, || {
+            assert_eq!(plist_path(), None);
+
+            let launch_agents = home.join("Library").join("LaunchAgents");
+            std::fs::create_dir_all(&launch_agents).unwrap();
+            let plist = launch_agents.join(format!("{PLIST_LABEL}.plist"));
+            std::fs::write(&plist, b"plist").unwrap();
+
+            assert_eq!(plist_path(), Some(plist.display().to_string()));
+        });
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn is_user_service_checks_home_systemd_unit() {
+        let home = unique_test_dir("systemd");
+        with_home(&home, || {
+            assert!(!is_user_service());
+
+            let user_dir = home.join(".config").join("systemd").join("user");
+            std::fs::create_dir_all(&user_dir).unwrap();
+            std::fs::write(user_dir.join(format!("{SYSTEMD_UNIT}.service")), b"unit").unwrap();
+
+            assert!(is_user_service());
+        });
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn remove_file_maybe_sudo_ignores_missing_and_removes_writable_file() {
+        let root = unique_test_dir("remove-file");
+        let missing = root.join("missing");
+        assert!(remove_file_maybe_sudo(missing.to_str().unwrap()).is_ok());
+
+        let file = root.join("service-file");
+        std::fs::write(&file, b"service").unwrap();
+        remove_file_maybe_sudo(file.to_str().unwrap()).unwrap();
+        assert!(!file.exists());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_service_commands_use_systemctl_output_and_error_paths() {
+        let root = unique_test_dir("linux-systemctl");
+        let home = root.join("home");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        install_fake_systemctl(&bin);
+
+        with_home_and_path(&home, &bin, || {
+            assert!(linux_start().is_ok());
+            assert!(linux_stop().is_ok());
+            assert!(linux_status().is_ok());
+
+            std::env::set_var("SYSTEMCTL_FAIL_START", "1");
+            let err = linux_start().unwrap_err();
+            assert!(err.contains("systemctl start failed"));
+            assert!(err.contains("start failed"));
+            std::env::remove_var("SYSTEMCTL_FAIL_START");
+
+            std::env::set_var("SYSTEMCTL_FAIL_STOP", "1");
+            let err = linux_stop().unwrap_err();
+            assert!(err.contains("systemctl stop failed"));
+            assert!(err.contains("stop failed"));
+            std::env::remove_var("SYSTEMCTL_FAIL_STOP");
+
+            std::env::set_var("SYSTEMCTL_ACTIVE", "inactive");
+            std::env::set_var("SYSTEMCTL_PID", "0");
+            assert!(linux_status().is_ok());
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_uninstall_removes_user_service_and_binaries_without_data_prompt() {
+        let root = unique_test_dir("linux-uninstall");
+        let home = root.join("home");
+        let bin = root.join("bin");
+        let user_systemd = home.join(".config").join("systemd").join("user");
+        let local_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&user_systemd).unwrap();
+        std::fs::create_dir_all(&local_bin).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        install_fake_systemctl(&bin);
+
+        let service = user_systemd.join(format!("{SYSTEMD_UNIT}.service"));
+        let server = local_bin.join("rhythm-server");
+        let cli = local_bin.join("rhythm-cli");
+        std::fs::write(&service, b"unit").unwrap();
+        std::fs::write(&server, b"server").unwrap();
+        std::fs::write(&cli, b"cli").unwrap();
+
+        with_home_and_path(&home, &bin, || {
+            assert!(is_user_service());
+            linux_uninstall().unwrap();
+            assert!(!service.exists());
+            assert!(!server.exists());
+            assert!(!cli.exists());
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+}

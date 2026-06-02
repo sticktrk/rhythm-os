@@ -89,3 +89,103 @@ pub fn persist_device_capture(
 
     Ok(Some(final_path))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
+
+    use rhythm_os::hub::HubEvent;
+
+    use crate::cloud_profiles::CloudMatterProfileCatalog;
+    use crate::controller::MatterDeviceRegistry;
+    use crate::transport::{MatterColorMode, MatterDeviceInfo};
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-matter-capture-{}-{}", name, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn hub_data() -> MatterHubData {
+        let (event_tx, _event_rx) = std::sync::mpsc::channel::<HubEvent>();
+        MatterHubData {
+            transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
+            registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
+            fabric_id: "test".to_string(),
+            commissioned: Mutex::new(Vec::<MatterDeviceInfo>::new()),
+            next_node_id: AtomicU64::new(100),
+            device_caps: Mutex::new(HashMap::new()),
+            device_quirks: Mutex::new(HashMap::new()),
+            cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
+            decommissioning: Mutex::new(HashSet::new()),
+            recently_decommissioned: Mutex::new(HashMap::new()),
+            event_tx,
+        }
+    }
+
+    fn commissioned_device() -> CommissionedDevice {
+        CommissionedDevice {
+            node_id: 42,
+            vendor_name: "Example Vendor".to_string(),
+            product_name: "Example Lamp".to_string(),
+            vendor_id: 0xfff1,
+            product_id: 0x0001,
+            serial_number: Some("serial-42".to_string()),
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::Xy,
+                MatterColorMode::ColorTemperature,
+                MatterColorMode::HueSaturation,
+            ],
+            min_kelvin: Some(2200),
+            max_kelvin: Some(6500),
+        }
+    }
+
+    #[test]
+    fn persist_device_capture_returns_none_when_capture_dir_is_disabled() {
+        let hub_data = hub_data();
+
+        let result = persist_device_capture(&hub_data, &commissioned_device(), "probe").unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn persist_device_capture_writes_json_payload_and_promotes_temp_file() {
+        let dir = unique_test_dir("writes");
+        let hub_data = hub_data();
+        hub_data
+            .capture_dir
+            .set(dir.display().to_string())
+            .expect("capture dir should be unset");
+
+        let path = persist_device_capture(&hub_data, &commissioned_device(), "pairing")
+            .unwrap()
+            .expect("capture path");
+
+        assert_eq!(path, dir.join("matter-42.json"));
+        assert!(path.exists());
+        assert!(!dir.join("matter-42.json.tmp").exists());
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("capture file")).unwrap();
+        assert_eq!(json["source"], "pairing");
+        assert_eq!(json["device_id"], "matter-42");
+        assert_eq!(json["commissioned"]["node_id"], 42);
+        assert_eq!(json["commissioned"]["vendor_name"], "Example Vendor");
+        assert_eq!(json["derived_capabilities"]["light_type"], "extended_color");
+        assert!(json["derived_quirks"].is_array());
+        assert!(json["captured_at_unix_ms"].as_u64().is_some());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}

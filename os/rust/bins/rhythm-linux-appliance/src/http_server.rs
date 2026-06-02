@@ -69,3 +69,17 @@ fn handle_delete_wifi(state: &SharedState, provisioning: &ProvisioningManager) -
         Err(e) => ApiResponse::server_error(e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhythm_os::state::AppState;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn create_router_builds_standard_and_wifi_routes() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let provisioning = ProvisioningManager::new("test-version", state.clone());
+        let _router = create_router(state, provisioning);
+    }
+}

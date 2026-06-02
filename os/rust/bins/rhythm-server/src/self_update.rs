@@ -2346,6 +2346,9 @@ fn remove_if_exists(path: &Path) {
 }
 
 #[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -2353,8 +2356,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -2422,11 +2423,39 @@ mod tests {
         format!("http://127.0.0.1:{}", port)
     }
 
+    fn spawn_json_fixture(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.read(&mut request);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(headers.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+        });
+        thread::sleep(Duration::from_millis(10));
+        format!("http://127.0.0.1:{}/feeds/manifest.json", port)
+    }
+
     fn test_client() -> reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
             .expect("client")
+    }
+
+    fn string_error<T>(result: Result<T, String>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error,
+        }
     }
 
     #[test]
@@ -2626,6 +2655,36 @@ mod tests {
     }
 
     #[test]
+    fn appliance_slot_helpers_cover_invalid_roots_and_reset_failures() {
+        assert_eq!(
+            parse_appliance_slot_from_cmdline("console=tty1 rootwait rw").unwrap_err(),
+            "Kernel command line did not include a root= device"
+        );
+        assert_eq!(
+            appliance_slot_from_root_device("/dev/sda1").unwrap_err(),
+            "Unsupported appliance root device /dev/sda1"
+        );
+        assert_eq!(
+            appliance_root_arg_for_slot(ApplianceSlot::A),
+            format!("root={}", APPLIANCE_ROOTFS_A_DEVICE)
+        );
+
+        let result = finalize_appliance_boot_switch(
+            ApplianceSlot::A,
+            ApplianceSlot::B,
+            "0.4.1",
+            "0.4.2",
+            |_, _, _, _| Ok(()),
+            |_| Err("cmdline rewrite failed".to_string()),
+            |_, _| Err("reset failed".to_string()),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "cmdline rewrite failed; additionally failed to restore bootstate for slot a: reset failed"
+        );
+    }
+
+    #[test]
     fn rollback_version_parser_reads_plain_and_hashed_bootstate() {
         let body = "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_ROLLBACK_VERSION=0.4.2\n";
         assert_eq!(
@@ -2694,6 +2753,15 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_restart_schedulers_return_without_rebooting() {
+        schedule_post_update_restart();
+        schedule_user_initiated_restart();
+        schedule_factory_reset_restart();
+        schedule_liveness_restart();
+        std::thread::sleep(Duration::from_millis(1200));
+    }
+
+    #[test]
     fn download_release_with_progress_reports_initial_and_final_bytes() {
         let payload = b"rhythm-update-payload".to_vec();
         let payload_len = payload.len() as u64;
@@ -2743,6 +2811,44 @@ mod tests {
     }
 
     #[test]
+    fn appliance_image_helpers_classify_rootfs_and_compression() {
+        let rootfs = UpdateImageAsset {
+            name: "rootfs.ext2".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rootfs.ext2".to_string(),
+            sha256: None,
+            size: None,
+            compression: None,
+        };
+        let gz_rootfs = UpdateImageAsset {
+            name: "rootfs.ext2.gz".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+            sha256: None,
+            size: None,
+            compression: Some("gzip".to_string()),
+        };
+        let disk = UpdateImageAsset {
+            name: "appliance.img".to_string(),
+            kind: ReleaseArtifactKind::DiskImage,
+            url: "https://example.invalid/appliance.img".to_string(),
+            sha256: None,
+            size: None,
+            compression: None,
+        };
+
+        assert!(has_rootfs_image(&[disk.clone(), rootfs.clone()]));
+        assert!(!has_rootfs_image(std::slice::from_ref(&disk)));
+        assert!(!artifact_uses_gzip(&rootfs));
+        assert!(artifact_uses_gzip(&gz_rootfs));
+        assert_eq!(
+            infer_image_kind("rootfs.ext2"),
+            ReleaseArtifactKind::RootfsImage
+        );
+        assert_eq!(infer_image_kind("disk.img"), ReleaseArtifactKind::DiskImage);
+    }
+
+    #[test]
     fn appliance_update_prefers_gzip_rootfs_asset() {
         let info = UpdateInfo {
             current_version: "0.4.146".to_string(),
@@ -2779,6 +2885,47 @@ mod tests {
                 .map(|asset| asset.name.as_str()),
             Some("rootfs.ext2.gz")
         );
+    }
+
+    #[test]
+    fn update_progress_and_apply_errors_cover_non_download_paths() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+
+        let staged = UpdateProgress::stage(OtaUpdateStage::Staging, "Staging bundle");
+        assert_eq!(staged.stage, OtaUpdateStage::Staging);
+        assert_eq!(staged.message, "Staging bundle");
+        assert_eq!(staged.downloaded_bytes, None);
+        assert_eq!(staged.total_bytes, None);
+
+        let downloading = UpdateProgress::downloading("Downloading bundle", 42, Some(128));
+        assert_eq!(downloading.stage, OtaUpdateStage::Downloading);
+        assert_eq!(downloading.message, "Downloading bundle");
+        assert_eq!(downloading.downloaded_bytes, Some(42));
+        assert_eq!(downloading.total_bytes, Some(128));
+
+        let mut info = no_update_info("1.0.0");
+        assert_eq!(
+            string_error(info.apply_blocking()),
+            "No download URL for this platform"
+        );
+
+        info.download_url = Some("https://example.invalid/rhythm.tar.gz".to_string());
+        assert_eq!(
+            string_error(info.apply_blocking_with_progress(|_| {})),
+            "No release asset for this platform"
+        );
+
+        let _apply_guard = APPLY_LOCK.lock().unwrap();
+        assert_eq!(
+            string_error(info.apply_blocking()),
+            "Update already in progress"
+        );
+        drop(_apply_guard);
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
     }
 
     #[test]
@@ -2848,6 +2995,116 @@ mod tests {
     }
 
     #[test]
+    fn url_and_artifact_helpers_resolve_relative_assets_and_errors() {
+        assert_eq!(
+            resolve_download_url(
+                "https://updates.example/releases/linux/manifest.json",
+                "rhythm-server.tar.gz"
+            )
+            .unwrap(),
+            "https://updates.example/releases/linux/rhythm-server.tar.gz"
+        );
+        assert_eq!(
+            resolve_download_url(
+                "https://updates.example/releases/linux/manifest.json",
+                "https://cdn.example/rhythm-server.tar.gz"
+            )
+            .unwrap(),
+            "https://cdn.example/rhythm-server.tar.gz"
+        );
+        assert!(
+            resolve_download_url("not a valid manifest URL", "rhythm-server.tar.gz")
+                .unwrap_err()
+                .starts_with("Invalid manifest URL:")
+        );
+
+        assert_eq!(
+            asset_name_from_url("https://cdn.example/releases/rhythm-server.tar.gz?token=redacted")
+                .unwrap(),
+            "rhythm-server.tar.gz"
+        );
+        assert_eq!(
+            asset_name_from_url("https://cdn.example/releases/").unwrap_err(),
+            "Update URL did not contain a filename"
+        );
+
+        let install_root = PathBuf::from("/tmp/rhythm-server");
+        let package = resolve_package_artifact(
+            "https://updates.example/releases/linux/manifest.json",
+            &ManifestArtifact {
+                name: String::new(),
+                url: "rhythm-server.tar.gz".to_string(),
+                sha256: Some("abc123".to_string()),
+                size: Some(2048),
+                kind: Some(ReleaseArtifactKind::ArchiveBundle),
+                compression: None,
+                install: Vec::new(),
+            },
+            &install_root,
+        )
+        .unwrap();
+        assert_eq!(package.asset_name, "rhythm-server.tar.gz");
+        assert_eq!(
+            package.download_url,
+            "https://updates.example/releases/linux/rhythm-server.tar.gz"
+        );
+        assert_eq!(package.expected_sha256.as_deref(), Some("abc123"));
+        assert_eq!(
+            install_targets_to_summaries(&package.install_targets),
+            vec![
+                UpdateTargetSummary {
+                    archive_path: "rhythm-server".to_string(),
+                    destination: "/tmp/rhythm-server".to_string(),
+                    required: true,
+                },
+                UpdateTargetSummary {
+                    archive_path: "rhythm-chipd".to_string(),
+                    destination: "/tmp/rhythm-chipd".to_string(),
+                    required: true,
+                },
+                UpdateTargetSummary {
+                    archive_path: "rhythm-cli".to_string(),
+                    destination: "/tmp/rhythm-cli".to_string(),
+                    required: false,
+                },
+            ]
+        );
+
+        let rootfs = resolve_manifest_image(
+            "https://updates.example/releases/linux/manifest.json",
+            &ManifestArtifact {
+                name: String::new(),
+                url: "rootfs.ext2.gz".to_string(),
+                sha256: Some("def456".to_string()),
+                size: Some(4096),
+                kind: None,
+                compression: Some("gzip".to_string()),
+                install: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(rootfs.name, "rootfs.ext2.gz");
+        assert_eq!(rootfs.kind, ReleaseArtifactKind::RootfsImage);
+        assert_eq!(rootfs.size, Some(4096));
+        assert_eq!(rootfs.compression.as_deref(), Some("gzip"));
+
+        let disk = resolve_manifest_image(
+            "https://updates.example/releases/linux/manifest.json",
+            &ManifestArtifact {
+                name: "appliance.img".to_string(),
+                url: "appliance.img".to_string(),
+                sha256: None,
+                size: None,
+                kind: None,
+                compression: None,
+                install: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(disk.kind, ReleaseArtifactKind::DiskImage);
+    }
+
+    #[test]
     fn resolve_manifest_install_targets_maps_self_and_sibling() {
         let root = PathBuf::from("/tmp/rhythm-server");
         let targets = resolve_manifest_install_targets(
@@ -2871,6 +3128,98 @@ mod tests {
 
         assert_eq!(targets[0].destination, PathBuf::from("/tmp/rhythm-server"));
         assert_eq!(targets[1].destination, PathBuf::from("/tmp/rhythm-chipd"));
+    }
+
+    #[test]
+    fn resolve_manifest_install_targets_infers_archive_paths_and_validates_slots() {
+        let root = PathBuf::from("/tmp/rhythm/rhythm-server");
+        let targets = resolve_manifest_install_targets(
+            &[
+                ManifestInstallTarget {
+                    archive_path: None,
+                    slot: InstallSlot::Current,
+                    path: None,
+                    required: true,
+                },
+                ManifestInstallTarget {
+                    archive_path: None,
+                    slot: InstallSlot::Sibling,
+                    path: Some("rhythm-chipd".to_string()),
+                    required: false,
+                },
+                ManifestInstallTarget {
+                    archive_path: None,
+                    slot: InstallSlot::Absolute,
+                    path: Some("/usr/local/bin/rhythm-cli".to_string()),
+                    required: true,
+                },
+            ],
+            &root,
+        )
+        .unwrap();
+
+        assert_eq!(targets[0].destination, root);
+        assert_eq!(targets[0].archive_path, "rhythm-server");
+        assert!(targets[0].required);
+
+        assert_eq!(
+            targets[1].destination,
+            PathBuf::from("/tmp/rhythm/rhythm-chipd")
+        );
+        assert_eq!(targets[1].archive_path, "rhythm-chipd");
+        assert!(!targets[1].required);
+
+        assert_eq!(
+            targets[2].destination,
+            PathBuf::from("/usr/local/bin/rhythm-cli")
+        );
+        assert_eq!(targets[2].archive_path, "rhythm-cli");
+        assert!(targets[2].required);
+
+        let sibling_error = resolve_manifest_install_targets(
+            &[ManifestInstallTarget {
+                archive_path: None,
+                slot: InstallSlot::Sibling,
+                path: None,
+                required: true,
+            }],
+            &PathBuf::from("/tmp/rhythm-server"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            sibling_error,
+            "Install target with slot=sibling requires a path"
+        );
+
+        let absolute_error = resolve_manifest_install_targets(
+            &[ManifestInstallTarget {
+                archive_path: None,
+                slot: InstallSlot::Absolute,
+                path: None,
+                required: true,
+            }],
+            &PathBuf::from("/tmp/rhythm-server"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            absolute_error,
+            "Install target with slot=absolute requires a path"
+        );
+
+        let archive_path_error = resolve_manifest_install_targets(
+            &[ManifestInstallTarget {
+                archive_path: None,
+                slot: InstallSlot::Absolute,
+                path: Some("/".to_string()),
+                required: true,
+            }],
+            &PathBuf::from("/tmp/rhythm-server"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            archive_path_error,
+            "Cannot infer archive path for install target /"
+        );
     }
 
     #[test]
@@ -2932,6 +3281,59 @@ mod tests {
             &default_bundle_install_targets(&install_root)
         ));
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sha256_file_hash_and_binary_staging_paths_are_stable() {
+        let dir = unique_test_dir("binary-stage");
+        let download = dir.join("rhythm-server.download");
+        let destination = dir.join("rhythm-server");
+        fs::write(&download, b"downloaded-server").unwrap();
+
+        let hash = compute_sha256_hex(&download).unwrap();
+        assert_eq!(hash, hex_string(&Sha256::digest(b"downloaded-server")));
+
+        let staged = stage_install_targets(
+            &download,
+            "rhythm-server",
+            &[InstallTarget {
+                archive_path: "rhythm-server".to_string(),
+                destination: destination.clone(),
+                required: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(destination.with_extension("new")).unwrap(),
+            b"downloaded-server"
+        );
+        cleanup_staged_files(&staged);
+
+        let err = stage_install_targets(
+            &download,
+            "rhythm-server",
+            &[
+                InstallTarget {
+                    archive_path: "rhythm-server".to_string(),
+                    destination: destination.clone(),
+                    required: true,
+                },
+                InstallTarget {
+                    archive_path: "rhythm-chipd".to_string(),
+                    destination: dir.join("rhythm-chipd"),
+                    required: true,
+                },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Binary payload rhythm-server cannot satisfy multi-file install plan"
+        );
+
+        let missing_hash = compute_sha256_hex(&dir.join("missing")).unwrap_err();
+        assert!(missing_hash.starts_with("Failed to open file for hashing:"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -3214,6 +3616,42 @@ mod tests {
     }
 
     #[test]
+    fn commit_staged_targets_skips_missing_stage_and_installs_new_target() {
+        let dir = unique_test_dir("commit-new-target");
+        let missing_stage = dir.join("missing.new");
+        let destination = dir.join("rhythm-server");
+        let stage_path = destination.with_extension("new");
+        fs::write(&stage_path, b"new-server").unwrap();
+
+        let installed = commit_staged_targets(&[
+            StagedInstallTarget {
+                spec: InstallTarget {
+                    archive_path: "missing".to_string(),
+                    destination: dir.join("missing"),
+                    required: false,
+                },
+                stage_path: missing_stage,
+                backup_path: dir.join("missing.old"),
+            },
+            StagedInstallTarget {
+                spec: InstallTarget {
+                    archive_path: "rhythm-server".to_string(),
+                    destination: destination.clone(),
+                    required: true,
+                },
+                stage_path,
+                backup_path: destination.with_extension("old"),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(installed, vec!["rhythm-server".to_string()]);
+        assert_eq!(fs::read(&destination).unwrap(), b"new-server");
+        assert!(!destination.with_extension("old").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn ota_status_handle_starts_idle() {
         let handle = OtaStatusHandle::new("1.0.0");
         let snapshot = handle.snapshot();
@@ -3221,6 +3659,260 @@ mod tests {
         assert_eq!(snapshot.state, OtaUpdateState::Idle);
         assert_eq!(snapshot.current_version, "1.0.0");
         assert_eq!(snapshot.latest_version, None);
+    }
+
+    #[test]
+    fn ota_status_handle_tracks_check_update_restart_and_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+
+        let handle = OtaStatusHandle::new("1.0.0");
+        let capabilities = handle.capabilities();
+        assert_eq!(capabilities.strategy, "self_pull");
+        assert_eq!(capabilities.scope, "component_bundle");
+        assert_eq!(capabilities.rollback, "backup_files");
+        assert_eq!(capabilities.payloads, vec!["archive_bundle"]);
+
+        handle.mark_checking();
+        let checking = handle.snapshot();
+        assert_eq!(checking.state, OtaUpdateState::Checking);
+        assert_eq!(checking.message.as_deref(), Some("Checking for updates..."));
+        assert!(checking.checked_at_epoch_ms.is_some());
+        assert_eq!(checking.target_version, None);
+        assert_eq!(checking.update_reason, None);
+        assert!(checking.install_targets.is_empty());
+        assert!(checking.image_assets.is_empty());
+        assert_eq!(checking.last_error, None);
+
+        let update = UpdateInfo {
+            current_version: "1.0.0".to_string(),
+            latest_version: "1.1.0".to_string(),
+            update_available: true,
+            update_reason: Some(UpdateReason::VersionMismatch),
+            download_url: Some("https://example.invalid/rhythm.tar.gz".to_string()),
+            expected_sha256: Some("abc123".to_string()),
+            asset_name: Some("rhythm.tar.gz".to_string()),
+            install_targets: vec![UpdateTargetSummary {
+                archive_path: "rhythm-server".to_string(),
+                destination: "/opt/rhythm/rhythm-server".to_string(),
+                required: true,
+            }],
+            image_assets: vec![UpdateImageAsset {
+                name: "rootfs.ext2.gz".to_string(),
+                kind: ReleaseArtifactKind::RootfsImage,
+                url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+                sha256: Some("def456".to_string()),
+                size: Some(128),
+                compression: Some("gzip".to_string()),
+            }],
+            resolved_install_targets: Vec::new(),
+        };
+
+        handle.record_check_result(&update);
+        let ready = handle.snapshot();
+        assert_eq!(ready.state, OtaUpdateState::Ready);
+        assert_eq!(ready.latest_version.as_deref(), Some("1.1.0"));
+        assert_eq!(ready.update_available, Some(true));
+        assert_eq!(ready.update_reason, Some(UpdateReason::VersionMismatch));
+        assert_eq!(ready.message.as_deref(), Some("Update available: v1.1.0"));
+        assert_eq!(ready.install_targets, update.install_targets);
+        assert_eq!(ready.image_assets, update.image_assets);
+        assert_eq!(ready.checksum_verified, None);
+
+        handle.begin_update("1.1.0").unwrap();
+        let updating = handle.snapshot();
+        assert_eq!(updating.state, OtaUpdateState::Updating);
+        assert_eq!(updating.target_version.as_deref(), Some("1.1.0"));
+        assert_eq!(updating.message.as_deref(), Some("Installing v1.1.0..."));
+        assert_eq!(
+            handle.begin_update("1.1.0").unwrap_err(),
+            "Update already in progress"
+        );
+
+        handle.mark_restarting("1.0.0", "1.1.0", Some(true));
+        let restarting = handle.snapshot();
+        assert_eq!(restarting.state, OtaUpdateState::Restarting);
+        assert_eq!(restarting.latest_version.as_deref(), Some("1.1.0"));
+        assert_eq!(restarting.target_version.as_deref(), Some("1.1.0"));
+        assert_eq!(restarting.update_available, Some(false));
+        assert_eq!(restarting.checksum_verified, Some(true));
+        assert_eq!(
+            restarting.message.as_deref(),
+            Some("Updated from v1.0.0 to v1.1.0, restarting...")
+        );
+
+        let mut drift = no_update_info("1.1.0");
+        drift.update_available = true;
+        drift.update_reason = Some(UpdateReason::ComponentDrift);
+        handle.record_check_result(&drift);
+        let repairing = handle.snapshot();
+        assert_eq!(repairing.state, OtaUpdateState::Ready);
+        assert_eq!(
+            repairing.message.as_deref(),
+            Some("Repairing OTA bundle for v1.1.0")
+        );
+
+        handle.record_check_result(&no_update_info("1.1.0"));
+        let idle = handle.snapshot();
+        assert_eq!(idle.state, OtaUpdateState::Idle);
+        assert_eq!(idle.update_available, Some(false));
+        assert_eq!(idle.update_reason, None);
+        assert_eq!(idle.message.as_deref(), Some("Already up to date"));
+
+        handle.mark_error("boom");
+        let error = handle.snapshot();
+        assert_eq!(error.state, OtaUpdateState::Error);
+        assert_eq!(error.message.as_deref(), Some("Update failed"));
+        assert_eq!(error.last_error.as_deref(), Some("boom"));
+        assert_eq!(error.checksum_verified, None);
+
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+    }
+
+    #[test]
+    fn ota_status_handle_reports_poisoned_lock_as_error_snapshot() {
+        let handle = OtaStatusHandle::new("1.0.0");
+        let inner = handle.inner.clone();
+        let _ = thread::spawn(move || {
+            let _guard = inner.lock().unwrap();
+            panic!("poison OTA status lock for test");
+        })
+        .join();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.state, OtaUpdateState::Error);
+        assert_eq!(snapshot.current_version, "unknown");
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("OTA state lock poisoned")
+        );
+        assert_eq!(
+            string_error(handle.begin_update("1.1.0")),
+            "OTA state lock poisoned"
+        );
+        handle.mark_checking();
+        assert_eq!(handle.snapshot().state, OtaUpdateState::Error);
+    }
+
+    #[test]
+    fn acquire_apply_lock_reports_contention_without_blocking() {
+        let _guard = APPLY_LOCK.lock().unwrap();
+
+        assert_eq!(
+            string_error(acquire_apply_lock()),
+            "Update already in progress"
+        );
+    }
+
+    #[test]
+    fn update_channel_progress_and_no_update_helpers_cover_default_shapes() {
+        assert_eq!(UpdateChannel::Beta.feed_suffix(), None);
+        assert_eq!(UpdateChannel::Stable.feed_suffix(), Some("-stable"));
+        assert!(default_required());
+
+        assert_eq!(ApplianceSlot::A.as_str(), "a");
+        assert_eq!(ApplianceSlot::B.as_str(), "b");
+        assert_eq!(ApplianceSlot::A.root_device(), APPLIANCE_ROOTFS_A_DEVICE);
+        assert_eq!(ApplianceSlot::B.root_device(), APPLIANCE_ROOTFS_B_DEVICE);
+        assert_eq!(ApplianceSlot::A.inactive(), ApplianceSlot::B);
+        assert_eq!(ApplianceSlot::B.inactive(), ApplianceSlot::A);
+
+        let staged = UpdateProgress::stage(OtaUpdateStage::Staging, "stage message");
+        assert_eq!(staged.stage, OtaUpdateStage::Staging);
+        assert_eq!(staged.message, "stage message");
+        assert_eq!(staged.downloaded_bytes, None);
+        assert_eq!(staged.total_bytes, None);
+
+        let downloading = UpdateProgress::downloading("download", 17, Some(128));
+        assert_eq!(downloading.stage, OtaUpdateStage::Downloading);
+        assert_eq!(downloading.message, "download");
+        assert_eq!(downloading.downloaded_bytes, Some(17));
+        assert_eq!(downloading.total_bytes, Some(128));
+
+        let info = no_update_info("1.2.3");
+        assert_eq!(info.current_version, "1.2.3");
+        assert_eq!(info.latest_version, "1.2.3");
+        assert!(!info.update_available);
+        assert_eq!(info.update_reason, None);
+        assert_eq!(info.download_url, None);
+        assert!(info.install_targets.is_empty());
+        assert!(info.image_assets.is_empty());
+        assert!(info.resolved_install_targets.is_empty());
+    }
+
+    #[test]
+    fn install_artifact_cleanup_helpers_remove_staged_backup_and_rollback_files() {
+        let dir = unique_test_dir("cleanup-helpers");
+        let destination = dir.join("rhythm-server");
+        let stage_path = destination.with_extension("new");
+        let backup_path = destination.with_extension("old");
+        fs::write(&destination, b"installed").unwrap();
+        fs::write(&stage_path, b"staged").unwrap();
+        fs::write(&backup_path, b"backup").unwrap();
+
+        let install_target = InstallTarget {
+            archive_path: "rhythm-server".to_string(),
+            destination: destination.clone(),
+            required: true,
+        };
+        cleanup_install_artifacts(std::slice::from_ref(&install_target));
+        assert!(!stage_path.exists());
+        assert!(backup_path.exists());
+
+        fs::write(&stage_path, b"staged").unwrap();
+        let staged = StagedInstallTarget {
+            spec: install_target.clone(),
+            stage_path: stage_path.clone(),
+            backup_path: backup_path.clone(),
+        };
+        cleanup_staged_files(std::slice::from_ref(&staged));
+        assert!(!stage_path.exists());
+
+        rollback_applied_targets(&[AppliedInstallTarget {
+            destination: destination.clone(),
+            backup_path: backup_path.clone(),
+            previously_existed: true,
+        }]);
+        assert_eq!(fs::read(&destination).unwrap(), b"backup");
+        assert!(!backup_path.exists());
+
+        fs::write(&destination, b"fresh").unwrap();
+        rollback_applied_targets(&[AppliedInstallTarget {
+            destination: destination.clone(),
+            backup_path: backup_path.clone(),
+            previously_existed: false,
+        }]);
+        assert!(!destination.exists());
+
+        fs::write(&backup_path, b"old").unwrap();
+        cleanup_backup_files(&[AppliedInstallTarget {
+            destination: destination.clone(),
+            backup_path: backup_path.clone(),
+            previously_existed: true,
+        }]);
+        assert!(!backup_path.exists());
+
+        remove_if_exists(&backup_path);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn download_release_reports_http_status_errors_without_promoting_tmp_file() {
+        let dir = unique_test_dir("download-status-error");
+        let destination = dir.join("artifact.tar.gz");
+        let error = string_error(download_release(
+            &test_client(),
+            &spawn_status_fixture(500),
+            &destination,
+        ));
+
+        assert_eq!(error, "Download returned 500 Internal Server Error");
+        assert!(!destination.exists());
+        assert!(!bootstate::tmp_sibling_path(&destination).exists());
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3401,6 +4093,81 @@ mod tests {
         assert!(!info.update_available);
         assert_eq!(info.current_version, "1.2.3");
         assert_eq!(info.latest_version, "1.2.3");
+    }
+
+    #[test]
+    fn stable_manifest_404_with_explicit_override_is_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", spawn_status_fixture(404));
+
+        let error = string_error(check_blocking("1.2.3", UpdateChannel::Stable));
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+
+        assert_eq!(error, "Update manifest returned 404 Not Found");
+    }
+
+    #[test]
+    fn check_manifest_blocking_resolves_package_images_and_update_reason() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "2.0.0",
+                "package": {
+                    "name": "",
+                    "url": "release/rhythm-server.tar.gz",
+                    "sha256": "abc123",
+                    "kind": "archive_bundle",
+                    "install": [
+                        {"slot": "self", "required": true},
+                        {"slot": "sibling", "path": "rhythm-chipd", "required": false}
+                    ]
+                },
+                "images": [
+                    {
+                        "name": "",
+                        "url": "images/rootfs.ext2.gz",
+                        "kind": "rootfs_image",
+                        "compression": "gzip",
+                        "sha256": "def456",
+                        "size": 4096
+                    }
+                ]
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let info = check_blocking("1.0.0", UpdateChannel::Beta).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+
+        assert_eq!(info.current_version, "1.0.0");
+        assert_eq!(info.latest_version, "2.0.0");
+        assert!(info.update_available);
+        assert_eq!(info.update_reason, Some(UpdateReason::VersionMismatch));
+        assert_eq!(info.asset_name.as_deref(), Some("rhythm-server.tar.gz"));
+        assert_eq!(info.expected_sha256.as_deref(), Some("abc123"));
+        assert!(
+            info.download_url
+                .as_deref()
+                .is_some_and(|url| url.ends_with("/feeds/release/rhythm-server.tar.gz")),
+            "unexpected download URL: {:?}",
+            info.download_url
+        );
+        assert_eq!(info.install_targets.len(), 2);
+        assert_eq!(info.install_targets[0].archive_path, "rhythm-server");
+        assert!(info.install_targets[0].required);
+        assert_eq!(info.install_targets[1].archive_path, "rhythm-chipd");
+        assert!(!info.install_targets[1].required);
+        assert_eq!(info.image_assets.len(), 1);
+        assert_eq!(info.image_assets[0].name, "rootfs.ext2.gz");
+        assert_eq!(info.image_assets[0].kind, ReleaseArtifactKind::RootfsImage);
+        assert_eq!(info.image_assets[0].compression.as_deref(), Some("gzip"));
+        assert_eq!(info.resolved_install_targets.len(), 2);
     }
 
     #[test]

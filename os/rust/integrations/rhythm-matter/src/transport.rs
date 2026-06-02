@@ -344,3 +344,229 @@ pub struct MatterDeviceInfo {
     pub product_name: String,
     pub reachable: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MinimalMatterTransport;
+
+    impl MatterTransport for MinimalMatterTransport {
+        fn commission_light(
+            &self,
+            request: &MatterCommissionRequest,
+        ) -> Result<CommissionedDevice> {
+            Ok(device(request.node_id))
+        }
+
+        fn decommission_device(&self, _node_id: u64, _force: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>> {
+            Ok(vec![MatterDeviceInfo {
+                node_id: 1,
+                vendor_name: "Vendor".to_string(),
+                product_name: "Lamp".to_string(),
+                reachable: true,
+            }])
+        }
+
+        fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+            Ok(device(node_id))
+        }
+
+        fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn identify_light(&self, _node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_brightness(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _level: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_color_temperature(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _kelvin: u16,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_xy(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _x: f32,
+            _y: f32,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_hue_saturation(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _hue: u8,
+            _saturation: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_on_off(&self, _node_id: u64, _endpoint: u16) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Vendor".to_string(),
+            product_name: "Lamp".to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        }
+    }
+
+    fn assert_error(result: Result<()>, expected: &str) {
+        assert_eq!(result.unwrap_err().to_string(), expected);
+    }
+
+    #[test]
+    fn default_group_and_snapshot_methods_report_unsupported() {
+        let transport = MinimalMatterTransport;
+        let group = MatterGroup {
+            group_id: 1,
+            name: "Kitchen".to_string(),
+            members: vec![MatterGroupMember {
+                node_id: 1,
+                endpoint: 1,
+            }],
+        };
+
+        assert_error(
+            transport.configure_group(&group),
+            "Matter groups are not supported by this transport",
+        );
+        assert_error(
+            transport.remove_group(1, &group.members),
+            "Matter groups are not supported by this transport",
+        );
+        assert_error(
+            transport.set_group_on_off(1, true),
+            "Matter group On/Off is not supported by this transport",
+        );
+        assert_error(
+            transport.identify_group(1, 3),
+            "Matter group Identify is not supported by this transport",
+        );
+        assert_error(
+            transport.set_group_brightness(1, 128, Some(100)),
+            "Matter group Level Control is not supported by this transport",
+        );
+        assert_error(
+            transport.set_group_color_temperature(1, 2700, None),
+            "Matter group Color Control is not supported by this transport",
+        );
+        assert_error(
+            transport.set_group_xy(1, 0.1, 0.2, None),
+            "Matter group Color Control is not supported by this transport",
+        );
+        assert_error(
+            transport.set_group_hue_saturation(1, 10, 20, None),
+            "Matter group Color Control is not supported by this transport",
+        );
+        assert_error(
+            transport.run_level_command(
+                1,
+                1,
+                MatterLevelCommandVariant::Step,
+                1,
+                Some(MatterLevelStepMode::Down),
+                None,
+            ),
+            "Matter Level Control command variants are not supported by this transport",
+        );
+        assert_eq!(
+            transport
+                .read_light_capability_snapshot(1, 1)
+                .unwrap_err()
+                .to_string(),
+            "Matter light capability snapshots are not supported by this transport"
+        );
+        assert_eq!(
+            transport.read_light_state(1, 1).unwrap_err().to_string(),
+            "Matter light state snapshots are not supported by this transport"
+        );
+        assert_eq!(
+            transport
+                .subscribe_on_off(
+                    &[MatterSubscriptionTarget {
+                        node_id: 1,
+                        endpoint: 1,
+                    }],
+                    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                )
+                .unwrap_err()
+                .to_string(),
+            "Matter On/Off attribute subscriptions are not supported by this transport"
+        );
+        assert!(transport.drain_attribute_reports().unwrap().is_empty());
+    }
+
+    #[test]
+    fn request_and_value_types_round_trip_through_json() {
+        let request = MatterCommissionRequest {
+            setup_payload: "MT:payload".to_string(),
+            node_id: 42,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::Ble,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "Rhythm".to_string(),
+                password: "secret".to_string(),
+            },
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: MatterCommissionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
+
+        let report = MatterAttributeReport {
+            node_id: 42,
+            endpoint: 1,
+            cluster: 6,
+            attr_id: 0,
+            value: MatterAttributeValue::Bool(true),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["value"]["type"], "bool");
+        assert_eq!(json["value"]["value"], true);
+        let decoded: MatterAttributeReport = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, report);
+
+        let transport = MinimalMatterTransport;
+        assert_eq!(transport.list_devices().unwrap()[0].node_id, 1);
+        assert_eq!(transport.commission_light(&request).unwrap().node_id, 42);
+        assert_eq!(transport.probe_light(9).unwrap().node_id, 9);
+        assert!(!transport.read_on_off(1, 1).unwrap());
+    }
+}

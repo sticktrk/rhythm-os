@@ -196,6 +196,8 @@ fn attempt_update(state: &SharedState) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use rhythm_os::state::AppState;
+    use std::sync::{Arc, Mutex};
 
     fn utc_at(hour: u32) -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 5, 18, hour, 0, 0).unwrap()
@@ -233,5 +235,36 @@ mod tests {
         let boot_epoch = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 30).unwrap();
         assert!(!clock_is_sane(boot_epoch));
         assert!(clock_is_sane(utc_at(1)));
+    }
+
+    #[test]
+    fn snapshot_settings_captures_auto_update_and_utc_offset() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut guard = state.lock().unwrap();
+            guard.auto_update = false;
+            guard.utc_offset_hours = -4.5;
+        }
+
+        let snapshot = snapshot_settings(&state).unwrap();
+
+        assert!(!snapshot.auto_update);
+        assert_eq!(snapshot.utc_offset_hours, -4.5);
+    }
+
+    #[test]
+    fn should_spawn_when_state_declares_appliance_platform() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().platform_type = "appliance";
+
+        assert!(should_spawn_for_state(&state));
+    }
+
+    #[test]
+    fn invalid_utc_offset_falls_back_to_utc_hour() {
+        let now = utc_at(5);
+
+        assert_eq!(local_hour_from_utc(now, 100.0), 5);
+        assert!(!in_overnight_window(now, 100.0));
     }
 }

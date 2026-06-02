@@ -1071,7 +1071,8 @@ mod tests {
     use crate::chip_rpc::{
         ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
         ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcError, ChipRpcErrorKind,
-        ChipRpcListDevicesResponse, ChipRpcResponse, ChipRpcResponseEnvelope,
+        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
+        ChipRpcReadOnOffResponse, ChipRpcResponse, ChipRpcResponseEnvelope,
     };
     use crate::transport::{
         MatterAttributeValue, MatterColorMode, MatterCommissioningNetwork,
@@ -1163,6 +1164,40 @@ mod tests {
         handle
     }
 
+    fn spawn_raw_server(socket_path: PathBuf, response: Option<String>) -> thread::JoinHandle<()> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = fs::remove_file(&socket_path);
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            ready_tx.send(()).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if let Some(response) = response {
+                let mut stream = reader.into_inner();
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(b"\n").unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        ready_rx.recv().unwrap();
+        handle
+    }
+
+    fn on_network_commission_request() -> MatterCommissionRequest {
+        MatterCommissionRequest {
+            setup_payload: "12345678901".to_string(),
+            node_id: 101,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::OnNetwork,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "wifi".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
     #[test]
     fn list_devices_uses_rpc_contract() {
         let socket_path = temp_socket_path("list-devices");
@@ -1204,6 +1239,99 @@ mod tests {
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn rpc_socket_edge_cases_surface_precise_errors() {
+        let closed_socket = temp_socket_path("closed-response");
+        let server = spawn_raw_server(closed_socket.clone(), None);
+        let transport = ChipTransport::for_test(closed_socket.clone());
+        let error = transport.set_on_off(1, 1, true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("closed the socket without a response"));
+        server.join().unwrap();
+        let _ = fs::remove_file(closed_socket);
+
+        let malformed_socket = temp_socket_path("malformed-response");
+        let server = spawn_raw_server(malformed_socket.clone(), Some("not-json".to_string()));
+        let transport = ChipTransport::for_test(malformed_socket.clone());
+        let error = transport.set_on_off(1, 1, true).unwrap_err();
+        assert!(format!("{error:#}").contains("decoding CHIP RPC response"));
+        server.join().unwrap();
+        let _ = fs::remove_file(malformed_socket);
+
+        let mismatch_socket = temp_socket_path("id-mismatch");
+        let server = spawn_fake_server(mismatch_socket.clone(), |request| {
+            ChipRpcResponseEnvelope::ok(request.id + 1, ChipRpcEmpty::new())
+        });
+        let transport = ChipTransport::for_test(mismatch_socket.clone());
+        let error = transport.set_on_off(1, 1, true).unwrap_err();
+        assert!(error.to_string().contains("response id mismatch"));
+        server.join().unwrap();
+        let _ = fs::remove_file(mismatch_socket);
+    }
+
+    #[test]
+    fn initialize_controller_validates_fabric_identity() {
+        let wrong_fabric_socket = temp_socket_path("wrong-fabric");
+        let server = spawn_fake_server(wrong_fabric_socket.clone(), |request| {
+            assert!(matches!(request.request, ChipRpcRequest::InitController(_)));
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipInitControllerResponse {
+                    fabric_id: "other".to_string(),
+                    operational_fabric_id: 1,
+                },
+            )
+        });
+        let transport = ChipTransport::for_test(wrong_fabric_socket.clone());
+        let error = transport.initialize_controller().unwrap_err();
+        assert!(error.to_string().contains("initialized unexpected fabric"));
+        server.join().unwrap();
+        let _ = fs::remove_file(wrong_fabric_socket);
+
+        let wrong_operational_socket = temp_socket_path("wrong-operational-fabric");
+        let server = spawn_fake_server(wrong_operational_socket.clone(), |request| {
+            assert!(matches!(request.request, ChipRpcRequest::InitController(_)));
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipInitControllerResponse {
+                    fabric_id: "test".to_string(),
+                    operational_fabric_id: 2,
+                },
+            )
+        });
+        let transport = ChipTransport::for_test(wrong_operational_socket.clone());
+        let error = transport.initialize_controller().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unexpected operational fabric id"));
+        server.join().unwrap();
+        let _ = fs::remove_file(wrong_operational_socket);
+    }
+
+    #[test]
+    fn unavailable_socket_paths_update_health_without_managed_sidecar() {
+        let missing_socket = temp_socket_path("missing-socket");
+        let transport = ChipTransport::for_test(missing_socket.clone());
+        let error = transport.set_on_off(1, 1, true).unwrap_err();
+        assert!(format!("{error:#}").contains("connecting to"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::Unavailable
+        );
+
+        let stale_socket_file = temp_socket_path("stale-socket-file");
+        fs::write(&stale_socket_file, b"not a socket").unwrap();
+        let transport = ChipTransport::for_test(stale_socket_file.clone());
+        let error = transport.set_on_off(1, 1, true).unwrap_err();
+        assert!(format!("{error:#}").contains("connecting to"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::Unavailable
+        );
+        let _ = fs::remove_file(stale_socket_file);
     }
 
     #[test]
@@ -1345,6 +1473,228 @@ mod tests {
         assert_eq!(reports, vec![expected]);
 
         server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn remaining_matter_transport_methods_map_to_rpc_contracts() {
+        let socket_path = temp_socket_path("remaining-rpc-methods");
+        let expected_group = MatterGroup {
+            group_id: 0x8001,
+            name: "Kitchen".to_string(),
+            members: vec![
+                MatterGroupMember {
+                    node_id: 7,
+                    endpoint: 1,
+                },
+                MatterGroupMember {
+                    node_id: 8,
+                    endpoint: 2,
+                },
+            ],
+        };
+        let expected_group_for_server = expected_group.clone();
+        let expected_members = expected_group.members.clone();
+        let expected_members_for_server = expected_members.clone();
+        let server =
+            spawn_fake_server_multi(socket_path.clone(), 16, move |request| {
+                match &request.request {
+                    ChipRpcRequest::ConfigureGroup { group } => {
+                        assert_eq!(group, &expected_group_for_server);
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::RemoveGroup { group_id, members } => {
+                        assert_eq!(*group_id, 0x8001);
+                        assert_eq!(members, &expected_members_for_server);
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetGroupOnOff { group_id, on } => {
+                        assert_eq!((*group_id, *on), (0x8001, true));
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::IdentifyGroup {
+                        group_id,
+                        duration_secs,
+                    } => {
+                        assert_eq!((*group_id, *duration_secs), (0x8001, 3));
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetGroupBrightness {
+                        group_id,
+                        level,
+                        transition_ms,
+                    } => {
+                        assert_eq!(
+                            (*group_id, *level, *transition_ms),
+                            (0x8001, 128, Some(250))
+                        );
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetGroupColorTemperature {
+                        group_id,
+                        kelvin,
+                        transition_ms,
+                    } => {
+                        assert_eq!((*group_id, *kelvin, *transition_ms), (0x8001, 3000, None));
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetGroupXy {
+                        group_id,
+                        x,
+                        y,
+                        transition_ms,
+                    } => {
+                        assert_eq!(*group_id, 0x8001);
+                        assert!((*x - 0.31).abs() < f32::EPSILON);
+                        assert!((*y - 0.42).abs() < f32::EPSILON);
+                        assert_eq!(*transition_ms, Some(400));
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetGroupHueSaturation {
+                        group_id,
+                        hue,
+                        saturation,
+                        transition_ms,
+                    } => {
+                        assert_eq!(
+                            (*group_id, *hue, *saturation, *transition_ms),
+                            (0x8001, 20, 210, None)
+                        );
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetBrightness {
+                        node_id,
+                        endpoint,
+                        level,
+                        transition_ms,
+                    } => {
+                        assert_eq!(
+                            (*node_id, *endpoint, *level, *transition_ms),
+                            (7, 2, 180, Some(500))
+                        );
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::RunLevelCommand {
+                        node_id,
+                        endpoint,
+                        command,
+                        level_or_step,
+                        step_mode,
+                        transition_ms,
+                    } => {
+                        assert_eq!((*node_id, *endpoint), (7, 2));
+                        assert_eq!(*command, MatterLevelCommandVariant::StepWithOnOff);
+                        assert_eq!(*level_or_step, 9);
+                        assert_eq!(*step_mode, Some(MatterLevelStepMode::Up));
+                        assert_eq!(*transition_ms, Some(125));
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetColorTemperature {
+                        node_id,
+                        endpoint,
+                        kelvin,
+                        transition_ms,
+                    } => {
+                        assert_eq!(
+                            (*node_id, *endpoint, *kelvin, *transition_ms),
+                            (7, 2, 2700, None)
+                        );
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::SetXy {
+                        node_id,
+                        endpoint,
+                        x,
+                        y,
+                        transition_ms,
+                    } => {
+                        assert_eq!((*node_id, *endpoint), (7, 2));
+                        assert!((*x - 0.12).abs() < f32::EPSILON);
+                        assert!((*y - 0.34).abs() < f32::EPSILON);
+                        assert_eq!(*transition_ms, Some(600));
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    ChipRpcRequest::ReadOnOff { node_id, endpoint } => {
+                        assert_eq!((*node_id, *endpoint), (7, 2));
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcReadOnOffResponse { on: true },
+                        )
+                    }
+                    ChipRpcRequest::ReadLightCapabilitySnapshot { node_id, endpoint } => {
+                        assert_eq!((*node_id, *endpoint), (7, 2));
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcJsonValueResponse {
+                                value: serde_json::json!({ "capability": "snapshot" }),
+                            },
+                        )
+                    }
+                    ChipRpcRequest::ReadLightState { node_id, endpoint } => {
+                        assert_eq!((*node_id, *endpoint), (7, 2));
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcJsonValueResponse {
+                                value: serde_json::json!({ "on": true }),
+                            },
+                        )
+                    }
+                    ChipRpcRequest::ProbeLight { node_id } => {
+                        assert_eq!(*node_id, 7);
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcProbeLightResponse {
+                                device: commissioned_test_device(7),
+                            },
+                        )
+                    }
+                    other => panic!("unexpected RPC request: {:?}", other),
+                }
+            });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport.configure_group(&expected_group).unwrap();
+        transport.remove_group(0x8001, &expected_members).unwrap();
+        transport.set_group_on_off(0x8001, true).unwrap();
+        transport.identify_group(0x8001, 3).unwrap();
+        transport
+            .set_group_brightness(0x8001, 128, Some(250))
+            .unwrap();
+        transport
+            .set_group_color_temperature(0x8001, 3000, None)
+            .unwrap();
+        transport
+            .set_group_xy(0x8001, 0.31, 0.42, Some(400))
+            .unwrap();
+        transport
+            .set_group_hue_saturation(0x8001, 20, 210, None)
+            .unwrap();
+        transport.set_brightness(7, 2, 180, Some(500)).unwrap();
+        transport
+            .run_level_command(
+                7,
+                2,
+                MatterLevelCommandVariant::StepWithOnOff,
+                9,
+                Some(MatterLevelStepMode::Up),
+                Some(125),
+            )
+            .unwrap();
+        transport.set_color_temperature(7, 2, 2700, None).unwrap();
+        transport.set_xy(7, 2, 0.12, 0.34, Some(600)).unwrap();
+        assert!(transport.read_on_off(7, 2).unwrap());
+        assert_eq!(
+            transport.read_light_capability_snapshot(7, 2).unwrap(),
+            serde_json::json!({ "capability": "snapshot" })
+        );
+        assert_eq!(
+            transport.read_light_state(7, 2).unwrap(),
+            serde_json::json!({ "on": true })
+        );
+        assert_eq!(transport.probe_light(7).unwrap().node_id, 7);
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 16);
         let _ = fs::remove_file(socket_path);
     }
 
@@ -1733,6 +2083,23 @@ mod tests {
     }
 
     #[test]
+    fn ble_preparation_skips_on_network_and_clears_expired_cooldown() {
+        let transport = ChipTransport::for_test(temp_socket_path("ble-prep"));
+        transport
+            .prepare_ble_commissioning(&on_network_commission_request())
+            .unwrap();
+        assert_eq!(transport.sidecar_health_for_test(), SidecarHealth::Ready);
+
+        transport.mark_ble_recovery_cooldown(Duration::from_millis(0));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown
+        );
+        transport.wait_for_ble_recovery_cooldown().unwrap();
+        assert_eq!(transport.sidecar_health_for_test(), SidecarHealth::Ready);
+    }
+
+    #[test]
     fn recoverable_ble_commissioning_errors_match_bundle_failures() {
         for message in [
             "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout",
@@ -1762,6 +2129,65 @@ mod tests {
             sidecar_log_path_from_env(Some(OsString::from("/tmp/rhythm-matter.log"))),
             Some(PathBuf::from("/tmp/rhythm-matter.log"))
         );
+    }
+
+    #[test]
+    fn command_resolution_stdio_and_status_helpers_cover_process_branches() {
+        let previous = std::env::var_os("RHYTHM_MATTER_CHIPD");
+        std::env::set_var("RHYTHM_MATTER_CHIPD", "/tmp/rhythm-chipd-test");
+        assert_eq!(
+            resolve_chipd_command().unwrap(),
+            PathBuf::from("/tmp/rhythm-chipd-test")
+        );
+        match previous {
+            Some(previous) => std::env::set_var("RHYTHM_MATTER_CHIPD", previous),
+            None => std::env::remove_var("RHYTHM_MATTER_CHIPD"),
+        }
+        assert!(!resolve_chipd_command().unwrap().as_os_str().is_empty());
+
+        let (_stdout, _stderr) = sidecar_stdio(None).unwrap();
+        let root = test_temp_root().join(format!(
+            "rhythm-matter-stdio-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let log_path = root.join("nested").join("chipd.log");
+        let (_stdout, _stderr) = sidecar_stdio(Some(&log_path)).unwrap();
+        assert!(log_path.exists());
+
+        let transport = ChipTransport::for_test(temp_socket_path("status-no-child"));
+        assert_eq!(transport.chipd_status_hint(), "not spawned");
+
+        let running_transport = ChipTransport::for_test(temp_socket_path("status-running"));
+        let running = std::process::Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+        *running_transport.sidecar.lock().unwrap() = Some(running);
+        assert_eq!(running_transport.chipd_status_hint(), "running");
+
+        let exited_transport = ChipTransport::for_test(temp_socket_path("status-exited"));
+        let exited = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        *exited_transport.sidecar.lock().unwrap() = Some(exited);
+        assert_eq!(exited_transport.chipd_status_hint(), "exited with code 7");
+
+        let drop_transport = ChipTransport::for_test(temp_socket_path("drop-kills-child"));
+        let child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        *drop_transport.sidecar.lock().unwrap() = Some(child);
+        drop(drop_transport);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -676,3 +676,310 @@ fn default_device(node_id: u64) -> CommissionedDevice {
         max_kelvin: Some(6500),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::{
+        MatterCommissioningNetwork, MatterCommissioningRendezvous,
+        MatterCommissioningWifiCredentials,
+    };
+
+    fn commission_request(node_id: u64) -> MatterCommissionRequest {
+        MatterCommissionRequest {
+            setup_payload: format!("MT:{node_id}"),
+            node_id,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::Auto,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "lab".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
+    fn matter_group(group_id: u16, members: &[(u64, u16)]) -> MatterGroup {
+        MatterGroup {
+            group_id,
+            name: format!("Room {group_id}"),
+            members: members
+                .iter()
+                .map(|(node_id, endpoint)| MatterGroupMember {
+                    node_id: *node_id,
+                    endpoint: *endpoint,
+                })
+                .collect(),
+        }
+    }
+
+    fn custom_device(node_id: u64, vendor: &str, product: &str) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: vendor.to_string(),
+            product_name: product.to_string(),
+            vendor_id: 123,
+            product_id: 456,
+            serial_number: Some(format!("serial-{node_id}")),
+            light_endpoint: 2,
+            color_modes: vec![MatterColorMode::HueSaturation, MatterColorMode::Xy],
+            min_kelvin: None,
+            max_kelvin: Some(5000),
+        }
+    }
+
+    #[test]
+    fn noop_transport_accepts_all_operations_and_returns_defaults() {
+        let transport = NoOpTransport;
+        let request = commission_request(42);
+
+        let commissioned = transport.commission_light(&request).unwrap();
+        assert_eq!(commissioned.node_id, 42);
+        assert_eq!(commissioned.product_name, "Light");
+        assert_eq!(commissioned.light_endpoint, 1);
+        assert_eq!(
+            commissioned.color_modes,
+            vec![MatterColorMode::ColorTemperature]
+        );
+
+        transport.decommission_device(42, true).unwrap();
+        assert!(transport.list_devices().unwrap().is_empty());
+        let probed = transport.probe_light(43).unwrap();
+        assert_eq!(probed.node_id, 43);
+        assert_eq!(probed.vendor_name, "Test");
+
+        let group = matter_group(7, &[(42, 1), (43, 2)]);
+        transport.set_on_off(42, 1, true).unwrap();
+        transport.configure_group(&group).unwrap();
+        transport
+            .remove_group(group.group_id, &group.members)
+            .unwrap();
+        transport.set_group_on_off(7, false).unwrap();
+        transport.identify_group(7, 5).unwrap();
+        transport.set_group_brightness(7, 128, Some(250)).unwrap();
+        transport
+            .set_group_color_temperature(7, 4100, None)
+            .unwrap();
+        transport.set_group_xy(7, 0.31, 0.29, Some(100)).unwrap();
+        transport
+            .set_group_hue_saturation(7, 23, 180, None)
+            .unwrap();
+
+        transport.identify_light(42, 1, 3).unwrap();
+        transport.set_brightness(42, 1, 200, Some(150)).unwrap();
+        transport.set_color_temperature(42, 1, 3000, None).unwrap();
+        transport.set_xy(42, 1, 0.4, 0.35, Some(50)).unwrap();
+        transport.set_hue_saturation(42, 1, 99, 120, None).unwrap();
+        assert!(!transport.read_on_off(42, 1).unwrap());
+    }
+
+    #[test]
+    fn spy_transport_commissions_probes_decommissions_and_records_failures() {
+        let transport = SpyTransport::new();
+        transport.set_commission_result(Ok(custom_device(999, "Acme", "Pendant")));
+
+        let request = commission_request(123);
+        let commissioned = transport.commission_light(&request).unwrap();
+        assert_eq!(commissioned.node_id, 123);
+        assert_eq!(commissioned.vendor_name, "Acme");
+        assert_eq!(commissioned.product_name, "Pendant");
+        assert_eq!(commissioned.light_endpoint, 2);
+        assert_eq!(transport.commission_requests(), vec![request.clone()]);
+
+        let devices = transport.list_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].node_id, 123);
+        assert_eq!(devices[0].vendor_name, "Acme");
+        assert!(devices[0].reachable);
+
+        let probed = transport.probe_light(123).unwrap();
+        assert_eq!(probed.node_id, 123);
+        assert_eq!(probed.product_name, "Pendant");
+
+        transport.set_probe_device(custom_device(55, "Other", "Table Lamp"));
+        let replacement = transport.probe_light(55).unwrap();
+        assert_eq!(replacement.node_id, 55);
+        assert_eq!(replacement.vendor_name, "Other");
+        assert_eq!(replacement.product_name, "Table Lamp");
+
+        transport.decommission_device(123, true).unwrap();
+        assert_eq!(transport.decommissioned(), vec![(123, true)]);
+        assert!(transport.probe_light(123).is_err());
+        assert!(transport.list_devices().unwrap().is_empty());
+
+        transport.set_commission_result(Err(anyhow::anyhow!("fabric unavailable")));
+        let error = transport
+            .commission_light(&commission_request(124))
+            .unwrap_err();
+        assert!(error.to_string().contains("fabric unavailable"));
+        assert_eq!(transport.commission_requests().len(), 2);
+    }
+
+    #[test]
+    fn spy_transport_records_group_operations_and_failures() {
+        let transport = SpyTransport::new();
+        transport.add_device(1, "Vendor", "Ceiling");
+        transport.add_device(2, "Vendor", "Sconce");
+        let group = matter_group(17, &[(1, 1), (2, 3)]);
+
+        transport.configure_group(&group).unwrap();
+        transport.set_group_on_off(17, true).unwrap();
+        assert!(transport.read_on_off(1, 1).unwrap());
+        assert!(transport.read_on_off(2, 3).unwrap());
+
+        transport.set_group_brightness(17, 0, Some(500)).unwrap();
+        assert!(!transport.read_on_off(1, 1).unwrap());
+        assert!(!transport.read_on_off(2, 3).unwrap());
+
+        transport.identify_group(17, 11).unwrap();
+        transport
+            .set_group_color_temperature(17, 4200, None)
+            .unwrap();
+        transport.set_group_xy(17, 0.2, 0.4, Some(75)).unwrap();
+        transport
+            .set_group_hue_saturation(17, 15, 220, Some(90))
+            .unwrap();
+        transport.remove_group(17, &group.members).unwrap();
+        transport.set_group_on_off(17, true).unwrap();
+        assert!(!transport.read_on_off(1, 1).unwrap());
+
+        let operations = transport.operations();
+        assert!(operations.contains(&RecordedOperation::ConfigureGroup {
+            group: group.clone()
+        }));
+        assert!(operations.contains(&RecordedOperation::SetGroupOnOff {
+            group_id: 17,
+            on: true
+        }));
+        assert!(operations.contains(&RecordedOperation::SetGroupBrightness {
+            group_id: 17,
+            level: 0,
+            transition_ms: Some(500)
+        }));
+        assert!(operations.contains(&RecordedOperation::IdentifyGroup {
+            group_id: 17,
+            duration_secs: 11
+        }));
+        assert!(
+            operations.contains(&RecordedOperation::SetGroupColorTemperature {
+                group_id: 17,
+                kelvin: 4200,
+                transition_ms: None
+            })
+        );
+        assert!(operations.contains(&RecordedOperation::SetGroupXy {
+            group_id: 17,
+            x: 0.2,
+            y: 0.4,
+            transition_ms: Some(75)
+        }));
+        assert!(
+            operations.contains(&RecordedOperation::SetGroupHueSaturation {
+                group_id: 17,
+                hue: 15,
+                saturation: 220,
+                transition_ms: Some(90)
+            })
+        );
+        assert!(operations.contains(&RecordedOperation::RemoveGroup {
+            group_id: 17,
+            members: group.members.clone()
+        }));
+
+        transport.fail_node(3);
+        let bad_group = matter_group(18, &[(3, 1)]);
+        assert!(transport.configure_group(&bad_group).is_err());
+
+        transport.fail_group_commands(19);
+        assert!(transport.set_group_on_off(19, false).is_err());
+        assert!(transport.identify_group(19, 1).is_err());
+        assert!(transport.set_group_brightness(19, 200, None).is_err());
+        assert!(transport
+            .set_group_color_temperature(19, 2700, Some(10))
+            .is_err());
+        assert!(transport.set_group_xy(19, 0.1, 0.2, None).is_err());
+        assert!(transport
+            .set_group_hue_saturation(19, 9, 10, Some(20))
+            .is_err());
+    }
+
+    #[test]
+    fn spy_transport_records_light_operations_and_read_failures() {
+        let transport = SpyTransport::default();
+        transport.add_device(5, "Vendor", "Lamp");
+        let devices = transport.list_devices().unwrap();
+        assert_eq!(devices[0].node_id, 5);
+        assert_eq!(devices[0].product_name, "Lamp");
+
+        transport.set_on_off_state(5, true);
+        assert!(transport.read_on_off(5, 1).unwrap());
+        transport.set_on_off(5, 1, false).unwrap();
+        assert!(!transport.read_on_off(5, 1).unwrap());
+
+        transport.identify_light(5, 1, 6).unwrap();
+        transport.set_brightness(5, 1, 254, Some(100)).unwrap();
+        assert!(transport.read_on_off(5, 1).unwrap());
+        transport.set_brightness(5, 1, 0, None).unwrap();
+        assert!(!transport.read_on_off(5, 1).unwrap());
+        transport
+            .set_color_temperature(5, 1, 3300, Some(25))
+            .unwrap();
+        transport.set_xy(5, 1, 0.45, 0.32, None).unwrap();
+        transport
+            .set_hue_saturation(5, 1, 42, 210, Some(30))
+            .unwrap();
+        assert!(!transport.read_on_off(8, 1).unwrap());
+
+        let operations = transport.operations();
+        assert!(operations.contains(&RecordedOperation::SetOnOff {
+            node_id: 5,
+            endpoint: 1,
+            on: false
+        }));
+        assert!(operations.contains(&RecordedOperation::IdentifyLight {
+            node_id: 5,
+            endpoint: 1,
+            duration_secs: 6
+        }));
+        assert!(operations.contains(&RecordedOperation::SetBrightness {
+            node_id: 5,
+            endpoint: 1,
+            level: 254,
+            transition_ms: Some(100)
+        }));
+        assert!(
+            operations.contains(&RecordedOperation::SetColorTemperature {
+                node_id: 5,
+                endpoint: 1,
+                kelvin: 3300,
+                transition_ms: Some(25)
+            })
+        );
+        assert!(operations.contains(&RecordedOperation::SetXy {
+            node_id: 5,
+            endpoint: 1,
+            x: 0.45,
+            y: 0.32,
+            transition_ms: None
+        }));
+        assert!(operations.contains(&RecordedOperation::SetHueSaturation {
+            node_id: 5,
+            endpoint: 1,
+            hue: 42,
+            saturation: 210,
+            transition_ms: Some(30)
+        }));
+
+        transport.fail_node(6);
+        assert!(transport.set_on_off(6, 1, true).is_err());
+        assert!(transport.identify_light(6, 1, 1).is_err());
+        assert!(transport.set_brightness(6, 1, 100, None).is_err());
+        assert!(transport.set_color_temperature(6, 1, 4000, None).is_err());
+        assert!(transport.set_xy(6, 1, 0.2, 0.3, None).is_err());
+        assert!(transport.set_hue_saturation(6, 1, 1, 2, None).is_err());
+        assert!(transport.read_on_off(6, 1).is_err());
+
+        transport.set_on_off_state(7, true);
+        transport.fail_read_node(7);
+        assert!(transport.read_on_off(7, 1).is_err());
+    }
+}

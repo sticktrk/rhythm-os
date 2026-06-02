@@ -77,3 +77,91 @@ where
         connect_fn,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use rhythm_os::hub::ActiveHub;
+
+    fn active_hub(address: &str) -> (ActiveHub, Receiver<HubEvent>) {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let hub_type = HubType::new(HubType::HUE);
+        let hub_key = rhythm_os::canonical::identity::HubKey::new(hub_type.clone(), address);
+        (
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn hue_credentials_round_trip_username() {
+        let creds = hue_credentials("192.0.2.10", "user-123");
+
+        assert_eq!(
+            creds.hub_type.as_ref().map(|ty| ty.as_str()),
+            Some(HubType::HUE)
+        );
+        assert_eq!(creds.address, "192.0.2.10");
+        assert_eq!(hue_username(&creds), Some("user-123"));
+    }
+
+    #[test]
+    fn configure_hue_hub_stores_credentials_and_skips_same_credentials() {
+        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let calls = Arc::new(Mutex::new(0usize));
+        let first_calls = calls.clone();
+
+        configure_hue_hub(
+            "192.0.2.10",
+            r#"{"username":"user-123"}"#,
+            &state,
+            move |_| {
+                *first_calls.lock().unwrap() += 1;
+                Ok(active_hub("192.0.2.10"))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let key =
+            rhythm_os::canonical::identity::HubKey::new(HubType::new(HubType::HUE), "192.0.2.10");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .hub_credentials
+                .get(&key)
+                .and_then(hue_username),
+            Some("user-123")
+        );
+
+        configure_hue_hub("192.0.2.10", r#"{"username":"user-123"}"#, &state, |_| {
+            panic!("same credentials should short-circuit")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_hue_hub_rejects_invalid_credentials_json() {
+        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+
+        let error = configure_hue_hub("192.0.2.10", "{}", &state, |_| {
+            panic!("invalid credentials should not connect")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Invalid Hue credentials:"));
+    }
+}

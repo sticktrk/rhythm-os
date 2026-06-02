@@ -2466,10 +2466,41 @@ fn parse_rfc3339(value: &str) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use flate2::read::GzDecoder;
     use serde_json::Value;
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::io::Read;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvRestore {
+        values: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn new(names: &[&'static str]) -> Self {
+            Self {
+                values: names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in &self.values {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -2495,6 +2526,362 @@ mod tests {
         }
 
         files
+    }
+
+    #[test]
+    fn file_name_and_log_dir_helpers_sanitize_dedup_and_honor_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::new(&["RHYTHM_LOG_DIR", "HOME"]);
+        let root = unique_test_dir("helpers");
+        let env_log_dir = root.join("logs");
+        let data_dir = root.join("data");
+        let home = root.join("home");
+        std::env::set_var("RHYTHM_LOG_DIR", &env_log_dir);
+        std::env::set_var("HOME", &home);
+
+        let created_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 34, 56)
+            .single()
+            .unwrap();
+        let runtime = RuntimeSnapshot {
+            firmware_version: "1.2.3".to_string(),
+            platform_type: "appliance".to_string(),
+            platform_context: "rpiz/dev unit".to_string(),
+            data_dir: data_dir.display().to_string(),
+        };
+
+        assert_eq!(
+            bundle_file_name(&runtime, created_at),
+            "rhythm-debug-bundle-rpiz-dev-unit-20260520T123456Z.tar.gz"
+        );
+        assert_eq!(sanitize_filename_component("///"), "");
+        assert_eq!(sanitize_filename_component("rpiz_01-beta"), "rpiz_01-beta");
+
+        let dirs = discover_log_dirs(&RuntimeSnapshot {
+            platform_context: "server".to_string(),
+            ..runtime
+        });
+        assert_eq!(dirs[0], env_log_dir);
+        assert!(dirs.contains(&data_dir.join("log")));
+        if cfg!(target_os = "macos") {
+            assert!(dirs.contains(&home.join("Library").join("Logs").join("Rhythm")));
+        }
+
+        std::env::set_var("RHYTHM_LOG_DIR", data_dir.join("log"));
+        let deduped = discover_log_dirs(&RuntimeSnapshot {
+            firmware_version: "1.2.3".to_string(),
+            platform_type: "server".to_string(),
+            platform_context: "server".to_string(),
+            data_dir: data_dir.display().to_string(),
+        });
+        assert_eq!(
+            deduped
+                .iter()
+                .filter(|dir| **dir == data_dir.join("log"))
+                .count(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnostics_finish_dedups_and_sorts_reported_findings() {
+        let started_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let completed_at = started_at + chrono::Duration::milliseconds(25);
+        let mut diagnostics = BundleDiagnostics::new(
+            started_at,
+            "/data".to_string(),
+            vec!["/var/log/rhythm".to_string()],
+        );
+        diagnostics.add_warning("z-warning");
+        diagnostics.add_warning("a-warning");
+        diagnostics.add_warning("a-warning");
+        diagnostics
+            .missing_persisted_files
+            .push("rooms.json".to_string());
+        diagnostics
+            .missing_persisted_files
+            .push("canonical_registry.json".to_string());
+        diagnostics
+            .missing_persisted_files
+            .push("rooms.json".to_string());
+        diagnostics.record_file_error("read", "/b", "later");
+        diagnostics.record_file_error("read", "/a", "earlier");
+
+        diagnostics.finish(
+            completed_at,
+            HostMetadata {
+                os: "test-os".to_string(),
+                ..HostMetadata::default()
+            },
+            ProcessMetadata {
+                pid: 42,
+                ..ProcessMetadata::default()
+            },
+        );
+
+        assert_eq!(diagnostics.completed_at, Some(completed_at.to_rfc3339()));
+        assert_eq!(diagnostics.duration_ms, Some(25));
+        assert_eq!(
+            diagnostics.missing_persisted_files,
+            vec!["canonical_registry.json", "rooms.json"]
+        );
+        assert_eq!(diagnostics.warnings, vec!["a-warning", "z-warning"]);
+        assert_eq!(diagnostics.file_errors[0].path, "/a");
+        assert_eq!(diagnostics.host.os, "test-os");
+        assert_eq!(diagnostics.process.pid, 42);
+    }
+
+    #[test]
+    fn discover_artifacts_records_missing_files_and_sorts_matches() {
+        let root = unique_test_dir("artifact-discovery");
+        let data_dir = root.join("data");
+        let log_dir = data_dir.join("log");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("rhythm-server.log"), b"active").unwrap();
+        fs::write(log_dir.join("rhythm-server.log.1"), b"rotated").unwrap();
+        fs::write(log_dir.join("not-rhythm.log"), b"ignored").unwrap();
+        fs::create_dir_all(log_dir.join("rhythm-matter.log")).unwrap();
+        fs::write(data_dir.join("topology.json"), b"{}").unwrap();
+        fs::write(data_dir.join("canonical_registry.json"), b"{}").unwrap();
+        fs::write(data_dir.join("hub_registry_z.json"), b"{}").unwrap();
+        fs::write(data_dir.join("hub_registry_a.json"), b"{}").unwrap();
+
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut diagnostics =
+            BundleDiagnostics::new(generated_at, data_dir.display().to_string(), Vec::new());
+        let logs = discover_log_artifacts(std::slice::from_ref(&log_dir), &mut diagnostics);
+        assert_eq!(
+            logs.iter()
+                .map(|artifact| artifact.archive_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["logs/rhythm-server.log", "logs/rhythm-server.log.1"]
+        );
+        assert!(matches_log_name("rhythm-matter.log.4"));
+        assert!(!matches_log_name("other-rhythm-server.log"));
+
+        let runtime = RuntimeSnapshot {
+            firmware_version: "1.2.3".to_string(),
+            platform_type: "appliance".to_string(),
+            platform_context: "rpiz".to_string(),
+            data_dir: data_dir.display().to_string(),
+        };
+        let persisted = discover_persisted_artifacts(&runtime, &mut diagnostics);
+        assert_eq!(
+            persisted
+                .iter()
+                .map(|artifact| artifact.archive_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "persisted/canonical_registry.json",
+                "persisted/hub_registry_a.json",
+                "persisted/hub_registry_z.json",
+                "persisted/topology.json"
+            ]
+        );
+        assert_eq!(diagnostics.missing_persisted_files, vec!["rooms.json"]);
+
+        let missing_runtime = RuntimeSnapshot {
+            data_dir: root.join("missing").display().to_string(),
+            ..runtime
+        };
+        let missing = discover_persisted_artifacts(&missing_runtime, &mut diagnostics);
+        assert!(missing.is_empty());
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("does not exist")));
+
+        let empty_runtime = RuntimeSnapshot {
+            data_dir: String::new(),
+            ..missing_runtime
+        };
+        let empty = discover_persisted_artifacts(&empty_runtime, &mut diagnostics);
+        assert!(empty.is_empty());
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("No data_dir configured")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matter_controller_debug_reports_identity_variants_and_missing_identity_warning() {
+        let root = unique_test_dir("matter-debug");
+        let matter_dir = root.join("matter");
+        let chip_dir = matter_dir.join("chip");
+        fs::create_dir_all(&chip_dir).unwrap();
+        let identity_path = matter_dir.join("fabric-identity.json");
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut diagnostics =
+            BundleDiagnostics::new(generated_at, root.display().to_string(), Vec::new());
+
+        let missing = build_matter_fabric_identity_debug(&identity_path, &mut diagnostics);
+        assert!(!missing.file.present);
+        assert!(missing.parse_error.is_none());
+
+        fs::write(&identity_path, b"{not json").unwrap();
+        let invalid = build_matter_fabric_identity_debug(&identity_path, &mut diagnostics);
+        assert!(invalid.file.present);
+        assert!(invalid.parse_error.is_some());
+
+        fs::write(
+            &identity_path,
+            br#"{"schema_version":2,"label":"primary","operational_fabric_id":4660,"ipk_hex":""}"#,
+        )
+        .unwrap();
+        let parsed = build_matter_fabric_identity_debug(&identity_path, &mut diagnostics);
+        assert_eq!(parsed.schema_version, Some(2));
+        assert_eq!(parsed.label.as_deref(), Some("primary"));
+        assert_eq!(
+            parsed.operational_fabric_id_hex.as_deref(),
+            Some("0x0000000000001234")
+        );
+        assert!(!parsed.ipk_hex_present);
+
+        fs::remove_file(&identity_path).unwrap();
+        fs::write(chip_dir.join("controller-storage.json"), b"storage").unwrap();
+        let runtime = RuntimeSnapshot {
+            firmware_version: "1.2.3".to_string(),
+            platform_type: "appliance".to_string(),
+            platform_context: "rpiz".to_string(),
+            data_dir: root.display().to_string(),
+        };
+        let json =
+            build_matter_controller_debug_json(&runtime, generated_at, &mut diagnostics).unwrap();
+        let snapshot: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(snapshot["storage_without_identity"], true);
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("without")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_metadata_capture_and_process_resources_report_edge_cases() {
+        let root = unique_test_dir("metadata");
+        let file = root.join("file.json");
+        let dir = root.join("not-file");
+        fs::write(&file, b"hello").unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut diagnostics =
+            BundleDiagnostics::new(generated_at, root.display().to_string(), Vec::new());
+
+        let present = debug_file_metadata(&file, &mut diagnostics);
+        assert!(present.present);
+        assert_eq!(present.bytes, Some(5));
+        assert!(present.modified_at.is_some());
+
+        let not_file = debug_file_metadata(&dir, &mut diagnostics);
+        assert!(!not_file.present);
+        assert_eq!(not_file.error.as_deref(), Some("not a regular file"));
+
+        let missing = debug_file_metadata(&root.join("missing.json"), &mut diagnostics);
+        assert!(!missing.present);
+        assert!(missing.error.is_none());
+
+        let artifact = FileArtifact {
+            source_path: file.clone(),
+            archive_path: "persisted/file.json".to_string(),
+        };
+        let (captured, bytes) = capture_artifact(&artifact, &mut diagnostics).unwrap();
+        assert_eq!(captured.archive_path, "persisted/file.json");
+        assert_eq!(captured.bytes, 5);
+        assert_eq!(bytes, b"hello");
+
+        let missing_artifact = FileArtifact {
+            source_path: root.join("gone.json"),
+            archive_path: "persisted/gone.json".to_string(),
+        };
+        assert!(capture_artifact(&missing_artifact, &mut diagnostics).is_none());
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Failed to read")));
+
+        let process_json =
+            build_process_resources_json(generated_at, "bad\0path", &mut diagnostics).unwrap();
+        let process: Value = serde_json::from_str(&process_json).unwrap();
+        assert_eq!(process["data_dir_filesystem"], Value::Null);
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("interior NUL byte")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn log_summary_classifies_patterns_and_truncates_long_lines() {
+        let root = unique_test_dir("log-summary");
+        let log = root.join("rhythm-server.log");
+        let long_line = "x".repeat(2_050);
+        fs::write(
+            &log,
+            format!(
+                "2026 INFO sys: Rhythm Server started\n\
+                 2026 WARN sys: warning happened\n\
+                 2026\tERROR sys: error happened\n\
+                 2026 INFO sys: Hub event channel full\n\
+                 2026 INFO hue-sse: event arrived\n\
+                 2026 INFO sys: sse: reconnect\n\
+                 2026 INFO sys: Periodic cycle event=\"periodic_cycle\"\n\
+                 rhythm-launch: boot marker\n\
+                 {long_line}\n"
+            ),
+        )
+        .unwrap();
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut diagnostics =
+            BundleDiagnostics::new(generated_at, root.display().to_string(), Vec::new());
+        let summary = build_log_summary_json(
+            &[FileArtifact {
+                source_path: log,
+                archive_path: "logs/rhythm-server.log".to_string(),
+            }],
+            generated_at,
+            &mut diagnostics,
+        )
+        .unwrap();
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+
+        assert_eq!(summary["total_lines_scanned"], 9);
+        assert_eq!(summary["warning_count"], 1);
+        assert_eq!(summary["error_count"], 1);
+        assert_eq!(summary["hub_event_channel_full_count"], 1);
+        assert_eq!(summary["sse_line_count"], 2);
+        assert_eq!(summary["periodic_cycle_count"], 1);
+        assert_eq!(summary["launch_line_count"], 2);
+        assert_eq!(
+            summary["recent_errors"][0]["line_number"],
+            Value::from(3_u64)
+        );
+        assert!(summary["tail"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("...<truncated>"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

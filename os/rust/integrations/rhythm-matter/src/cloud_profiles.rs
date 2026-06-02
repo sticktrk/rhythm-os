@@ -344,6 +344,10 @@ fn recalculate_light_type(caps: &mut LightCapabilities) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn device() -> CommissionedDevice {
         CommissionedDevice {
@@ -362,6 +366,16 @@ mod tests {
             min_kelvin: Some(2000),
             max_kelvin: Some(6500),
         }
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-cloud-profiles-{}-{}", name, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -397,5 +411,114 @@ mod tests {
         assert_eq!(caps.min_brightness, Some(8));
         assert!(!caps.color_modes.contains(&ColorMode::Xy));
         assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(250)));
+    }
+
+    #[test]
+    fn profile_matches_normalized_manufacturer_model_and_dedupes_quirks() {
+        let profile = CloudMatterDeviceProfile {
+            profile_key: "normalized".to_string(),
+            match_data: CloudMatterProfileMatch {
+                manufacturer: Some(" shenzhen-qianyan technology ".to_string()),
+                model: Some("h 6004".to_string()),
+                ..Default::default()
+            },
+            capabilities: CloudMatterProfileCapabilities {
+                min_brightness: Some(0),
+                supports_transition: Some(true),
+                usable_min_kelvin: Some(2300),
+                usable_max_kelvin: Some(6400),
+                preferred_color_command: Some("xy".to_string()),
+                ..Default::default()
+            },
+            quirks: CloudMatterProfileQuirks {
+                needs_explicit_on: Some(true),
+                needs_xy_not_ct: Some(true),
+                recommended_command_spacing_ms: Some(0),
+                runtime_quirks: vec![
+                    serde_json::json!("needs_explicit_on"),
+                    serde_json::json!("needs_xy_not_ct"),
+                    serde_json::json!({"command_throttle_ms": 125}),
+                    serde_json::json!({"command_throttle_ms": 9_999_999_999_u64}),
+                    serde_json::json!("unknown"),
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(profile.matches(&device()));
+
+        let catalog = CloudMatterProfileCatalog {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut quirks = vec![DeviceQuirk::NeedsExplicitOn];
+
+        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+
+        assert_eq!(caps.min_brightness, Some(1));
+        assert!(caps.supports_transition);
+        assert_eq!(caps.min_kelvin, Some(2300));
+        assert_eq!(caps.max_kelvin, Some(6400));
+        assert_eq!(
+            quirks
+                .iter()
+                .filter(|quirk| **quirk == DeviceQuirk::NeedsExplicitOn)
+                .count(),
+            1
+        );
+        assert!(quirks.contains(&DeviceQuirk::NeedsXyNotCt));
+        assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(125)));
+    }
+
+    #[test]
+    fn cache_path_save_load_and_sync_disabled_env_are_deterministic() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        assert!(cache_path(&state).is_none());
+        assert!(load_cached_for_state(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("data_dir not configured"));
+
+        let dir = unique_test_dir("cache");
+        state.lock().unwrap().data_dir = dir.display().to_string();
+        let catalog = CloudMatterProfileCatalog {
+            schema_version: 1,
+            profile_version: 99,
+            generated_at: Some("2026-01-01T00:00:00Z".to_string()),
+            profiles: vec![CloudMatterDeviceProfile {
+                profile_key: "cached".to_string(),
+                profile_version: 3,
+                ..Default::default()
+            }],
+        };
+
+        save_cached_for_state(&state, &catalog).unwrap();
+        let path = cache_path(&state).unwrap();
+        assert_eq!(path, dir.join("matter").join("cloud_profiles.json"));
+        assert!(path.exists());
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let loaded = load_cached_for_state(&state).unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.profile_version, 99);
+        assert_eq!(loaded.profiles[0].profile_key, "cached");
+
+        for value in ["0", "false", "off", "disabled"] {
+            std::env::set_var(PROFILE_SYNC_DISABLE_ENV, value);
+            assert!(profile_sync_disabled(), "{} should disable sync", value);
+        }
+        for value in ["1", "true", "enabled", ""] {
+            std::env::set_var(PROFILE_SYNC_DISABLE_ENV, value);
+            assert!(
+                !profile_sync_disabled(),
+                "{} should not disable sync",
+                value
+            );
+        }
+        std::env::remove_var(PROFILE_SYNC_DISABLE_ENV);
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

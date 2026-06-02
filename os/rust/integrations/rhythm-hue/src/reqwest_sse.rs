@@ -216,3 +216,38 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fd_log_suffix_is_empty_or_prefixed_with_open_fd_count() {
+        let suffix = fd_log_suffix();
+
+        assert!(suffix.is_empty() || suffix.starts_with(" open_fds="));
+    }
+
+    #[test]
+    fn build_sse_client_succeeds_without_opening_a_connection() {
+        let client = build_sse_client().unwrap();
+
+        let request = client
+            .get("https://192.0.2.10/eventstream/clip/v2")
+            .header("hue-application-key", "user-123")
+            .header("Accept", "text/event-stream")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            "https://192.0.2.10/eventstream/clip/v2"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("Accept")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+    }
+}

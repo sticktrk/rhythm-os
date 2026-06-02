@@ -96,3 +96,35 @@ fn do_update() -> Result<(), String> {
     println!("Restarting service...");
     service_ctl::restart()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parsed_command(arg: &str) -> Commands {
+        Cli::try_parse_from(["rhythm-cli", arg]).unwrap().command
+    }
+
+    #[test]
+    fn cli_parses_service_and_update_subcommands() {
+        assert!(matches!(parsed_command("start"), Commands::Start));
+        assert!(matches!(parsed_command("stop"), Commands::Stop));
+        assert!(matches!(parsed_command("restart"), Commands::Restart));
+        assert!(matches!(parsed_command("status"), Commands::Status));
+        assert!(matches!(parsed_command("update"), Commands::Update));
+        assert!(matches!(parsed_command("uninstall"), Commands::Uninstall));
+    }
+
+    #[test]
+    fn cli_rejects_unknown_subcommand_and_exposes_version() {
+        assert!(Cli::try_parse_from(["rhythm-cli", "bogus"]).is_err());
+
+        let mut command = Cli::command();
+        let version = command.get_version().unwrap_or_default().to_string();
+        let help = command.render_long_help().to_string();
+        assert_eq!(version, VERSION);
+        assert!(help.contains("Manage the Rhythm OS server"));
+        assert!(help.contains("Self-update to the latest version"));
+    }
+}

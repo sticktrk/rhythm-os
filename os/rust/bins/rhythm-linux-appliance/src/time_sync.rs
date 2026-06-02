@@ -136,7 +136,7 @@ pub fn sync_system_clock(reason: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clock_is_sane_at, min_sane_clock_utc};
+    use super::{clock_is_sane_at, min_sane_clock_utc, sync_system_clock, system_clock_is_sane};
     use chrono::{TimeZone, Utc};
 
     #[test]
@@ -155,5 +155,11 @@ mod tests {
             .single()
             .unwrap();
         assert!(clock_is_sane_at(newer));
+    }
+
+    #[test]
+    fn sane_current_clock_short_circuits_sync_attempt() {
+        assert!(system_clock_is_sane());
+        assert!(sync_system_clock("test").unwrap());
     }
 }

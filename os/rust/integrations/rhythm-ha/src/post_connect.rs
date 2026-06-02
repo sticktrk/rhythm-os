@@ -160,3 +160,179 @@ pub fn populate_device_area_cache(state: &SharedState) {
         "Populated event cache with {} device + {} binary_sensor + {} event entries",
         device_count, sensor_count, event_count);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use anyhow::Result;
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    use rhythm_os::canonical::identity::HubKey;
+    use rhythm_os::hub::HubType;
+    use rhythm_os::state::AppState;
+    use rhythm_os::storage::FileStorage;
+
+    use crate::provider::ha_credentials;
+    use crate::transport::EntityState;
+
+    struct FakeTransport {
+        config: Result<Value, String>,
+    }
+
+    impl FakeTransport {
+        fn ok(config: Value) -> Self {
+            Self { config: Ok(config) }
+        }
+
+        fn err(message: &str) -> Self {
+            Self {
+                config: Err(message.to_string()),
+            }
+        }
+    }
+
+    impl HaTransport for FakeTransport {
+        fn call_service(&self, _domain: &str, _service: &str, _data: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_states(&self) -> Result<Vec<EntityState>> {
+            Ok(Vec::new())
+        }
+
+        fn get_state(&self, entity_id: &str) -> Result<EntityState> {
+            Ok(EntityState {
+                entity_id: entity_id.to_string(),
+                state: "off".to_string(),
+                attributes: Value::Null,
+            })
+        }
+
+        fn test_connection(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn get_config(&self) -> Result<Value> {
+            self.config
+                .clone()
+                .map_err(|message| anyhow::anyhow!(message))
+        }
+    }
+
+    fn shared_state() -> SharedState {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn temp_storage(prefix: &str) -> FileStorage {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-ha-post-connect-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            id
+        ));
+        if path.exists() {
+            std::fs::remove_dir_all(&path).unwrap();
+        }
+        FileStorage::new(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn fetch_ha_config_imports_new_location_timezone_and_persists_it() {
+        let state = shared_state();
+        state.lock().unwrap().storage = Some(Box::new(temp_storage("import")));
+        let transport = FakeTransport::ok(json!({
+            "latitude": 35.22,
+            "longitude": -80.84,
+            "time_zone": "America/New_York"
+        }));
+
+        fetch_ha_config(&state, &transport);
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.latitude, Some(35.22));
+        assert_eq!(guard.longitude, Some(-80.84));
+        assert_eq!(guard.timezone_name.as_deref(), Some("America/New_York"));
+        assert_ne!(guard.utc_offset_hours, 0.0);
+        assert!(
+            guard
+                .storage
+                .as_ref()
+                .unwrap()
+                .load_location()
+                .unwrap()
+                .timezone_name
+                .as_deref()
+                == Some("America/New_York")
+        );
+    }
+
+    #[test]
+    fn fetch_ha_config_refreshes_timezone_without_overwriting_existing_location() {
+        let state = shared_state();
+        {
+            let mut guard = state.lock().unwrap();
+            guard.latitude = Some(12.0);
+            guard.longitude = Some(34.0);
+            guard.utc_offset_hours = 2.0;
+        }
+        let transport = FakeTransport::ok(json!({
+            "latitude": 35.22,
+            "longitude": -80.84,
+            "time_zone": "Europe/Berlin"
+        }));
+
+        fetch_ha_config(&state, &transport);
+
+        let guard = state.lock().unwrap();
+        assert_eq!(guard.latitude, Some(12.0));
+        assert_eq!(guard.longitude, Some(34.0));
+        assert_eq!(guard.timezone_name.as_deref(), Some("Europe/Berlin"));
+    }
+
+    #[test]
+    fn fetch_ha_config_returns_on_transport_error_or_incomplete_location() {
+        let state = shared_state();
+        fetch_ha_config(&state, &FakeTransport::err("offline"));
+        assert!(state.lock().unwrap().latitude.is_none());
+
+        fetch_ha_config(
+            &state,
+            &FakeTransport::ok(json!({
+                "latitude": 35.22,
+                "time_zone": "America/New_York"
+            })),
+        );
+        assert!(state.lock().unwrap().latitude.is_none());
+    }
+
+    #[test]
+    fn config_from_state_picks_stored_homeassistant_credentials() {
+        let state = shared_state();
+        let hub_key = HubKey::new(HubType::new("homeassistant"), "https://ha.local:9443");
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(hub_key, ha_credentials("https://ha.local:9443", "token-1"));
+
+        let config = config_from_state(&state).unwrap();
+
+        assert_eq!(config.host, "ha.local");
+        assert_eq!(config.port, 9443);
+        assert_eq!(config.token, "token-1");
+        assert!(config.use_ssl);
+    }
+
+    #[test]
+    fn config_from_state_and_cache_population_return_when_credentials_are_missing() {
+        let state = shared_state();
+
+        assert!(config_from_state(&state).is_none());
+        populate_device_area_cache(&state);
+        assert!(state.lock().unwrap().hubs.is_empty());
+    }
+}

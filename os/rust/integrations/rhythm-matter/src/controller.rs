@@ -1672,6 +1672,81 @@ mod tests {
     }
 
     #[test]
+    fn group_only_targets_can_use_groupcast_when_fanout_only_is_disabled() {
+        let (mut controller, spy, registry) = make_controller();
+        controller.group_fanout_only = false;
+        let group_id = 4097;
+        registry.lock().unwrap().upsert_room(
+            "group-only",
+            "Group Only",
+            &format_group_control_id(group_id),
+            &[],
+        );
+
+        block_on(controller.turn_on("group-only", LightingCommand::new(80, 4000))).unwrap();
+        block_on(controller.turn_off("group-only", None)).unwrap();
+        block_on(controller.flash_target(&HubDispatchTarget::Group {
+            room_id: "group-only".to_string(),
+            control_id: format_group_control_id(group_id),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::SetGroupColorTemperature {
+                    group_id,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetGroupBrightness {
+                    group_id,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetGroupOnOff {
+                    group_id,
+                    on: false,
+                },
+                RecordedOperation::IdentifyGroup {
+                    group_id,
+                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn fanout_only_group_targets_without_members_return_command_errors() {
+        let (controller, spy, registry) = make_controller();
+        let group_id = 4097;
+        registry.lock().unwrap().upsert_room(
+            "group-only",
+            "Group Only",
+            &format_group_control_id(group_id),
+            &[],
+        );
+        let target = HubDispatchTarget::Group {
+            room_id: "group-only".to_string(),
+            control_id: format_group_control_id(group_id),
+        };
+
+        assert!(matches!(
+            block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000))),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(matches!(
+            block_on(controller.turn_off_target(&target, None)),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(matches!(
+            block_on(controller.flash_target(&target)),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(spy.operations().is_empty());
+    }
+
+    #[test]
     fn turn_on_direct_device_target_succeeds() {
         let (controller, spy, _) = make_controller();
 
@@ -1699,6 +1774,82 @@ mod tests {
         let error =
             block_on(controller.turn_on("matter-42", LightingCommand::new(50, 3000))).unwrap_err();
         assert!(matches!(error, LightControlError::RoomNotFound(_)));
+    }
+
+    #[test]
+    fn direct_device_targets_skip_invalid_ids_when_valid_members_remain() {
+        let (controller, spy, _) = make_controller();
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["not-matter".to_string(), "matter-42".to_string()],
+            },
+            LightingCommand::new(50, 3000),
+        ))
+        .unwrap();
+        block_on(controller.turn_off_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["bad".to_string(), "matter-42".to_string()],
+            },
+            None,
+        ))
+        .unwrap();
+        block_on(controller.flash_target(&HubDispatchTarget::Devices {
+            native_ids: vec!["also-bad".to_string(), "matter-42".to_string()],
+        }))
+        .unwrap();
+        spy.set_on_off_state(42, true);
+        assert!(block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices {
+                native_ids: vec!["bad".to_string(), "matter-42".to_string()],
+            })
+        )
+        .unwrap());
+
+        let operations = spy.operations();
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetOnOff {
+                node_id: 42,
+                on: false,
+                ..
+            }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::IdentifyLight { node_id: 42, .. }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::ReadOnOff { node_id: 42, .. }
+        )));
+    }
+
+    #[test]
+    fn direct_device_targets_with_only_invalid_ids_return_command_errors() {
+        let (controller, spy, _) = make_controller();
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["not-matter".to_string()],
+        };
+
+        assert!(matches!(
+            block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000))),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(matches!(
+            block_on(controller.turn_off_target(&target, None)),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(matches!(
+            block_on(controller.flash_target(&target)),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+        assert!(spy.operations().is_empty());
     }
 
     #[test]

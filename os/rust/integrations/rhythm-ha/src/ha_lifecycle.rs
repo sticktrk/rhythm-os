@@ -183,3 +183,158 @@ pub enum HaWsEvent {
     /// Connection lost.
     Disconnected(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::mpsc;
+
+    use serde_json::Value;
+
+    use rhythm_os::state::AppState;
+
+    use crate::transport::{EntityState, HaTransport};
+
+    struct FakeHaTransport;
+
+    impl HaTransport for FakeHaTransport {
+        fn call_service(&self, _domain: &str, _service: &str, _data: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_states(&self) -> Result<Vec<EntityState>> {
+            Ok(Vec::new())
+        }
+
+        fn get_state(&self, entity_id: &str) -> Result<EntityState> {
+            Ok(EntityState {
+                entity_id: entity_id.to_string(),
+                state: "off".to_string(),
+                attributes: Value::Null,
+            })
+        }
+
+        fn test_connection(&self) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn shared_state() -> SharedState {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn ha_key(address: &str) -> HubKey {
+        HubKey::new(HubType::new(HA_HUB_TYPE), address)
+    }
+
+    fn ha_config() -> HaConnectionConfig {
+        HaConnectionConfig {
+            host: "ha.local".to_string(),
+            port: 8123,
+            token: "token-1".to_string(),
+            use_ssl: false,
+        }
+    }
+
+    #[test]
+    fn connect_ha_builds_hub_data_cache_and_tags_events() {
+        let state = shared_state();
+        let key = ha_key("ha.local");
+        let (raw_tx, raw_rx) = mpsc::channel();
+
+        let (hub, event_rx) = connect_ha(
+            &state,
+            key.clone(),
+            ha_config(),
+            None,
+            move |config, registry, shutdown, cache| {
+                assert_eq!(config.host, "ha.local");
+                assert_eq!(config.port, 8123);
+                assert!(!shutdown.load(std::sync::atomic::Ordering::Relaxed));
+                registry
+                    .lock()
+                    .unwrap()
+                    .upsert_room("area-1", "Kitchen", "", &[]);
+                cache
+                    .lock()
+                    .unwrap()
+                    .insert("device-1".to_string(), "area-1".to_string());
+                raw_rx
+            },
+        )
+        .unwrap();
+
+        let data = hub.data::<HaHubData>().unwrap();
+        assert_eq!(data.config.host, "ha.local");
+        assert_eq!(
+            data.registry.lock().unwrap().room_name("area-1"),
+            Some("Kitchen")
+        );
+        assert_eq!(
+            data.device_area_cache
+                .lock()
+                .unwrap()
+                .get("device-1")
+                .cloned(),
+            Some("area-1".to_string())
+        );
+
+        raw_tx.send(HubEvent::Heartbeat { hub_key: None }).unwrap();
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+                .hub_key(),
+            Some(&key)
+        );
+    }
+
+    #[test]
+    fn ensure_ha_runtime_reports_missing_active_hub() {
+        let state = shared_state();
+
+        let error = ensure_ha_runtime(&state, FakeHaTransport).unwrap_err();
+
+        assert_eq!(error.to_string(), "HA hub not active (call connect first)");
+    }
+
+    #[test]
+    fn start_event_translator_maps_connection_heartbeat_and_disconnect() {
+        let (tx, rx) = mpsc::channel();
+        let registry = Arc::new(Mutex::new(HaDeviceRegistry::with_options(true)));
+        let hub_rx = start_event_translator(
+            rx,
+            registry,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+            None,
+        );
+
+        tx.send(HaWsEvent::Connected).unwrap();
+        tx.send(HaWsEvent::Heartbeat).unwrap();
+        tx.send(HaWsEvent::Disconnected("closed".to_string()))
+            .unwrap();
+
+        assert!(matches!(
+            hub_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            HubEvent::Connected { hub_key: None }
+        ));
+        assert!(matches!(
+            hub_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            HubEvent::Heartbeat { hub_key: None }
+        ));
+        assert!(matches!(
+            hub_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+            HubEvent::Disconnected {
+                hub_key: None,
+                reason
+            } if reason == "closed"
+        ));
+    }
+}

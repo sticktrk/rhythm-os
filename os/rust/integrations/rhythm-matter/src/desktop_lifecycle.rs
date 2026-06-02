@@ -506,3 +506,672 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 }
 
 pub static INTEGRATION: MatterIntegration = MatterIntegration;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::{Mutex, OnceLock};
+
+    use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
+    use rhythm_os::canonical::registry::ResolveResult;
+    use rhythm_os::hub::{ActiveHub, ExternalLightHubIntegration, HubCredentials};
+    use rhythm_os::pairing::PairingStatus;
+
+    use crate::cloud_profiles::CloudMatterProfileCatalog;
+    use crate::controller::MatterDeviceRegistry;
+    use crate::transport::{
+        CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterCommissioningNetwork,
+        MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterDeviceInfo,
+        MatterGroup, MatterGroupMember,
+    };
+
+    #[derive(Default)]
+    struct FakeMatterTransport {
+        decommission_calls: Mutex<Vec<(u64, bool)>>,
+        decommission_error: Mutex<Option<String>>,
+        configured_groups: Mutex<Vec<MatterGroup>>,
+        removed_groups: Mutex<Vec<(u16, Vec<MatterGroupMember>)>>,
+    }
+
+    impl FakeMatterTransport {
+        fn set_decommission_error(&self, error: impl Into<String>) {
+            *self.decommission_error.lock().unwrap() = Some(error.into());
+        }
+    }
+
+    impl MatterTransport for FakeMatterTransport {
+        fn commission_light(
+            &self,
+            request: &MatterCommissionRequest,
+        ) -> Result<CommissionedDevice> {
+            Ok(commissioned_device(request.node_id))
+        }
+
+        fn decommission_device(&self, node_id: u64, force: bool) -> Result<()> {
+            self.decommission_calls
+                .lock()
+                .unwrap()
+                .push((node_id, force));
+            if let Some(error) = self.decommission_error.lock().unwrap().clone() {
+                anyhow::bail!(error);
+            }
+            Ok(())
+        }
+
+        fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>> {
+            Ok(vec![MatterDeviceInfo {
+                node_id: 42,
+                vendor_name: "Acme".to_string(),
+                product_name: "Lamp".to_string(),
+                reachable: true,
+            }])
+        }
+
+        fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+            Ok(commissioned_device(node_id))
+        }
+
+        fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn configure_group(&self, group: &MatterGroup) -> Result<()> {
+            self.configured_groups.lock().unwrap().push(group.clone());
+            Ok(())
+        }
+
+        fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+            self.removed_groups
+                .lock()
+                .unwrap()
+                .push((group_id, members.to_vec()));
+            Ok(())
+        }
+
+        fn identify_light(&self, _node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_brightness(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _level: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_color_temperature(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _kelvin: u16,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_xy(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _x: f32,
+            _y: f32,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_hue_saturation(
+            &self,
+            _node_id: u64,
+            _endpoint: u16,
+            _hue: u8,
+            _saturation: u8,
+            _transition_ms: Option<u32>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn read_on_off(&self, _node_id: u64, _endpoint: u16) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn matter_key() -> HubKey {
+        HubKey::new(HubType::new("matter"), "local")
+    }
+
+    fn state() -> SharedState {
+        Arc::new(Mutex::new(rhythm_os::state::AppState::default()))
+    }
+
+    fn commissioned_device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Acme".to_string(),
+            product_name: "Lamp".to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: None,
+            light_endpoint: 2,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        }
+    }
+
+    fn hub_data() -> Arc<MatterHubData> {
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        Arc::new(MatterHubData {
+            transport: OnceLock::new(),
+            capture_dir: OnceLock::new(),
+            registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
+            fabric_id: "default".to_string(),
+            commissioned: Mutex::new(Vec::new()),
+            next_node_id: AtomicU64::new(10),
+            device_caps: Mutex::new(HashMap::new()),
+            device_quirks: Mutex::new(HashMap::new()),
+            cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
+            decommissioning: Mutex::new(HashSet::new()),
+            recently_decommissioned: Mutex::new(HashMap::new()),
+            event_tx,
+        })
+    }
+
+    fn install_hub(state: &SharedState, hub_data: Arc<MatterHubData>) {
+        let key = matter_key();
+        let hub = ActiveHub {
+            hub_type: key.hub_type.clone(),
+            hub_key: key.clone(),
+            runtime: None,
+            hub_data: Box::new(hub_data),
+            registry: None,
+            discovery: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        state.lock().unwrap().hubs.insert(key, hub);
+    }
+
+    fn install_transport(
+        hub_data: &Arc<MatterHubData>,
+        transport: Arc<FakeMatterTransport>,
+    ) -> Arc<FakeMatterTransport> {
+        let transport_dyn: Arc<dyn MatterTransport> = transport.clone();
+        assert!(hub_data.transport.set(transport_dyn).is_ok());
+        transport
+    }
+
+    fn canonical_matter_device(state: &SharedState, native_id: &str) -> String {
+        let identity = DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Matter Lamp".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter(&format!("vid-1-pid-2-{native_id}"))],
+            manufacturer: Some("Acme".to_string()),
+            model: Some("Lamp".to_string()),
+        };
+        let result = state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .resolve(&identity, &matter_key(), 1);
+        match result {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected new canonical device, got {other:?}"),
+        }
+    }
+
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn topology_group_specs_include_only_assigned_matter_lights() {
+        let state = state();
+        let room_id = state.lock().unwrap().topology.create_room("Kitchen");
+        let lamp_one = canonical_matter_device(&state, "matter-42-2");
+        let lamp_two = canonical_matter_device(&state, "matter-43-2");
+
+        let hue_identity = DiscoveredIdentity {
+            native_id: "hue-light-1".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Hue Lamp".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::serial("hue-light-1")],
+            manufacturer: Some("Hue".to_string()),
+            model: Some("A19".to_string()),
+        };
+        let hue_id = match state.lock().unwrap().canonical_registry.resolve(
+            &hue_identity,
+            &HubKey::new(HubType::new("hue"), "bridge"),
+            2,
+        ) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected hue canonical device, got {other:?}"),
+        };
+
+        let button_identity = DiscoveredIdentity {
+            native_id: "matter-button-1".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Button".to_string(),
+            device_type: DeviceType::Button,
+            hardware_ids: vec![HardwareId::matter("button")],
+            manufacturer: Some("Acme".to_string()),
+            model: Some("Button".to_string()),
+        };
+        let button_id = match state.lock().unwrap().canonical_registry.resolve(
+            &button_identity,
+            &matter_key(),
+            3,
+        ) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected button canonical device, got {other:?}"),
+        };
+
+        {
+            let mut state = state.lock().unwrap();
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &lamp_one));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &lamp_two));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &hue_id));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &button_id));
+        }
+
+        let specs = topology_group_specs(&state, &matter_key()).unwrap();
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].area_id, room_id);
+        assert_eq!(specs[0].name, "Kitchen");
+        assert_eq!(
+            specs[0].member_device_ids,
+            vec!["matter-42-2".to_string(), "matter-43-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn sync_topology_groups_configures_matter_group_and_topology_binding() {
+        let state = state();
+        let data = hub_data();
+        let transport = install_transport(&data, Arc::new(FakeMatterTransport::default()));
+        install_hub(&state, data.clone());
+
+        let room_id = state.lock().unwrap().topology.create_room("Kitchen");
+        let stale_room_id = state.lock().unwrap().topology.create_room("Stale");
+        let lamp_one = canonical_matter_device(&state, "matter-42-2");
+        let lamp_two = canonical_matter_device(&state, "matter-43-2");
+        {
+            let mut state = state.lock().unwrap();
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &lamp_one));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &lamp_two));
+            state
+                .topology
+                .get_mut(&stale_room_id)
+                .unwrap()
+                .upsert_hub_room_binding(HubRoomBinding {
+                    hub_key: matter_key(),
+                    hub_room_id: "old-area".to_string(),
+                    control_id: crate::controller::format_group_control_id(0x8001),
+                    light_device_ids: vec!["matter-99-2".to_string()],
+                });
+        }
+
+        sync_topology_groups(&state, &HubKey::new(HubType::new("hue"), "bridge")).unwrap();
+        assert!(transport.configured_groups.lock().unwrap().is_empty());
+
+        sync_topology_groups(&state, &matter_key()).unwrap();
+
+        let configured = transport.configured_groups.lock().unwrap().clone();
+        assert_eq!(configured.len(), 1);
+        assert_eq!(configured[0].members.len(), 2);
+        assert_eq!(
+            configured[0].members,
+            vec![
+                MatterGroupMember {
+                    node_id: 42,
+                    endpoint: 2
+                },
+                MatterGroupMember {
+                    node_id: 43,
+                    endpoint: 2
+                },
+            ]
+        );
+
+        let state = state.lock().unwrap();
+        let room = state.topology.get(&room_id).unwrap();
+        let binding = room
+            .hub_room_bindings
+            .iter()
+            .find(|binding| binding.hub_key == matter_key())
+            .expect("Matter group sync should upsert a room binding");
+        assert_eq!(binding.hub_room_id, room_id);
+        assert!(parse_group_control_id(&binding.control_id).is_some());
+        assert_eq!(
+            binding.light_device_ids,
+            vec!["matter-42-2".to_string(), "matter-43-2".to_string()]
+        );
+        assert!(state
+            .topology
+            .get(&stale_room_id)
+            .unwrap()
+            .hub_room_bindings
+            .is_empty());
+        drop(state);
+
+        let registry = data.registry.lock().unwrap();
+        assert_eq!(
+            registry.get_light_entities(&room_id),
+            vec!["matter-42-2".to_string(), "matter-43-2".to_string()]
+        );
+        assert_eq!(
+            registry
+                .get_grouped_light_id(&room_id)
+                .and_then(|control_id| parse_group_control_id(&control_id)),
+            Some(configured[0].group_id)
+        );
+    }
+
+    #[test]
+    fn matter_data_path_and_fabric_id_follow_state() {
+        let state = state();
+        assert_eq!(
+            string_error(matter_data_path(&state)),
+            "data_dir not configured on AppState"
+        );
+        assert_eq!(configured_fabric_id(&state), "default");
+
+        {
+            let mut state = state.lock().unwrap();
+            state.data_dir = "/tmp/rhythm".to_string();
+            state.hub_credentials.insert(
+                matter_key(),
+                HubCredentials::new(
+                    "matter",
+                    "local",
+                    serde_json::json!({ "fabric_id": "fabric-a" }),
+                ),
+            );
+        }
+
+        assert_eq!(matter_data_path(&state).unwrap(), "/tmp/rhythm/matter");
+        assert_eq!(configured_fabric_id(&state), "fabric-a");
+    }
+
+    #[test]
+    fn integration_capabilities_and_credentials_interceptor_branches() {
+        let state = state();
+        let integration = MatterIntegration;
+
+        assert_eq!(integration.hub_type(), "matter");
+        assert_eq!(integration.provider().hub_type().as_str(), "matter");
+
+        let capabilities = integration.api_capabilities();
+        assert_eq!(capabilities.hub_type, "matter");
+        assert!(capabilities.configurable);
+        assert!(capabilities.supports_unpairing);
+        assert!(capabilities.supports_roomless_devices);
+        assert!(capabilities
+            .device_onboarding_methods
+            .iter()
+            .any(|method| method
+                == rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE));
+
+        assert!(integration
+            .credentials_interceptor(&state, &serde_json::json!({ "hub_type": "hue" }))
+            .is_none());
+        assert!(integration
+            .credentials_interceptor(
+                &state,
+                &serde_json::json!({
+                    "hub_type": "matter",
+                    "credentials": { "fabric_id": "custom" }
+                })
+            )
+            .is_none());
+
+        let intercepted = integration
+            .credentials_interceptor(&state, &serde_json::json!({ "hub_type": "matter" }))
+            .expect("matter empty credentials should be intercepted");
+        assert_eq!(intercepted.unwrap_err(), "No hub provider registered");
+    }
+
+    #[test]
+    fn resolve_unpair_device_id_accepts_native_or_canonical_matter_endpoint() {
+        let state = state();
+        assert_eq!(
+            resolve_unpair_device_id(&state, "matter-42-2").unwrap(),
+            "matter-42-2"
+        );
+        assert_eq!(
+            string_error(resolve_unpair_device_id(&state, "missing")),
+            "Invalid Matter device ID: missing"
+        );
+
+        let canonical_id = canonical_matter_device(&state, "matter-99-2");
+        assert_eq!(
+            resolve_unpair_device_id(&state, &canonical_id).unwrap(),
+            "matter-99-2"
+        );
+    }
+
+    #[test]
+    fn resolve_unpair_device_id_rejects_canonical_device_without_matter_endpoint() {
+        let state = state();
+        let hue_identity = DiscoveredIdentity {
+            native_id: "hue-light-1".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Hue Lamp".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::serial("hue-light-1")],
+            manufacturer: Some("Hue".to_string()),
+            model: Some("A19".to_string()),
+        };
+        let canonical_id = match state.lock().unwrap().canonical_registry.resolve(
+            &hue_identity,
+            &HubKey::new(HubType::new("hue"), "bridge"),
+            4,
+        ) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected hue canonical device, got {other:?}"),
+        };
+
+        let error = resolve_unpair_device_id(&state, &canonical_id).unwrap_err();
+        assert!(error.to_string().contains("has no Matter endpoint"));
+    }
+
+    #[test]
+    fn create_controller_reports_missing_hub_data_or_transport() {
+        let state = state();
+        assert_eq!(
+            string_error(create_controller(&state, &matter_key())),
+            "Matter hub not connected"
+        );
+
+        let data = hub_data();
+        install_hub(&state, data.clone());
+        assert_eq!(
+            string_error(create_controller(&state, &matter_key())),
+            "Matter transport not initialized"
+        );
+
+        install_transport(&data, Arc::new(FakeMatterTransport::default()));
+        let controller = create_controller(&state, &matter_key()).unwrap();
+        assert_eq!(controller.name(), "Matter");
+    }
+
+    #[test]
+    fn integration_trait_wrappers_delegate_to_matter_helpers() {
+        let state = state();
+        let integration = MatterIntegration;
+
+        integration.ensure_runtime(&state).unwrap();
+        integration.post_connect(&state, &matter_key());
+        assert_eq!(
+            string_error(integration.create_controller(&state, &matter_key())),
+            "Matter hub not connected"
+        );
+
+        integration
+            .sync_topology_groups(&state, &HubKey::new(HubType::new("hue"), "bridge"))
+            .unwrap();
+
+        assert!(integration
+            .run_device_test(&state, &serde_json::json!({}))
+            .is_err());
+        assert!(integration
+            .save_device_test_report(&state, &serde_json::json!({}))
+            .is_err());
+    }
+
+    #[test]
+    fn fake_matter_transport_covers_full_trait_surface() {
+        let transport = FakeMatterTransport::default();
+        let request = MatterCommissionRequest {
+            setup_payload: "MT:TEST".to_string(),
+            node_id: 123,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::OnNetwork,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "wifi".to_string(),
+                password: "secret".to_string(),
+            },
+        };
+
+        assert_eq!(transport.commission_light(&request).unwrap().node_id, 123);
+        assert_eq!(transport.list_devices().unwrap()[0].node_id, 42);
+        assert_eq!(transport.probe_light(77).unwrap().node_id, 77);
+        transport.set_on_off(77, 2, true).unwrap();
+        transport.identify_light(77, 2, 1).unwrap();
+        transport.set_brightness(77, 2, 128, Some(100)).unwrap();
+        transport.set_color_temperature(77, 2, 3000, None).unwrap();
+        transport.set_xy(77, 2, 0.25, 0.35, Some(50)).unwrap();
+        transport.set_hue_saturation(77, 2, 10, 200, None).unwrap();
+        assert!(!transport.read_on_off(77, 2).unwrap());
+
+        let group = MatterGroup {
+            group_id: 0x8001,
+            name: "Kitchen".to_string(),
+            members: vec![MatterGroupMember {
+                node_id: 77,
+                endpoint: 2,
+            }],
+        };
+        transport.configure_group(&group).unwrap();
+        transport
+            .remove_group(group.group_id, &group.members)
+            .unwrap();
+
+        assert_eq!(transport.configured_groups.lock().unwrap()[0], group);
+        assert_eq!(
+            transport.removed_groups.lock().unwrap()[0],
+            (
+                0x8001,
+                vec![MatterGroupMember {
+                    node_id: 77,
+                    endpoint: 2
+                }]
+            )
+        );
+    }
+
+    #[test]
+    fn start_unpairing_validates_params_and_missing_transport() {
+        let state = state();
+        let integration = MatterIntegration;
+
+        assert_eq!(
+            string_error(integration.start_unpairing(&state, &serde_json::json!({}))),
+            "Missing 'device_id' in unpairing params"
+        );
+        assert_eq!(
+            string_error(
+                integration
+                    .start_unpairing(&state, &serde_json::json!({ "device_id": "not-matter" }))
+            ),
+            "Invalid Matter device ID: not-matter"
+        );
+
+        install_hub(&state, hub_data());
+        assert_eq!(
+            string_error(
+                integration
+                    .start_unpairing(&state, &serde_json::json!({ "device_id": "matter-42-2" }))
+            ),
+            "Matter transport not initialized"
+        );
+    }
+
+    #[test]
+    fn start_unpairing_tracks_success_recent_suppression_in_progress_and_failure() {
+        let state = state();
+        let data = hub_data();
+        let transport = install_transport(&data, Arc::new(FakeMatterTransport::default()));
+        install_hub(&state, data.clone());
+        let integration = MatterIntegration;
+
+        let result = integration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({ "device_id": "matter-42-2", "force": true }),
+            )
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Complete);
+        assert_eq!(result.device_id.as_deref(), Some("matter-42-2"));
+        assert_eq!(
+            transport.decommission_calls.lock().unwrap().as_slice(),
+            &[(42, true)]
+        );
+        assert!(data.is_recently_decommissioned(42));
+
+        let result = integration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({ "device_id": "matter-42-2", "force": true }),
+            )
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Complete);
+        assert_eq!(transport.decommission_calls.lock().unwrap().len(), 1);
+
+        assert!(data.begin_decommission(77));
+        let result = integration
+            .start_unpairing(&state, &serde_json::json!({ "device_id": "matter-77" }))
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Failed);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Matter node 77 is already being decommissioned")
+        );
+
+        transport.set_decommission_error("sidecar rejected request");
+        let result = integration
+            .start_unpairing(&state, &serde_json::json!({ "device_id": "matter-88" }))
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Failed);
+        assert_eq!(result.error.as_deref(), Some("sidecar rejected request"));
+        assert!(!data.is_recently_decommissioned(88));
+    }
+}

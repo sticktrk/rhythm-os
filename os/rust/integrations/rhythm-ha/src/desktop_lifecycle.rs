@@ -396,3 +396,303 @@ fn start_event_stream(
         Some(on_unknown_motion),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    use rhythm_core::{
+        InputEvent, LightProfileConfig, LightingCommand, ModeConfig, RestoredRoomState,
+        RoomSnapshot, RuntimeHandle, SolarTime,
+    };
+    use rhythm_os::hub::{ActiveHub, ExternalLightHubIntegration, HubCredentials};
+
+    use crate::hub_state::HaHubData;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct NoopRuntime;
+
+    impl RuntimeHandle for NoopRuntime {
+        fn handle_event(&self, _: &InputEvent) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn sync_rooms(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_solar(&self, _: SolarTime) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_light_profile_config(&self, _: LightProfileConfig) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_mode_configs(&self, _: Vec<ModeConfig>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn periodic_tick_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn engine_room_snapshot(&self, _: &str) -> Option<RoomSnapshot> {
+            None
+        }
+
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            Vec::new()
+        }
+
+        fn restore_room_state(&self, _: &str, _: RestoredRoomState) {}
+
+        fn add_room(&self, _: &str, _: &str) {}
+
+        fn remove_room(&self, _: &str) {}
+
+        fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn turn_on_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn apply_room_command(&self, _: &str, _: LightingCommand) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_power_save(&self, _: bool) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn is_power_save(&self) -> bool {
+            false
+        }
+
+        fn set_room_brightness(&self, _: &str, _: u8) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_room_time_offset(&self, _: &str, _: f32) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn idle_brightness(&self) -> u8 {
+            1
+        }
+
+        fn soft_off_tick_room(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn any_lights_on(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn current_hour(&self) -> f32 {
+            12.0
+        }
+
+        fn set_light_profile(&self, _: &str) -> bool {
+            true
+        }
+
+        fn active_light_profile_id(&self) -> String {
+            rhythm_core::RHYTHM_PROFILE_ID.to_string()
+        }
+
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![(
+                rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+                "Rhythm".to_string(),
+            )]
+        }
+    }
+
+    fn state() -> SharedState {
+        Arc::new(Mutex::new(rhythm_os::state::AppState::default()))
+    }
+
+    fn ha_key(address: &str) -> HubKey {
+        HubKey::new(HubType::new(crate::ha_lifecycle::HA_HUB_TYPE), address)
+    }
+
+    fn ha_config() -> HaConnectionConfig {
+        HaConnectionConfig {
+            host: "ha.local".to_string(),
+            port: 8123,
+            token: "token".to_string(),
+            use_ssl: false,
+        }
+    }
+
+    fn install_credentials(state: &SharedState, address: &str) {
+        let creds = crate::provider::ha_credentials(address, "token");
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(ha_key(address), creds);
+    }
+
+    fn install_hub(
+        state: &SharedState,
+        address: &str,
+        runtime: Option<Arc<dyn RuntimeHandle>>,
+        hub_data: Box<dyn std::any::Any + Send + Sync>,
+    ) {
+        let key = ha_key(address);
+        let hub = ActiveHub {
+            hub_type: key.hub_type.clone(),
+            hub_key: key.clone(),
+            runtime,
+            hub_data,
+            registry: None,
+            discovery: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        state.lock().unwrap().hubs.insert(key, hub);
+    }
+
+    fn ha_hub_data() -> HaHubData {
+        HaHubData {
+            config: ha_config(),
+            registry: Arc::new(Mutex::new(HaDeviceRegistry::new())),
+            device_area_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn integration_metadata_and_credentials_interceptor_branches() {
+        let state = state();
+        let integration = HaIntegration;
+
+        assert_eq!(integration.hub_type(), crate::ha_lifecycle::HA_HUB_TYPE);
+        assert_eq!(
+            integration.provider().hub_type().as_str(),
+            crate::ha_lifecycle::HA_HUB_TYPE
+        );
+        let capabilities = integration.api_capabilities();
+        assert_eq!(capabilities.hub_type, crate::ha_lifecycle::HA_HUB_TYPE);
+        assert!(capabilities.configurable);
+        assert!(!capabilities.supports_unpairing);
+
+        assert!(integration
+            .credentials_interceptor(&state, &serde_json::json!({ "hub_type": "hue" }))
+            .is_none());
+        assert!(integration
+            .credentials_interceptor(
+                &state,
+                &serde_json::json!({
+                    "hub_type": crate::ha_lifecycle::HA_HUB_TYPE,
+                    "credentials": { "token": "explicit" }
+                })
+            )
+            .is_none());
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("SUPERVISOR_TOKEN").ok();
+        std::env::set_var("SUPERVISOR_TOKEN", "supervisor-token");
+        let intercepted = integration
+            .credentials_interceptor(
+                &state,
+                &serde_json::json!({ "hub_type": crate::ha_lifecycle::HA_HUB_TYPE }),
+            )
+            .expect("empty HA credentials should be intercepted when supervisor token exists");
+        assert_eq!(intercepted.unwrap_err(), "No hub provider registered");
+        if let Some(previous) = previous {
+            std::env::set_var("SUPERVISOR_TOKEN", previous);
+        } else {
+            std::env::remove_var("SUPERVISOR_TOKEN");
+        }
+    }
+
+    #[test]
+    fn connect_and_start_requires_stored_credentials() {
+        let state = state();
+        assert_eq!(
+            string_error(connect_and_start(state, &ha_key("ha.local"))),
+            "No HA credentials configured for homeassistant@ha.local"
+        );
+    }
+
+    #[test]
+    fn ensure_runtime_requires_credentials_unless_runtime_already_exists() {
+        let state = state();
+        assert_eq!(
+            string_error(ensure_runtime(&state)),
+            "No HA credentials configured"
+        );
+
+        install_hub(
+            &state,
+            "ha.local",
+            Some(Arc::new(NoopRuntime) as Arc<dyn RuntimeHandle>),
+            Box::new(()),
+        );
+        ensure_runtime(&state).unwrap();
+    }
+
+    #[test]
+    fn create_ha_controller_reports_missing_credentials_or_hub_data_then_constructs() {
+        let state = state();
+        assert_eq!(
+            string_error(create_ha_controller(&state, &ha_key("ha.local"))),
+            "No HA credentials for homeassistant@ha.local"
+        );
+
+        install_credentials(&state, "ha.local");
+        assert_eq!(
+            string_error(create_ha_controller(&state, &ha_key("ha.local"))),
+            "HA hub not active for homeassistant@ha.local"
+        );
+
+        install_hub(&state, "ha.local", None, Box::new(ha_hub_data()));
+        let controller = create_ha_controller(&state, &ha_key("ha.local")).unwrap();
+        assert_eq!(controller.name(), "HomeAssistant");
+    }
+
+    #[test]
+    fn create_ha_controller_can_fallback_to_matching_credentials_and_any_ha_hub_data() {
+        let state = state();
+        install_credentials(&state, "ha.local");
+        install_hub(&state, "different.local", None, Box::new(ha_hub_data()));
+
+        let controller = create_ha_controller(&state, &ha_key("ha.local")).unwrap();
+        assert_eq!(controller.name(), "HomeAssistant");
+    }
+
+    #[test]
+    fn transport_from_state_uses_stored_ha_credentials_only() {
+        let state = state();
+        assert!(transport_from_state(&state).is_none());
+
+        state.lock().unwrap().hub_credentials.insert(
+            HubKey::new(HubType::new("matter"), "local"),
+            HubCredentials::new(
+                "matter",
+                "local",
+                serde_json::json!({ "fabric_id": "default" }),
+            ),
+        );
+        assert!(transport_from_state(&state).is_none());
+
+        install_credentials(&state, "ha.local");
+        assert!(transport_from_state(&state).is_some());
+    }
+}

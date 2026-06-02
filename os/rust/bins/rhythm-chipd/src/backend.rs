@@ -670,3 +670,322 @@ impl ChipControllerBackend for FakeChipBackend {
         Ok(Vec::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    use rhythm_matter::transport::{
+        MatterColorMode, MatterCommissioningNetwork, MatterCommissioningRendezvous,
+        MatterCommissioningWifiCredentials,
+    };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn commissioning_state() -> CommissioningState {
+        CommissioningState {
+            fabric_id: "fabric-test".to_string(),
+            operational_fabric_id: 0x1234,
+            ipk_hex: "00112233445566778899aabbccddeeff".to_string(),
+            storage_path: PathBuf::from("/tmp/chip-storage/chip.json"),
+        }
+    }
+
+    fn commissioned_device(node_id: u64, endpoint: u16) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Vendor".to_string(),
+            product_name: format!("Lamp {}", node_id),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: Some(format!("serial-{}", node_id)),
+            light_endpoint: endpoint,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        }
+    }
+
+    fn commission_request(node_id: u64, payload: &str) -> MatterCommissionRequest {
+        MatterCommissionRequest {
+            setup_payload: payload.to_string(),
+            node_id,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::Auto,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "Rhythm".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn build_backend_from_env_selects_fake_or_native_backend() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_CHIPD_BACKEND", "fake");
+
+        let mut fake = build_backend_from_env();
+        let response = fake
+            .init_controller(&commissioning_state(), Some(0), &[])
+            .unwrap();
+        assert_eq!(response.fabric_id, "fabric-test");
+        assert_eq!(response.operational_fabric_id, 0x1234);
+
+        std::env::remove_var("RHYTHM_CHIPD_BACKEND");
+        let mut native = build_backend_from_env();
+        assert!(string_error(native.read_on_off(1, 1))
+            .contains("CHIP controller backend not initialized"));
+    }
+
+    #[test]
+    fn fake_backend_initializes_and_validates_commissioning_state() {
+        let mut backend = FakeChipBackend::default();
+        let existing = vec![commissioned_device(10, 2)];
+
+        let response = backend
+            .init_controller(&commissioning_state(), Some(1), &existing)
+            .unwrap();
+        assert_eq!(response.fabric_id, "fabric-test");
+        assert_eq!(response.operational_fabric_id, 0x1234);
+        assert_eq!(backend.probe_light(10).unwrap().light_endpoint, 2);
+        assert!(!backend.read_on_off(10, 2).unwrap());
+
+        let mut invalid_fabric = commissioning_state();
+        invalid_fabric.operational_fabric_id = 0;
+        assert_eq!(
+            string_error(FakeChipBackend::default().init_controller(&invalid_fabric, None, &[])),
+            "Fake CHIP operational fabric id must be non-zero"
+        );
+
+        let mut invalid_ipk = commissioning_state();
+        invalid_ipk.ipk_hex = "not-hex".to_string();
+        assert_eq!(
+            string_error(FakeChipBackend::default().init_controller(&invalid_ipk, None, &[])),
+            "Fake CHIP IPK must be a 16-byte hex string"
+        );
+    }
+
+    #[test]
+    fn fake_backend_commissions_light_and_tracks_endpoint_state() {
+        let mut backend = FakeChipBackend::default();
+        backend
+            .init_controller(&commissioning_state(), None, &[])
+            .unwrap();
+
+        let device = backend
+            .commission_light(&commission_request(42, "MT:1234567890abcdef"))
+            .unwrap();
+        assert_eq!(device.node_id, 42);
+        assert_eq!(device.vendor_name, "FakeVendor MT:123456789");
+        assert_eq!(device.product_name, "Fake Matter Lamp");
+        assert_eq!(device.serial_number.as_deref(), Some("fake-42"));
+        assert_eq!(device.light_endpoint, 1);
+        assert!(device.color_modes.contains(&MatterColorMode::Xy));
+        assert!(device
+            .color_modes
+            .contains(&MatterColorMode::ColorTemperature));
+
+        assert!(!backend.read_on_off(42, 1).unwrap());
+        backend.set_on_off(42, 1, true).unwrap();
+        assert!(backend.read_on_off(42, 1).unwrap());
+
+        backend.set_brightness(42, 1, 0, Some(100)).unwrap();
+        assert!(!backend.read_on_off(42, 1).unwrap());
+        backend
+            .run_level_command(
+                42,
+                1,
+                MatterLevelCommandVariant::MoveToLevel,
+                254,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            !backend.read_on_off(42, 1).unwrap(),
+            "level commands without OnOff must not flip power"
+        );
+        backend
+            .run_level_command(
+                42,
+                1,
+                MatterLevelCommandVariant::StepWithOnOff,
+                4,
+                Some(MatterLevelStepMode::Up),
+                Some(50),
+            )
+            .unwrap();
+        assert!(backend.read_on_off(42, 1).unwrap());
+
+        backend.set_color_temperature(42, 1, 1800, None).unwrap();
+        backend.set_color_temperature(42, 1, 7000, None).unwrap();
+        backend.set_xy(42, 1, 0.31, 0.32, Some(250)).unwrap();
+        backend.set_hue_saturation(42, 1, 128, 200, None).unwrap();
+        backend.identify_light(42, 1, 5).unwrap();
+        backend
+            .subscribe_on_off(
+                &[MatterSubscriptionTarget {
+                    node_id: 42,
+                    endpoint: 1,
+                }],
+                1,
+                60,
+            )
+            .unwrap();
+        assert!(backend.drain_attribute_reports().unwrap().is_empty());
+
+        let snapshot = backend.read_light_capability_snapshot(42, 1).unwrap();
+        assert_eq!(snapshot["node_id"], 42);
+        assert_eq!(snapshot["selected_endpoint"], 1);
+        assert_eq!(snapshot["raw_attribute_reads_available"], true);
+        assert_eq!(
+            snapshot["color_control"]["color_temp_physical_min_mireds"],
+            142
+        );
+        assert_eq!(
+            snapshot["color_control"]["color_temp_physical_max_mireds"],
+            555
+        );
+
+        let state = backend.read_light_state(42, 1).unwrap();
+        assert_eq!(state["onoff"]["value"], true);
+
+        assert!(string_error(backend.probe_light(999)).contains("Unknown fake CHIP node 999"));
+        assert!(string_error(backend.subscribe_on_off(
+            &[MatterSubscriptionTarget {
+                node_id: 999,
+                endpoint: 1,
+            }],
+            1,
+            60,
+        ))
+        .contains("Unknown fake CHIP node 999"));
+    }
+
+    #[test]
+    fn fake_backend_applies_group_commands_and_decommissions_devices() {
+        let mut backend = FakeChipBackend::default();
+        let devices = vec![commissioned_device(1, 1), commissioned_device(2, 3)];
+        backend
+            .init_controller(&commissioning_state(), None, &devices)
+            .unwrap();
+
+        let group = MatterGroup {
+            group_id: 7,
+            name: "Kitchen".to_string(),
+            members: vec![
+                MatterGroupMember {
+                    node_id: 1,
+                    endpoint: 1,
+                },
+                MatterGroupMember {
+                    node_id: 2,
+                    endpoint: 3,
+                },
+            ],
+        };
+
+        let mut invalid_group = group.clone();
+        invalid_group.group_id = 0;
+        assert_eq!(
+            string_error(backend.configure_group(&invalid_group)),
+            "Invalid fake CHIP group id 0"
+        );
+
+        let mut unknown_member_group = group.clone();
+        unknown_member_group.members.push(MatterGroupMember {
+            node_id: 99,
+            endpoint: 1,
+        });
+        assert!(string_error(backend.configure_group(&unknown_member_group))
+            .contains("Unknown fake CHIP node 99"));
+
+        backend.configure_group(&group).unwrap();
+        backend.identify_group(7, 3).unwrap();
+        backend.set_group_on_off(7, true).unwrap();
+        assert!(backend.read_on_off(1, 1).unwrap());
+        assert!(backend.read_on_off(2, 3).unwrap());
+
+        backend.set_group_brightness(7, 0, Some(100)).unwrap();
+        assert!(!backend.read_on_off(1, 1).unwrap());
+        assert!(!backend.read_on_off(2, 3).unwrap());
+        backend
+            .set_group_color_temperature(7, 3000, Some(100))
+            .unwrap();
+        backend.set_group_xy(7, 0.1, 0.2, None).unwrap();
+        backend.set_group_hue_saturation(7, 20, 200, None).unwrap();
+
+        backend.remove_group(7, &group.members).unwrap();
+        assert!(string_error(backend.identify_group(7, 3)).contains("Unknown fake CHIP group 7"));
+
+        backend.decommission_device(1, true).unwrap();
+        assert!(string_error(backend.probe_light(1)).contains("Unknown fake CHIP node 1"));
+        assert!(string_error(backend.read_on_off(1, 1)).contains("Unknown fake CHIP node 1"));
+    }
+
+    #[test]
+    fn native_backend_reports_uninitialized_for_operations() {
+        let mut backend = NativeChipBackend::default();
+        let request = commission_request(1, "MT:code");
+        let group = MatterGroup {
+            group_id: 1,
+            name: "Test".to_string(),
+            members: vec![MatterGroupMember {
+                node_id: 1,
+                endpoint: 1,
+            }],
+        };
+        let targets = vec![MatterSubscriptionTarget {
+            node_id: 1,
+            endpoint: 1,
+        }];
+
+        for error in [
+            string_error(backend.commission_light(&request)),
+            string_error(backend.probe_light(1)),
+            string_error(backend.decommission_device(1, false)),
+            string_error(backend.set_on_off(1, 1, true)),
+            string_error(backend.configure_group(&group)),
+            string_error(backend.remove_group(1, &group.members)),
+            string_error(backend.set_group_on_off(1, true)),
+            string_error(backend.identify_group(1, 1)),
+            string_error(backend.set_group_brightness(1, 1, None)),
+            string_error(backend.set_group_color_temperature(1, 2700, None)),
+            string_error(backend.set_group_xy(1, 0.1, 0.2, None)),
+            string_error(backend.set_group_hue_saturation(1, 1, 1, None)),
+            string_error(backend.identify_light(1, 1, 1)),
+            string_error(backend.set_brightness(1, 1, 1, None)),
+            string_error(backend.run_level_command(
+                1,
+                1,
+                MatterLevelCommandVariant::Step,
+                1,
+                Some(MatterLevelStepMode::Down),
+                None,
+            )),
+            string_error(backend.set_color_temperature(1, 1, 2700, None)),
+            string_error(backend.set_xy(1, 1, 0.1, 0.2, None)),
+            string_error(backend.set_hue_saturation(1, 1, 1, 1, None)),
+            string_error(backend.read_on_off(1, 1)),
+            string_error(backend.read_light_capability_snapshot(1, 1)),
+            string_error(backend.read_light_state(1, 1)),
+            string_error(backend.subscribe_on_off(&targets, 1, 60)),
+            string_error(backend.drain_attribute_reports()),
+        ] {
+            assert!(
+                error.contains("CHIP controller backend not initialized"),
+                "unexpected error: {}",
+                error
+            );
+        }
+    }
+}

@@ -637,89 +637,168 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     );
 
     loop {
-        let (
-            utc_offset,
-            profile_registry,
-            solar_noon,
-            latitude,
-            longitude,
-            update_interval,
-            timezone_name,
-            power_save,
-            dispatch_generation,
-        ) = {
-            let Ok(s) = state.lock() else {
-                thread::sleep(Duration::from_secs(60));
-                continue;
-            };
-            let active_profile_id = s.active_mode_profile_id();
-            let mut profile_registry = rhythm_core::LightProfileRegistry::with_profiles(
-                s.light_profile_configs
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                &active_profile_id,
-            );
-            profile_registry.set_mode_configs(s.mode_configs());
-            (
-                s.utc_offset_hours,
-                profile_registry,
-                s.solar_noon_hour(),
-                s.latitude,
-                s.longitude,
-                Duration::from_secs(s.runtime_config.update_interval_secs),
-                s.timezone_name.clone(),
-                s.power_save,
-                s.light_dispatch_generation,
-            )
+        let sleep_for = run_periodic_cycle(state.clone(), on_tick.as_ref());
+        if !sleep_for.is_zero() {
+            thread::sleep(sleep_for);
+        }
+    }
+}
+
+fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Duration {
+    let (
+        utc_offset,
+        profile_registry,
+        solar_noon,
+        latitude,
+        longitude,
+        update_interval,
+        timezone_name,
+        power_save,
+        dispatch_generation,
+    ) = {
+        let Ok(s) = state.lock() else {
+            return Duration::from_secs(60);
         };
-
-        let lat = latitude.unwrap_or(35.0);
-        let lon = longitude.unwrap_or(-80.84);
-
-        let doy = SystemTimeProvider::new(utc_offset).day_of_year();
-
-        // Check for DST transition and refresh UTC offset if needed
-        let (utc_offset, solar_noon, _doy) = refresh_dst_offset(
-            &state,
-            utc_offset,
-            solar_noon,
-            lat,
-            lon,
-            doy,
-            timezone_name.as_deref(),
+        let active_profile_id = s.active_mode_profile_id();
+        let mut profile_registry = rhythm_core::LightProfileRegistry::with_profiles(
+            s.light_profile_configs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            &active_profile_id,
         );
-        let (solar_noon, _doy, _sun_times) = refresh_runtime_solar_context(
-            &state,
-            solar_noon,
-            lat,
-            lon,
-            utc_offset,
-            timezone_name.as_deref(),
-        );
+        profile_registry.set_mode_configs(s.mode_configs());
+        (
+            s.utc_offset_hours,
+            profile_registry,
+            s.solar_noon_hour(),
+            s.latitude,
+            s.longitude,
+            Duration::from_secs(s.runtime_config.update_interval_secs),
+            s.timezone_name.clone(),
+            s.power_save,
+            s.light_dispatch_generation,
+        )
+    };
 
-        let time_provider = SystemTimeProvider::new(utc_offset);
-        let current_hour = time_provider.current_hour();
-        let local_now = chrono::Utc::now().naive_utc()
-            + chrono::Duration::seconds((utc_offset * 3600.0) as i64);
+    let lat = latitude.unwrap_or(35.0);
+    let lon = longitude.unwrap_or(-80.84);
 
-        // Calculate generic curve values (no offset) for logging
-        let ctx = rhythm_core::curve_context_for_local_date_and_hour(
-            solar_noon,
-            latitude,
-            longitude,
-            timezone_name.as_deref(),
-            local_now.date(),
-            current_hour,
-        );
-        let module = profile_registry.active_profile();
-        let values = module.calculate(&ctx);
+    let doy = SystemTimeProvider::new(utc_offset).day_of_year();
 
-        // Get rhythm-enabled light-addressable runtime nodes, skipping warning-dimmed nodes
-        let (
-            mut room_snapshots,
-            mut periodic_nodes,
-            has_composite_controller,
+    // Check for DST transition and refresh UTC offset if needed
+    let (utc_offset, solar_noon, _doy) = refresh_dst_offset(
+        &state,
+        utc_offset,
+        solar_noon,
+        lat,
+        lon,
+        doy,
+        timezone_name.as_deref(),
+    );
+    let (solar_noon, _doy, _sun_times) = refresh_runtime_solar_context(
+        &state,
+        solar_noon,
+        lat,
+        lon,
+        utc_offset,
+        timezone_name.as_deref(),
+    );
+
+    let time_provider = SystemTimeProvider::new(utc_offset);
+    let current_hour = time_provider.current_hour();
+    let local_now =
+        chrono::Utc::now().naive_utc() + chrono::Duration::seconds((utc_offset * 3600.0) as i64);
+
+    // Calculate generic curve values (no offset) for logging
+    let ctx = rhythm_core::curve_context_for_local_date_and_hour(
+        solar_noon,
+        latitude,
+        longitude,
+        timezone_name.as_deref(),
+        local_now.date(),
+        current_hour,
+    );
+    let module = profile_registry.active_profile();
+    let values = module.calculate(&ctx);
+
+    // Get rhythm-enabled light-addressable runtime nodes, skipping warning-dimmed nodes
+    let (
+        mut room_snapshots,
+        mut periodic_nodes,
+        has_composite_controller,
+        warning_skipped,
+        transition_skipped,
+        rhythm_disabled_skipped,
+        hard_off_rooms,
+        expired_transitions,
+        expired_transition_room_ids,
+        transition_event_runtime,
+        periodic_work_tx,
+        work_tx,
+        light_breaker_enabled,
+    ) = {
+        let Ok(mut s) = state.lock() else {
+            return update_interval;
+        };
+        let now = Instant::now();
+        let expired_transition_room_ids = expire_room_mode_transitions(&mut s, now);
+        let expired_transitions = expired_transition_room_ids.len();
+        let transition_event_runtime = if expired_transition_room_ids.is_empty() {
+            None
+        } else {
+            s.hub_runtime()
+        };
+        let all_rooms: Vec<rhythm_core::NodeSnapshot> = s
+            .hub_runtime()
+            .map(|rt| rt.engine_all_effective_node_snapshots())
+            .unwrap_or_default();
+        let mut warning_skipped = 0usize;
+        let mut transition_skipped = 0usize;
+        let mut rhythm_disabled_skipped = 0usize;
+        let mut hard_off_rooms = 0usize;
+        let light_breaker_enabled = s.light_breaker_enabled;
+        let rooms: Vec<rhythm_core::NodeSnapshot> = if light_breaker_enabled {
+            all_rooms
+                .into_iter()
+                .filter(|room| {
+                    if !room.kind.is_light_addressable() {
+                        return false;
+                    }
+                    let event_room_id = room.parent_id.as_deref().unwrap_or(&room.id);
+                    if !room.rhythm_enabled {
+                        rhythm_disabled_skipped += 1;
+                        return false;
+                    }
+                    if room.hard_off {
+                        hard_off_rooms += 1;
+                    }
+                    if s.room_mode_transitions
+                        .get(event_room_id)
+                        .is_some_and(|transition| transition.periodic_resume_at > now)
+                    {
+                        transition_skipped += 1;
+                        return false;
+                    }
+                    if s.motion_snapshots
+                        .get(event_room_id)
+                        .is_some_and(|ms| ms.warning_active)
+                    {
+                        warning_skipped += 1;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let periodic_nodes = periodic_dispatch_nodes_from_state(&s, &rooms);
+        (
+            rooms,
+            periodic_nodes,
+            s.composite_controller.is_some(),
             warning_skipped,
             transition_skipped,
             rhythm_disabled_skipped,
@@ -727,140 +806,43 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             expired_transitions,
             expired_transition_room_ids,
             transition_event_runtime,
-            periodic_work_tx,
-            work_tx,
+            s.periodic_work_tx.clone(),
+            s.work_tx.clone(),
             light_breaker_enabled,
-        ) = {
-            let Ok(mut s) = state.lock() else {
-                thread::sleep(update_interval);
-                continue;
-            };
-            let now = Instant::now();
-            let expired_transition_room_ids = expire_room_mode_transitions(&mut s, now);
-            let expired_transitions = expired_transition_room_ids.len();
-            let transition_event_runtime = if expired_transition_room_ids.is_empty() {
-                None
-            } else {
-                s.hub_runtime()
-            };
-            let all_rooms: Vec<rhythm_core::NodeSnapshot> = s
-                .hub_runtime()
-                .map(|rt| rt.engine_all_effective_node_snapshots())
-                .unwrap_or_default();
-            let mut warning_skipped = 0usize;
-            let mut transition_skipped = 0usize;
-            let mut rhythm_disabled_skipped = 0usize;
-            let mut hard_off_rooms = 0usize;
-            let light_breaker_enabled = s.light_breaker_enabled;
-            let rooms: Vec<rhythm_core::NodeSnapshot> = if light_breaker_enabled {
-                all_rooms
-                    .into_iter()
-                    .filter(|room| {
-                        if !room.kind.is_light_addressable() {
-                            return false;
-                        }
-                        let event_room_id = room.parent_id.as_deref().unwrap_or(&room.id);
-                        if !room.rhythm_enabled {
-                            rhythm_disabled_skipped += 1;
-                            return false;
-                        }
-                        if room.hard_off {
-                            hard_off_rooms += 1;
-                        }
-                        if s.room_mode_transitions
-                            .get(event_room_id)
-                            .is_some_and(|transition| transition.periodic_resume_at > now)
-                        {
-                            transition_skipped += 1;
-                            return false;
-                        }
-                        if s.motion_snapshots
-                            .get(event_room_id)
-                            .is_some_and(|ms| ms.warning_active)
-                        {
-                            warning_skipped += 1;
-                            false
-                        } else {
-                            true
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let periodic_nodes = periodic_dispatch_nodes_from_state(&s, &rooms);
-            (
-                rooms,
-                periodic_nodes,
-                s.composite_controller.is_some(),
-                warning_skipped,
-                transition_skipped,
-                rhythm_disabled_skipped,
-                hard_off_rooms,
-                expired_transitions,
-                expired_transition_room_ids,
-                transition_event_runtime,
-                s.periodic_work_tx.clone(),
-                s.work_tx.clone(),
-                light_breaker_enabled,
-            )
-        };
+        )
+    };
 
-        emit_expired_transition_node_states(
-            &state,
-            transition_event_runtime.as_ref(),
-            &expired_transition_room_ids,
-        );
+    emit_expired_transition_node_states(
+        &state,
+        transition_event_runtime.as_ref(),
+        &expired_transition_room_ids,
+    );
 
-        room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
-        periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
-        let dispatch_summary =
-            summarize_periodic_dispatch(&room_snapshots, &periodic_nodes, has_composite_controller);
-        let last_node_index_by_emit_target =
-            last_periodic_node_index_by_emit_target(&periodic_nodes);
-        let cycle_duration = effective_cycle_duration(
-            &profile_registry,
-            &ctx,
-            &room_snapshots,
-            update_interval,
-            power_save,
-        );
-        let phase_gap = dispatch_spacing(cycle_duration, periodic_nodes.len());
-        let command_id = logging::next_command_id("periodic");
+    room_snapshots.sort_by_key(|room| stable_room_phase_key(&room.id));
+    periodic_nodes.sort_by_key(|node| stable_room_phase_key(&node.node_id));
+    let dispatch_summary =
+        summarize_periodic_dispatch(&room_snapshots, &periodic_nodes, has_composite_controller);
+    let last_node_index_by_emit_target = last_periodic_node_index_by_emit_target(&periodic_nodes);
+    let cycle_duration = effective_cycle_duration(
+        &profile_registry,
+        &ctx,
+        &room_snapshots,
+        update_interval,
+        power_save,
+    );
+    let phase_gap = dispatch_spacing(cycle_duration, periodic_nodes.len());
+    let command_id = logging::next_command_id("periodic");
 
-        if transition_skipped > 0
-            || rhythm_disabled_skipped > 0
-            || hard_off_rooms > 0
-            || expired_transitions > 0
-            || dispatch_summary.no_dispatch_node_count > 0
-        {
-            tracing::debug!(
-                target: "sys",
-                event = "periodic_cycle_detail",
-                command_id = %command_id,
-                dispatch_count = dispatch_summary.dispatch_node_count,
-                eligible_node_count = dispatch_summary.eligible_node_count,
-                eligible_room_count = dispatch_summary.eligible_room_count,
-                eligible_device_count = dispatch_summary.eligible_device_count,
-                dispatched_settings_count = dispatch_summary.dispatched_settings_node_count,
-                no_dispatch_count = dispatch_summary.no_dispatch_node_count,
-                warning_skipped,
-                transition_skipped,
-                rhythm_disabled_skipped,
-                hard_off_rooms,
-                expired_transitions,
-                "Periodic cycle detail"
-            );
-        }
-
-        tracing::info!(
+    if transition_skipped > 0
+        || rhythm_disabled_skipped > 0
+        || hard_off_rooms > 0
+        || expired_transitions > 0
+        || dispatch_summary.no_dispatch_node_count > 0
+    {
+        tracing::debug!(
             target: "sys",
-            event = "periodic_cycle",
+            event = "periodic_cycle_detail",
             command_id = %command_id,
-            local_hour = current_hour,
-            solar_time = values.solar_time,
-            brightness_pct = values.brightness,
-            kelvin = values.kelvin,
             dispatch_count = dispatch_summary.dispatch_node_count,
             eligible_node_count = dispatch_summary.eligible_node_count,
             eligible_room_count = dispatch_summary.eligible_room_count,
@@ -872,196 +854,219 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
             rhythm_disabled_skipped,
             hard_off_rooms,
             expired_transitions,
-            light_breaker_enabled,
-            cycle_secs = cycle_duration.as_secs_f32(),
-            phase_gap_ms = phase_gap.as_millis(),
-            "Periodic cycle"
+            "Periodic cycle detail"
         );
+    }
 
-        // Record tick timestamp and sync curve-computed motion timeout
-        if let Ok(mut s) = state.lock() {
-            s.last_tick_epoch_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            s.default_motion_timeout_secs = values.motion_timeout_secs as u64;
-            s.default_fade_ms = values.transition_ms;
-        }
+    tracing::info!(
+        target: "sys",
+        event = "periodic_cycle",
+        command_id = %command_id,
+        local_hour = current_hour,
+        solar_time = values.solar_time,
+        brightness_pct = values.brightness,
+        kelvin = values.kelvin,
+        dispatch_count = dispatch_summary.dispatch_node_count,
+        eligible_node_count = dispatch_summary.eligible_node_count,
+        eligible_room_count = dispatch_summary.eligible_room_count,
+        eligible_device_count = dispatch_summary.eligible_device_count,
+        dispatched_settings_count = dispatch_summary.dispatched_settings_node_count,
+        no_dispatch_count = dispatch_summary.no_dispatch_node_count,
+        warning_skipped,
+        transition_skipped,
+        rhythm_disabled_skipped,
+        hard_off_rooms,
+        expired_transitions,
+        light_breaker_enabled,
+        cycle_secs = cycle_duration.as_secs_f32(),
+        phase_gap_ms = phase_gap.as_millis(),
+        "Periodic cycle"
+    );
 
-        if let Some(ref cb) = on_tick {
-            cb();
-        }
+    // Record tick timestamp and sync curve-computed motion timeout
+    if let Ok(mut s) = state.lock() {
+        s.last_tick_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        s.default_motion_timeout_secs = values.motion_timeout_secs as u64;
+        s.default_fade_ms = values.transition_ms;
+    }
 
-        let cycle_started = Instant::now();
+    if let Some(cb) = on_tick {
+        cb();
+    }
 
-        // Dispatch per-node ticks with stable staggering across the cycle.
-        if let Some(ref tx) = periodic_work_tx {
-            for (idx, node) in periodic_nodes.iter().enumerate() {
-                if !light_dispatch_generation_current(&state, dispatch_generation) {
-                    tracing::debug!(
-                        target: "sys",
-                        event = "periodic_cycle_invalidated",
-                        command_id = %command_id,
-                        dispatch_generation,
-                        "Stopping stale periodic cycle"
-                    );
-                    break;
-                }
-                let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
-                let emit_parent_node_id = last_node_index_by_emit_target
-                    .get(&node.emit_node_id)
-                    .is_some_and(|last_idx| *last_idx == idx)
-                    .then_some(node.emit_node_id.as_str())
-                    .filter(|emit_id| *emit_id != node.settings_node_id);
-                if !enqueue_periodic_tick(
-                    &state,
-                    tx,
-                    PeriodicTickEnqueue {
-                        command_id: &command_id,
-                        node_id: &node.node_id,
-                        settings_node_id: &node.settings_node_id,
-                        dispatch_generation,
-                        current_hour: room_hour,
-                        emit_parent_node_id,
-                        dispatch_spacing: phase_gap,
-                    },
-                ) {
-                    tracing::warn!(
-                        target: "sys",
-                        event = "periodic_tick_dropped",
-                        command_id = %command_id,
-                        node_id = %node.node_id,
-                        settings_node_id = %node.settings_node_id,
-                        queue = "periodic",
-                        "Periodic queue full, dropping tick"
-                    );
-                }
-                if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
-                    thread::sleep(phase_gap);
-                }
-            }
-        } else if let Some(ref tx) = work_tx {
-            for (idx, node) in periodic_nodes.iter().enumerate() {
-                if !light_dispatch_generation_current(&state, dispatch_generation) {
-                    tracing::debug!(
-                        target: "sys",
-                        event = "periodic_cycle_invalidated",
-                        command_id = %command_id,
-                        dispatch_generation,
-                        "Stopping stale periodic cycle"
-                    );
-                    break;
-                }
-                let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
-                let emit_parent_node_id = last_node_index_by_emit_target
-                    .get(&node.emit_node_id)
-                    .is_some_and(|last_idx| *last_idx == idx)
-                    .then_some(node.emit_node_id.as_str())
-                    .filter(|emit_id| *emit_id != node.settings_node_id);
-                if !enqueue_periodic_tick(
-                    &state,
-                    tx,
-                    PeriodicTickEnqueue {
-                        command_id: &command_id,
-                        node_id: &node.node_id,
-                        settings_node_id: &node.settings_node_id,
-                        dispatch_generation,
-                        current_hour: room_hour,
-                        emit_parent_node_id,
-                        dispatch_spacing: phase_gap,
-                    },
-                ) {
-                    tracing::warn!(
-                        target: "sys",
-                        event = "periodic_tick_dropped",
-                        command_id = %command_id,
-                        node_id = %node.node_id,
-                        settings_node_id = %node.settings_node_id,
-                        queue = "work",
-                        "Work queue full, dropping periodic tick"
-                    );
-                }
-                if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
-                    thread::sleep(phase_gap);
-                }
-            }
-        } else {
-            // No work queue (e.g. rhythm-server) - tick rooms inline
-            let runtime = {
-                let Ok(s) = state.lock() else {
-                    thread::sleep(update_interval);
-                    continue;
-                };
-                s.hub_runtime()
-            };
-            if let Some(runtime) = runtime {
-                for (idx, node) in periodic_nodes.iter().enumerate() {
-                    let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
-                    let started = Instant::now();
-                    if let Err(e) =
-                        runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
-                    {
-                        tracing::warn!(
-                            target: "sys",
-                            event = "periodic_node_tick_failed",
-                            command_id = %command_id,
-                            node_id = %node.node_id,
-                            settings_node_id = %node.settings_node_id,
-                            current_hour = room_hour,
-                            latency_ms = started.elapsed().as_millis(),
-                            error = %e,
-                            "Periodic node tick failed"
-                        );
-                    } else {
-                        tracing::debug!(
-                            target: "sys",
-                            event = "periodic_node_tick_applied",
-                            command_id = %command_id,
-                            node_id = %node.node_id,
-                            settings_node_id = %node.settings_node_id,
-                            current_hour = room_hour,
-                            latency_ms = started.elapsed().as_millis(),
-                            dispatch = "inline",
-                            "Periodic node tick applied"
-                        );
-                    }
-                    post_tick_node(&state, &runtime, &node.settings_node_id);
-                    if last_node_index_by_emit_target
-                        .get(&node.emit_node_id)
-                        .is_some_and(|last_idx| *last_idx == idx)
-                        && node.emit_node_id != node.settings_node_id
-                    {
-                        post_tick_node(&state, &runtime, &node.emit_node_id);
-                    }
-                    if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
-                        thread::sleep(phase_gap);
-                    }
-                }
-            } else if !periodic_nodes.is_empty() {
-                debug!(
+    let cycle_started = Instant::now();
+
+    // Dispatch per-node ticks with stable staggering across the cycle.
+    if let Some(ref tx) = periodic_work_tx {
+        for (idx, node) in periodic_nodes.iter().enumerate() {
+            if !light_dispatch_generation_current(&state, dispatch_generation) {
+                tracing::debug!(
                     target: "sys",
-                    "Periodic tick skipped {} queued node(s): no runtime available",
-                    periodic_nodes.len()
+                    event = "periodic_cycle_invalidated",
+                    command_id = %command_id,
+                    dispatch_generation,
+                    "Stopping stale periodic cycle"
+                );
+                break;
+            }
+            let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
+            let emit_parent_node_id = last_node_index_by_emit_target
+                .get(&node.emit_node_id)
+                .is_some_and(|last_idx| *last_idx == idx)
+                .then_some(node.emit_node_id.as_str())
+                .filter(|emit_id| *emit_id != node.settings_node_id);
+            if !enqueue_periodic_tick(
+                &state,
+                tx,
+                PeriodicTickEnqueue {
+                    command_id: &command_id,
+                    node_id: &node.node_id,
+                    settings_node_id: &node.settings_node_id,
+                    dispatch_generation,
+                    current_hour: room_hour,
+                    emit_parent_node_id,
+                    dispatch_spacing: phase_gap,
+                },
+            ) {
+                tracing::warn!(
+                    target: "sys",
+                    event = "periodic_tick_dropped",
+                    command_id = %command_id,
+                    node_id = %node.node_id,
+                    settings_node_id = %node.settings_node_id,
+                    queue = "periodic",
+                    "Periodic queue full, dropping tick"
                 );
             }
-        }
-
-        if light_breaker_enabled {
-            let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
-            match check_solar_midnight_at(&state, current_hour, utc_offset, Instant::now()) {
-                PeriodicTimeCheckResult::Continuous { last_hour } => {
-                    check_mode_transitions(&state, last_hour, current_hour);
-                }
-                PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
-                    replay_missed_mode_transitions(&state);
-                }
+            if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
+                thread::sleep(phase_gap);
             }
         }
-
-        let elapsed = cycle_started.elapsed();
-        if elapsed < cycle_duration {
-            thread::sleep(cycle_duration - elapsed);
+    } else if let Some(ref tx) = work_tx {
+        for (idx, node) in periodic_nodes.iter().enumerate() {
+            if !light_dispatch_generation_current(&state, dispatch_generation) {
+                tracing::debug!(
+                    target: "sys",
+                    event = "periodic_cycle_invalidated",
+                    command_id = %command_id,
+                    dispatch_generation,
+                    "Stopping stale periodic cycle"
+                );
+                break;
+            }
+            let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
+            let emit_parent_node_id = last_node_index_by_emit_target
+                .get(&node.emit_node_id)
+                .is_some_and(|last_idx| *last_idx == idx)
+                .then_some(node.emit_node_id.as_str())
+                .filter(|emit_id| *emit_id != node.settings_node_id);
+            if !enqueue_periodic_tick(
+                &state,
+                tx,
+                PeriodicTickEnqueue {
+                    command_id: &command_id,
+                    node_id: &node.node_id,
+                    settings_node_id: &node.settings_node_id,
+                    dispatch_generation,
+                    current_hour: room_hour,
+                    emit_parent_node_id,
+                    dispatch_spacing: phase_gap,
+                },
+            ) {
+                tracing::warn!(
+                    target: "sys",
+                    event = "periodic_tick_dropped",
+                    command_id = %command_id,
+                    node_id = %node.node_id,
+                    settings_node_id = %node.settings_node_id,
+                    queue = "work",
+                    "Work queue full, dropping periodic tick"
+                );
+            }
+            if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
+                thread::sleep(phase_gap);
+            }
         }
+    } else {
+        // No work queue (e.g. rhythm-server) - tick rooms inline
+        let runtime = {
+            let Ok(s) = state.lock() else {
+                return update_interval;
+            };
+            s.hub_runtime()
+        };
+        if let Some(runtime) = runtime {
+            for (idx, node) in periodic_nodes.iter().enumerate() {
+                let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
+                let started = Instant::now();
+                if let Err(e) =
+                    runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
+                {
+                    tracing::warn!(
+                        target: "sys",
+                        event = "periodic_node_tick_failed",
+                        command_id = %command_id,
+                        node_id = %node.node_id,
+                        settings_node_id = %node.settings_node_id,
+                        current_hour = room_hour,
+                        latency_ms = started.elapsed().as_millis(),
+                        error = %e,
+                        "Periodic node tick failed"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_node_tick_applied",
+                        command_id = %command_id,
+                        node_id = %node.node_id,
+                        settings_node_id = %node.settings_node_id,
+                        current_hour = room_hour,
+                        latency_ms = started.elapsed().as_millis(),
+                        dispatch = "inline",
+                        "Periodic node tick applied"
+                    );
+                }
+                post_tick_node(&state, &runtime, &node.settings_node_id);
+                if last_node_index_by_emit_target
+                    .get(&node.emit_node_id)
+                    .is_some_and(|last_idx| *last_idx == idx)
+                    && node.emit_node_id != node.settings_node_id
+                {
+                    post_tick_node(&state, &runtime, &node.emit_node_id);
+                }
+                if idx + 1 < periodic_nodes.len() && !phase_gap.is_zero() {
+                    thread::sleep(phase_gap);
+                }
+            }
+        } else if !periodic_nodes.is_empty() {
+            debug!(
+                target: "sys",
+                "Periodic tick skipped {} queued node(s): no runtime available",
+                periodic_nodes.len()
+            );
+        }
+    }
+
+    if light_breaker_enabled {
+        let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
+        match check_solar_midnight_at(&state, current_hour, utc_offset, Instant::now()) {
+            PeriodicTimeCheckResult::Continuous { last_hour } => {
+                check_mode_transitions(&state, last_hour, current_hour);
+            }
+            PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
+                replay_missed_mode_transitions(&state);
+            }
+        }
+    }
+
+    let elapsed = cycle_started.elapsed();
+    if elapsed < cycle_duration {
+        cycle_duration - elapsed
+    } else {
+        Duration::ZERO
     }
 }
 
@@ -1846,6 +1851,160 @@ mod tests {
 
     fn make_state() -> SharedState {
         Arc::new(Mutex::new(crate::state::AppState::default()))
+    }
+
+    fn runtime_with_rooms(room_ids: &[&str]) -> Arc<dyn RuntimeHandle> {
+        use rhythm_core::controller::NoOpController;
+        use rhythm_core::runtime::orchestrator::RhythmRuntime;
+        use rhythm_core::runtime::registry::SimpleDeviceRegistry;
+        use rhythm_core::runtime::scheduler::NoOpScheduler;
+        use rhythm_core::runtime::time::MockTimeProvider;
+        use rhythm_core::RuntimeConfig;
+
+        let runtime = Arc::new(RhythmRuntime::new(
+            Arc::new(NoOpController::new()),
+            MockTimeProvider::new(14.0, 172, 2026),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        ));
+        for room_id in room_ids {
+            runtime.add_room(room_id, room_id);
+            let snap = runtime
+                .engine_effective_node_snapshot(room_id)
+                .expect("test room should have a snapshot");
+            let mut restored = RestoredNodeState::from(&snap);
+            restored.rhythm_enabled = true;
+            runtime.restore_node_state(room_id, restored);
+        }
+        runtime
+    }
+
+    fn install_runtime(state: &SharedState, runtime: Arc<dyn RuntimeHandle>) {
+        let hub_type = crate::hub::HubType::parse("test").unwrap();
+        let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "test.local");
+        state.lock().unwrap().hubs.insert(
+            hub_key.clone(),
+            crate::hub::ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: Some(runtime),
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+    }
+
+    fn assert_periodic_item_for_room(rx: &std::sync::mpsc::Receiver<WorkItem>, room_id: &str) {
+        match rx.try_recv().expect("periodic work item should be queued") {
+            WorkItem::PeriodicNodeTick {
+                node_id,
+                settings_node_id,
+                emit_parent_node_id,
+                ..
+            } => {
+                assert_eq!(node_id, room_id);
+                assert_eq!(settings_node_id, room_id);
+                assert_eq!(emit_parent_node_id, None);
+            }
+            _ => panic!("unexpected work item"),
+        }
+    }
+
+    #[test]
+    fn run_periodic_cycle_queues_periodic_work_and_updates_tick_state() {
+        let state = make_state();
+        install_runtime(&state, runtime_with_rooms(&["room-a"]));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+        {
+            let mut s = state.lock().unwrap();
+            s.runtime_config.update_interval_secs = 1;
+            s.periodic_work_tx = Some(tx);
+        }
+        let tick_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tick_count_for_cb = tick_count.clone();
+        let on_tick = move || {
+            tick_count_for_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        };
+
+        let sleep_for = run_periodic_cycle(state.clone(), Some(&on_tick));
+
+        assert!(!sleep_for.is_zero());
+        assert_periodic_item_for_room(&rx, "room-a");
+        let s = state.lock().unwrap();
+        assert!(s.last_tick_epoch_ms > 0);
+        assert!(s.default_motion_timeout_secs > 0);
+        assert_eq!(tick_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn run_periodic_cycle_uses_fallback_work_queue_when_periodic_queue_is_absent() {
+        let state = make_state();
+        install_runtime(&state, runtime_with_rooms(&["room-b"]));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+        {
+            let mut s = state.lock().unwrap();
+            s.runtime_config.update_interval_secs = 1;
+            s.work_tx = Some(tx);
+        }
+
+        let sleep_for = run_periodic_cycle::<fn()>(state.clone(), None);
+
+        assert!(!sleep_for.is_zero());
+        assert_periodic_item_for_room(&rx, "room-b");
+    }
+
+    #[test]
+    fn run_periodic_cycle_ticks_inline_and_emits_node_state_without_queues() {
+        let state = make_state();
+        install_runtime(&state, runtime_with_rooms(&["room-c"]));
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(4);
+        {
+            let mut s = state.lock().unwrap();
+            s.runtime_config.update_interval_secs = 1;
+            s.event_tx = Some(event_tx);
+        }
+
+        let sleep_for = run_periodic_cycle::<fn()>(state.clone(), None);
+
+        assert!(!sleep_for.is_zero());
+        match event_rx
+            .try_recv()
+            .expect("inline tick should emit node state")
+        {
+            crate::server_event::ServerEvent::NodeState { nodes } => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].id, "room-c");
+                assert!(nodes[0].tick);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enqueue_periodic_tick_removes_pending_marker_when_queue_is_full() {
+        let state = make_state();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(0);
+        let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
+
+        assert!(!enqueue_periodic_tick(
+            &state,
+            &tx,
+            PeriodicTickEnqueue {
+                command_id: "periodic-test-full",
+                node_id: "node-full",
+                settings_node_id: "room-full",
+                dispatch_generation,
+                current_hour: 10.0,
+                emit_parent_node_id: None,
+                dispatch_spacing: Duration::ZERO,
+            },
+        ));
+
+        assert!(rx.try_recv().is_err());
+        assert!(state.lock().unwrap().pending_periodic_ticks.is_empty());
     }
 
     #[test]
@@ -3434,6 +3593,231 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().active_mode,
             rhythm_core::RhythmMode::Day
+        );
+    }
+
+    #[test]
+    fn reserve_dispatch_slot_seeds_then_paces_future_dispatches() {
+        let mut next_dispatch_at = None;
+
+        assert_eq!(
+            reserve_dispatch_slot(&mut next_dispatch_at, Duration::from_millis(25)),
+            None
+        );
+        let first_slot = next_dispatch_at.expect("first slot should be reserved");
+        assert!(first_slot > Instant::now());
+
+        let sleep_for = reserve_dispatch_slot(&mut next_dispatch_at, Duration::from_millis(25))
+            .expect("future slot should request pacing sleep");
+        assert!(sleep_for <= Duration::from_millis(25));
+        assert!(
+            next_dispatch_at.expect("second slot should be reserved") >= first_slot,
+            "successive reservations should move the slot forward"
+        );
+    }
+
+    #[test]
+    fn dispatch_generation_checks_light_breaker_and_generation() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.light_dispatch_generation = 7;
+        }
+
+        assert!(light_dispatch_generation_current(&state, 7));
+        assert!(!light_dispatch_generation_current(&state, 6));
+
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = false;
+        }
+        assert!(!light_dispatch_generation_current(&state, 7));
+    }
+
+    #[test]
+    fn wait_for_node_dispatch_slot_rejects_stale_generation_without_sleeping() {
+        let state = make_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.light_dispatch_generation = 3;
+        }
+
+        assert!(!wait_for_node_dispatch_slot_if_current(
+            &state,
+            "cmd-1",
+            "room-1",
+            Duration::ZERO,
+            2,
+        ));
+        assert!(wait_for_node_dispatch_slot_if_current(
+            &state,
+            "cmd-1",
+            "room-1",
+            Duration::ZERO,
+            3,
+        ));
+    }
+
+    #[test]
+    fn periodic_time_check_seeds_continuous_and_detects_clock_jumps() {
+        let state = make_state();
+        let start = Instant::now();
+
+        assert_eq!(
+            advance_periodic_time_check(&state, 23.5, -4.0, start),
+            PeriodicTimeCheckResult::Seeded
+        );
+        assert_eq!(
+            advance_periodic_time_check(&state, 0.5, -4.0, start + Duration::from_secs(60 * 60),),
+            PeriodicTimeCheckResult::Continuous { last_hour: 23.5 }
+        );
+
+        match advance_periodic_time_check(
+            &state,
+            12.0,
+            -4.0,
+            start + Duration::from_secs(2 * 60 * 60),
+        ) {
+            PeriodicTimeCheckResult::Discontinuous {
+                last_hour,
+                adjusted_delta_hours,
+                expected_delta_hours,
+            } => {
+                assert_eq!(last_hour, 0.5);
+                assert!(adjusted_delta_hours > 10.0);
+                assert!((expected_delta_hours - 1.0).abs() < 0.01);
+            }
+            other => panic!("expected discontinuity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adjusted_local_hour_delta_picks_wraparound_delta_closest_to_elapsed_time() {
+        assert!((adjusted_local_hour_delta(23.75, 0.25, 0.5) - 0.5).abs() < 0.001);
+        assert!((adjusted_local_hour_delta(0.25, 23.75, -0.5) + 0.5).abs() < 0.001);
+        assert!((adjusted_local_hour_delta(8.0, 11.0, 3.0) - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fallback_solar_trigger_hour_covers_manual_scheduled_and_twilight() {
+        let scheduled = rhythm_core::ModeTransitionTime::from_hour_minute(6, 30).unwrap();
+
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::Manual,
+                rhythm_core::RhythmMode::Day,
+                6.0,
+                18.0,
+            ),
+            None
+        );
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::Scheduled(scheduled),
+                rhythm_core::RhythmMode::Day,
+                6.0,
+                18.0,
+            ),
+            Some(6.5)
+        );
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::Sunrise,
+                rhythm_core::RhythmMode::Day,
+                6.0,
+                18.0,
+            ),
+            Some(6.0)
+        );
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::Sunset,
+                rhythm_core::RhythmMode::Sleep,
+                6.0,
+                18.0,
+            ),
+            Some(18.0)
+        );
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::CivilTwilight,
+                rhythm_core::RhythmMode::Day,
+                6.0,
+                18.0,
+            ),
+            Some(5.5)
+        );
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::NauticalTwilight,
+                rhythm_core::RhythmMode::Sleep,
+                6.0,
+                18.0,
+            ),
+            Some(19.0)
+        );
+        assert_eq!(
+            fallback_solar_trigger_hour(
+                rhythm_core::ModeTransitionTrigger::AstronomicalTwilight,
+                rhythm_core::RhythmMode::Day,
+                0.5,
+                18.0,
+            ),
+            Some(23.0)
+        );
+    }
+
+    #[test]
+    fn trigger_hour_uses_fallback_when_location_or_timezone_is_missing() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let ctx = SolarTriggerContext {
+            solar_noon: 13.0,
+            latitude: Some(35.0),
+            longitude: None,
+            timezone_name: Some("America/New_York"),
+        };
+
+        assert_eq!(
+            trigger_hour_for_local_date(
+                rhythm_core::ModeTransitionTrigger::Sunrise,
+                rhythm_core::RhythmMode::Day,
+                ctx,
+                date,
+            ),
+            Some(rhythm_core::config::FALLBACK_SUNRISE_HOUR)
+        );
+        assert_eq!(
+            trigger_hour(
+                rhythm_core::ModeTransitionTrigger::Sunset,
+                rhythm_core::RhythmMode::Sleep,
+                SolarTriggerContext {
+                    solar_noon: 12.0,
+                    latitude: None,
+                    longitude: None,
+                    timezone_name: None,
+                },
+            ),
+            Some(rhythm_core::config::FALLBACK_SUNSET_HOUR)
+        );
+    }
+
+    #[test]
+    fn local_and_utc_datetime_conversions_use_timezone_or_fixed_offset() {
+        let utc = NaiveDate::from_ymd_opt(2026, 1, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+
+        let fixed_local = local_datetime_from_utc(utc, -5.0, None);
+        assert_eq!(fixed_local.hour(), 7);
+        assert_eq!(utc_datetime_from_local(fixed_local, -5.0, None), Some(utc));
+
+        let new_york_local = local_datetime_from_utc(utc, 0.0, Some("America/New_York"));
+        assert_eq!(new_york_local.hour(), 7);
+        assert_eq!(
+            utc_datetime_from_local(new_york_local, 0.0, Some("America/New_York")),
+            Some(utc)
         );
     }
 }

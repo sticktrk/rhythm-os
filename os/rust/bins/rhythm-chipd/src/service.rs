@@ -361,3 +361,402 @@ impl DeviceStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use rhythm_matter::chip_rpc::{
+        ChipRpcAttributeReportsResponse, ChipRpcCommissionLightResponse, ChipRpcEmpty,
+        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
+        ChipRpcReadOnOffResponse,
+    };
+    use rhythm_matter::transport::{
+        MatterColorMode, MatterCommissionRequest, MatterCommissioningNetwork,
+        MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterGroup,
+        MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
+        MatterSubscriptionTarget,
+    };
+
+    use crate::backend::FakeChipBackend;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-chipd-{}-{}", name, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn init_request(storage_path: &Path) -> ChipInitControllerRequest {
+        ChipInitControllerRequest {
+            fabric_id: "fabric-test".to_string(),
+            operational_fabric_id: 0x1234,
+            ipk_hex: "00112233445566778899aabbccddeeff".to_string(),
+            storage_path: storage_path.display().to_string(),
+            ble_controller: Some(1),
+        }
+    }
+
+    fn commission_request(node_id: u64) -> MatterCommissionRequest {
+        MatterCommissionRequest {
+            setup_payload: format!("MT:payload-{}", node_id),
+            node_id,
+            network: MatterCommissioningNetwork::Wifi,
+            rendezvous: MatterCommissioningRendezvous::Auto,
+            wifi_credentials: MatterCommissioningWifiCredentials {
+                ssid: "Rhythm".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
+    fn commissioned_device(node_id: u64, endpoint: u16) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Vendor".to_string(),
+            product_name: format!("Lamp {}", node_id),
+            vendor_id: 1,
+            product_id: 2,
+            serial_number: Some(format!("serial-{}", node_id)),
+            light_endpoint: endpoint,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(5000),
+        }
+    }
+
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn service_routes_rpc_requests_and_persists_device_store() {
+        let dir = unique_test_dir("service-flow");
+        let storage_path = dir.join("chip.json");
+        let devices_path = dir.join("devices.json");
+        fs::write(
+            &devices_path,
+            serde_json::to_string_pretty(&vec![commissioned_device(10, 2)]).unwrap(),
+        )
+        .unwrap();
+
+        let mut service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
+        let initial_list: ChipRpcListDevicesResponse =
+            serde_json::from_value(service.handle(ChipRpcRequest::ListDevices).unwrap()).unwrap();
+        assert!(initial_list.devices.is_empty());
+        assert_eq!(
+            string_error(service.handle(ChipRpcRequest::ProbeLight { node_id: 10 })),
+            "Controller not initialized"
+        );
+
+        let init: ChipInitControllerResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::InitController(init_request(&storage_path)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(init.fabric_id, "fabric-test");
+        assert_eq!(init.operational_fabric_id, 0x1234);
+
+        let list: ChipRpcListDevicesResponse =
+            serde_json::from_value(service.handle(ChipRpcRequest::ListDevices).unwrap()).unwrap();
+        assert_eq!(list.devices.len(), 1);
+        assert_eq!(list.devices[0].node_id, 10);
+
+        let probed: ChipRpcProbeLightResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::ProbeLight { node_id: 10 })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(probed.device.light_endpoint, 2);
+
+        let commissioned: ChipRpcCommissionLightResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::CommissionLight(commission_request(42)))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(commissioned.device.node_id, 42);
+        assert!(fs::read_to_string(&devices_path)
+            .unwrap()
+            .contains("\"node_id\": 42"));
+
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: true,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let on: ChipRpcReadOnOffResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::ReadOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(on.on);
+
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: 0,
+                    transition_ms: Some(100),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::RunLevelCommand {
+                    node_id: 42,
+                    endpoint: 1,
+                    command: MatterLevelCommandVariant::StepWithOnOff,
+                    level_or_step: 12,
+                    step_mode: Some(MatterLevelStepMode::Up),
+                    transition_ms: Some(50),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 1800,
+                    transition_ms: None,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetXy {
+                    node_id: 42,
+                    endpoint: 1,
+                    x: 0.31,
+                    y: 0.32,
+                    transition_ms: Some(250),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetHueSaturation {
+                    node_id: 42,
+                    endpoint: 1,
+                    hue: 20,
+                    saturation: 200,
+                    transition_ms: None,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::IdentifyLight {
+                    node_id: 42,
+                    endpoint: 1,
+                    duration_secs: 5,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        let group = MatterGroup {
+            group_id: 7,
+            name: "Kitchen".to_string(),
+            members: vec![
+                MatterGroupMember {
+                    node_id: 10,
+                    endpoint: 2,
+                },
+                MatterGroupMember {
+                    node_id: 42,
+                    endpoint: 1,
+                },
+            ],
+        };
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::ConfigureGroup {
+                    group: group.clone(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::IdentifyGroup {
+                    group_id: 7,
+                    duration_secs: 2,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetGroupOnOff {
+                    group_id: 7,
+                    on: true,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetGroupBrightness {
+                    group_id: 7,
+                    level: 0,
+                    transition_ms: Some(100),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetGroupColorTemperature {
+                    group_id: 7,
+                    kelvin: 2700,
+                    transition_ms: None,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetGroupXy {
+                    group_id: 7,
+                    x: 0.1,
+                    y: 0.2,
+                    transition_ms: None,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SetGroupHueSaturation {
+                    group_id: 7,
+                    hue: 10,
+                    saturation: 20,
+                    transition_ms: None,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        let capability: ChipRpcJsonValueResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::ReadLightCapabilitySnapshot {
+                    node_id: 42,
+                    endpoint: 1,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(capability.value["node_id"], 42);
+
+        let light_state: ChipRpcJsonValueResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::ReadLightState {
+                    node_id: 42,
+                    endpoint: 1,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(light_state.value["onoff"]["ok"], true);
+
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::SubscribeOnOff {
+                    targets: vec![MatterSubscriptionTarget {
+                        node_id: 42,
+                        endpoint: 1,
+                    }],
+                    min_interval_secs: 1,
+                    max_interval_secs: 60,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let reports: ChipRpcAttributeReportsResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::DrainAttributeReports)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(reports.reports.is_empty());
+
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::RemoveGroup {
+                    group_id: 7,
+                    members: group.members,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let _: ChipRpcEmpty = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::DecommissionDevice {
+                    node_id: 42,
+                    force: true,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!fs::read_to_string(&devices_path)
+            .unwrap()
+            .contains("\"node_id\": 42"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn device_store_handles_missing_path_noop_and_decode_errors() {
+        let mut store = DeviceStore::default();
+        store.upsert(commissioned_device(1, 1)).unwrap();
+        assert_eq!(store.devices().len(), 1);
+
+        let dir = unique_test_dir("store-errors");
+        let devices_path = dir.join("devices.json");
+        fs::write(&devices_path, "{ not valid json").unwrap();
+
+        let error = string_error(store.configure(devices_path.clone()));
+        assert!(error.contains(&format!("decoding {}", devices_path.display())));
+
+        fs::write(
+            &devices_path,
+            serde_json::to_string(&vec![commissioned_device(2, 3)]).unwrap(),
+        )
+        .unwrap();
+        store.configure(devices_path.clone()).unwrap();
+        assert_eq!(store.devices().len(), 1);
+        assert_eq!(store.list_devices()[0].node_id, 2);
+
+        store.remove(2).unwrap();
+        assert_eq!(store.devices().len(), 0);
+        assert_eq!(fs::read_to_string(&devices_path).unwrap(), "[]");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+}

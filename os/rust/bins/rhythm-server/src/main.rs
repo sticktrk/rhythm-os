@@ -223,3 +223,58 @@ fn shellexpand(path: &str) -> String {
     }
     path.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::Mutex as StdMutex;
+
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct EnvRestore {
+        key: &'static str,
+        value: Option<OsString>,
+    }
+
+    impl EnvRestore {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var_os(key),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.value {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn shellexpand_expands_home_prefix_only_when_home_is_available() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::new("HOME");
+
+        std::env::set_var("HOME", "/Users/tester");
+        assert_eq!(shellexpand("~/.rhythm"), "/Users/tester/.rhythm");
+        assert_eq!(shellexpand("/tmp/.rhythm"), "/tmp/.rhythm");
+        assert_eq!(shellexpand("~"), "~");
+
+        std::env::remove_var("HOME");
+        assert_eq!(shellexpand("~/missing-home"), "~/missing-home");
+    }
+
+    #[test]
+    fn install_factory_reset_hook_registers_restart_callback() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+
+        install_factory_reset_hook(&state).unwrap();
+
+        assert!(state.lock().unwrap().after_factory_reset_fn.is_some());
+    }
+}

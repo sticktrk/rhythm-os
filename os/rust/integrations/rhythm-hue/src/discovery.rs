@@ -801,6 +801,188 @@ mod tests {
     }
 
     #[test]
+    fn discovery_maps_rooms_devices_identities_and_configured_behaviors() {
+        let transport = StaticHueTransport::default()
+            .with_resource(
+                "room",
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "room-1",
+                            "metadata": { "name": "Kitchen" },
+                            "children": [
+                                { "rtype": "device", "rid": "dev-light" },
+                                { "rtype": "device", "rid": "dev-button" },
+                                { "rtype": "device", "rid": "dev-motion" }
+                            ],
+                            "services": [
+                                { "rtype": "grouped_light", "rid": "grouped-kitchen" }
+                            ]
+                        },
+                        {
+                            "id": "room-without-grouped-light",
+                            "metadata": { "name": "Ignored" },
+                            "children": [
+                                { "rtype": "device", "rid": "ignored-device" }
+                            ],
+                            "services": []
+                        }
+                    ]
+                }),
+            )
+            .with_resource(
+                "device",
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "dev-light",
+                            "metadata": { "name": "Kitchen Ceiling" },
+                            "product_data": {
+                                "manufacturer_name": "Signify",
+                                "model_id": "LCA001"
+                            },
+                            "services": [
+                                { "rtype": "light", "rid": "light-1" }
+                            ]
+                        },
+                        {
+                            "id": "dev-button",
+                            "metadata": { "name": "Kitchen Dimmer" },
+                            "product_data": {
+                                "manufacturer_name": "Signify",
+                                "model_id": "RWL022"
+                            },
+                            "services": [
+                                { "rtype": "button", "rid": "button-1" },
+                                { "rtype": "button", "rid": "button-2" }
+                            ]
+                        },
+                        {
+                            "id": "dev-motion",
+                            "metadata": { "name": "Kitchen Motion" },
+                            "product_data": {
+                                "manufacturer_name": "Signify",
+                                "model_id": "SML004"
+                            },
+                            "services": [
+                                { "rtype": "motion", "rid": "motion-1" }
+                            ]
+                        },
+                        {
+                            "id": "dev-bridge",
+                            "metadata": { "name": "Bridge" },
+                            "services": [
+                                { "rtype": "bridge", "rid": "bridge-1" }
+                            ]
+                        }
+                    ]
+                }),
+            )
+            .with_resource(
+                "zigbee_connectivity",
+                serde_json::json!({
+                    "data": [
+                        {
+                            "owner": { "rtype": "device", "rid": "dev-light" },
+                            "mac_address": "00:17:88:01:00:00:01"
+                        },
+                        {
+                            "owner": { "rtype": "device", "rid": "dev-button" },
+                            "mac_address": "00:17:88:01:00:00:02"
+                        },
+                        {
+                            "owner": { "rtype": "device", "rid": "dev-motion" },
+                            "mac_address": "00:17:88:01:00:00:03"
+                        }
+                    ]
+                }),
+            )
+            .with_resource(
+                "behavior_instance",
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "behavior-direct",
+                            "configuration": {
+                                "device": { "rtype": "device", "rid": "dev-button" }
+                            }
+                        },
+                        {
+                            "id": "behavior-dependee",
+                            "configuration": {},
+                            "dependees": [
+                                { "target": { "rtype": "room", "rid": "room-1" } },
+                                { "target": { "rtype": "device", "rid": "dev-motion" } }
+                            ]
+                        },
+                        {
+                            "id": "behavior-unmapped",
+                            "configuration": {},
+                            "dependees": []
+                        }
+                    ]
+                }),
+            );
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let rooms = discovery.discover_rooms().unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].id, "room-1");
+        assert_eq!(rooms[0].name, "Kitchen");
+        assert_eq!(rooms[0].grouped_light_id, "grouped-kitchen");
+        assert_eq!(
+            rooms[0].device_ids,
+            vec![
+                "dev-light".to_string(),
+                "dev-button".to_string(),
+                "dev-motion".to_string()
+            ]
+        );
+
+        let devices = discovery.discover_devices().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Button
+                && device.device_id == "dev-button"
+                && device.room_id.as_deref() == Some("room-1")
+                && device.buttons == vec![("button-1".to_string(), 1), ("button-2".to_string(), 2)]
+        }));
+        assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Motion
+                && device.device_id == "motion-1"
+                && device.room_id.as_deref() == Some("room-1")
+        }));
+
+        let identities = discovery.discover_identities().unwrap();
+        assert_eq!(identities.len(), 3);
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Light
+                && identity.native_id == "dev-light"
+                && identity.room_name.as_deref() == Some("Kitchen")
+                && identity.hardware_ids == vec![HardwareId::mac("00:17:88:01:00:00:01")]
+        }));
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Button
+                && identity.native_id == "dev-button"
+                && identity.hardware_ids == vec![HardwareId::mac("00:17:88:01:00:00:02")]
+        }));
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Motion
+                && identity.native_id == "motion-1"
+                && identity.hardware_ids == vec![HardwareId::mac("00:17:88:01:00:00:03")]
+        }));
+
+        let configured = discovery.discover_configured_devices().unwrap();
+        assert_eq!(
+            configured,
+            vec![
+                ("behavior-direct".to_string(), "dev-button".to_string()),
+                ("behavior-dependee".to_string(), "dev-motion".to_string())
+            ]
+        );
+    }
+
+    #[test]
     fn extract_device_from_hue_accessories_behavior() {
         // Real structure from a live Hue bridge (RWL022 dimmer switch)
         let bi: serde_json::Value = serde_json::json!({

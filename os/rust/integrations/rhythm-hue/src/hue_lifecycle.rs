@@ -144,3 +144,178 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
         })),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::mpsc;
+
+    use serde_json::Value;
+
+    use rhythm_os::hub::HubCredentials;
+    use rhythm_os::state::AppState;
+
+    use crate::provider::hue_credentials;
+    use crate::transport::HueTransport;
+
+    struct FakeHueTransport;
+
+    impl HueTransport for FakeHueTransport {
+        fn test_connection(&self, _username: &str) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+
+        fn warmup_tls(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_grouped_light(
+            &self,
+            _username: &str,
+            _grouped_light_id: &str,
+            _on: bool,
+            _brightness: Option<u8>,
+            _kelvin: Option<u16>,
+            _xy: Option<(f32, f32)>,
+            _fade_ms: Option<u16>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn is_grouped_light_on(
+            &self,
+            _username: &str,
+            _grouped_light_id: &str,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn identify_light(&self, _username: &str, _light_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn get_resources(&self, _username: &str, _resource_type: &str) -> anyhow::Result<Value> {
+            Ok(serde_json::json!({"data":[]}))
+        }
+    }
+
+    fn shared_state() -> SharedState {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn hue_key(address: &str) -> HubKey {
+        HubKey::new(HubType::new(HubType::HUE), address)
+    }
+
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn connect_hue_sse_requires_credentials_and_username() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+
+        let missing = string_error(connect_hue_sse(
+            &state,
+            key.clone(),
+            None,
+            |_config, _registry, _shutdown| panic!("missing credentials must not start SSE"),
+        ));
+        assert!(missing.contains("No hub credentials configured"));
+
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new(HubType::HUE, "192.0.2.10", serde_json::json!({})),
+        );
+        let invalid = string_error(connect_hue_sse(
+            &state,
+            key,
+            None,
+            |_config, _registry, _shutdown| panic!("invalid credentials must not start SSE"),
+        ));
+        assert_eq!(invalid, "Hue credentials not configured");
+    }
+
+    #[test]
+    fn connect_hue_sse_builds_hub_data_and_passes_sse_config() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(key.clone(), hue_credentials("192.0.2.10", "user-123"));
+
+        let (raw_tx, raw_rx) = mpsc::channel();
+        let (hub, event_rx) = connect_hue_sse(
+            &state,
+            key.clone(),
+            None,
+            move |config, registry, shutdown| {
+                assert_eq!(config.bridge_ip, "192.0.2.10");
+                assert_eq!(config.username, "user-123");
+                assert!(!shutdown.load(std::sync::atomic::Ordering::Relaxed));
+                registry
+                    .lock()
+                    .unwrap()
+                    .upsert_room("room-1", "Kitchen", "grouped-1", &[]);
+                raw_rx
+            },
+        )
+        .unwrap();
+
+        let data = hub.data::<HueHubData>().unwrap();
+        assert_eq!(data.bridge_ip, "192.0.2.10");
+        assert_eq!(data.username, "user-123");
+        assert_eq!(
+            data.registry.lock().unwrap().room_name("room-1"),
+            Some("Kitchen")
+        );
+
+        raw_tx.send(HubEvent::Connected { hub_key: None }).unwrap();
+        assert_eq!(
+            event_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+                .hub_key(),
+            Some(&key)
+        );
+    }
+
+    #[test]
+    fn ensure_hue_runtime_reports_missing_active_hub_or_credentials() {
+        let state = shared_state();
+        let no_hub = ensure_hue_runtime(&state, FakeHueTransport).unwrap_err();
+        assert_eq!(
+            no_hub.to_string(),
+            "Hue hub not active (call connect_sse first)"
+        );
+
+        let key = hue_key("192.0.2.10");
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::with_options(false)));
+        state.lock().unwrap().hubs.insert(
+            key,
+            ActiveHub {
+                hub_type: HubType::new(HubType::HUE),
+                hub_key: hue_key("192.0.2.10"),
+                runtime: None,
+                hub_data: Box::new(HueHubData {
+                    bridge_ip: "192.0.2.10".to_string(),
+                    username: "user-123".to_string(),
+                    registry,
+                }),
+                registry: None,
+                discovery: None,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        let no_creds = ensure_hue_runtime(&state, FakeHueTransport).unwrap_err();
+        assert_eq!(no_creds.to_string(), "No hub credentials configured");
+    }
+}

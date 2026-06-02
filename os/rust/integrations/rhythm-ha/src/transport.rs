@@ -135,3 +135,140 @@ impl HaConnectionConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct MinimalTransport;
+
+    impl HaTransport for MinimalTransport {
+        fn call_service(&self, _domain: &str, _service: &str, _data: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_states(&self) -> Result<Vec<EntityState>> {
+            Ok(vec![EntityState {
+                entity_id: "light.kitchen".to_string(),
+                state: "on".to_string(),
+                attributes: serde_json::json!({"friendly_name": "Kitchen"}),
+            }])
+        }
+
+        fn get_state(&self, entity_id: &str) -> Result<EntityState> {
+            Ok(EntityState {
+                entity_id: entity_id.to_string(),
+                state: "off".to_string(),
+                attributes: Value::Null,
+            })
+        }
+
+        fn test_connection(&self) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn minimal_transport_uses_default_config_error_and_entity_state_defaults() {
+        let transport = MinimalTransport;
+
+        assert_eq!(
+            transport.get_config().unwrap_err().to_string(),
+            "get_config not implemented for this transport"
+        );
+        assert_eq!(
+            transport.get_states().unwrap()[0].attributes["friendly_name"],
+            "Kitchen"
+        );
+        assert_eq!(
+            transport.get_state("light.office").unwrap().entity_id,
+            "light.office"
+        );
+        assert!(transport.test_connection().unwrap());
+
+        let state: EntityState =
+            serde_json::from_str(r#"{"entity_id":"light.bed","state":"off"}"#).unwrap();
+        assert_eq!(state.attributes, Value::Null);
+    }
+
+    #[test]
+    fn connection_config_builds_supervisor_and_plain_urls() {
+        let plain = HaConnectionConfig {
+            host: "ha.local".to_string(),
+            port: 8123,
+            token: "token".to_string(),
+            use_ssl: false,
+        };
+        assert_eq!(plain.ws_url(), "ws://ha.local:8123/api/websocket");
+        assert_eq!(
+            plain.rest_url("/api/states"),
+            "http://ha.local:8123/api/states"
+        );
+
+        let supervisor = HaConnectionConfig {
+            host: "supervisor".to_string(),
+            port: 80,
+            token: "token".to_string(),
+            use_ssl: true,
+        };
+        assert_eq!(
+            supervisor.ws_url(),
+            "wss://supervisor:80/core/api/websocket"
+        );
+        assert_eq!(
+            supervisor.rest_url("/api/config"),
+            "https://supervisor:80/core/api/config"
+        );
+    }
+
+    #[test]
+    fn connection_config_reads_env_and_supervisor_fallback() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("HA_HOST", "ha.local");
+        std::env::set_var("HA_PORT", "9443");
+        std::env::set_var("HA_TOKEN", "ha-token");
+        std::env::set_var("HA_USE_SSL", "true");
+        std::env::remove_var("SUPERVISOR_TOKEN");
+
+        let config = HaConnectionConfig::from_env().unwrap();
+        assert_eq!(config.host, "ha.local");
+        assert_eq!(config.port, 9443);
+        assert_eq!(config.token, "ha-token");
+        assert!(config.use_ssl);
+
+        std::env::remove_var("HA_TOKEN");
+        std::env::set_var("SUPERVISOR_TOKEN", "supervisor-token");
+        std::env::set_var("HA_PORT", "not-a-port");
+        std::env::set_var("HA_USE_SSL", "0");
+
+        let config = HaConnectionConfig::from_env().unwrap();
+        assert_eq!(config.port, 8123);
+        assert_eq!(config.token, "supervisor-token");
+        assert!(!config.use_ssl);
+
+        let supervisor = HaConnectionConfig::for_supervisor().unwrap();
+        assert_eq!(supervisor.host, "supervisor");
+        assert_eq!(supervisor.port, 80);
+        assert_eq!(supervisor.token, "supervisor-token");
+
+        std::env::remove_var("HA_HOST");
+        std::env::remove_var("HA_PORT");
+        std::env::remove_var("HA_TOKEN");
+        std::env::remove_var("HA_USE_SSL");
+        std::env::remove_var("SUPERVISOR_TOKEN");
+
+        assert_eq!(
+            HaConnectionConfig::from_env().unwrap_err().to_string(),
+            "Neither HA_TOKEN nor SUPERVISOR_TOKEN set"
+        );
+        assert_eq!(
+            HaConnectionConfig::for_supervisor()
+                .unwrap_err()
+                .to_string(),
+            "SUPERVISOR_TOKEN not set"
+        );
+    }
+}

@@ -2516,6 +2516,27 @@ mod tests {
     }
 
     #[test]
+    fn api_response_not_found_and_time_offset_errors_classify_messages() {
+        let r = ApiResponse::not_found("missing");
+        assert_eq!(r.status, 404);
+        assert_eq!(r.body, "missing");
+
+        let r = node_time_offset_error_response(anyhow::anyhow!("room not found in engine"));
+        assert_eq!(r.status, 404);
+        assert!(r.body.contains("not found in engine"));
+
+        let r = node_time_offset_error_response(anyhow::anyhow!(
+            "Time offsets can only be set on light nodes"
+        ));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Time offsets can only be set"));
+
+        let r = node_time_offset_error_response(anyhow::anyhow!("storage failed"));
+        assert_eq!(r.status, 500);
+        assert_eq!(r.body, "storage failed");
+    }
+
+    #[test]
     fn pair_device_emits_progress_and_passes_session_id_to_integration() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
@@ -2597,6 +2618,446 @@ mod tests {
 
     fn test_state() -> SharedState {
         Arc::new(Mutex::new(AppState::default()))
+    }
+
+    #[test]
+    fn mutation_items_accepts_all_supported_batch_shapes() {
+        assert_eq!(
+            mutation_items(&json!({"node_id": "room1"})).unwrap(),
+            vec![json!({"node_id": "room1"})]
+        );
+        assert_eq!(
+            mutation_items(&json!([{"node_id": "a"}, {"node_id": "b"}])).unwrap(),
+            vec![json!({"node_id": "a"}), json!({"node_id": "b"})]
+        );
+        assert_eq!(
+            mutation_items(&json!({"items": [{"node_id": "a"}]})).unwrap(),
+            vec![json!({"node_id": "a"})]
+        );
+        assert_eq!(
+            mutation_items(&json!({"nodes": [{"node_id": "a"}]})).unwrap(),
+            vec![json!({"node_id": "a"})]
+        );
+        assert_eq!(
+            mutation_items(&json!({"rooms": [{"room_id": "a"}]})).unwrap(),
+            vec![json!({"room_id": "a"})]
+        );
+    }
+
+    #[test]
+    fn dispatch_spacing_from_body_defaults_validates_and_caps() {
+        assert_eq!(
+            dispatch_spacing_from_body(&json!({})).unwrap(),
+            commands::default_http_batch_dispatch_spacing()
+        );
+        assert_eq!(
+            dispatch_spacing_from_body(&json!({"dispatch_spacing_ms": 42})).unwrap(),
+            Duration::from_millis(42)
+        );
+        assert_eq!(
+            dispatch_spacing_from_body(&json!({"dispatch_spacing_ms": "fast"})).unwrap_err(),
+            "dispatch_spacing_ms must be a non-negative integer"
+        );
+        assert_eq!(
+            dispatch_spacing_from_body(&json!({"dispatch_spacing_ms": 60_001})).unwrap_err(),
+            "dispatch_spacing_ms must be <= 60000"
+        );
+    }
+
+    #[test]
+    fn color_parsers_accept_valid_payloads_and_report_precise_errors() {
+        let rgb = parse_rgb(Some(&json!({"r": 1, "g": 2, "b": 3}))).unwrap();
+        assert_eq!((rgb.r, rgb.g, rgb.b), (1, 2, 3));
+        assert_eq!(parse_rgb(None).unwrap_err(), "Missing rgb");
+        assert_eq!(
+            parse_rgb(Some(&json!({"r": 256, "g": 2, "b": 3}))).unwrap_err(),
+            "rgb.r must be <= 255"
+        );
+        assert_eq!(
+            parse_rgb(Some(&json!({"r": 1, "g": "2", "b": 3}))).unwrap_err(),
+            "rgb.g must be an integer"
+        );
+        assert_eq!(
+            parse_rgb(Some(&json!([1, 2, 3]))).unwrap_err(),
+            "rgb must be an object"
+        );
+
+        assert_eq!(parse_xy(None).unwrap(), None);
+        assert_eq!(parse_xy(Some(&Value::Null)).unwrap(), None);
+        assert_eq!(
+            parse_xy(Some(&json!({"x": 0.1, "y": 0.2}))).unwrap(),
+            Some(XyColor { x: 0.1, y: 0.2 })
+        );
+        assert_eq!(
+            parse_xy(Some(&json!({"x": 1.2, "y": 0.2}))).unwrap_err(),
+            "xy values must be between 0 and 1"
+        );
+        assert_eq!(
+            parse_xy(Some(&json!({"x": 0.1}))).unwrap_err(),
+            "xy.y must be a number"
+        );
+        assert_eq!(
+            parse_xy(Some(&json!("xy"))).unwrap_err(),
+            "xy must be an object or null"
+        );
+
+        assert_eq!(parse_optional_u8(None, "brightness").unwrap(), None);
+        assert_eq!(
+            parse_optional_u8(Some(&Value::Null), "brightness").unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_optional_u8(Some(&json!(0)), "brightness").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            parse_optional_u8(Some(&json!(500)), "brightness").unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            parse_optional_u8(Some(&json!("bright")), "brightness").unwrap_err(),
+            "brightness must be an integer or null"
+        );
+
+        assert_eq!(parse_optional_u32(None, "transition_ms").unwrap(), None);
+        assert_eq!(
+            parse_optional_u32(Some(&Value::Null), "transition_ms").unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_optional_u32(Some(&json!(123)), "transition_ms").unwrap(),
+            Some(123)
+        );
+        assert!(parse_optional_u32(Some(&json!(u64::MAX)), "transition_ms")
+            .unwrap_err()
+            .contains("transition_ms must be <="));
+    }
+
+    #[test]
+    fn node_curve_and_color_scope_parsers_cover_aliases_and_conflicts() {
+        assert_eq!(
+            parse_node_curve_modifier(&json!({"brightness": 250})).unwrap(),
+            commands::NodeCurveModifier::Brightness(100)
+        );
+        assert_eq!(
+            parse_node_curve_modifier(
+                &json!({"color_temp_kelvin": 100, "preserve_brightness": false})
+            )
+            .unwrap(),
+            commands::NodeCurveModifier::ColorTemperature {
+                kelvin: 500,
+                preserve_brightness: false,
+            }
+        );
+        assert_eq!(
+            parse_node_curve_modifier(&json!({"kelvin": 30_000})).unwrap(),
+            commands::NodeCurveModifier::ColorTemperature {
+                kelvin: 25_000,
+                preserve_brightness: true,
+            }
+        );
+        assert_eq!(
+            parse_node_curve_modifier(&json!({"brightness": 50, "kelvin": 2700})).unwrap_err(),
+            "Specify exactly one curve modifier: brightness or color_temperature"
+        );
+        assert_eq!(
+            parse_node_curve_modifier(&json!({})).unwrap_err(),
+            "Missing curve modifier: brightness or color_temperature"
+        );
+
+        assert_eq!(
+            parse_color_scope(None).unwrap(),
+            commands::NodeColorScope::Auto
+        );
+        assert_eq!(
+            parse_color_scope(Some(&json!("preview"))).unwrap(),
+            commands::NodeColorScope::Preview
+        );
+        assert_eq!(
+            parse_color_scope(Some(&json!("mood"))).unwrap(),
+            commands::NodeColorScope::Mood
+        );
+        assert_eq!(
+            parse_color_scope(Some(&json!(true))).unwrap_err(),
+            "scope must be a string"
+        );
+        assert_eq!(
+            parse_color_scope(Some(&json!("scene"))).unwrap_err(),
+            "Invalid color scope: scene"
+        );
+    }
+
+    #[test]
+    fn input_binding_parsers_cover_aliases_defaults_and_errors() {
+        assert_eq!(parse_optional_button_action(&json!({})).unwrap(), None);
+        assert_eq!(
+            parse_optional_button_action(&json!({"button_action": null})).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_optional_button_action(&json!({"button_action": "on"})).unwrap(),
+            Some(ButtonAction::OnPress)
+        );
+        assert_eq!(
+            parse_optional_button_action(&json!({"button_action": "off"})).unwrap(),
+            Some(ButtonAction::OffPress)
+        );
+        assert_eq!(
+            parse_optional_button_action(&json!({"button_action": "toggle"})).unwrap(),
+            Some(ButtonAction::Toggle)
+        );
+        assert!(
+            parse_optional_button_action(&json!({"button_action": "bad"}))
+                .unwrap_err()
+                .contains("Invalid button_action")
+        );
+
+        assert_eq!(parse_input_binding_preset(&json!({})).unwrap(), None);
+        assert_eq!(
+            parse_input_binding_preset(&json!({"preset": null})).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_input_binding_preset(&json!({"preset": "day_sleep_toggle"})).unwrap(),
+            Some(InputBindingPreset::DaySleepToggle)
+        );
+        assert_eq!(
+            parse_input_binding_preset(&json!({"preset": "unknown"})).unwrap_err(),
+            "Invalid input binding preset"
+        );
+
+        assert!(input_binding_source_node_id(&json!({"source_node_id": "button-1"})).is_ok());
+        assert_eq!(
+            input_binding_source_node_id(&json!({})).unwrap_err().status,
+            400
+        );
+        assert!(input_binding_enabled(&json!({})));
+        assert!(!input_binding_enabled(&json!({"enabled": false})));
+        match input_binding_button_action(&json!({"button_action": "on"})) {
+            Ok(action) => assert_eq!(action, Some(ButtonAction::OnPress)),
+            Err(response) => panic!("unexpected error response {}", response.status),
+        }
+        assert_eq!(
+            input_binding_button_action(&json!({"button_action": "bad"}))
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+
+    #[test]
+    fn profile_settings_patch_parser_covers_clear_aliases_timers_and_errors() {
+        assert!(parse_profile_settings_patch(None, "room_profile")
+            .unwrap()
+            .is_none());
+
+        let clear = parse_profile_settings_patch(Some(&Value::Null), "room_profile")
+            .unwrap()
+            .unwrap();
+        assert!(clear.clear_all);
+
+        let patch = parse_profile_settings_patch(
+            Some(&json!({
+                "profile_id": null,
+                "mood_enabled": false,
+                "idle_profile_id": "legacy-idle",
+                "active_light_scene_id": "scene-1",
+                "fade_ms": {"mode": "fixed", "value": 250},
+                "motion_timeout_secs": null
+            })),
+            "room_profile",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(patch.profile_id, Some(None));
+        assert_eq!(patch.mood_enabled, Some(Some(false)));
+        assert_eq!(patch.mood_profile_id, Some(Some("legacy-idle".to_string())));
+        assert_eq!(patch.mood_scene_id, Some(Some("scene-1".to_string())));
+        assert_eq!(
+            patch.fade_ms,
+            Some(Some(rhythm_core::TimerSetting::Fixed { value: 250 }))
+        );
+        assert_eq!(patch.motion_timeout_secs, Some(None));
+
+        assert_eq!(
+            parse_profile_settings_patch(Some(&json!("bad")), "room_profile").unwrap_err(),
+            "room_profile must be an object or null"
+        );
+        assert_eq!(
+            parse_profile_settings_patch(Some(&json!({"profile_id": 5})), "room_profile")
+                .unwrap_err(),
+            "room_profile.profile_id must be a string or null"
+        );
+        assert_eq!(
+            parse_profile_settings_patch(Some(&json!({"mood_enabled": "yes"})), "room_profile")
+                .unwrap_err(),
+            "room_profile.mood_enabled must be a boolean or null"
+        );
+        assert_eq!(
+            parse_profile_settings_patch(Some(&json!({"mood_profile_id": 5})), "room_profile")
+                .unwrap_err(),
+            "room_profile.mood_profile_id must be a string or null"
+        );
+        assert_eq!(
+            parse_profile_settings_patch(Some(&json!({"mood_scene_id": false})), "room_profile")
+                .unwrap_err(),
+            "room_profile.mood_scene_id must be a string or null"
+        );
+        assert!(parse_profile_settings_patch(
+            Some(&json!({"fade_ms": {"mode": "fixed", "value": "fast"}})),
+            "room_profile"
+        )
+        .unwrap_err()
+        .contains("Invalid fade_ms"));
+
+        let empty = serde_json::Map::new();
+        assert_eq!(parse_timer_patch_value(&empty, "fade_ms").unwrap(), None);
+        let mut timer_body = serde_json::Map::new();
+        timer_body.insert("fade_ms".to_string(), Value::Null);
+        assert_eq!(
+            parse_timer_patch_value(&timer_body, "fade_ms").unwrap(),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn mode_settings_and_transition_handlers_reject_legacy_or_invalid_payloads() {
+        let state = handler_state_with_runtime();
+
+        for (body, expected) in [
+            (
+                json!({"rhythm_interval_secs": 30}),
+                "rhythm_interval_secs now belongs in light profile config",
+            ),
+            (json!({"mode": "sleep"}), "Use active/configs in /api/mode"),
+            (
+                json!({"active_mode": "sleep"}),
+                "Use active/configs in /api/mode",
+            ),
+            (json!({"modes": []}), "Use active/configs in /api/mode"),
+            (
+                json!({"power_save": true}),
+                "power_save has been removed; off is hard_off only",
+            ),
+            (
+                json!({"profiles": []}),
+                "Profiles moved to /api/profiles and /api/config",
+            ),
+        ] {
+            let response = handle_put_mode(&state, &body);
+            assert_eq!(response.status, 400, "{body}");
+            assert!(response.body.contains(expected), "{:?}", response.body);
+        }
+
+        let response = handle_put_mode(&state, &json!({"active": "invalid"}));
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("Invalid active"));
+
+        let response = handle_put_mode(&state, &json!({"configs": "invalid"}));
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("Invalid configs"));
+
+        for (body, expected) in [
+            (
+                json!({"rhythm_interval_secs": 30}),
+                "rhythm_interval_secs now belongs in light profile config",
+            ),
+            (
+                json!({"power_save": true}),
+                "power_save has been removed; off is hard_off only",
+            ),
+            (json!({"active": "day"}), "Mode fields belong in /api/mode"),
+            (json!({"configs": []}), "Mode fields belong in /api/mode"),
+            (
+                json!({"last_change": {}}),
+                "Mode fields belong in /api/mode",
+            ),
+            (
+                json!({"profiles": []}),
+                "Profiles moved to /api/profiles and /api/config",
+            ),
+        ] {
+            let response = handle_put_transitions(&state, &body);
+            assert_eq!(response.status, 400, "{body}");
+            assert!(response.body.contains(expected), "{:?}", response.body);
+        }
+
+        let response = handle_put_transitions(&state, &json!({"transitions": "bad"}));
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("Invalid transitions"));
+    }
+
+    #[test]
+    fn settings_and_input_binding_handlers_cover_rejection_branches() {
+        let state = handler_state_with_runtime();
+
+        for (body, expected) in [
+            (
+                json!({"profiles": []}),
+                "Profiles moved to /api/profiles and /api/config",
+            ),
+            (
+                json!({"light_breaker_enabled": true}),
+                "Light breaker moved to /api/light-breaker",
+            ),
+            (
+                json!({"light_breaker": {"enabled": true}}),
+                "Light breaker moved to /api/light-breaker",
+            ),
+        ] {
+            let response = handle_put_settings(&state, &body);
+            assert_eq!(response.status, 400, "{body}");
+            assert!(response.body.contains(expected), "{:?}", response.body);
+        }
+
+        let response = handle_post_input_binding(
+            &state,
+            &json!({
+                "trigger": {"kind": "button", "source_node_id": "button-1"},
+                "action": {"kind": "mode_set", "mode": "day"}
+            }),
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("Generic input bindings require id"));
+
+        let response = handle_post_input_binding(
+            &state,
+            &json!({
+                "id": "",
+                "trigger": {"kind": "button", "source_node_id": "button-1"},
+                "action": {"kind": "mode_set", "mode": "day"}
+            }),
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("id cannot be empty"));
+
+        let response = handle_post_input_binding(
+            &state,
+            &json!({
+                "id": "binding-1",
+                "trigger": {"kind": "bad"},
+                "action": {"kind": "mode_set", "mode": "day"}
+            }),
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("Invalid input binding"));
+
+        let response = handle_put_input_binding(
+            &state,
+            "binding-1",
+            &json!({
+                "trigger": {"kind": "button", "source_node_id": "button-1"},
+                "action": {"kind": "unknown"}
+            }),
+        );
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("Invalid input binding"));
+
+        let response = handle_put_input_binding(&state, "binding-1", &json!("bad"));
+        assert_eq!(response.status, 400);
+        assert!(response
+            .body
+            .contains("Preset input bindings require a preset field"));
     }
 
     fn add_button_node(state: &SharedState, native_id: &str) -> String {

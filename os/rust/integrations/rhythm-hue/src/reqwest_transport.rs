@@ -237,4 +237,11 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn reqwest_hue_transport_new_builds_https_base_url_without_network_io() {
+        let transport = ReqwestHueTransport::new("192.0.2.10").unwrap();
+
+        assert_eq!(transport.base_url(), "https://192.0.2.10");
+    }
 }

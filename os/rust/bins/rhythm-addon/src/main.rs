@@ -197,3 +197,17 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_factory_reset_hook_registers_restart_callback() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+
+        install_factory_reset_hook(&state).unwrap();
+
+        assert!(state.lock().unwrap().after_factory_reset_fn.is_some());
+    }
+}

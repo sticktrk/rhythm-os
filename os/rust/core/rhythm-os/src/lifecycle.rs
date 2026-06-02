@@ -938,10 +938,196 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+
+    use crate::canonical::identity::HubKey;
+    use crate::hub::{
+        ActiveHub, ExternalLightHubIntegration, HubCredentials, HubEvent, HubProvider, HubType,
+    };
+    use crate::scenes::StoredScenes;
+    use crate::state::AppState;
+    use crate::storage::{Storage, StoredLightProfiles, StoredLocation, StoredSettings};
+    use crate::topology::{HubRoomBinding, TopologyRoom};
+    use anyhow::Result;
     use rhythm_core::room::{Room, RoomManager};
+    use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_core::{HubLightController, NoOpController, SpyLightController};
+
+    #[derive(Default)]
+    struct LifecycleTestStorage {
+        rooms: Option<RoomManager>,
+        saved_credentials: Arc<Mutex<Vec<Vec<HubCredentials>>>>,
+    }
+
+    impl LifecycleTestStorage {
+        fn with_rooms(rooms: RoomManager) -> Self {
+            Self {
+                rooms: Some(rooms),
+                saved_credentials: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl Storage for LifecycleTestStorage {
+        fn load_rooms(&self) -> Result<RoomManager> {
+            self.rooms
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing rooms"))
+        }
+
+        fn save_rooms(&self, _rooms: &RoomManager) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_light_profiles(&self) -> Result<StoredLightProfiles> {
+            Err(anyhow::anyhow!("missing light profiles"))
+        }
+
+        fn save_light_profiles(&self, _config: &StoredLightProfiles) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_location(&self) -> Result<StoredLocation> {
+            Err(anyhow::anyhow!("missing location"))
+        }
+
+        fn save_location(&self, _loc: &StoredLocation) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_settings(&self) -> Result<StoredSettings> {
+            Err(anyhow::anyhow!("missing settings"))
+        }
+
+        fn save_settings(&self, _settings: &StoredSettings) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_scenes(&self) -> Result<Option<StoredScenes>> {
+            Ok(None)
+        }
+
+        fn save_scenes(&self, _scenes: &StoredScenes) -> Result<()> {
+            Ok(())
+        }
+
+        fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
+            Ok(Vec::new())
+        }
+
+        fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
+            self.saved_credentials.lock().unwrap().push(creds.to_vec());
+            Ok(())
+        }
+
+        fn load_hub_registry_for(&self, _key: &HubKey) -> Result<Option<serde_json::Value>> {
+            Ok(None)
+        }
+
+        fn save_hub_registry_for(&self, _key: &HubKey, _data: &serde_json::Value) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct TestProvider;
+
+    impl HubProvider for TestProvider {
+        fn hub_type(&self) -> HubType {
+            HubType::new("test")
+        }
+
+        fn configure(
+            &self,
+            _address: &str,
+            _credentials_json: &str,
+            _state: &SharedState,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    static TEST_PROVIDER: TestProvider = TestProvider;
+
+    struct TestIntegration;
+
+    impl ExternalLightHubIntegration for TestIntegration {
+        fn hub_type(&self) -> &'static str {
+            "test"
+        }
+
+        fn provider(&self) -> &'static dyn HubProvider {
+            &TEST_PROVIDER
+        }
+
+        fn connect_and_start(
+            &self,
+            _state: SharedState,
+            _key: &HubKey,
+        ) -> Result<Receiver<HubEvent>> {
+            let (_tx, rx) = mpsc::channel();
+            Ok(rx)
+        }
+
+        fn ensure_runtime(&self, state: &SharedState) -> Result<()> {
+            ensure_composite_runtime(state, &[self])
+        }
+
+        fn create_controller(
+            &self,
+            _state: &SharedState,
+            _key: &HubKey,
+        ) -> Result<Arc<dyn HubLightController>> {
+            Ok(Arc::new(NoOpController::new()))
+        }
+    }
 
     fn default_room(id: &str) -> Room {
         Room::new(id, id)
+    }
+
+    fn shared_state() -> SharedState {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    fn active_hub(hub_key: HubKey, shutdown: Arc<AtomicBool>) -> ActiveHub {
+        ActiveHub {
+            hub_type: hub_key.hub_type.clone(),
+            hub_key,
+            runtime: None,
+            hub_data: Box::new(()),
+            registry: None,
+            discovery: None,
+            shutdown,
+        }
+    }
+
+    fn registry_with_room(
+        hub_room_id: &str,
+        name: &str,
+        control_id: &str,
+    ) -> Arc<Mutex<HubDeviceRegistry>> {
+        let mut registry = HubDeviceRegistry::with_options(true);
+        registry.upsert_room(hub_room_id, name, control_id, &["light-1".to_string()]);
+        registry.upsert_device("light-1", Some(hub_room_id), &[], DeviceType::Light);
+        Arc::new(Mutex::new(registry))
+    }
+
+    fn topology_room_with_binding(
+        room_id: &str,
+        name: &str,
+        hub_key: HubKey,
+        hub_room_id: &str,
+        control_id: &str,
+    ) -> TopologyRoom {
+        let mut room = TopologyRoom::new(room_id, name);
+        room.upsert_hub_room_binding(HubRoomBinding {
+            hub_key,
+            hub_room_id: hub_room_id.to_string(),
+            control_id: control_id.to_string(),
+            light_device_ids: vec!["light-1".to_string()],
+        });
+        room
     }
 
     #[test]
@@ -1027,5 +1213,359 @@ mod tests {
             !persisted_rooms_look_corrupted(&rooms),
             "hard_off alone should prove non-corruption"
         );
+    }
+
+    #[test]
+    fn connect_hub_restores_snapshot_builds_data_and_tags_events() {
+        let state = shared_state();
+        let hub_key = HubKey::new(HubType::new("test"), "hub-1");
+        let mut original = HubDeviceRegistry::with_options(true);
+        original.upsert_room("area-1", "Kitchen", "", &["light.kitchen".to_string()]);
+        original.upsert_device(
+            "button-1",
+            Some("area-1"),
+            &[("button-event-1".to_string(), 2)],
+            DeviceType::Button,
+        );
+        let snapshot = original.snapshot();
+
+        let (raw_tx, raw_rx) = mpsc::channel();
+        let (hub, event_rx) = connect_hub(
+            &state,
+            HubType::new("test"),
+            hub_key.clone(),
+            true,
+            Some(snapshot),
+            |registry| {
+                let registry = registry.lock().unwrap();
+                assert_eq!(registry.room_name("area-1"), Some("Kitchen"));
+                assert_eq!(
+                    registry.get_room_for_button("button-event-1"),
+                    Some("area-1".to_string())
+                );
+                Box::new("typed-data".to_string())
+            },
+            move |_registry, _shutdown| raw_rx,
+        )
+        .unwrap();
+
+        assert_eq!(hub.hub_key, hub_key);
+        assert_eq!(hub.data::<String>().map(String::as_str), Some("typed-data"));
+        let registry = hub.registry.as_ref().unwrap().lock().unwrap();
+        assert_eq!(
+            registry.get_grouped_light_id("area-1"),
+            Some("area-1".to_string())
+        );
+        assert!(registry
+            .devices_for_room("area-1")
+            .contains(&"button-1".to_string()));
+        drop(registry);
+
+        raw_tx.send(HubEvent::Heartbeat { hub_key: None }).unwrap();
+        let event = event_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(event.hub_key(), Some(&hub_key));
+    }
+
+    #[test]
+    fn start_event_translator_invokes_activity_and_honors_shutdown() {
+        let (raw_tx, raw_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let activity_count = Arc::new(AtomicUsize::new(0));
+        let activity = {
+            let activity_count = activity_count.clone();
+            Arc::new(move || {
+                activity_count.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        let hub_rx = start_event_translator(
+            raw_rx,
+            |raw: &u8| {
+                vec![HubEvent::Disconnected {
+                    hub_key: None,
+                    reason: format!("raw-{raw}"),
+                }]
+            },
+            shutdown.clone(),
+            "test-event-translator",
+            Some(activity),
+        );
+
+        raw_tx.send(7).unwrap();
+        let first = hub_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        match first {
+            HubEvent::Disconnected { reason, .. } => assert_eq!(reason, "raw-7"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert_eq!(activity_count.load(Ordering::Relaxed), 1);
+
+        shutdown.store(true, Ordering::Relaxed);
+        raw_tx.send(8).unwrap();
+        assert!(hub_rx
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .is_err());
+    }
+
+    #[test]
+    fn ensure_hub_runtime_restores_persisted_rooms_and_runs_warmup_once() {
+        let state = shared_state();
+        let hub_key = HubKey::new(HubType::new("test"), "hub-1");
+        let registry = registry_with_room("hub-kitchen", "Kitchen", "group-kitchen");
+
+        let mut persisted = RoomManager::new();
+        let mut kitchen = Room::new("hub-kitchen", "Kitchen");
+        kitchen.rhythm_enabled = true;
+        kitchen.disabled = true;
+        kitchen.time_offset_minutes = 45.0;
+        kitchen.brightness_offset = 0.25;
+        kitchen.soft_off = true;
+        kitchen.profile_settings.mood_enabled = Some(false);
+        persisted.add_room(kitchen);
+
+        {
+            let mut guard = state.lock().unwrap();
+            guard.latitude = Some(40.71);
+            guard.longitude = Some(-74.0);
+            guard.utc_offset_hours = 0.0;
+            guard.timezone_name = Some("America/New_York".to_string());
+            guard.power_save = false;
+            guard.storage = Some(Box::new(LifecycleTestStorage::with_rooms(persisted)));
+            guard.topology.insert_room(topology_room_with_binding(
+                "top-kitchen",
+                "Kitchen",
+                hub_key.clone(),
+                "hub-kitchen",
+                "group-kitchen",
+            ));
+            guard.hubs.insert(
+                hub_key.clone(),
+                active_hub(hub_key.clone(), Arc::new(AtomicBool::new(false))),
+            );
+        }
+
+        let warmups = Arc::new(AtomicUsize::new(0));
+        let spy = Arc::new(SpyLightController::new());
+        ensure_hub_runtime(
+            &state,
+            &hub_key,
+            spy.clone(),
+            registry.clone(),
+            Some(Box::new({
+                let warmups = warmups.clone();
+                move |_| {
+                    warmups.fetch_add(1, Ordering::Relaxed);
+                }
+            })),
+        )
+        .unwrap();
+
+        let runtime = state.lock().unwrap().hub_runtime_for(&hub_key).unwrap();
+        let snapshot = runtime.engine_node_snapshot("hub-kitchen").unwrap();
+        assert!(snapshot.rhythm_enabled);
+        assert!(snapshot.disabled);
+        assert!(snapshot.soft_off);
+        assert!((snapshot.time_offset_minutes - 45.0).abs() < f32::EPSILON);
+        assert!((snapshot.brightness_offset - 0.25).abs() < f32::EPSILON);
+        assert_eq!(snapshot.profile_settings.mood_enabled, Some(false));
+        assert_eq!(warmups.load(Ordering::Relaxed), 1);
+        assert!(state.lock().unwrap().utc_offset_hours < 0.0);
+
+        ensure_hub_runtime(&state, &hub_key, NoOpController::new(), registry, None).unwrap();
+        assert_eq!(
+            warmups.load(Ordering::Relaxed),
+            1,
+            "existing runtime should short-circuit without warmup"
+        );
+    }
+
+    #[test]
+    fn ensure_hub_runtime_defaults_missing_or_corrupted_rooms_to_rhythm_enabled() {
+        for storage in [
+            Some(Box::new(LifecycleTestStorage::default()) as Box<dyn Storage>),
+            Some(Box::new(LifecycleTestStorage::with_rooms({
+                let mut rooms = RoomManager::new();
+                rooms.add_room(Room::new("hub-kitchen", "Kitchen"));
+                rooms
+            })) as Box<dyn Storage>),
+        ] {
+            let state = shared_state();
+            let hub_key = HubKey::new(HubType::new("test"), "hub-1");
+            let registry = registry_with_room("hub-kitchen", "Kitchen", "group-kitchen");
+            {
+                let mut guard = state.lock().unwrap();
+                guard.power_save = false;
+                guard.storage = storage;
+                guard.topology.insert_room(topology_room_with_binding(
+                    "top-kitchen",
+                    "Kitchen",
+                    hub_key.clone(),
+                    "hub-kitchen",
+                    "group-kitchen",
+                ));
+                guard.hubs.insert(
+                    hub_key.clone(),
+                    active_hub(hub_key.clone(), Arc::new(AtomicBool::new(false))),
+                );
+            }
+
+            ensure_hub_runtime(&state, &hub_key, NoOpController::new(), registry, None).unwrap();
+            let runtime = state.lock().unwrap().hub_runtime_for(&hub_key).unwrap();
+            let snapshot = runtime.engine_node_snapshot("hub-kitchen").unwrap();
+            assert!(
+                snapshot.rhythm_enabled,
+                "missing and corrupted room state should both default to rhythm on"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_composite_runtime_registers_controller_and_restores_topology_nodes() {
+        let state = shared_state();
+        let hub_key = HubKey::new(HubType::new("test"), "hub-1");
+        let mut hub_registry = HubDeviceRegistry::with_options(true);
+        hub_registry.upsert_room(
+            "hub-kitchen",
+            "Kitchen",
+            "group-kitchen",
+            &["light-1".to_string()],
+        );
+
+        let registry: Arc<Mutex<dyn rhythm_core::HubRegistry>> = Arc::new(Mutex::new(hub_registry));
+        let mut persisted = RoomManager::new();
+        let mut kitchen = Room::new("top-kitchen", "Kitchen");
+        kitchen.rhythm_enabled = true;
+        kitchen.standby_enabled = true;
+        kitchen.brightness_offset = -0.2;
+        persisted.add_room(kitchen);
+
+        {
+            let mut guard = state.lock().unwrap();
+            guard.latitude = Some(35.22);
+            guard.longitude = Some(-80.84);
+            guard.utc_offset_hours = -5.0;
+            guard.power_save = false;
+            guard.storage = Some(Box::new(LifecycleTestStorage::with_rooms(persisted)));
+            guard.topology.insert_room(topology_room_with_binding(
+                "top-kitchen",
+                "Kitchen",
+                hub_key.clone(),
+                "hub-kitchen",
+                "group-kitchen",
+            ));
+            let mut hub = active_hub(hub_key.clone(), Arc::new(AtomicBool::new(false)));
+            hub.registry = Some(registry);
+            guard.hubs.insert(hub_key.clone(), hub);
+        }
+
+        let integration = TestIntegration;
+        ensure_composite_runtime(&state, &[&integration]).unwrap();
+
+        let guard = state.lock().unwrap();
+        let composite = guard.composite_controller.as_ref().unwrap();
+        assert_eq!(composite.controller_count(), 1);
+        let runtime = guard.hub_runtime_for(&hub_key).unwrap();
+        drop(guard);
+
+        let snapshot = runtime.engine_node_snapshot("top-kitchen").unwrap();
+        assert!(snapshot.rhythm_enabled);
+        assert!(snapshot.standby_enabled);
+        assert!((snapshot.brightness_offset + 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ensure_composite_runtime_reports_when_no_controllers_can_be_registered() {
+        let state = shared_state();
+        let hub_key = HubKey::new(HubType::new("missing"), "hub-1");
+        state.lock().unwrap().hubs.insert(
+            hub_key.clone(),
+            active_hub(hub_key, Arc::new(AtomicBool::new(false))),
+        );
+
+        let err = ensure_composite_runtime(&state, &[]).unwrap_err();
+        assert!(err.to_string().contains("No controllers registered"));
+        assert!(state.lock().unwrap().hub_runtime().is_none());
+    }
+
+    #[test]
+    fn configure_hub_saves_credentials_replaces_old_hub_and_stores_receiver() {
+        let state = shared_state();
+        let hub_key = HubKey::new(HubType::new("test"), "hub-1");
+        let old_shutdown = Arc::new(AtomicBool::new(false));
+        state.lock().unwrap().hubs.insert(
+            hub_key.clone(),
+            active_hub(hub_key.clone(), old_shutdown.clone()),
+        );
+
+        configure_hub(
+            &state,
+            "hub-1",
+            r#"{"token":"new"}"#,
+            |address, raw| {
+                let parsed: serde_json::Value = serde_json::from_str(raw)?;
+                Ok(HubCredentials::new(
+                    "test",
+                    address,
+                    serde_json::json!({"token": parsed["token"]}),
+                ))
+            },
+            |_state, creds| creds.get_str("token") == Some("same"),
+            {
+                let hub_key = hub_key.clone();
+                move |_state| {
+                    let (tx, rx) = mpsc::channel();
+                    drop(tx);
+                    Ok((active_hub(hub_key, Arc::new(AtomicBool::new(false))), rx))
+                }
+            },
+        )
+        .unwrap();
+
+        let guard = state.lock().unwrap();
+        assert_eq!(
+            guard
+                .hub_credentials
+                .get(&hub_key)
+                .and_then(|creds| creds.get_str("token")),
+            Some("new")
+        );
+        assert!(guard.hubs.contains_key(&hub_key));
+        assert_eq!(guard.hub_connection_status.get(&hub_key), Some(&false));
+        assert_eq!(guard.pending_hub_event_rxs.len(), 1);
+        assert!(old_shutdown.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn configure_hub_skips_connection_when_already_configured() {
+        let state = shared_state();
+        let called = Arc::new(AtomicBool::new(false));
+
+        configure_hub(
+            &state,
+            "hub-1",
+            r#"{}"#,
+            |address, _raw| Ok(HubCredentials::new("test", address, serde_json::json!({}))),
+            |_state, _creds| true,
+            {
+                let called = called.clone();
+                move |_state| {
+                    called.store(true, Ordering::Relaxed);
+                    let (_tx, rx) = mpsc::channel();
+                    Ok((
+                        active_hub(
+                            HubKey::new(HubType::new("test"), "hub-1"),
+                            Arc::new(AtomicBool::new(false)),
+                        ),
+                        rx,
+                    ))
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(!called.load(Ordering::Relaxed));
+        assert!(state.lock().unwrap().hubs.is_empty());
     }
 }

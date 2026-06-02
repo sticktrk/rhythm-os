@@ -726,3 +726,209 @@ impl ProvisioningFrontend for BluezFrontend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    use rhythm_os::storage::{FileStorage, Storage};
+
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn state() -> SharedState {
+        Arc::new(Mutex::new(rhythm_os::state::AppState::default()))
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-ble-provision-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn with_force_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var(FORCE_ENV).ok();
+        match value {
+            Some(value) => std::env::set_var(FORCE_ENV, value),
+            None => std::env::remove_var(FORCE_ENV),
+        }
+        let result = f();
+        if let Some(previous) = previous {
+            std::env::set_var(FORCE_ENV, previous);
+        } else {
+            std::env::remove_var(FORCE_ENV);
+        }
+        result
+    }
+
+    fn wifi_credentials() -> WifiCredentials {
+        WifiCredentials {
+            ssid: "RhythmNet".to_string(),
+            password: "secret".to_string(),
+        }
+    }
+
+    #[test]
+    fn provisioning_manager_force_flag_accepts_common_truthy_values() {
+        let manager = ProvisioningManager::new("1.2.3", state());
+
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            with_force_env(Some(value), || assert!(manager.force_enabled()));
+        }
+        for value in ["0", "false", "no", "off", "", "maybe"] {
+            with_force_env(Some(value), || assert!(!manager.force_enabled()));
+        }
+        with_force_env(None, || assert!(!manager.force_enabled()));
+    }
+
+    #[test]
+    fn provisioning_manager_checks_auth_requirement_and_force_override() {
+        let state = state();
+        let manager = ProvisioningManager::new("1.2.3", state.clone());
+
+        state.lock().unwrap().require_api_auth = true;
+        assert!(manager.api_auth_required());
+        with_force_env(
+            Some("1"),
+            || assert!(manager.should_run_for_current_state()),
+        );
+
+        state.lock().unwrap().require_api_auth = false;
+        assert!(!manager.api_auth_required());
+        with_force_env(
+            Some("1"),
+            || assert!(manager.should_run_for_current_state()),
+        );
+    }
+
+    #[test]
+    fn persist_commissioning_wifi_credentials_writes_storage_when_available() {
+        let root = unique_test_dir("persist");
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        let state = state();
+        state.lock().unwrap().storage = Some(Box::new(storage));
+
+        let creds = wifi_credentials();
+        persist_commissioning_wifi_credentials(&state, &creds);
+
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        assert_eq!(
+            storage.load_commissioning_wifi_credentials().unwrap(),
+            Some(creds)
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn persist_commissioning_wifi_credentials_noops_without_storage() {
+        let state = state();
+        persist_commissioning_wifi_credentials(&state, &wifi_credentials());
+    }
+
+    #[test]
+    fn build_identity_uses_rpiz_name_and_supplied_version() {
+        let identity = build_identity("9.8.7-test");
+
+        assert!(identity.name.starts_with("rhythm-rpiz-"));
+        assert_eq!(identity.version, "9.8.7-test");
+        assert!(identity.mac.is_none());
+    }
+
+    #[test]
+    fn linux_wifi_backend_poll_result_filters_stale_attempts_and_clears_active_attempt() {
+        let state = state();
+        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state);
+
+        assert!(backend.poll_result(Duration::ZERO).unwrap().is_none());
+
+        backend.active_attempt = Some(2);
+        backend
+            .result_tx
+            .send((
+                1,
+                ProvisioningConnectResult::Failed {
+                    error: "stale".to_string(),
+                },
+            ))
+            .unwrap();
+        backend
+            .result_tx
+            .send((
+                2,
+                ProvisioningConnectResult::Connected {
+                    ip: "192.168.1.10".to_string(),
+                    owner_token: Some("owner".to_string()),
+                },
+            ))
+            .unwrap();
+
+        let result = backend.poll_result(Duration::ZERO).unwrap().unwrap();
+        match result {
+            ProvisioningConnectResult::Connected { ip, owner_token } => {
+                assert_eq!(ip, "192.168.1.10");
+                assert_eq!(owner_token.as_deref(), Some("owner"));
+            }
+            other => panic!("expected connected result, got {other:?}"),
+        }
+        assert_eq!(backend.active_attempt, None);
+    }
+
+    #[test]
+    fn linux_wifi_backend_poll_result_times_out_when_active_attempt_has_no_result() {
+        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state());
+        backend.active_attempt = Some(1);
+
+        assert!(backend
+            .poll_result(Duration::from_millis(1))
+            .unwrap()
+            .is_none());
+        assert_eq!(backend.active_attempt, Some(1));
+    }
+
+    #[test]
+    fn linux_wifi_backend_can_issue_local_owner_token() {
+        let state = state();
+        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state);
+
+        let token = backend
+            .issue_local_owner_token(Some("BLE test".to_string()))
+            .unwrap()
+            .expect("owner token should be returned");
+
+        assert!(!token.is_empty());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_bluez_frontend_reports_unsupported_operations() {
+        let new_error = match BluezFrontend::new() {
+            Ok(_) => panic!("expected BlueZ frontend creation to fail off Linux"),
+            Err(error) => error,
+        };
+        assert!(new_error.to_string().contains("only supported on Linux"));
+
+        let mut frontend = BluezFrontend;
+        let info = build_identity("1.0.0");
+        assert!(frontend
+            .start(&info)
+            .unwrap_err()
+            .to_string()
+            .contains("Linux"));
+        assert!(frontend
+            .poll_event(Duration::ZERO)
+            .unwrap_err()
+            .to_string()
+            .contains("Linux"));
+        assert!(frontend
+            .publish_status(&ProvisioningStatus::Waiting)
+            .unwrap_err()
+            .to_string()
+            .contains("Linux"));
+        frontend.stop().unwrap();
+    }
+}

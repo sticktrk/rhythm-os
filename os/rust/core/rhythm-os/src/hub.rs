@@ -1216,6 +1216,13 @@ mod tests {
 
     static TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[&MOCK_HUE, &MOCK_HA];
 
+    fn string_error<T>(result: Result<T>) -> String {
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error.to_string(),
+        }
+    }
+
     struct EmptyDiscovery;
 
     impl HubDiscovery for EmptyDiscovery {
@@ -1429,6 +1436,149 @@ mod tests {
         let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
         let key = HubKey::new(HubType::new("test"), "127.0.0.1");
         integration.post_connect(&state, &key); // should not panic
+    }
+
+    #[test]
+    fn trait_default_methods_report_unsupported_operations() {
+        struct MinimalIntegration;
+        impl ExternalLightHubIntegration for MinimalIntegration {
+            fn hub_type(&self) -> &'static str {
+                "test"
+            }
+            fn provider(&self) -> &'static dyn HubProvider {
+                &MOCK_HUE_PROVIDER
+            }
+            fn connect_and_start(&self, _: SharedState, _: &HubKey) -> Result<Receiver<HubEvent>> {
+                let (_tx, rx) = mpsc::channel();
+                Ok(rx)
+            }
+            fn ensure_runtime(&self, _: &SharedState) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let integration = MinimalIntegration;
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("test"), "local");
+        let params = serde_json::json!({"device_id": "test-1"});
+
+        let caps = integration.api_capabilities();
+        assert_eq!(caps.hub_type, "test");
+        assert!(caps.configurable);
+        assert!(integration.create_controller(&state, &key).is_err());
+        assert!(integration.start_pairing(&state, &params).is_err());
+        assert!(integration.start_unpairing(&state, &params).is_err());
+        assert!(integration.run_device_test(&state, &params).is_err());
+        assert!(integration
+            .save_device_test_report(&state, &params)
+            .is_err());
+        assert!(integration.sync_topology_groups(&state, &key).is_ok());
+        integration.refresh_credentials(&state, &key);
+        assert!(integration
+            .credentials_interceptor(&state, &serde_json::json!({}))
+            .is_none());
+    }
+
+    #[test]
+    fn combined_credentials_interceptor_returns_first_integration_result() {
+        struct InterceptorIntegration {
+            hub_type: &'static str,
+            response: Option<&'static str>,
+        }
+
+        impl ExternalLightHubIntegration for InterceptorIntegration {
+            fn hub_type(&self) -> &'static str {
+                self.hub_type
+            }
+            fn provider(&self) -> &'static dyn HubProvider {
+                &MOCK_HUE_PROVIDER
+            }
+            fn connect_and_start(&self, _: SharedState, _: &HubKey) -> Result<Receiver<HubEvent>> {
+                let (_tx, rx) = mpsc::channel();
+                Ok(rx)
+            }
+            fn ensure_runtime(&self, _: &SharedState) -> Result<()> {
+                Ok(())
+            }
+            fn credentials_interceptor(
+                &self,
+                _state: &SharedState,
+                _body: &serde_json::Value,
+            ) -> Option<Result<String, String>> {
+                self.response.map(|value| Ok(value.to_string()))
+            }
+        }
+
+        static FIRST: InterceptorIntegration = InterceptorIntegration {
+            hub_type: "first",
+            response: None,
+        };
+        static SECOND: InterceptorIntegration = InterceptorIntegration {
+            hub_type: "second",
+            response: Some("filled"),
+        };
+        static INTERCEPTOR_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[&FIRST, &SECOND];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+
+        let interceptor = combined_credentials_interceptor(INTERCEPTOR_INTEGRATIONS);
+        let result = interceptor(&state, &serde_json::json!({}))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result, "filled");
+    }
+
+    #[test]
+    fn integration_callbacks_cover_capabilities_and_unsupported_dispatch() {
+        let callbacks = integration_callbacks(TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+
+        assert_eq!(
+            callbacks
+                .hub_capabilities
+                .iter()
+                .map(|cap| cap.hub_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["homeassistant", "hue"]
+        );
+        assert!((callbacks.register_controller_fn)(
+            &state,
+            &HubKey::new(HubType::new("hue"), "192.168.1.5")
+        )
+        .is_ok());
+
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        let missing_key = HubKey::new(HubType::new("unknown"), "local");
+        assert!(
+            string_error((callbacks.register_controller_fn)(&state, &missing_key))
+                .contains("No integration for hub type")
+        );
+
+        assert!(string_error((callbacks.start_pairing_fn)(
+            &state,
+            "unknown",
+            &serde_json::json!({})
+        ))
+        .contains("No integration for hub type"));
+        assert!(string_error((callbacks.start_unpairing_fn)(
+            &state,
+            "unknown",
+            &serde_json::json!({})
+        ))
+        .contains("No integration for hub type"));
+        assert!(string_error((callbacks.run_device_test_fn)(
+            &state,
+            "unknown",
+            &serde_json::json!({})
+        ))
+        .contains("No integration for hub type"));
+        assert!(string_error((callbacks.save_device_test_report_fn)(
+            &state,
+            "unknown",
+            &serde_json::json!({})
+        ))
+        .contains("No integration for hub type"));
     }
 
     #[test]

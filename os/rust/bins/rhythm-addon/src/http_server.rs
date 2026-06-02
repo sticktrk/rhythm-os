@@ -24,3 +24,16 @@ pub fn create_router(state: SharedState) -> Router {
 
     logging::with_http_observability(api.layer(CorsLayer::permissive()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhythm_os::state::AppState;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn create_router_builds_addon_api_routes() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let _router = create_router(state);
+    }
+}
