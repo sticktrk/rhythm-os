@@ -130,6 +130,49 @@ void main() {
       expect(service!.availableRelease, isNull);
     });
 
+    test('surfaces image base drift metadata from explicit check response',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.1.0',
+        latestVersion: '1.1.0',
+        currentImageVersion: '1.0.8',
+        latestImageVersion: '1.0.9',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        initialUpdateAvailable: false,
+        updateReason: 'image_base_drift',
+        otaScope: 'rootfs_slot',
+        capabilityPayloads: const ['archive_bundle', 'rootfs_image'],
+        statusHasPreviousCheck: false,
+        imageAssets: const [
+          {
+            'name': 'rootfs.ext2.gz',
+            'version': '1.0.9',
+            'url': 'https://example.invalid/rootfs.ext2.gz',
+          },
+        ],
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.state, OtaState.idle);
+
+      await service!.checkForUpdate('1.1.0');
+
+      expect(service!.state, OtaState.available);
+      expect(service!.updateReason, OtaUpdateReason.imageBaseDrift);
+      expect(service!.currentImageVersion, '1.0.8');
+      expect(service!.latestImageVersion, '1.0.9');
+      expect(service!.availableRelease?.currentImageVersion, '1.0.8');
+      expect(service!.availableRelease?.latestImageVersion, '1.0.9');
+      expect(service!.imageAssets.map((entry) => entry.title).toList(), [
+        'rootfs.ext2.gz',
+      ]);
+    });
+
     test('surfaces component drift metadata from server bundle checks',
         () async {
       server = await _FakeOtaServer.start(
@@ -170,6 +213,62 @@ void main() {
         service!.imageAssets.map((entry) => entry.title).toList(),
         ['server.img.zst'],
       );
+    });
+
+    test('surfaces image base drift as an available self-pull update',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.1.0',
+        latestVersion: '1.1.0',
+        currentImageVersion: '1.0.8',
+        latestImageVersion: '1.0.9',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        initialUpdateAvailable: false,
+        updateReason: 'image_base_drift',
+        otaScope: 'rootfs_slot',
+        capabilityPayloads: const ['archive_bundle', 'rootfs_image'],
+        imageAssets: const [
+          {
+            'name': 'rootfs.ext2.gz',
+            'version': '1.0.9',
+            'url': 'https://example.invalid/rootfs.ext2.gz',
+          },
+        ],
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.isSelfPull, isTrue);
+      expect(service!.state, OtaState.available);
+      expect(service!.updateReason, OtaUpdateReason.imageBaseDrift);
+      expect(service!.availableRelease?.version, '1.1.0');
+      expect(service!.currentPackageVersion, '1.1.0');
+      expect(service!.latestPackageVersion, '1.1.0');
+      expect(service!.currentImageVersion, '1.0.8');
+      expect(service!.latestImageVersion, '1.0.9');
+      expect(service!.availableRelease?.currentImageVersion, '1.0.8');
+      expect(service!.availableRelease?.latestImageVersion, '1.0.9');
+      expect(service!.imageAssets.map((entry) => entry.title).toList(), [
+        'rootfs.ext2.gz',
+      ]);
+
+      await service!.startUpdate(
+        InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      await _waitFor(
+        () => service!.state == OtaState.complete,
+        description: 'image-base drift update to complete',
+      );
+
+      expect(service!.currentVersion, '1.1.0');
+      expect(service!.currentImageVersion, '1.0.9');
+      expect(service!.latestImageVersion, '1.0.9');
     });
 
     test('accepts v-prefixed versions when status reports the updated version',
@@ -333,6 +432,10 @@ class _FakeOtaServer {
   final HttpServer _server;
   final String initialVersion;
   final String latestVersion;
+  final String? currentPackageVersion;
+  final String? latestPackageVersion;
+  final String? currentImageVersion;
+  final String? latestImageVersion;
   final String stateVersionAfterUpdate;
   final _FakeOtaScenario scenario;
   final Duration startResponseDelay;
@@ -354,6 +457,10 @@ class _FakeOtaServer {
     required HttpServer server,
     required this.initialVersion,
     required this.latestVersion,
+    required this.currentPackageVersion,
+    required this.latestPackageVersion,
+    required this.currentImageVersion,
+    required this.latestImageVersion,
     required this.stateVersionAfterUpdate,
     required this.scenario,
     required this.startResponseDelay,
@@ -374,6 +481,10 @@ class _FakeOtaServer {
   static Future<_FakeOtaServer> start({
     required String initialVersion,
     required String latestVersion,
+    String? currentPackageVersion,
+    String? latestPackageVersion,
+    String? currentImageVersion,
+    String? latestImageVersion,
     required _FakeOtaScenario scenario,
     String? stateVersionAfterUpdate,
     Duration startResponseDelay = Duration.zero,
@@ -393,6 +504,10 @@ class _FakeOtaServer {
       server: server,
       initialVersion: initialVersion,
       latestVersion: latestVersion,
+      currentPackageVersion: currentPackageVersion,
+      latestPackageVersion: latestPackageVersion,
+      currentImageVersion: currentImageVersion,
+      latestImageVersion: latestImageVersion,
       stateVersionAfterUpdate: stateVersionAfterUpdate ?? latestVersion,
       scenario: scenario,
       startResponseDelay: startResponseDelay,
@@ -570,6 +685,12 @@ class _FakeOtaServer {
       'state': state,
       'current_version': currentVersion,
       'latest_version': latestVersion,
+      'current_package_version': currentPackageVersion ?? currentVersion,
+      'latest_package_version': latestPackageVersion ?? latestVersion,
+      if (currentImageVersion != null)
+        'current_image_version': currentImageVersion,
+      if (latestImageVersion != null)
+        'latest_image_version': latestImageVersion,
       if (updateAvailable) 'target_version': latestVersion,
       'update_available': updateAvailable,
       if (includeUpdateReason && updateReason != null)

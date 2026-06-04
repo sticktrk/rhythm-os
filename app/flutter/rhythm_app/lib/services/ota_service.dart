@@ -35,6 +35,7 @@ enum _OtaStrategy {
 enum OtaUpdateReason {
   versionMismatch,
   componentDrift,
+  imageBaseDrift,
   unknown,
 }
 
@@ -45,6 +46,7 @@ OtaUpdateReason? _tryParseOtaUpdateReason(Object? value) {
   return switch (raw) {
     'version_mismatch' => OtaUpdateReason.versionMismatch,
     'component_drift' => OtaUpdateReason.componentDrift,
+    'image_base_drift' => OtaUpdateReason.imageBaseDrift,
     _ => OtaUpdateReason.unknown,
   };
 }
@@ -93,7 +95,8 @@ bool _inferUpdateAvailable({
   }
 
   if (updateReason == OtaUpdateReason.versionMismatch ||
-      updateReason == OtaUpdateReason.componentDrift) {
+      updateReason == OtaUpdateReason.componentDrift ||
+      updateReason == OtaUpdateReason.imageBaseDrift) {
     return true;
   }
 
@@ -230,6 +233,10 @@ class FirmwareRelease {
   final String url;
   final int? size;
   final String? changelog;
+  final String? currentPackageVersion;
+  final String? latestPackageVersion;
+  final String? currentImageVersion;
+  final String? latestImageVersion;
   final OtaUpdateReason updateReason;
   final List<OtaBundleEntry> installTargets;
   final List<OtaBundleEntry> imageAssets;
@@ -239,6 +246,10 @@ class FirmwareRelease {
     this.url = '',
     this.size,
     this.changelog,
+    this.currentPackageVersion,
+    this.latestPackageVersion,
+    this.currentImageVersion,
+    this.latestImageVersion,
     this.updateReason = OtaUpdateReason.unknown,
     List<OtaBundleEntry> installTargets = const [],
     List<OtaBundleEntry> imageAssets = const [],
@@ -331,6 +342,10 @@ class _OtaStatusPayload {
   final String state;
   final String currentVersion;
   final String latestVersion;
+  final String? currentPackageVersion;
+  final String? latestPackageVersion;
+  final String? currentImageVersion;
+  final String? latestImageVersion;
   final String? targetVersion;
   final bool updateAvailable;
   final bool hasCheckResult;
@@ -346,6 +361,10 @@ class _OtaStatusPayload {
     required this.state,
     required this.currentVersion,
     required this.latestVersion,
+    required this.currentPackageVersion,
+    required this.latestPackageVersion,
+    required this.currentImageVersion,
+    required this.latestImageVersion,
     required this.targetVersion,
     required this.updateAvailable,
     required this.hasCheckResult,
@@ -366,6 +385,8 @@ class _OtaStatusPayload {
         : null;
     final hasCheckResult = json.containsKey('checked_at_epoch_ms') ||
         json.containsKey('latest_version') ||
+        json.containsKey('latest_package_version') ||
+        json.containsKey('latest_image_version') ||
         json.containsKey('update_available') ||
         json.containsKey('update_reason');
 
@@ -373,6 +394,14 @@ class _OtaStatusPayload {
       state: json['state']?.toString() ?? 'idle',
       currentVersion: currentVersion,
       latestVersion: latestVersion ?? '0.0.0',
+      currentPackageVersion:
+          _normalizeOtaVersion(json['current_package_version']?.toString()),
+      latestPackageVersion:
+          _normalizeOtaVersion(json['latest_package_version']?.toString()),
+      currentImageVersion:
+          _normalizeOtaVersion(json['current_image_version']?.toString()),
+      latestImageVersion:
+          _normalizeOtaVersion(json['latest_image_version']?.toString()),
       targetVersion: json['target_version']?.toString(),
       updateAvailable: _inferUpdateAvailable(
         updateAvailableValue: json['update_available'],
@@ -430,6 +459,10 @@ class OtaService extends ChangeNotifier {
   String? _statusMessage;
   String _currentVersion = '0.0.0';
   String? _latestVersion;
+  String? _currentPackageVersion;
+  String? _latestPackageVersion;
+  String? _currentImageVersion;
+  String? _latestImageVersion;
   String? _targetVersion;
   OtaUpdateReason _updateReason = OtaUpdateReason.unknown;
   List<OtaBundleEntry> _installTargets = const [];
@@ -449,6 +482,10 @@ class OtaService extends ChangeNotifier {
   String? get statusMessage => _statusMessage;
   String get currentVersion => _currentVersion;
   String? get latestVersion => _latestVersion;
+  String? get currentPackageVersion => _currentPackageVersion;
+  String? get latestPackageVersion => _latestPackageVersion;
+  String? get currentImageVersion => _currentImageVersion;
+  String? get latestImageVersion => _latestImageVersion;
   OtaCapabilities? get capabilities => _capabilities;
   OtaUpdateReason get updateReason => _updateReason;
   List<OtaBundleEntry> get installTargets =>
@@ -481,6 +518,7 @@ class OtaService extends ChangeNotifier {
     final fallbackVersion = _normalizeVersion(fallbackCurrentVersion);
     if (fallbackVersion != null) {
       _currentVersion = fallbackVersion;
+      _currentPackageVersion = fallbackVersion;
     }
 
     _isLoadingSupport = true;
@@ -494,6 +532,7 @@ class OtaService extends ChangeNotifier {
       final stateJson = await _getJson('api/state');
       _currentVersion = _normalizeVersion(stateJson['version']?.toString()) ??
           _currentVersion;
+      _currentPackageVersion = _currentVersion;
       platformType = stateJson['platform']?.toString() ?? platformType;
       platformContext = stateJson['context']?.toString() ?? platformContext;
     } catch (_) {
@@ -530,6 +569,10 @@ class OtaService extends ChangeNotifier {
       _statusMessage = null;
       _availableRelease = null;
       _latestVersion = null;
+      _currentPackageVersion = _currentVersion;
+      _latestPackageVersion = null;
+      _currentImageVersion = null;
+      _latestImageVersion = null;
       _targetVersion = null;
       _updateReason = OtaUpdateReason.unknown;
       _installTargets = const [];
@@ -551,6 +594,7 @@ class OtaService extends ChangeNotifier {
     final normalized = _normalizeVersion(currentVersion);
     if (normalized != null) {
       _currentVersion = normalized;
+      _currentPackageVersion = normalized;
     }
 
     if (_strategy == _OtaStrategy.selfPull) {
@@ -576,12 +620,14 @@ class OtaService extends ChangeNotifier {
         _sdkRelease = release;
         _availableRelease = FirmwareRelease._fromSdk(release);
         _latestVersion = release.version;
+        _latestPackageVersion = release.version;
         _targetVersion = release.version;
         _state = OtaState.available;
       } else {
         _sdkRelease = null;
         _availableRelease = null;
         _latestVersion = _currentVersion;
+        _latestPackageVersion = _currentPackageVersion ?? _currentVersion;
         _targetVersion = null;
         _state = OtaState.upToDate;
       }
@@ -648,6 +694,14 @@ class OtaService extends ChangeNotifier {
       final latestVersion =
           _normalizeVersion(response['latest_version']?.toString()) ??
               currentVersion;
+      final currentPackageVersion = _normalizeVersion(
+            response['current_package_version']?.toString(),
+          ) ??
+          currentVersion;
+      final latestPackageVersion = _normalizeVersion(
+            response['latest_package_version']?.toString(),
+          ) ??
+          latestVersion;
       final updateReason = response.containsKey('update_reason')
           ? _tryParseOtaUpdateReason(response['update_reason'])
           : null;
@@ -660,6 +714,8 @@ class OtaService extends ChangeNotifier {
 
       _currentVersion = currentVersion;
       _latestVersion = latestVersion;
+      _currentPackageVersion = currentPackageVersion;
+      _latestPackageVersion = latestPackageVersion;
       _targetVersion = updateAvailable ? latestVersion : null;
       _applySelfPullMetadataFromJson(response);
 
@@ -831,6 +887,16 @@ class OtaService extends ChangeNotifier {
     _currentVersion =
         _normalizeVersion(status.currentVersion) ?? _currentVersion;
     _latestVersion = _normalizeVersion(status.latestVersion) ?? _latestVersion;
+    _currentPackageVersion = _normalizeVersion(status.currentPackageVersion) ??
+        _currentPackageVersion ??
+        _currentVersion;
+    _latestPackageVersion = _normalizeVersion(status.latestPackageVersion) ??
+        _latestPackageVersion ??
+        _latestVersion;
+    _currentImageVersion =
+        _normalizeVersion(status.currentImageVersion) ?? _currentImageVersion;
+    _latestImageVersion =
+        _normalizeVersion(status.latestImageVersion) ?? _latestImageVersion;
     _targetVersion = _normalizeVersion(status.targetVersion) ?? _targetVersion;
     if (status.updateReason != null) {
       _updateReason = status.updateReason!;
@@ -914,6 +980,9 @@ class OtaService extends ChangeNotifier {
   void _markComplete(String updatedVersion) {
     _currentVersion = _normalizeVersion(updatedVersion) ?? updatedVersion;
     _latestVersion = _currentVersion;
+    _currentPackageVersion = _currentVersion;
+    _latestPackageVersion = _currentVersion;
+    _currentImageVersion = _latestImageVersion ?? _currentImageVersion;
     _targetVersion = _currentVersion;
     _availableRelease = null;
     _statusMessage = _updateReason == OtaUpdateReason.componentDrift
@@ -928,6 +997,10 @@ class OtaService extends ChangeNotifier {
   FirmwareRelease _buildSelfPullRelease(String version) {
     return FirmwareRelease(
       version: version,
+      currentPackageVersion: _currentPackageVersion,
+      latestPackageVersion: _latestPackageVersion,
+      currentImageVersion: _currentImageVersion,
+      latestImageVersion: _latestImageVersion,
       updateReason: _updateReason,
       installTargets: _installTargets,
       imageAssets: _imageAssets,
@@ -935,6 +1008,24 @@ class OtaService extends ChangeNotifier {
   }
 
   void _applySelfPullMetadataFromJson(Map<String, dynamic> json) {
+    if (json.containsKey('current_package_version')) {
+      _currentPackageVersion =
+          _normalizeVersion(json['current_package_version']?.toString()) ??
+              _currentPackageVersion;
+    }
+    if (json.containsKey('latest_package_version')) {
+      _latestPackageVersion =
+          _normalizeVersion(json['latest_package_version']?.toString()) ??
+              _latestPackageVersion;
+    }
+    if (json.containsKey('current_image_version')) {
+      _currentImageVersion =
+          _normalizeVersion(json['current_image_version']?.toString());
+    }
+    if (json.containsKey('latest_image_version')) {
+      _latestImageVersion =
+          _normalizeVersion(json['latest_image_version']?.toString());
+    }
     final updateReason = _tryParseOtaUpdateReason(json['update_reason']);
     if (updateReason != null) {
       _updateReason = updateReason;
@@ -1163,6 +1254,10 @@ class OtaService extends ChangeNotifier {
     _errorMessage = null;
     _statusMessage = null;
     _targetVersion = null;
+    _currentPackageVersion = _currentVersion;
+    _latestPackageVersion = null;
+    _currentImageVersion = null;
+    _latestImageVersion = null;
     _updateReason = OtaUpdateReason.unknown;
     _installTargets = const [];
     _imageAssets = const [];
@@ -1170,6 +1265,7 @@ class OtaService extends ChangeNotifier {
     _checksumVerified = null;
     if (_strategy == _OtaStrategy.selfPull) {
       _latestVersion = _currentVersion;
+      _latestPackageVersion = _currentPackageVersion;
     }
     _notifyListeners();
   }
