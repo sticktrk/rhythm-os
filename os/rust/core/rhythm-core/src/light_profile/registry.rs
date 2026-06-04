@@ -239,7 +239,7 @@ impl LightProfileRegistry {
             });
 
         if let Some(settings) = settings {
-            settings.apply_to_config(&mut config);
+            settings.apply_to_config_for_profile(base_id, &mut config);
         }
 
         config
@@ -493,7 +493,7 @@ mod tests {
         SLEEP_IDLE_PROFILE_NAME, SLEEP_PROFILE_NAME,
     };
     use super::*;
-    use crate::{LightDirectColor, RoomModeState, TimerSetting};
+    use crate::{LightDirectColor, LightProfileNodeOverride, RoomModeState, TimerSetting};
 
     fn test_context(hour: f32) -> CurveContext {
         CurveContext::new(hour, crate::SolarTime::new(12.0, 35.0, 172), None)
@@ -663,6 +663,39 @@ mod tests {
         assert_eq!(idle_values.xy, active_values.xy);
         assert_eq!(idle_values.brightness, 1);
         assert_eq!(idle_values.transition_ms, DEFAULT_FADE_MS as u32);
+    }
+
+    #[test]
+    fn active_profile_override_uses_resolved_profile_id_not_mode() {
+        let mut registry = LightProfileRegistry::new();
+        let mut focus = default_rhythm_profile();
+        focus.id = "focus".into();
+        focus.motion_timeout_secs = TimerSetting::Fixed { value: 90 };
+        registry.register_config(focus);
+        assert!(registry.set_active_profile("focus"));
+        registry.set_mode_configs(vec![ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some("focus".into()),
+            idle_profile_id: None,
+            wake_profile_id: None,
+            warning_profile_id: None,
+            room_defaults: vec![],
+        }]);
+
+        let mut settings = RoomProfileSettings::default();
+        settings.profile_overrides.insert(
+            "focus".into(),
+            LightProfileNodeOverride {
+                motion_timeout_secs: Some(TimerSetting::Fixed { value: 123 }),
+                ..Default::default()
+            },
+        );
+
+        let values = registry
+            .profile_for_room_state(RhythmMode::Day, RoomModeState::Active, Some(&settings))
+            .calculate(&test_context(12.0));
+
+        assert_eq!(values.motion_timeout_secs, 123);
     }
 
     #[test]

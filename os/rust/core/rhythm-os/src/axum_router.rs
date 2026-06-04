@@ -94,7 +94,6 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/nodes/state", get(get_nodes_state))
         .route("/api/events", get(sse_events))
         .route("/api/devices", delete(delete_device))
-        .route("/api/nodes/motion-timeout", put(put_motion_timeout))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/config/absorb-offset", post(absorb_time_offset))
         .route("/api/config/reset", post(reset_config))
@@ -141,6 +140,10 @@ fn shared_routes() -> Router<SharedState> {
         )
         .route("/api/hub/retry", post(post_hub_retry))
         .route("/api/nodes/preferences", put(put_node_preferences))
+        .route(
+            "/api/nodes/profile-overrides",
+            put(put_node_profile_overrides),
+        )
         // Canonical device management
         .route("/api/devices/canonical", get(get_canonical_devices))
         .route("/api/devices/canonical/:id", get(get_canonical_device))
@@ -289,13 +292,6 @@ async fn delete_device(
         Some(id) => handlers::handle_delete_device(&state, id),
         None => ApiResponse::bad_request("Missing ?id="),
     }
-}
-
-async fn put_motion_timeout(
-    State(state): State<SharedState>,
-    Json(body): Json<Value>,
-) -> ApiResponse {
-    handlers::handle_put_motion_timeout(&state, &body)
 }
 
 async fn node_action(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
@@ -503,6 +499,13 @@ async fn put_node_preferences(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_put_node_preferences(&state, &body, true)).await
+}
+
+async fn put_node_profile_overrides(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_node_profile_overrides(&state, &body, true)).await
 }
 
 // ---------------------------------------------------------------------------

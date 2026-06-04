@@ -1648,6 +1648,55 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
     }
 }
 
+fn normalize_motion_timer_warning_after_timeout_change(
+    motion: &mut MotionTimerState,
+    target_node_id: &str,
+    timeouts: &HashMap<String, u64>,
+    default_timeout_secs: u64,
+    now: Instant,
+) -> bool {
+    let sources: Vec<&MotionSourceState> = motion
+        .sensors
+        .values()
+        .filter(|source| source.target_node_id == target_node_id)
+        .collect();
+
+    if sources.is_empty() || sources.iter().any(|source| source.stopped_at.is_none()) {
+        return motion.warning_active.remove(target_node_id);
+    }
+
+    let timeout_secs = timeouts
+        .get(target_node_id)
+        .copied()
+        .unwrap_or(default_timeout_secs);
+    if timeout_secs == 0 {
+        return motion.warning_active.remove(target_node_id);
+    }
+
+    let Some(elapsed) = sources
+        .iter()
+        .filter_map(|source| source.stopped_at.as_ref())
+        .map(|stopped_at| now.duration_since(*stopped_at))
+        .min()
+    else {
+        return motion.warning_active.remove(target_node_id);
+    };
+
+    if elapsed > Duration::from_secs(timeout_secs) {
+        return false;
+    }
+
+    let remaining_secs = timeout_secs.saturating_sub(elapsed.as_secs());
+    let should_warn = remaining_secs <= WARNING_BEFORE_SECS
+        && timeout_secs > WARNING_BEFORE_SECS
+        && motion.motion_owned.contains(target_node_id);
+    if should_warn {
+        false
+    } else {
+        motion.warning_active.remove(target_node_id)
+    }
+}
+
 /// Main event loop — process hub events and check motion timers.
 ///
 /// Runs forever on a blocking thread. Picks up new hub event receivers
@@ -1668,6 +1717,7 @@ pub fn run_event_loop(
         let mut force_motion_persist = false;
         let mut motion_persist_acks = Vec::new();
         let mut pending_motion_clear = Vec::new();
+        let mut pending_motion_timeout_refresh = Vec::new();
 
         // Pick up new hub event receivers from reconfiguration
         if let Ok(mut s) = state.lock() {
@@ -1683,6 +1733,11 @@ pub fn run_event_loop(
 
             if !s.pending_motion_clear.is_empty() {
                 pending_motion_clear = std::mem::take(&mut s.pending_motion_clear);
+            }
+
+            if !s.pending_motion_timeout_refresh.is_empty() {
+                pending_motion_timeout_refresh =
+                    std::mem::take(&mut s.pending_motion_timeout_refresh);
             }
 
             if !s.pending_motion_timer_persist_acks.is_empty() {
@@ -1710,6 +1765,35 @@ pub fn run_event_loop(
         }
 
         let light_breaker_enabled = crate::state::light_breaker_enabled(&state);
+        if !pending_motion_timeout_refresh.is_empty() {
+            let (timeouts, _) = commands::resolved_motion_timeout_map(&state);
+            let default_timeout_secs = state
+                .lock()
+                .ok()
+                .map(|s| s.default_motion_timeout_secs)
+                .unwrap_or(0);
+            let now = Instant::now();
+            let mut timeout_refresh_dirty = false;
+            for target_node_id in &pending_motion_timeout_refresh {
+                timeout_refresh_dirty |= normalize_motion_timer_warning_after_timeout_change(
+                    &mut motion_state,
+                    target_node_id,
+                    &timeouts,
+                    default_timeout_secs,
+                    now,
+                );
+            }
+            if light_breaker_enabled && !motion_state.sensors.is_empty() {
+                check_motion_timers(&state, &mut motion_state);
+                timeout_refresh_dirty = true;
+            }
+            if timeout_refresh_dirty {
+                motion_dirty = true;
+                motion_persistence.mark_dirty();
+                force_motion_persist = true;
+            }
+        }
+
         if !light_breaker_enabled {
             if !motion_state.sensors.is_empty()
                 || !motion_state.motion_owned.is_empty()
@@ -6301,6 +6385,86 @@ mod tests {
 
         // Warning should be active (timeout > WARNING_BEFORE_SECS and remaining < WARNING_BEFORE_SECS)
         assert!(motion.warning_active.contains("room_a"));
+    }
+
+    #[test]
+    fn timeout_refresh_clears_warning_when_timeout_extends_outside_warning_window() {
+        let state = make_state_with_motion_override(500);
+        let now = Instant::now();
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source("s1", "room_a", Some(now - Duration::from_secs(270))),
+        );
+        motion.motion_owned.insert("room_a".into());
+        motion.warning_active.insert("room_a".into());
+        let (timeouts, _) = commands::resolved_motion_timeout_map(&state);
+
+        assert!(normalize_motion_timer_warning_after_timeout_change(
+            &mut motion,
+            "room_a",
+            &timeouts,
+            300,
+            now,
+        ));
+        check_motion_timers(&state, &mut motion);
+
+        assert_eq!(motion.sensors.len(), 1);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(!motion.warning_active.contains("room_a"));
+    }
+
+    #[test]
+    fn timeout_refresh_allows_shortened_timeout_to_enter_warning_window() {
+        let state = make_state_with_motion_override(300);
+        let now = Instant::now();
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source("s1", "room_a", Some(now - Duration::from_secs(250))),
+        );
+        motion.motion_owned.insert("room_a".into());
+        let (timeouts, _) = commands::resolved_motion_timeout_map(&state);
+
+        assert!(!normalize_motion_timer_warning_after_timeout_change(
+            &mut motion,
+            "room_a",
+            &timeouts,
+            300,
+            now,
+        ));
+        check_motion_timers(&state, &mut motion);
+
+        assert!(motion.warning_active.contains("room_a"));
+        assert_eq!(motion.sensors.len(), 1);
+        assert!(motion.motion_owned.contains("room_a"));
+    }
+
+    #[test]
+    fn timeout_refresh_clears_warning_when_timeout_zero_disables_auto_off() {
+        let state = make_state_with_motion_override(0);
+        let now = Instant::now();
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source("s1", "room_a", Some(now - Duration::from_secs(500))),
+        );
+        motion.motion_owned.insert("room_a".into());
+        motion.warning_active.insert("room_a".into());
+        let (timeouts, _) = commands::resolved_motion_timeout_map(&state);
+
+        assert!(normalize_motion_timer_warning_after_timeout_change(
+            &mut motion,
+            "room_a",
+            &timeouts,
+            300,
+            now,
+        ));
+        check_motion_timers(&state, &mut motion);
+
+        assert_eq!(motion.sensors.len(), 1);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(!motion.warning_active.contains("room_a"));
     }
 
     #[test]

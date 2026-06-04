@@ -15,9 +15,9 @@ use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{
     ButtonAction, HubDispatchTarget, InputEvent, LightNodeKind, LightProfileConfig,
-    LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig, ModeTransitionConfig,
-    ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb, RhythmMode, RoomModeState,
-    RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
+    LightProfileNodeOverride, LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig,
+    ModeTransitionConfig, ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb,
+    RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
 };
 use serde_json::Value;
 
@@ -510,6 +510,25 @@ fn resolved_active_profile_id_for_mode_from_parts(
     }
 }
 
+fn resolved_active_profile_id_for_settings_from_parts(
+    lighting: RoomLightingContext<'_>,
+    settings: &RoomProfileSettings,
+) -> String {
+    let active_profile_id = resolved_active_profile_id_for_mode_from_parts(
+        lighting.light_profile_configs,
+        lighting.mode_configs,
+        lighting.mode,
+    );
+    let requested_id = settings.resolved_profile_id(active_profile_id.as_str());
+    if !rhythm_core::is_builtin_state_profile_id(requested_id)
+        && lighting.light_profile_configs.contains_key(requested_id)
+    {
+        requested_id.to_string()
+    } else {
+        active_profile_id
+    }
+}
+
 fn compute_room_display_values_for_settings_from_parts(
     lighting: RoomLightingContext<'_>,
     room: RoomLightingInput<'_>,
@@ -785,12 +804,70 @@ fn queue_motion_timer_clear(state: &SharedState, room_id: &str) {
     }
 }
 
+fn queue_motion_timer_timeout_refresh(state: &SharedState, node_id: &str) {
+    if let Ok(mut s) = state.lock() {
+        if !s
+            .pending_motion_timeout_refresh
+            .iter()
+            .any(|pending| pending == node_id)
+        {
+            s.pending_motion_timeout_refresh.push(node_id.to_string());
+        }
+    }
+}
+
+fn refresh_cached_motion_timeout_after_settings_change(
+    state: &SharedState,
+    node_id: &str,
+    timeout_secs: u64,
+) -> bool {
+    let Ok(mut s) = state.lock() else {
+        return false;
+    };
+
+    let Some(snapshot) = s.motion_snapshots.get_mut(node_id) else {
+        return false;
+    };
+
+    if snapshot.timeout_secs == timeout_secs {
+        return false;
+    }
+
+    let old_timeout_secs = snapshot.timeout_secs;
+    let old_remaining_secs = snapshot.remaining_secs;
+    snapshot.timeout_secs = timeout_secs;
+
+    if let Some(old_remaining_secs) = old_remaining_secs {
+        let elapsed_secs = old_timeout_secs.saturating_sub(old_remaining_secs);
+        let remaining_secs = timeout_secs.saturating_sub(elapsed_secs);
+        snapshot.remaining_secs = Some(remaining_secs);
+        if timeout_secs == 0
+            || timeout_secs <= crate::event_loop::WARNING_BEFORE_SECS
+            || remaining_secs > crate::event_loop::WARNING_BEFORE_SECS
+        {
+            snapshot.warning_active = false;
+        }
+    } else {
+        snapshot.warning_active = false;
+    }
+
+    let timers = s
+        .motion_snapshots
+        .iter()
+        .map(|(node_id, snap)| crate::server_event::MotionTimerEvent::from_snapshot(node_id, snap))
+        .collect();
+    s.emit_event(crate::server_event::ServerEvent::MotionTimer { timers });
+    true
+}
+
 fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.room_observed_power.remove(node_id);
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
     s.pending_motion_clear.retain(|pending| pending != node_id);
+    s.pending_motion_timeout_refresh
+        .retain(|pending| pending != node_id);
     s.pending_motion_seed
         .retain(|seed| seed.source_node_id != node_id && seed.target_node_id != node_id);
 }
@@ -904,6 +981,7 @@ pub struct RoomProfileSettingsPatch {
     pub mood_scene_id: Option<Option<String>>,
     pub fade_ms: Option<Option<TimerSetting>>,
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
+    pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
 }
 
 impl RoomProfileSettingsPatch {
@@ -931,6 +1009,28 @@ impl RoomProfileSettingsPatch {
         if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
             settings.motion_timeout_secs = motion_timeout_secs.clone();
         }
+        if let Some(profile_overrides) = &self.profile_overrides {
+            match profile_overrides {
+                None => settings.profile_overrides.clear(),
+                Some(overrides) => {
+                    for (profile_id, profile_override) in overrides {
+                        match profile_override {
+                            None => {
+                                settings.profile_overrides.remove(profile_id);
+                            }
+                            Some(profile_override) if profile_override.is_empty() => {
+                                settings.profile_overrides.remove(profile_id);
+                            }
+                            Some(profile_override) => {
+                                settings
+                                    .profile_overrides
+                                    .insert(profile_id.clone(), profile_override.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn touches_profile_settings(&self) -> bool {
@@ -941,6 +1041,7 @@ impl RoomProfileSettingsPatch {
             || self.mood_scene_id.is_some()
             || self.fade_ms.is_some()
             || self.motion_timeout_secs.is_some()
+            || self.profile_overrides.is_some()
     }
 }
 
@@ -5967,18 +6068,11 @@ fn resolved_profile_config_for_room_state_from_parts(
         lighting.mode_configs,
         lighting.mode,
     );
-    let requested_id = settings.resolved_profile_id(active_profile_id.as_str());
-    let base_id = if !rhythm_core::is_builtin_state_profile_id(requested_id)
-        && lighting.light_profile_configs.contains_key(requested_id)
-    {
-        requested_id
-    } else {
-        active_profile_id.as_str()
-    };
+    let base_id = resolved_active_profile_id_for_settings_from_parts(lighting, settings);
 
     let mut active_config = lighting
         .light_profile_configs
-        .get(base_id)
+        .get(base_id.as_str())
         .cloned()
         .or_else(|| {
             lighting
@@ -5987,7 +6081,7 @@ fn resolved_profile_config_for_room_state_from_parts(
                 .cloned()
         })
         .unwrap_or_else(|| factory_default_active_profile_config_for_mode(lighting.mode));
-    settings.apply_to_config(&mut active_config);
+    settings.apply_to_config_for_profile(base_id.as_str(), &mut active_config);
 
     if room_state == RoomModeState::Active {
         return active_config;
@@ -6902,6 +6996,22 @@ fn validate_room_profile_settings(
             ));
         }
     }
+    for profile_id in room_profile.profile_overrides.keys() {
+        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Room '{}' cannot override built-in state profile '{}'",
+                room_id,
+                profile_id
+            ));
+        }
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Room '{}' references unknown overridden light profile '{}'",
+                room_id,
+                profile_id
+            ));
+        }
+    }
     if let Some(scene_id) = room_profile.mood_scene_id.as_deref() {
         if scene_id.trim().is_empty() {
             return Err(anyhow::anyhow!(
@@ -6932,6 +7042,15 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
         mood_scene_id: Some(room.room_profile.mood_scene_id.clone()),
         fade_ms: Some(room.room_profile.fade_ms.clone()),
         motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
+        profile_overrides: Some(Some(
+            room.room_profile
+                .profile_overrides
+                .iter()
+                .map(|(profile_id, profile_override)| {
+                    (profile_id.clone(), Some(profile_override.clone()))
+                })
+                .collect(),
+        )),
     }
 }
 
@@ -8460,41 +8579,6 @@ pub fn do_canonical_soft_remove(state: &SharedState, device_id: &str, hub_key: &
     }
 }
 
-/// Set a per-node motion timeout override in the profile-settings layer.
-pub fn do_motion_timeout_set(
-    state: &SharedState,
-    node_id: &str,
-    timeout_secs: u64,
-    _hub_key: Option<&HubKey>,
-) -> Result<()> {
-    info!(target: "cmd", "motion_timeout_set: node {} -> {}s", node_id, timeout_secs);
-
-    let value = u32::try_from(timeout_secs)
-        .map_err(|_| anyhow::anyhow!("motion timeout {} exceeds supported range", timeout_secs))?;
-    let patch = RoomProfileSettingsPatch {
-        motion_timeout_secs: Some(Some(TimerSetting::Fixed { value })),
-        ..Default::default()
-    };
-    do_node_preferences_set(state, node_id, None, None, None, None, Some(&patch), true)?;
-    Ok(())
-}
-
-/// Remove a per-node motion timeout override so it falls back to the profile default.
-pub fn do_motion_timeout_clear(
-    state: &SharedState,
-    node_id: &str,
-    _hub_key: Option<&HubKey>,
-) -> Result<()> {
-    info!(target: "cmd", "motion_timeout_clear: node {}", node_id);
-
-    let patch = RoomProfileSettingsPatch {
-        motion_timeout_secs: Some(None),
-        ..Default::default()
-    };
-    do_node_preferences_set(state, node_id, None, None, None, None, Some(&patch), true)?;
-    Ok(())
-}
-
 /// Resolve motion timeout defaults for controlled target nodes.
 pub(crate) fn resolved_motion_timeout_map(
     state: &SharedState,
@@ -8555,6 +8639,50 @@ pub(crate) fn resolved_motion_timeout_map(
         );
     }
     (timeouts, control_targets)
+}
+
+fn resolved_motion_timeout_for_node_settings(
+    state: &SharedState,
+    settings: &RoomProfileSettings,
+    current_hour: f32,
+) -> Result<u64> {
+    let (
+        light_profile_configs,
+        mode_configs,
+        active_mode,
+        solar_noon,
+        latitude,
+        longitude,
+        utc_offset,
+        timezone_name,
+    ) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.light_profile_configs.clone(),
+            s.mode_configs(),
+            s.active_mode,
+            s.solar_noon_hour(),
+            s.latitude,
+            s.longitude,
+            s.utc_offset_hours,
+            s.timezone_name.clone(),
+        )
+    };
+
+    Ok(resolved_room_motion_timeout_secs_from_parts(
+        RoomLightingContext {
+            light_profile_configs: &light_profile_configs,
+            mode_configs: &mode_configs,
+            mode: active_mode,
+            solar_noon,
+            latitude,
+            longitude,
+            timezone_name: timezone_name.as_deref(),
+            utc_offset,
+        },
+        settings,
+        current_hour,
+    ))
 }
 
 // ============================================================================
@@ -9307,6 +9435,17 @@ pub fn do_node_preferences_set(
         snap.mood_active,
         snap.soft_off,
     );
+    let profile_settings_touched =
+        room_profile.is_some_and(|patch| patch.touches_profile_settings());
+    let motion_timeout_before = if profile_settings_touched {
+        Some(resolved_motion_timeout_for_node_settings(
+            state,
+            &snap.profile_settings,
+            runtime.current_hour(),
+        )?)
+    } else {
+        None
+    };
     let mut standby_toggle_state_request = false;
     let requested_state = match target_state {
         Some(state) => state,
@@ -9353,6 +9492,29 @@ pub fn do_node_preferences_set(
             return Err(anyhow::anyhow!("Unknown light scene: {}", scene_id));
         }
     }
+    for profile_id in profile_settings.profile_overrides.keys() {
+        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+            return Err(anyhow::anyhow!(
+                "State profiles cannot be overridden per-node"
+            ));
+        }
+        if !valid_profile_ids.contains(profile_id) {
+            return Err(anyhow::anyhow!(
+                "Unknown overridden light profile: {}",
+                profile_id
+            ));
+        }
+    }
+
+    let motion_timeout_after = if motion_timeout_before.is_some() {
+        Some(resolved_motion_timeout_for_node_settings(
+            state,
+            &profile_settings,
+            runtime.current_hour(),
+        )?)
+    } else {
+        None
+    };
 
     // Mood and Standby need rhythm enabled unless the caller explicitly pauses it.
     let rhythm_enabled = if (soft_off || mood_active) && requested_rhythm_enabled != Some(false) {
@@ -9378,6 +9540,12 @@ pub fn do_node_preferences_set(
     clear_room_mode_transition(state, node_id);
     if explicit_state_request || standby_toggle_state_request {
         queue_motion_timer_clear(state, node_id);
+    }
+    if motion_timeout_before != motion_timeout_after {
+        if let Some(timeout_secs) = motion_timeout_after {
+            queue_motion_timer_timeout_refresh(state, node_id);
+            refresh_cached_motion_timeout_after_settings_change(state, node_id, timeout_secs);
+        }
     }
 
     let entered_hard_off = hard_off && !prev_hard_off;
@@ -9446,7 +9614,7 @@ pub fn do_node_preferences_set(
             }
             RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
         }
-    } else if room_profile.is_some_and(|patch| patch.touches_profile_settings()) {
+    } else if profile_settings_touched {
         match persistent_state {
             RoomModeState::Mood => {
                 refresh_lights_on = true;
@@ -9543,6 +9711,24 @@ fn validate_room_profile_settings_patch(
     {
         if !valid_scene_ids.contains(scene_id) {
             return Err(anyhow::anyhow!("Unknown light scene: {}", scene_id));
+        }
+    }
+    if let Some(profile_overrides) = room_profile
+        .and_then(|patch| patch.profile_overrides.as_ref())
+        .and_then(|profile_overrides| profile_overrides.as_ref())
+    {
+        for profile_id in profile_overrides.keys() {
+            if rhythm_core::is_builtin_state_profile_id(profile_id) {
+                return Err(anyhow::anyhow!(
+                    "State profiles cannot be overridden per-node"
+                ));
+            }
+            if !valid_profile_ids.contains(profile_id) {
+                return Err(anyhow::anyhow!(
+                    "Unknown overridden light profile: {}",
+                    profile_id
+                ));
+            }
         }
     }
     Ok(())
@@ -12108,6 +12294,71 @@ mod tests {
         snapshot
     }
 
+    fn set_profile_motion_timeout(state: &SharedState, profile_id: &str, timeout_secs: u32) {
+        let mut s = state.lock().unwrap();
+        let mut config = s.light_profile_config(profile_id).cloned().unwrap();
+        config.motion_timeout_secs = TimerSetting::Fixed {
+            value: timeout_secs,
+        };
+        s.set_light_profile_config(config);
+    }
+
+    fn motion_timeout_profile_override(timeout_secs: u32) -> LightProfileNodeOverride {
+        LightProfileNodeOverride {
+            motion_timeout_secs: Some(TimerSetting::Fixed {
+                value: timeout_secs,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn profile_overrides_patch(
+        entries: Vec<(&str, Option<LightProfileNodeOverride>)>,
+    ) -> RoomProfileSettingsPatch {
+        RoomProfileSettingsPatch {
+            profile_overrides: Some(Some(
+                entries
+                    .into_iter()
+                    .map(|(profile_id, profile_override)| {
+                        (profile_id.to_string(), profile_override)
+                    })
+                    .collect(),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn install_event_recorder(
+        state: &SharedState,
+    ) -> tokio::sync::broadcast::Receiver<crate::server_event::ServerEvent> {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        state.lock().unwrap().event_tx = Some(tx);
+        rx
+    }
+
+    fn drain_server_events(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::server_event::ServerEvent>,
+    ) -> Vec<crate::server_event::ServerEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn motion_timer_event_for_node(
+        events: &[crate::server_event::ServerEvent],
+        node_id: &str,
+    ) -> Option<crate::server_event::MotionTimerEvent> {
+        events.iter().find_map(|event| match event {
+            crate::server_event::ServerEvent::MotionTimer { timers } => timers
+                .iter()
+                .find(|timer| timer.node_id == node_id)
+                .cloned(),
+            _ => None,
+        })
+    }
+
     fn setup_state(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
         setup_state_at_hour(snapshots, 12.0)
     }
@@ -12598,6 +12849,43 @@ mod tests {
         assert_eq!(active.id, rhythm_core::RHYTHM_PROFILE_ID);
         assert_eq!(active.fade_ms, TimerSetting::Fixed { value: 345 });
 
+        let mut focus = rhythm.clone();
+        focus.id = "focus".into();
+        focus.motion_timeout_secs = TimerSetting::Fixed { value: 90 };
+        let mut profiles_with_focus = profiles.clone();
+        profiles_with_focus.insert("focus".into(), focus);
+        let focus_mode_configs = [ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some("focus".into()),
+            idle_profile_id: None,
+            wake_profile_id: None,
+            warning_profile_id: None,
+            room_defaults: vec![],
+        }];
+        let focus_lighting = RoomLightingContext {
+            light_profile_configs: &profiles_with_focus,
+            mode_configs: &focus_mode_configs,
+            ..lighting
+        };
+        let mut focus_settings = RoomProfileSettings::default();
+        focus_settings.profile_overrides.insert(
+            "focus".into(),
+            LightProfileNodeOverride {
+                motion_timeout_secs: Some(TimerSetting::Fixed { value: 77 }),
+                ..Default::default()
+            },
+        );
+        let focus_active = resolved_profile_config_for_room_state_from_parts(
+            focus_lighting,
+            &focus_settings,
+            RoomModeState::Active,
+        );
+        assert_eq!(focus_active.id, "focus");
+        assert_eq!(
+            focus_active.motion_timeout_secs,
+            TimerSetting::Fixed { value: 77 }
+        );
+
         settings.mood_profile_id = Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.to_string());
         let mood = resolved_profile_config_for_room_state_from_parts(
             lighting,
@@ -12665,6 +12953,13 @@ mod tests {
             mood_scene_id: Some("scene".to_string()),
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
+            profile_overrides: BTreeMap::from([(
+                "custom".to_string(),
+                LightProfileNodeOverride {
+                    motion_timeout_secs: Some(TimerSetting::Fixed { value: 25 }),
+                    ..Default::default()
+                },
+            )]),
         };
 
         let clear_all = RoomProfileSettingsPatch {
@@ -12676,6 +12971,22 @@ mod tests {
         assert_eq!(settings, RoomProfileSettings::default());
         assert!(!RoomProfileSettingsPatch::default().touches_profile_settings());
 
+        let profile_overrides = BTreeMap::from([
+            (
+                "rhythm".to_string(),
+                Some(LightProfileNodeOverride {
+                    motion_timeout_secs: Some(TimerSetting::Fixed { value: 50 }),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "sleep".to_string(),
+                Some(LightProfileNodeOverride {
+                    motion_timeout_secs: Some(TimerSetting::Fixed { value: 55 }),
+                    ..Default::default()
+                }),
+            ),
+        ]);
         let update = RoomProfileSettingsPatch {
             profile_id: Some(Some("rhythm".to_string())),
             mood_enabled: Some(Some(false)),
@@ -12683,6 +12994,7 @@ mod tests {
             mood_scene_id: Some(Some("relax".to_string())),
             fade_ms: Some(Some(TimerSetting::Fixed { value: 250 })),
             motion_timeout_secs: Some(Some(TimerSetting::Fixed { value: 45 })),
+            profile_overrides: Some(Some(profile_overrides)),
             ..Default::default()
         };
         assert!(update.touches_profile_settings());
@@ -12696,6 +13008,20 @@ mod tests {
             settings.motion_timeout_secs,
             Some(TimerSetting::Fixed { value: 45 })
         );
+        assert_eq!(
+            settings
+                .profile_overrides
+                .get("rhythm")
+                .and_then(|profile_override| profile_override.motion_timeout_secs.as_ref()),
+            Some(&TimerSetting::Fixed { value: 50 })
+        );
+        assert_eq!(
+            settings
+                .profile_overrides
+                .get("sleep")
+                .and_then(|profile_override| profile_override.motion_timeout_secs.as_ref()),
+            Some(&TimerSetting::Fixed { value: 55 })
+        );
 
         let clear_fields = RoomProfileSettingsPatch {
             profile_id: Some(None),
@@ -12704,6 +13030,7 @@ mod tests {
             mood_scene_id: Some(None),
             fade_ms: Some(None),
             motion_timeout_secs: Some(None),
+            profile_overrides: Some(None),
             ..Default::default()
         };
         clear_fields.apply_to(&mut settings);
@@ -16161,11 +16488,9 @@ mod tests {
         room.soft_off = true;
         room.profile_settings = rhythm_core::RoomProfileSettings {
             profile_id: Some("focus".into()),
-            mood_enabled: None,
-            mood_profile_id: None,
-            mood_scene_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 3_210 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 654 }),
+            ..Default::default()
         };
 
         let hub_key = HubKey::new(HubType::new("mock"), "bridge.local");
@@ -16952,11 +17277,7 @@ mod tests {
         let room = rooms.get_or_create("office", "Office");
         room.profile_settings = rhythm_core::RoomProfileSettings {
             profile_id: Some("missing_profile".into()),
-            mood_enabled: None,
-            mood_profile_id: None,
-            mood_scene_id: None,
-            fade_ms: None,
-            motion_timeout_secs: None,
+            ..Default::default()
         };
 
         let err = do_backup_restore(
@@ -18705,6 +19026,325 @@ mod tests {
         assert!(snap.mood_active);
         assert!(!snap.soft_off);
         assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn node_preferences_active_profile_override_refreshes_active_motion_timer_and_sse() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        let mut events_rx = install_event_recorder(&state);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: true,
+                motion_owned: true,
+                remaining_secs: None,
+                timeout_secs: 300,
+                warning_active: true,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(motion_timeout_profile_override(120)),
+        )]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_ok());
+        {
+            let s = state.lock().unwrap();
+            let snapshot = s.motion_snapshots.get("r1").unwrap();
+            assert!(snapshot.motion_active);
+            assert!(snapshot.motion_owned);
+            assert_eq!(snapshot.remaining_secs, None);
+            assert_eq!(snapshot.timeout_secs, 120);
+            assert!(!snapshot.warning_active);
+            assert_eq!(s.pending_motion_timeout_refresh, vec!["r1".to_string()]);
+            assert!(s.pending_motion_clear.is_empty());
+        }
+        let events = drain_server_events(&mut events_rx);
+        let timer = motion_timer_event_for_node(&events, "r1").unwrap();
+        assert!(timer.motion_active);
+        assert_eq!(timer.remaining_secs, None);
+        assert_eq!(timer.timeout_secs, 120);
+        assert!(!timer.warning_active);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::server_event::ServerEvent::NodeState { nodes }
+                if nodes.iter().any(|node| node.id == "r1")
+        )));
+        assert_eq!(
+            runtime
+                .engine_node_snapshot("r1")
+                .unwrap()
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::RHYTHM_PROFILE_ID)
+                .and_then(|profile_override| profile_override.motion_timeout_secs.as_ref()),
+            Some(&TimerSetting::Fixed { value: 120 })
+        );
+    }
+
+    #[test]
+    fn node_preferences_inactive_profile_override_does_not_refresh_motion_timer() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        let mut events_rx = install_event_recorder(&state);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: true,
+                motion_owned: true,
+                remaining_secs: None,
+                timeout_secs: 300,
+                warning_active: false,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::SLEEP_PROFILE_ID,
+            Some(motion_timeout_profile_override(120)),
+        )]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_ok());
+        {
+            let s = state.lock().unwrap();
+            let snapshot = s.motion_snapshots.get("r1").unwrap();
+            assert_eq!(snapshot.timeout_secs, 300);
+            assert_eq!(snapshot.remaining_secs, None);
+            assert!(s.pending_motion_timeout_refresh.is_empty());
+        }
+        let events = drain_server_events(&mut events_rx);
+        assert!(
+            motion_timer_event_for_node(&events, "r1").is_none(),
+            "inactive profile override should not broadcast a motion timer update"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::server_event::ServerEvent::NodeState { nodes }
+                if nodes.iter().any(|node| node.id == "r1")
+        )));
+    }
+
+    #[test]
+    fn node_preferences_motion_timeout_change_preserves_elapsed_countdown_and_clears_stale_warning()
+    {
+        let (state, _runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: false,
+                motion_owned: true,
+                remaining_secs: Some(30),
+                timeout_secs: 300,
+                warning_active: true,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(motion_timeout_profile_override(500)),
+        )]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        let snapshot = s.motion_snapshots.get("r1").unwrap();
+        assert!(!snapshot.motion_active);
+        assert!(snapshot.motion_owned);
+        assert_eq!(snapshot.timeout_secs, 500);
+        assert_eq!(snapshot.remaining_secs, Some(230));
+        assert!(!snapshot.warning_active);
+        assert_eq!(s.pending_motion_timeout_refresh, vec!["r1".to_string()]);
+    }
+
+    #[test]
+    fn node_preferences_motion_timeout_zero_keeps_motion_state_but_disables_countdown_warning() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: false,
+                motion_owned: true,
+                remaining_secs: Some(45),
+                timeout_secs: 300,
+                warning_active: true,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(motion_timeout_profile_override(0)),
+        )]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        let snapshot = s.motion_snapshots.get("r1").unwrap();
+        assert_eq!(snapshot.timeout_secs, 0);
+        assert_eq!(snapshot.remaining_secs, Some(0));
+        assert!(!snapshot.warning_active);
+        assert_eq!(s.pending_motion_timeout_refresh, vec!["r1".to_string()]);
+        assert!(s.pending_motion_clear.is_empty());
+    }
+
+    #[test]
+    fn node_preferences_clearing_active_profile_override_restores_base_motion_timeout() {
+        let mut snap = make_snapshot("r1", false, false);
+        snap.profile_settings.profile_overrides.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.into(),
+            motion_timeout_profile_override(120),
+        );
+        let (state, runtime) = setup_state(vec![snap]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: true,
+                motion_owned: true,
+                remaining_secs: None,
+                timeout_secs: 120,
+                warning_active: false,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(rhythm_core::RHYTHM_PROFILE_ID, None)]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_ok());
+        {
+            let s = state.lock().unwrap();
+            let snapshot = s.motion_snapshots.get("r1").unwrap();
+            assert_eq!(snapshot.timeout_secs, 300);
+            assert_eq!(s.pending_motion_timeout_refresh, vec!["r1".to_string()]);
+        }
+        assert!(runtime
+            .engine_node_snapshot("r1")
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .is_empty());
+    }
+
+    #[test]
+    fn node_preferences_profile_override_refreshes_standalone_light_motion_timer() {
+        let (state, _runtime) = setup_state(vec![make_standalone_light_snapshot("light1")]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        state.lock().unwrap().motion_snapshots.insert(
+            "light1".into(),
+            MotionSnapshot {
+                motion_active: true,
+                motion_owned: true,
+                remaining_secs: None,
+                timeout_secs: 300,
+                warning_active: false,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(motion_timeout_profile_override(90)),
+        )]);
+
+        let result = do_node_preferences_set(
+            &state,
+            "light1",
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            false,
+        );
+
+        assert!(result.is_ok());
+        let s = state.lock().unwrap();
+        let snapshot = s.motion_snapshots.get("light1").unwrap();
+        assert_eq!(snapshot.timeout_secs, 90);
+        assert_eq!(snapshot.remaining_secs, None);
+        assert_eq!(s.pending_motion_timeout_refresh, vec!["light1".to_string()]);
+    }
+
+    #[test]
+    fn node_preferences_fade_only_profile_override_does_not_refresh_motion_timer() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        set_profile_motion_timeout(&state, rhythm_core::RHYTHM_PROFILE_ID, 300);
+        let mut events_rx = install_event_recorder(&state);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: false,
+                motion_owned: true,
+                remaining_secs: Some(120),
+                timeout_secs: 300,
+                warning_active: false,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                fade_ms: Some(TimerSetting::Fixed { value: 2_000 }),
+                ..Default::default()
+            }),
+        )]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_ok());
+        {
+            let s = state.lock().unwrap();
+            let snapshot = s.motion_snapshots.get("r1").unwrap();
+            assert_eq!(snapshot.timeout_secs, 300);
+            assert_eq!(snapshot.remaining_secs, Some(120));
+            assert!(s.pending_motion_timeout_refresh.is_empty());
+        }
+        let events = drain_server_events(&mut events_rx);
+        assert!(motion_timer_event_for_node(&events, "r1").is_none());
+    }
+
+    #[test]
+    fn node_preferences_rejects_unknown_profile_override_in_direct_command() {
+        let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state.lock().unwrap().motion_snapshots.insert(
+            "r1".into(),
+            MotionSnapshot {
+                motion_active: true,
+                motion_owned: true,
+                remaining_secs: None,
+                timeout_secs: 300,
+                warning_active: false,
+            },
+        );
+        let patch = profile_overrides_patch(vec![(
+            "missing-profile",
+            Some(motion_timeout_profile_override(120)),
+        )]);
+
+        let result =
+            do_node_preferences_set(&state, "r1", None, None, None, None, Some(&patch), false);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown overridden light profile: missing-profile"));
+        assert!(runtime
+            .engine_node_snapshot("r1")
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .is_empty());
+        let s = state.lock().unwrap();
+        assert_eq!(s.motion_snapshots.get("r1").unwrap().timeout_secs, 300);
+        assert!(s.pending_motion_timeout_refresh.is_empty());
     }
 
     // ========================================================================

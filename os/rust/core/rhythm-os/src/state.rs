@@ -453,6 +453,8 @@ pub struct AppState {
     pub pending_hub_event_rxs: Vec<std::sync::mpsc::Receiver<HubEvent>>,
     /// Target node IDs whose motion timers should be cleared (picked up by event loop).
     pub pending_motion_clear: Vec<String>,
+    /// Target node IDs whose live motion timers should be re-evaluated after a timeout change.
+    pub pending_motion_timeout_refresh: Vec<String>,
     /// Restart-time motion timer persist acknowledgements requested by lifecycle code.
     ///
     /// The event loop owns the live motion timer map, so planned restarts ask
@@ -706,6 +708,7 @@ impl Default for AppState {
             next_interactive_node_dispatch_at: None,
             pending_hub_event_rxs: Vec::new(),
             pending_motion_clear: Vec::new(),
+            pending_motion_timeout_refresh: Vec::new(),
             pending_motion_timer_persist_acks: Vec::new(),
             pending_motion_seed: Vec::new(),
             composite_controller: None,

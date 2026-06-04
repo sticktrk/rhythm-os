@@ -102,7 +102,7 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["DELETE"],
     },
     SharedRoute {
-        path: "/api/nodes/motion-timeout",
+        path: "/api/nodes/profile-overrides",
         methods: &["PUT"],
     },
     SharedRoute {

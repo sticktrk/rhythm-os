@@ -82,9 +82,9 @@ pub use persistence::{
 pub use primitives::{crossed_solar_midnight, PeriodicTickResult, RhythmEngine};
 pub use room::{
     default_mode_configs, default_mode_transition_configs, normalize_mode_transition_configs,
-    EffectiveRoomState, LightNodeKind, ModeChangeCause, ModeConfig, ModeTransitionConfig,
-    ModeTransitionTime, ModeTransitionTrigger, RhythmMode, Room, RoomManager, RoomModeDefault,
-    RoomModeState, RoomProfileSettings, DEFAULT_MODE_TRANSITION_DURATION_MS,
+    EffectiveRoomState, LightNodeKind, LightProfileNodeOverride, ModeChangeCause, ModeConfig,
+    ModeTransitionConfig, ModeTransitionTime, ModeTransitionTrigger, RhythmMode, Room, RoomManager,
+    RoomModeDefault, RoomModeState, RoomProfileSettings, DEFAULT_MODE_TRANSITION_DURATION_MS,
 };
 pub use solar::{
     calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_times, calculate_sunrise,

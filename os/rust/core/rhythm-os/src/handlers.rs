@@ -14,6 +14,7 @@
 //! | Batch mutations returning data| Always `{"rooms":[...]}` regardless of N  |
 //! | Errors                        | 400/500 with plain text                   |
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
 use std::io::ErrorKind;
@@ -27,7 +28,7 @@ use crate::commands::{self};
 use crate::logging;
 use crate::state::SharedState;
 use crate::topology::{InputBinding, InputBindingPreset, NodeControlKind};
-use rhythm_core::{ButtonAction, Rgb, XyColor};
+use rhythm_core::{ButtonAction, LightProfileNodeOverride, Rgb, XyColor};
 
 fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
     if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
@@ -686,32 +687,6 @@ pub fn handle_delete_device(state: &SharedState, id: &str) -> ApiResponse {
     }
 }
 
-pub fn handle_put_motion_timeout(state: &SharedState, body: &Value) -> ApiResponse {
-    let raw_room_id = match body.get("node_id").and_then(|v| v.as_str()) {
-        Some(id) => id,
-        None => return ApiResponse::bad_request("Missing node_id"),
-    };
-    let room_id = commands::resolve_node_id(state, raw_room_id);
-
-    // null timeout_secs → remove per-room override (use profile default)
-    let timeout_val = body.get("timeout_secs");
-    if timeout_val.is_some_and(|v| v.is_null()) {
-        match commands::do_motion_timeout_clear(state, &room_id, None) {
-            Ok(()) => return ApiResponse::no_content(),
-            Err(e) => return ApiResponse::server_error(e),
-        }
-    }
-
-    let timeout = match timeout_val.and_then(|v| v.as_u64()) {
-        Some(t) => t,
-        None => return ApiResponse::bad_request("Missing timeout_secs"),
-    };
-    match commands::do_motion_timeout_set(state, &room_id, timeout, None) {
-        Ok(()) => ApiResponse::no_content(),
-        Err(e) => ApiResponse::server_error(e),
-    }
-}
-
 fn parse_timer_patch_value(
     body: &serde_json::Map<String, Value>,
     key: &str,
@@ -722,6 +697,42 @@ fn parse_timer_patch_value(
         Some(v) => serde_json::from_value(v.clone())
             .map(|value| Some(Some(value)))
             .map_err(|e| format!("Invalid {}: {}", key, e)),
+    }
+}
+
+fn parse_profile_overrides_patch_value(
+    body: &serde_json::Map<String, Value>,
+    field_name: &str,
+) -> Result<Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>, String> {
+    match body.get("profile_overrides") {
+        None => Ok(None),
+        Some(v) if v.is_null() => Ok(Some(None)),
+        Some(v) => {
+            let object = v.as_object().ok_or_else(|| {
+                format!("{field_name}.profile_overrides must be an object or null")
+            })?;
+            let mut overrides = BTreeMap::new();
+            for (profile_id, value) in object {
+                if profile_id.trim().is_empty() {
+                    return Err(format!(
+                        "{field_name}.profile_overrides keys must be non-empty profile IDs"
+                    ));
+                }
+                if value.is_null() {
+                    overrides.insert(profile_id.clone(), None);
+                    continue;
+                }
+                let profile_override: LightProfileNodeOverride =
+                    serde_json::from_value(value.clone()).map_err(|e| {
+                        format!(
+                            "Invalid {field_name}.profile_overrides.{}: {}",
+                            profile_id, e
+                        )
+                    })?;
+                overrides.insert(profile_id.clone(), Some(profile_override));
+            }
+            Ok(Some(Some(overrides)))
+        }
     }
 }
 
@@ -795,6 +806,7 @@ fn parse_profile_settings_patch(
         mood_scene_id,
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
+        profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
     }))
 }
 
@@ -2055,6 +2067,81 @@ pub fn handle_put_node_preferences(
     nodes_response(results, true, queue_dispatch_spacing)
 }
 
+/// Patch per-profile overrides for one or more nodes.
+///
+/// Body shape:
+/// `{ "node_id": "...", "profile_overrides": { "profile-id": { ... }, "other": null } }`
+/// where a `null` profile entry removes that profile override, and
+/// `profile_overrides: null` clears all profile overrides for the node.
+pub fn handle_put_node_profile_overrides(
+    state: &SharedState,
+    body: &Value,
+    persist: bool,
+) -> ApiResponse {
+    let items = match mutation_items(body) {
+        Ok(items) => items,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+
+    let mut updates = Vec::with_capacity(items.len());
+
+    for item in &items {
+        let body = match item.as_object() {
+            Some(body) => body,
+            None => {
+                return ApiResponse::bad_request("node profile override item must be an object")
+            }
+        };
+        let raw_node_id = match body.get("node_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return ApiResponse::bad_request("Missing node_id"),
+        };
+        let profile_overrides = match parse_profile_overrides_patch_value(body, "body") {
+            Ok(Some(profile_overrides)) => profile_overrides,
+            Ok(None) => return ApiResponse::bad_request("Missing profile_overrides"),
+            Err(e) => return ApiResponse::bad_request(&e),
+        };
+        updates.push(commands::QueuedNodePreferencesPatch {
+            node_id: commands::resolve_node_id(state, raw_node_id),
+            rhythm_enabled: None,
+            disabled: None,
+            standby_enabled: None,
+            target_state: None,
+            room_profile: Some(commands::RoomProfileSettingsPatch {
+                profile_overrides: Some(profile_overrides),
+                ..Default::default()
+            }),
+        });
+    }
+
+    let node_ids: Vec<String> = updates
+        .iter()
+        .map(|update| update.node_id.clone())
+        .collect();
+    let mut results = Vec::with_capacity(node_ids.len());
+    for node_id in &node_ids {
+        match commands::build_node_state(state, node_id) {
+            Ok(node) => results.push(node),
+            Err(e) => return ApiResponse::server_error(e),
+        }
+    }
+    let queue_dispatch_spacing = if updates.len() <= 1 {
+        Duration::ZERO
+    } else {
+        dispatch_spacing
+    };
+    if let Err(e) =
+        commands::queue_node_preferences_batch(state, updates, persist, queue_dispatch_spacing)
+    {
+        return ApiResponse::server_error(e);
+    }
+    nodes_response(results, true, queue_dispatch_spacing)
+}
+
 pub fn handle_post_sync(state: &SharedState) -> ApiResponse {
     match crate::room_sync::sync_all_hubs(state) {
         Ok(report) => {
@@ -2863,7 +2950,13 @@ mod tests {
                 "idle_profile_id": "legacy-idle",
                 "active_light_scene_id": "scene-1",
                 "fade_ms": {"mode": "fixed", "value": 250},
-                "motion_timeout_secs": null
+                "motion_timeout_secs": null,
+                "profile_overrides": {
+                    "rhythm": {
+                        "motion_timeout_secs": {"mode": "fixed", "value": 300}
+                    },
+                    "sleep": null
+                }
             })),
             "room_profile",
         )
@@ -2878,6 +2971,15 @@ mod tests {
             Some(Some(rhythm_core::TimerSetting::Fixed { value: 250 }))
         );
         assert_eq!(patch.motion_timeout_secs, Some(None));
+        let profile_overrides = patch.profile_overrides.unwrap().unwrap();
+        assert_eq!(
+            profile_overrides
+                .get("rhythm")
+                .and_then(|override_patch| override_patch.as_ref())
+                .and_then(|override_patch| override_patch.motion_timeout_secs.as_ref()),
+            Some(&rhythm_core::TimerSetting::Fixed { value: 300 })
+        );
+        assert!(matches!(profile_overrides.get("sleep"), Some(None)));
 
         assert_eq!(
             parse_profile_settings_patch(Some(&json!("bad")), "room_profile").unwrap_err(),
@@ -3138,19 +3240,23 @@ mod tests {
     }
 
     #[test]
-    fn put_motion_timeout_missing_node_id() {
+    fn put_node_profile_overrides_missing_node_id() {
         let state = test_state();
-        let r = handle_put_motion_timeout(&state, &json!({"timeout_secs": 60}));
+        let r = handle_put_node_profile_overrides(
+            &state,
+            &json!({"profile_overrides": {"rhythm": null}}),
+            false,
+        );
         assert_eq!(r.status, 400);
         assert!(r.body.contains("node_id"));
     }
 
     #[test]
-    fn put_motion_timeout_missing_timeout() {
+    fn put_node_profile_overrides_missing_overrides() {
         let state = test_state();
-        let r = handle_put_motion_timeout(&state, &json!({"node_id": "r"}));
+        let r = handle_put_node_profile_overrides(&state, &json!({"node_id": "r"}), false);
         assert_eq!(r.status, 400);
-        assert!(r.body.contains("timeout_secs"));
+        assert!(r.body.contains("profile_overrides"));
     }
 
     #[test]
@@ -3834,6 +3940,21 @@ mod tests {
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
+                RoomSnapshot {
+                    id: "standalone-light".into(),
+                    name: "Standalone Light".into(),
+                    kind: rhythm_core::LightNodeKind::LightDevice,
+                    parent_id: None,
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
+                    hard_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
+                },
             ],
         });
         let mut app = AppState::default();
@@ -4288,11 +4409,28 @@ mod tests {
     }
 
     #[test]
-    fn put_motion_timeout_returns_204() {
+    fn put_node_profile_overrides_queues_patch() {
         let state = handler_state_with_runtime();
-        let r = handle_put_motion_timeout(&state, &json!({"node_id": "room1", "timeout_secs": 60}));
-        assert_eq!(r.status, 204);
-        assert!(r.body.is_empty());
+        let rx = attach_work_queue(&state);
+        let r = handle_put_node_profile_overrides(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "profile_overrides": {
+                    "rhythm": {
+                        "motion_timeout_secs": {"mode": "fixed", "value": 60}
+                    }
+                }
+            }),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodePreferences { .. }
+        ));
     }
 
     #[test]

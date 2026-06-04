@@ -5,7 +5,7 @@
 //! leaves. `RoomManager` tracks that node graph and computes inherited
 //! behavior for child nodes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::light_profile::{
     is_builtin_state_profile_id, LightProfileConfig, TimerSetting, DAY_IDLE_PROFILE_ID,
@@ -795,6 +795,40 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     ])
 }
 
+/// Per-node timer overrides for one resolved light profile.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct LightProfileNodeOverride {
+    /// Optional per-node fade override for this profile.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub fade_ms: Option<TimerSetting>,
+
+    /// Optional per-node motion timeout override for this profile.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub motion_timeout_secs: Option<TimerSetting>,
+}
+
+impl LightProfileNodeOverride {
+    pub fn is_empty(&self) -> bool {
+        self.fade_ms.is_none() && self.motion_timeout_secs.is_none()
+    }
+
+    fn apply_to_config(&self, config: &mut LightProfileConfig) {
+        if let Some(fade_ms) = &self.fade_ms {
+            config.fade_ms = fade_ms.clone();
+        }
+        if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
+            config.motion_timeout_secs = motion_timeout_secs.clone();
+        }
+    }
+}
+
 /// Per-room light profile selection and timer overrides.
 ///
 /// This layer sits on top of the globally active profile:
@@ -802,6 +836,7 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
 /// - `mood_enabled`: legacy compatibility field, currently not runtime-active
 /// - `mood_profile_id`: legacy compatibility field for stored profile payloads
 /// - timer fields: optionally override the selected profile's timer settings
+/// - `profile_overrides`: optionally override timers for specific resolved profiles
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RoomProfileSettings {
@@ -854,6 +889,13 @@ pub struct RoomProfileSettings {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub motion_timeout_secs: Option<TimerSetting>,
+
+    /// Optional per-profile node overrides keyed by light profile ID.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub profile_overrides: BTreeMap<String, LightProfileNodeOverride>,
 }
 
 impl RoomProfileSettings {
@@ -865,6 +907,7 @@ impl RoomProfileSettings {
             && self.mood_scene_id.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
+            && self.profile_overrides.is_empty()
     }
 
     /// Resolve legacy mood enablement for compatibility payloads.
@@ -885,6 +928,14 @@ impl RoomProfileSettings {
         }
         if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
             config.motion_timeout_secs = motion_timeout_secs.clone();
+        }
+    }
+
+    /// Apply per-node timer overrides for a specific resolved profile.
+    pub fn apply_to_config_for_profile(&self, profile_id: &str, config: &mut LightProfileConfig) {
+        self.apply_to_config(config);
+        if let Some(profile_override) = self.profile_overrides.get(profile_id) {
+            profile_override.apply_to_config(config);
         }
     }
 
@@ -909,6 +960,11 @@ impl RoomProfileSettings {
                 .motion_timeout_secs
                 .clone()
                 .or_else(|| parent.motion_timeout_secs.clone()),
+            profile_overrides: {
+                let mut profile_overrides = parent.profile_overrides.clone();
+                profile_overrides.extend(self.profile_overrides.clone());
+                profile_overrides
+            },
         }
     }
 }
@@ -1514,6 +1570,7 @@ mod tests {
             mood_scene_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
+            profile_overrides: BTreeMap::new(),
         };
         let mut config = crate::default_rhythm_profile();
 
@@ -1525,6 +1582,40 @@ mod tests {
             config.motion_timeout_secs,
             TimerSetting::Fixed { value: 42 }
         );
+    }
+
+    #[test]
+    fn test_room_profile_settings_apply_profile_motion_timeout_to_config() {
+        let mut settings = RoomProfileSettings {
+            fade_ms: Some(TimerSetting::Fixed { value: 250 }),
+            motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
+            ..Default::default()
+        };
+        settings.profile_overrides.insert(
+            "focus".into(),
+            LightProfileNodeOverride {
+                fade_ms: Some(TimerSetting::Fixed { value: 500 }),
+                motion_timeout_secs: Some(TimerSetting::Fixed { value: 75 }),
+                ..Default::default()
+            },
+        );
+
+        let mut focus_config = crate::default_rhythm_profile();
+        focus_config.id = "focus".into();
+        settings.apply_to_config_for_profile("focus", &mut focus_config);
+        assert_eq!(
+            focus_config.motion_timeout_secs,
+            TimerSetting::Fixed { value: 75 }
+        );
+        assert_eq!(focus_config.fade_ms, TimerSetting::Fixed { value: 500 });
+
+        let mut sleep_config = crate::default_sleep_profile();
+        settings.apply_to_config_for_profile("sleep", &mut sleep_config);
+        assert_eq!(
+            sleep_config.motion_timeout_secs,
+            TimerSetting::Fixed { value: 42 }
+        );
+        assert_eq!(sleep_config.fade_ms, TimerSetting::Fixed { value: 250 });
     }
 
     #[test]
