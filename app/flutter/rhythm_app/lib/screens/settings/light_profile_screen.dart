@@ -1392,10 +1392,13 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         ),
         const SizedBox(height: 24),
       ],
-      _buildAdvancedSection(
-        canUseAdvancedDay: canUseAdvancedDay,
-        canUseSleepPrimary: canUseSleepPrimary,
-      ),
+      // Advanced (timing fine-tune) is hidden for now behind a feature flag
+      // while the Light tab moves to layered profiles — retained for later.
+      if (FeatureFlags.showAdvancedLightSection)
+        _buildAdvancedSection(
+          canUseAdvancedDay: canUseAdvancedDay,
+          canUseSleepPrimary: canUseSleepPrimary,
+        ),
       if (_curveConfigDirty || _isSaving) ...[
         const SizedBox(height: 24),
         _buildPendingChangesActions(),

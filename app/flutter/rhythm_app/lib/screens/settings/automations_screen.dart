@@ -33,8 +33,12 @@ class AutomationsScreen extends StatelessWidget {
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const SettingsSectionHeader(
-                          title: 'How Day & Sleep switch',
+                        const _AutomationSectionHeader(
+                          step: 1,
+                          title: 'How it switches',
+                          subtitle: 'Move between Day and Sleep automatically, '
+                              'or with a button.',
+                          accent: CelestialColors.accentBlue,
                         ),
                         SettingsGroup(
                           children: [
@@ -42,7 +46,13 @@ class AutomationsScreen extends StatelessWidget {
                             _buttonRow(context, sync, profileColors),
                           ],
                         ),
-                        const SettingsSectionHeader(title: 'What lights do'),
+                        const _AutomationSectionHeader(
+                          step: 2,
+                          title: 'What each mode does',
+                          subtitle: 'Set what your rooms do once Day or Sleep '
+                              'begins.',
+                          accent: CelestialColors.sunWarm,
+                        ),
                         SettingsGroup(
                           children: [
                             _modeRow(context, sync, RhythmMode.day),
@@ -98,8 +108,9 @@ class AutomationsScreen extends StatelessWidget {
     return SettingsRow(
       icon: Icons.access_time_rounded,
       iconColor: const Color(0xFF58A6FF),
-      label: 'Day/Sleep Automatic',
-      value: enabled ? 'On' : 'Off',
+      label: 'Automatic',
+      showChevron: false,
+      trailing: _StatusPill(enabled: enabled),
       onTap: () => _pushDetail(
         context,
         DefaultTransitionEditorScreen(
@@ -119,8 +130,9 @@ class AutomationsScreen extends StatelessWidget {
     return SettingsRow(
       icon: Icons.radio_button_checked_rounded,
       iconColor: const Color(0xFF9C8CFF),
-      label: 'Day/Sleep Button Toggle',
-      value: enabled ? 'On' : 'Off',
+      label: 'Button Toggle',
+      showChevron: false,
+      trailing: _StatusPill(enabled: enabled),
       onTap: () => _pushDetail(
         context,
         DefaultTransitionEditorScreen(
@@ -150,6 +162,125 @@ class AutomationsScreen extends StatelessWidget {
           ? '$overrides room${overrides == 1 ? '' : 's'} set'
           : 'All Auto',
       onTap: () => _pushDetail(context, ModeBehaviorDetailScreen(mode: mode)),
+    );
+  }
+}
+
+/// A numbered, two-line section header for the Automations flow. The tinted
+/// step badge plus subtitle turns two loose lists into a clear sequence:
+/// ① decide how the home switches → ② define what each mode does.
+class _AutomationSectionHeader extends StatelessWidget {
+  final int step;
+  final String title;
+  final String subtitle;
+  final Color accent;
+
+  const _AutomationSectionHeader({
+    required this.step,
+    required this.title,
+    required this.subtitle,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 2, right: 8, top: 30, bottom: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Tinted numeral badge — conveys "first, then" ordering.
+          Container(
+            width: 26,
+            height: 26,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: accent.withValues(alpha: 0.16),
+              border: Border.all(
+                color: accent.withValues(alpha: 0.4),
+                width: 1,
+              ),
+            ),
+            child: Text(
+              '$step',
+              style: TextStyle(
+                color: accent,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                height: 1,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title.toUpperCase(),
+                  style: TextStyle(
+                    color: accent,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.9,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.85),
+                    fontSize: 13,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A colorful On/Off status pill (green when enabled, muted grey when off),
+/// paired with a chevron to keep the row reading as tappable.
+class _StatusPill extends StatelessWidget {
+  final bool enabled;
+
+  const _StatusPill({required this.enabled});
+
+  @override
+  Widget build(BuildContext context) {
+    final color =
+        enabled ? const Color(0xFF3FB950) : CelestialColors.textSecondary;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 4),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.16),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            enabled ? 'On' : 'Off',
+            style: TextStyle(
+              color: color,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Icon(
+          Icons.chevron_right,
+          color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+          size: 22,
+        ),
+      ],
     );
   }
 }

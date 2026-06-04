@@ -38,6 +38,16 @@ class FeatureFlags {
     defaultValue: false,
   );
 
+  /// Show the per-profile "Advanced" (timing fine-tune) section on the Light
+  /// tab. Hidden for now while the Light tab is reworked around layered
+  /// profiles; the underlying UI is retained and can be switched back on.
+  ///
+  /// Configure in .env: SHOW_ADVANCED_LIGHT_SECTION=true/false
+  static const bool showAdvancedLightSection = bool.fromEnvironment(
+    'SHOW_ADVANCED_LIGHT_SECTION',
+    defaultValue: false,
+  );
+
   /// Enable Cloudflare Tunnel-backed remote access for Rhythm Server hubs.
   ///
   /// When false, the app ignores remote endpoints, hides remote access setup,
