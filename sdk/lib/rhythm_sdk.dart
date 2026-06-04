@@ -38,6 +38,7 @@ export 'src/api/rhythm_bundle_api.dart';
 export 'src/api/rhythm_diagnostics_api.dart';
 export 'src/api/rhythm_matter_api.dart';
 export 'src/api/rhythm_ota_api.dart';
+export 'src/api/rhythm_remote_access_api.dart';
 export 'src/api/rhythm_server_api.dart';
 
 // Logging

@@ -401,12 +401,14 @@ class RhythmLightSceneEntry {
 class RhythmLightScene {
   final int? defaultTransitionMs;
   final RhythmLightSceneOutput? defaultOutput;
+  final List<RhythmLightSceneOutput> palette;
   final List<RhythmLightSceneEntry> entries;
   final Map<String, dynamic> raw;
 
   const RhythmLightScene({
     this.defaultTransitionMs,
     this.defaultOutput,
+    this.palette = const [],
     this.entries = const [],
     this.raw = const <String, dynamic>{},
   });
@@ -415,6 +417,7 @@ class RhythmLightScene {
     final raw = Map<String, dynamic>.from(json)
       ..remove('default_transition_ms')
       ..remove('default_output')
+      ..remove('palette')
       ..remove('entries');
     final defaultOutputJson = jsonMap(json['default_output']);
     return RhythmLightScene(
@@ -425,6 +428,11 @@ class RhythmLightScene {
       defaultOutput: defaultOutputJson == null
           ? null
           : RhythmLightSceneOutput.fromJson(defaultOutputJson),
+      palette: ((json['palette'] as List<dynamic>?) ?? const <dynamic>[])
+          .map(jsonMap)
+          .nonNulls
+          .map(RhythmLightSceneOutput.fromJson)
+          .toList(),
       entries: ((json['entries'] as List<dynamic>?) ?? const <dynamic>[])
           .map(jsonMap)
           .nonNulls
@@ -436,12 +444,18 @@ class RhythmLightScene {
 
   bool get isValid =>
       (defaultOutput?.isValid ?? true) &&
+      palette.every((output) => output.isValid) &&
       entries.every((entry) => entry.isValid);
 
   List<String> get validationErrors {
     final errors = <String>[];
     for (final error in defaultOutput?.validationErrors ?? const <String>[]) {
       errors.add('default_output: $error');
+    }
+    for (var i = 0; i < palette.length; i += 1) {
+      for (final error in palette[i].validationErrors) {
+        errors.add('palette[$i]: $error');
+      }
     }
     for (var i = 0; i < entries.length; i += 1) {
       for (final error in entries[i].validationErrors) {
@@ -456,6 +470,8 @@ class RhythmLightScene {
         if (defaultTransitionMs != null)
           'default_transition_ms': defaultTransitionMs,
         'default_output': defaultOutput?.toJson(),
+        if (palette.isNotEmpty)
+          'palette': palette.map((output) => output.toJson()).toList(),
         'entries': entries.map((entry) => entry.toJson()).toList(),
       };
 }

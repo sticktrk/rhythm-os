@@ -149,6 +149,7 @@ class RhythmConnection {
   // Optional web base URL (consumer passes Uri.base.toString() on web).
   String? _webBaseUrl;
   String? _authToken;
+  bool _useSsl = false;
 
   // The server API (uses the shared Dio instance).
   RhythmServerApi? _api;
@@ -215,18 +216,23 @@ class RhythmConnection {
   Future<void> connect(
     String host, {
     int port = 80,
+    bool useSsl = false,
     String? webBaseUrl,
     String? authToken,
   }) async {
     if (_connectionState == RhythmConnectionState.connected &&
         _host == host &&
         _port == port &&
+        _useSsl == useSsl &&
         _authToken == authToken) {
       return;
     }
 
     if (_host != null &&
-        (_host != host || _port != port || _authToken != authToken)) {
+        (_host != host ||
+            _port != port ||
+            _useSsl != useSsl ||
+            _authToken != authToken)) {
       _stopPolling();
       _disconnectSse();
       _sseReconnectTimer?.cancel();
@@ -244,9 +250,10 @@ class RhythmConnection {
 
     _host = host;
     _port = port;
+    _useSsl = useSsl;
     _webBaseUrl = webBaseUrl;
     _authToken = authToken;
-    final baseUrl = _buildBaseUrl(host, port, webBaseUrl);
+    final baseUrl = _buildBaseUrl(host, port, useSsl, webBaseUrl);
     _dio = Dio(BaseOptions(
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 5),
@@ -1103,10 +1110,16 @@ class RhythmConnection {
     return '$hubType@$address';
   }
 
-  static String _buildBaseUrl(String host, int port, String? webBaseUrl) {
+  static String _buildBaseUrl(
+    String host,
+    int port,
+    bool useSsl,
+    String? webBaseUrl,
+  ) {
     if (webBaseUrl != null) {
       return webBaseUrl.endsWith('/') ? webBaseUrl : '$webBaseUrl/';
     }
-    return 'http://$host:$port/';
+    final scheme = useSsl ? 'https' : 'http';
+    return '$scheme://$host:$port/';
   }
 }
