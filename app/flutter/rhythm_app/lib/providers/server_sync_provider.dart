@@ -564,6 +564,156 @@ class ServerSyncProvider extends ChangeNotifier {
   bool standbyEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.standbyEnabled ?? false;
 
+  void setNodeProfileMotionTimeoutLocal(
+    String nodeId, {
+    required RhythmMode mode,
+    required String profileId,
+    required RhythmTimerSetting? setting,
+  }) {
+    final index = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (index == -1) return;
+
+    final previous = _helloNodes[index];
+    final previousSettings =
+        previous.profileSettings ?? const RhythmNodeProfileSettings();
+    final updatedSettings = RhythmNodeProfileSettings(
+      profileId: previousSettings.profileId,
+      moodEnabled: previousSettings.moodEnabled,
+      moodProfileId: previousSettings.moodProfileId,
+      moodSceneId: previousSettings.moodSceneId,
+      fadeSetting: previousSettings.fadeSetting,
+      motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+      profileOverrides: _withMotionTimeoutProfileOverride(
+        previousSettings.profileOverrides,
+        profileId: profileId,
+        setting: setting,
+      ),
+      raw: previousSettings.raw,
+    );
+
+    _helloNodes[index] = RhythmRoom(
+      id: previous.id,
+      name: previous.name,
+      kind: previous.kind,
+      parentId: previous.parentId,
+      placement: previous.placement,
+      groupedLightId: previous.groupedLightId,
+      state: previous.state,
+      transitioning: previous.transitioning,
+      rhythmEnabled: previous.rhythmEnabled,
+      disabled: previous.disabled,
+      timeOffset: previous.timeOffset,
+      brightnessOffset: previous.brightnessOffset,
+      hubTypes: previous.hubTypes,
+      manufacturer: previous.manufacturer,
+      model: previous.model,
+      deviceIds: previous.deviceIds,
+      devices: previous.devices,
+      profileSettings: updatedSettings,
+      observedPower: previous.observedPower,
+      moodEnabled: previous.moodEnabled,
+      moodActive: previous.moodActive,
+      standbyEnabled: previous.standbyEnabled,
+      standbyActive: previous.standbyActive,
+      lightsOn: previous.lightsOn,
+      brightness: previous.brightness,
+      kelvin: previous.kelvin,
+      motionActive: previous.motionActive,
+      motionOwned: previous.motionOwned,
+      remainingSecs: previous.remainingSecs,
+      timeoutSecs: previous.timeoutSecs,
+      warningActive: previous.warningActive,
+    );
+    _updateActiveMotionTimerTimeoutLocal(
+      nodeId,
+      mode: mode,
+      settings: updatedSettings,
+    );
+    _helloRooms = _buildRoomSummaries();
+    notifyListeners();
+  }
+
+  void _updateActiveMotionTimerTimeoutLocal(
+    String nodeId, {
+    required RhythmMode mode,
+    required RhythmNodeProfileSettings settings,
+  }) {
+    if (_activeMode != mode) return;
+    final existing = _roomProvider.getMotionTimer(nodeId);
+    if (existing == null) return;
+
+    final timeoutSecs = _effectiveMotionTimeoutSecsForNodeMode(mode, settings);
+    final remainingSecs = existing.remainingSecs?.clamp(0, timeoutSecs).toInt();
+    _roomProvider.updateNodeMotionTimer(
+      nodeId,
+      MotionTimerInfo(
+        motionActive: existing.motionActive,
+        motionOwned: existing.motionOwned,
+        remainingSecs: remainingSecs,
+        timeoutSecs: timeoutSecs,
+        warningActive: existing.warningActive,
+        receivedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  int _effectiveMotionTimeoutSecsForNodeMode(
+    RhythmMode mode,
+    RhythmNodeProfileSettings settings,
+  ) {
+    final profileId = _activeProfileIdForMode(mode);
+    final modeSetting =
+        settings.profileOverrides[profileId]?.motionTimeoutSetting;
+    final fixedValue =
+        modeSetting?.fixedValue ?? settings.motionTimeoutSetting?.fixedValue;
+    if (fixedValue != null) return fixedValue;
+
+    for (final profile in _profiles) {
+      if (profile.id == profileId) {
+        return profile.motionTimeoutSecs ??
+            RhythmCurveConfig.defaultMotionTimeoutSecs;
+      }
+    }
+    return _effectiveMotionTimeoutSecs ??
+        RhythmCurveConfig.defaultMotionTimeoutSecs;
+  }
+
+  String _activeProfileIdForMode(RhythmMode mode) {
+    for (final config in _modeConfigs) {
+      if (config.mode == mode && config.activeProfileId.isNotEmpty) {
+        return config.activeProfileId;
+      }
+    }
+    return mode == RhythmMode.sleep ? 'sleep' : 'rhythm';
+  }
+
+  Map<String, RhythmLightProfileNodeOverride> _withMotionTimeoutProfileOverride(
+    Map<String, RhythmLightProfileNodeOverride> current, {
+    required String profileId,
+    required RhythmTimerSetting? setting,
+  }) {
+    final next = Map<String, RhythmLightProfileNodeOverride>.from(current);
+    final existing = next[profileId];
+    if (setting == null) {
+      if (existing == null || existing.fadeSetting == null) {
+        next.remove(profileId);
+      } else {
+        next[profileId] = RhythmLightProfileNodeOverride(
+          fadeSetting: existing.fadeSetting,
+          raw: existing.raw,
+        );
+      }
+      return Map.unmodifiable(next);
+    }
+
+    next[profileId] = RhythmLightProfileNodeOverride(
+      fadeSetting: existing?.fadeSetting,
+      motionTimeoutSetting: setting,
+      raw: existing?.raw ?? const <String, dynamic>{},
+    );
+    return Map.unmodifiable(next);
+  }
+
   void setNodeStandbyEnabledLocal(String nodeId, bool enabled) {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 || _helloNodes[index].standbyEnabled == enabled) return;
@@ -1819,6 +1969,20 @@ class ServerSyncProvider extends ChangeNotifier {
       standbyEnabled: standbyEnabled,
       state: state,
       profileSettings: profileSettings,
+    );
+  }
+
+  /// Patch per-profile overrides for one node.
+  void pushNodeProfileOverrides(
+    String nodeId, {
+    required Map<String, dynamic>? profileOverrides,
+  }) {
+    if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
+    if (!_connection.connected || _receivingFromServer) return;
+    debugPrint('ServerSync: pushNodeProfileOverrides $nodeId');
+    api.nodeProfileOverridesSet(
+      nodeId: nodeId,
+      profileOverrides: profileOverrides,
     );
   }
 

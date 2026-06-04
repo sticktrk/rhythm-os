@@ -93,6 +93,11 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   final List<
       ({
         String nodeId,
+        Map<String, dynamic>? profileOverrides,
+      })> nodeProfileOverrideCalls = [];
+  final List<
+      ({
+        String nodeId,
         int r,
         int g,
         int b,
@@ -155,6 +160,17 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       state: state,
       softOff: softOff,
       profileSettings: profileSettings,
+    ));
+  }
+
+  @override
+  Future<void> nodeProfileOverridesSet({
+    required String nodeId,
+    required Map<String, dynamic>? profileOverrides,
+  }) async {
+    nodeProfileOverrideCalls.add((
+      nodeId: nodeId,
+      profileOverrides: profileOverrides,
     ));
   }
 
@@ -3157,6 +3173,172 @@ void main() {
     expect(call.nodeId, 'room-1');
     expect(call.standbyEnabled, isTrue);
     expect(provider.standbyEnabledForNode('room-1'), isTrue);
+  });
+
+  testWidgets('room settings rhythm tab pushes day and sleep motion timeouts',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['matter'],
+            'device_ids': ['light-1'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'profile_settings': {
+              'profile_overrides': {
+                'sleep': {
+                  'motion_timeout_secs': {'mode': 'fixed', 'value': 900},
+                },
+              },
+            },
+          },
+        ],
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {'mode': 'day', 'active_profile_id': 'rhythm'},
+            {'mode': 'sleep', 'active_profile_id': 'sleep'},
+          ],
+        },
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    roomProvider.updateNodeMotionTimer(
+      'room-1',
+      MotionTimerInfo(
+        motionActive: false,
+        motionOwned: true,
+        remainingSecs: 850,
+        timeoutSecs: 900,
+        receivedAt: DateTime.now(),
+      ),
+    );
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Rhythm');
+    expect(find.text('Motion Timeout'), findsNWidgets(2));
+
+    await tester.tap(find.text('10m').first);
+    await tester.pump();
+
+    expect(api.nodePreferenceCalls, isEmpty);
+    expect(api.nodeProfileOverrideCalls, isEmpty);
+    expect(find.byType(Slider), findsNWidgets(2));
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides['rhythm']
+          ?.motionTimeoutSetting,
+      isNull,
+    );
+    expect(roomProvider.getMotionTimer('room-1')?.timeoutSecs, 900);
+    expect(roomProvider.getMotionTimer('room-1')?.remainingSecs, 850);
+
+    final daySlider = tester.widget<Slider>(find.byType(Slider).first);
+    expect(daySlider.value, 600);
+    expect(daySlider.onChanged, isNotNull);
+    expect(daySlider.onChangeEnd, isNotNull);
+    daySlider.onChanged!(720);
+    await tester.pump();
+
+    final draggedDaySlider = tester.widget<Slider>(find.byType(Slider).first);
+    expect(draggedDaySlider.value, 720);
+    expect(api.nodeProfileOverrideCalls, isEmpty);
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides['rhythm']
+          ?.motionTimeoutSetting,
+      isNull,
+    );
+
+    draggedDaySlider.onChangeEnd!(720);
+    await tester.pump();
+
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides['rhythm']
+          ?.motionTimeoutSetting
+          ?.fixedValue,
+      720,
+    );
+    expect(roomProvider.getMotionTimer('room-1')?.timeoutSecs, 720);
+    expect(roomProvider.getMotionTimer('room-1')?.remainingSecs, 720);
+
+    expect(api.nodeProfileOverrideCalls, hasLength(1));
+    final dayCall = api.nodeProfileOverrideCalls.single;
+    expect(dayCall.nodeId, 'room-1');
+    expect(
+      dayCall.profileOverrides,
+      {
+        'rhythm': {
+          'motion_timeout_secs': {'mode': 'fixed', 'value': 720},
+        },
+      },
+    );
+
+    await tester.tap(find.text('Auto').last);
+    await tester.pump();
+
+    expect(api.nodeProfileOverrideCalls, hasLength(2));
+    expect(roomProvider.getMotionTimer('room-1')?.timeoutSecs, 720);
+    final sleepCall = api.nodeProfileOverrideCalls.last;
+    expect(
+      sleepCall.profileOverrides,
+      {'sleep': null},
+    );
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides['sleep']
+          ?.motionTimeoutSetting,
+      isNull,
+    );
   });
 
   testWidgets('Delete Room is shown for matter rooms and calls the SDK method',

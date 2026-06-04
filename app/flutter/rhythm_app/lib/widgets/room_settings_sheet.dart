@@ -7,9 +7,17 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show
+        RhythmCurveConfig,
+        RhythmDevice,
+        RhythmDeviceType,
+        RhythmMode,
+        RhythmNodeProfileSettings,
+        RhythmTimerSetting;
 import 'device_detail_sheet.dart';
 import 'light_output_display.dart';
+import 'auto_slider_setting_row.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 /// Bottom sheet with per-room settings.
@@ -45,6 +53,7 @@ enum _SheetTab { rhythm, devices, settings }
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   _SheetTab _selectedTab = _SheetTab.devices;
   bool _deletingRoom = false;
+  final Map<String, RhythmTimerSetting> _motionTimeoutDrafts = {};
 
   RoomDto get room => widget.room;
 
@@ -57,6 +66,9 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   @override
   void didUpdateWidget(RoomSettingsSheet oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.room.id != widget.room.id) {
+      _motionTimeoutDrafts.clear();
+    }
     if (oldWidget.room.id != widget.room.id ||
         oldWidget.enableLivePreview != widget.enableLivePreview) {
       _refreshLivePreviewState();
@@ -264,35 +276,180 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 
   Widget _buildRhythmContent(BuildContext context) {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final node = syncProvider.nodeById(room.id);
+    final settings = node?.profileSettings;
+
     return ListView(
       key: const ValueKey('rhythm'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
         _buildSettingsGroup('Day Profile', [
-          _SettingsRow(
-            icon: Icons.wb_sunny_outlined,
-            label: 'Default',
-            trailing: Icon(
-              Icons.check_rounded,
-              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
-              size: 18,
-            ),
+          _buildMotionTimeoutRow(
+            context,
+            mode: RhythmMode.day,
+            profileSettings: settings,
           ),
         ]),
         const SizedBox(height: 16),
         _buildSettingsGroup('Sleep Profile', [
-          _SettingsRow(
-            icon: Icons.nightlight_outlined,
-            label: 'Default',
-            trailing: Icon(
-              Icons.check_rounded,
-              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
-              size: 18,
-            ),
+          _buildMotionTimeoutRow(
+            context,
+            mode: RhythmMode.sleep,
+            profileSettings: settings,
           ),
         ]),
       ],
     );
+  }
+
+  Widget _buildMotionTimeoutRow(
+    BuildContext context, {
+    required RhythmMode mode,
+    required RhythmNodeProfileSettings? profileSettings,
+  }) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final profileId = _activeProfileIdForMode(syncProvider, mode);
+    final draftKey = _motionTimeoutDraftKey(mode, profileId);
+    final committedSetting =
+        _motionTimeoutSettingForProfile(profileId, profileSettings);
+    final draftSetting = _motionTimeoutDrafts[draftKey];
+    final setting = draftSetting ?? committedSetting;
+    final inheritedSecs = _defaultMotionTimeoutSecs(context, mode);
+    final currentSecs = setting?.fixedValue ?? inheritedSecs;
+    final sliderValue = currentSecs.clamp(30, 1800).toDouble();
+
+    void push(int? secs) {
+      syncProvider.pushNodeProfileOverrides(
+        room.id,
+        profileOverrides: {
+          profileId: secs == null
+              ? null
+              : {
+                  'motion_timeout_secs':
+                      RhythmTimerSetting.fixed(secs).toJson(),
+                },
+        },
+      );
+      HapticFeedback.selectionClick();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 12),
+      child: AutoSliderSettingRow(
+        icon: mode == RhythmMode.sleep
+            ? Icons.nightlight_outlined
+            : Icons.wb_sunny_outlined,
+        title: 'Motion Timeout',
+        color: const Color(0xFF4ADE80),
+        isAuto: setting == null || setting.isAuto,
+        sliderValue: sliderValue,
+        effectiveValue: inheritedSecs.toDouble(),
+        sliderMin: 30,
+        sliderMax: 1800,
+        divisions: 59,
+        format: (value) => _formatMotionTimeout(value.round()),
+        tooltip: 'How long the lights stay on after motion is last detected '
+            'before timing out to mood.',
+        onAuto: () {
+          _commitMotionTimeoutSetting(mode, profileId, null);
+          push(null);
+        },
+        onManual: () {
+          _setMotionTimeoutDraft(
+            mode,
+            profileId,
+            RhythmTimerSetting.fixed(inheritedSecs),
+          );
+          HapticFeedback.selectionClick();
+        },
+        onSliderChanged: (value) {
+          _setMotionTimeoutDraft(
+            mode,
+            profileId,
+            RhythmTimerSetting.fixed(value.round()),
+          );
+        },
+        onSliderChangeEnd: (value) {
+          final secs = value.round();
+          _commitMotionTimeoutSetting(
+            mode,
+            profileId,
+            RhythmTimerSetting.fixed(secs),
+          );
+          push(secs);
+        },
+      ),
+    );
+  }
+
+  RhythmTimerSetting? _motionTimeoutSettingForProfile(
+    String profileId,
+    RhythmNodeProfileSettings? profileSettings,
+  ) {
+    return profileSettings?.profileOverrides[profileId]?.motionTimeoutSetting;
+  }
+
+  void _setMotionTimeoutDraft(
+    RhythmMode mode,
+    String profileId,
+    RhythmTimerSetting setting,
+  ) {
+    setState(() {
+      _motionTimeoutDrafts[_motionTimeoutDraftKey(mode, profileId)] = setting;
+    });
+  }
+
+  void _commitMotionTimeoutSetting(
+    RhythmMode mode,
+    String profileId,
+    RhythmTimerSetting? setting,
+  ) {
+    setState(() {
+      _motionTimeoutDrafts.remove(_motionTimeoutDraftKey(mode, profileId));
+    });
+    context.read<ServerSyncProvider>().setNodeProfileMotionTimeoutLocal(
+          room.id,
+          mode: mode,
+          profileId: profileId,
+          setting: setting,
+        );
+  }
+
+  String _motionTimeoutDraftKey(RhythmMode mode, String profileId) =>
+      '${mode.wireValue}:$profileId';
+
+  int _defaultMotionTimeoutSecs(BuildContext context, RhythmMode mode) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    if (syncProvider.activeMode == mode &&
+        syncProvider.effectiveMotionTimeoutSecs != null) {
+      return syncProvider.effectiveMotionTimeoutSecs!;
+    }
+
+    final profileId = _activeProfileIdForMode(syncProvider, mode);
+    for (final profile in syncProvider.profiles) {
+      if (profile.id == profileId) {
+        return profile.motionTimeoutSecs ??
+            RhythmCurveConfig.defaultMotionTimeoutSecs;
+      }
+    }
+    return RhythmCurveConfig.defaultMotionTimeoutSecs;
+  }
+
+  String _activeProfileIdForMode(
+      ServerSyncProvider syncProvider, RhythmMode mode) {
+    for (final config in syncProvider.modeConfigs) {
+      if (config.mode == mode && config.activeProfileId.isNotEmpty) {
+        return config.activeProfileId;
+      }
+    }
+    return mode == RhythmMode.sleep ? 'sleep' : 'rhythm';
+  }
+
+  String _formatMotionTimeout(int secs) {
+    if (secs == 0) return 'Off';
+    if (secs >= 60) return '${(secs / 60).round()}m';
+    return '${secs}s';
   }
 
   Widget _buildSettingsContent(BuildContext context) {

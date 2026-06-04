@@ -13,8 +13,8 @@ import '../../models/plan_tier.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../widgets/info_tooltip.dart';
 import '../../widgets/plan_tier_modal.dart';
+import '../../widgets/auto_slider_setting_row.dart';
 
 /// Full-screen modal for configuring the light profile.
 ///
@@ -2502,114 +2502,21 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     required VoidCallback onManual,
     String? tooltip,
   }) {
-    final displayValue = isAuto ? effectiveValue : sliderValue;
-    return Column(
-      children: [
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: isAuto ? onManual : null,
-          child: Row(
-            children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: color.withValues(alpha: 0.1),
-                ),
-                child: Icon(icon, color: color, size: 15),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        title,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: _Palette.textSecondary,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                    if (tooltip != null) ...[
-                      const SizedBox(width: 2),
-                      InfoTooltip(message: tooltip, iconSize: 13),
-                    ],
-                  ],
-                ),
-              ),
-              _buildAutoToggle(
-                color: color,
-                isAuto: isAuto,
-                valueLabel: format(displayValue),
-                onAuto: onAuto,
-                onManual: onManual,
-              ),
-            ],
-          ),
-        ),
-        AnimatedSize(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOutCubic,
-          alignment: Alignment.topCenter,
-          child: isAuto
-              ? const SizedBox.shrink()
-              : Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    children: [
-                      SliderTheme(
-                        data: SliderThemeData(
-                          activeTrackColor: color,
-                          inactiveTrackColor: color.withValues(alpha: 0.12),
-                          thumbColor: color,
-                          overlayColor: color.withValues(alpha: 0.12),
-                          trackHeight: 4,
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 8),
-                          overlayShape:
-                              const RoundSliderOverlayShape(overlayRadius: 18),
-                        ),
-                        child: Slider(
-                          value: sliderValue.clamp(sliderMin, sliderMax),
-                          min: sliderMin,
-                          max: sliderMax,
-                          divisions: divisions,
-                          onChanged: onSliderChanged,
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              format(sliderMin),
-                              style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11,
-                              ),
-                            ),
-                            Text(
-                              format(sliderMax),
-                              style: TextStyle(
-                                color: _Palette.textSecondary
-                                    .withValues(alpha: 0.4),
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-        ),
-      ],
+    return AutoSliderSettingRow(
+      icon: icon,
+      title: title,
+      color: color,
+      isAuto: isAuto,
+      sliderValue: sliderValue,
+      effectiveValue: effectiveValue,
+      sliderMin: sliderMin,
+      sliderMax: sliderMax,
+      divisions: divisions,
+      format: format,
+      onSliderChanged: onSliderChanged,
+      onAuto: onAuto,
+      onManual: onManual,
+      tooltip: tooltip,
     );
   }
 
@@ -4045,7 +3952,6 @@ class _TimeGradientPainter extends CustomPainter {
       glowPhase != old.glowPhase ||
       showTimeMarkers != old.showTimeMarkers;
 }
-
 
 class _Palette {
   static const bg = Color(0xFF0B0E13);

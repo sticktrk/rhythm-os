@@ -257,6 +257,16 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<void> nodeProfileOverridesSet({
+    required String nodeId,
+    required Map<String, dynamic>? profileOverrides,
+  }) {
+    return _delegate.nodeProfileOverridesSet(
+      nodeId: nodeId,
+      profileOverrides: profileOverrides,
+    );
+  }
+
   Future<void> roomPreferencesBatchSet(
     List<Map<String, dynamic>> items, {
     int? dispatchSpacingMs,
