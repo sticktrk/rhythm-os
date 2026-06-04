@@ -74,7 +74,6 @@ Deno.serve((req) =>
       const hostname = hostnameForDomain(
         existing?.hostname,
         desiredHostname,
-        domain,
       )
       const tunnel = existing
         ? { id: existing.tunnel_id, name: existing.tunnel_name }
@@ -552,12 +551,11 @@ function remoteAccessDomain(): string {
 function hostnameForDomain(
   existingHostname: string | undefined,
   desiredHostname: string,
-  domain: string,
 ): string {
   if (!existingHostname) return desiredHostname
 
   const normalized = existingHostname.toLowerCase()
-  return normalized.endsWith(`.${domain}`) ? normalized : desiredHostname
+  return normalized === desiredHostname ? normalized : desiredHostname
 }
 
 function requireEnv(name: string): string {
