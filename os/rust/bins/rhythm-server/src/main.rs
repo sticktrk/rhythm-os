@@ -219,7 +219,11 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
     // listener is up so clients can connect immediately during hub sync.
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
 
-    axum::serve(listener, server).await?;
+    axum::serve(
+        listener,
+        server.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

@@ -77,6 +77,7 @@ fn do_update() -> Result<(), String> {
         let reason = match reason {
             self_update::UpdateReason::VersionMismatch => "version mismatch",
             self_update::UpdateReason::ComponentDrift => "component drift",
+            self_update::UpdateReason::ImageBaseDrift => "image base drift",
         };
         println!("Reason: {}", reason);
     }

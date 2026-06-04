@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -204,8 +204,11 @@ async fn health() -> ApiResponse {
     handlers::handle_health()
 }
 
-async fn get_auth_status(State(state): State<SharedState>) -> ApiResponse {
-    crate::auth::handle_get_auth_status(&state)
+async fn get_auth_status(
+    State(state): State<SharedState>,
+    auth_info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+) -> ApiResponse {
+    crate::auth::handle_get_auth_status(&state, auth_info.map(|Extension(info)| info))
 }
 
 async fn post_auth_claim(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {

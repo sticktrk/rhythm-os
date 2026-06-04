@@ -575,7 +575,11 @@ async fn run_server(
     spawn_boot_success_marker(state.clone());
     spawn_remote_access_startup_reconcile(state.clone());
 
-    axum::serve(listener, server).await?;
+    axum::serve(
+        listener,
+        server.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

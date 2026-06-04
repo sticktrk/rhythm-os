@@ -1,11 +1,12 @@
 //! Local API authentication for Rhythm OS.
 //!
 //! The appliance owns its API credentials. Cloud/account identity can decide
-//! who receives a token later, but every HTTP request to the local server should
-//! still be authorized by a device-issued bearer token.
+//! who may use remote access, but requests that reach the appliance through
+//! the remote tunnel are still authorized by a device-issued bearer token.
+//! Direct LAN access can remain open for local-first setup and control.
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::Next;
@@ -14,12 +15,20 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
 
 use crate::handlers::ApiResponse;
 use crate::state::{current_epoch_ms, SharedState};
 
 const TOKEN_RANDOM_BYTES: usize = 32;
 const TOKEN_PREFIX: &str = "rhythm_owner_";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiAuthRequestInfo {
+    pub requires_auth: bool,
+    pub claim_available: bool,
+    pub via_remote_access: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiAuth {
@@ -210,31 +219,35 @@ pub fn clear_api_auth(state: &SharedState) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn handle_get_auth_status(state: &SharedState) -> ApiResponse {
+pub fn handle_get_auth_status(
+    state: &SharedState,
+    request_info: Option<ApiAuthRequestInfo>,
+) -> ApiResponse {
     match state.lock() {
-        Ok(s) => ApiResponse::json_ok(
-            auth_status_payload(
-                s.require_api_auth,
-                s.api_auth.has_owner(),
-                s.api_auth.tokens.len(),
+        Ok(s) => {
+            let request_info = request_info.unwrap_or(ApiAuthRequestInfo {
+                requires_auth: s.require_api_auth,
+                claim_available: s.require_api_auth && !s.api_auth.has_owner(),
+                via_remote_access: false,
+            });
+            ApiResponse::json_ok(
+                auth_status_payload(
+                    request_info.requires_auth,
+                    s.api_auth.has_owner(),
+                    s.api_auth.tokens.len(),
+                    request_info.claim_available,
+                    request_info.via_remote_access,
+                )
+                .to_string(),
             )
-            .to_string(),
-        ),
+        }
         Err(_) => ApiResponse::server_error("lock"),
     }
 }
 
 pub fn handle_claim_owner_token(state: &SharedState, label: Option<String>) -> ApiResponse {
-    match state.lock() {
-        Ok(s) if !s.require_api_auth => {
-            return ApiResponse::bad_request("API auth is not required on this server");
-        }
-        Ok(_) => {}
-        Err(_) => return ApiResponse::server_error("lock"),
-    }
-
-    match issue_owner_token(state, label) {
-        Ok(IssueOwnerTokenResult::Issued(issued)) => ApiResponse::json_ok(
+    match issue_local_owner_token(state, label) {
+        Ok(issued) => ApiResponse::json_ok(
             json!({
                 "status": "ok",
                 "token_id": issued.id,
@@ -242,15 +255,6 @@ pub fn handle_claim_owner_token(state: &SharedState, label: Option<String>) -> A
             })
             .to_string(),
         ),
-        Ok(IssueOwnerTokenResult::AlreadyConfigured) => ApiResponse {
-            status: StatusCode::CONFLICT.as_u16(),
-            body: json!({
-                "status": "error",
-                "message": "Owner token is already configured",
-            })
-            .to_string(),
-            content_type: "application/json",
-        },
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -279,6 +283,8 @@ pub fn handle_put_auth_settings(state: &SharedState, body: &Value) -> ApiRespons
                 update.require_api_auth,
                 update.owner_configured,
                 update.token_count,
+                !update.require_api_auth || !update.owner_configured,
+                false,
             );
             if let Some(object) = body.as_object_mut() {
                 object.insert("status".to_string(), json!("ok"));
@@ -295,15 +301,17 @@ pub fn handle_put_auth_settings(state: &SharedState, body: &Value) -> ApiRespons
 
 pub async fn require_api_auth_middleware(
     State(state): State<SharedState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    if is_public_request(req.method(), req.uri().path()) {
+    let auth_info = auth_request_info(&state, &req);
+    req.extensions_mut().insert(auth_info);
+
+    if is_public_request(req.method(), req.uri().path(), auth_info) {
         return next.run(req).await;
     }
 
-    let auth_required = state.lock().map(|s| s.require_api_auth).unwrap_or(true);
-    if !auth_required {
+    if !auth_info.requires_auth {
         return next.run(req).await;
     }
 
@@ -326,20 +334,59 @@ fn auth_status_payload(
     require_api_auth: bool,
     owner_configured: bool,
     token_count: usize,
+    claim_available: bool,
+    via_remote_access: bool,
 ) -> Value {
     json!({
         "requires_auth": require_api_auth,
         "owner_configured": owner_configured,
         "token_count": token_count,
-        "claim_available": require_api_auth && !owner_configured,
+        "claim_available": claim_available,
+        "via_remote_access": via_remote_access,
     })
 }
 
-fn is_public_request(method: &Method, path: &str) -> bool {
+pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthRequestInfo {
+    let (stored_requires_auth, owner_configured, is_appliance) = state
+        .lock()
+        .map(|s| {
+            (
+                s.require_api_auth,
+                s.api_auth.has_owner(),
+                s.platform_type == "appliance",
+            )
+        })
+        .unwrap_or((true, true, false));
+
+    let via_remote_access = is_appliance
+        && req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip().is_loopback())
+            .unwrap_or(false);
+
+    let requires_auth = if via_remote_access {
+        true
+    } else if is_appliance {
+        false
+    } else {
+        stored_requires_auth
+    };
+
+    let claim_available = !via_remote_access && (!requires_auth || !owner_configured);
+
+    ApiAuthRequestInfo {
+        requires_auth,
+        claim_available,
+        via_remote_access,
+    }
+}
+
+fn is_public_request(method: &Method, path: &str, auth_info: ApiAuthRequestInfo) -> bool {
     *method == Method::OPTIONS
         || path == "/health"
         || path == "/api/auth/status"
-        || (*method == Method::POST && path == "/api/auth/claim")
+        || (*method == Method::POST && path == "/api/auth/claim" && auth_info.claim_available)
 }
 
 fn bearer_token(value: Option<&axum::http::HeaderValue>) -> Option<&str> {
@@ -401,8 +448,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::body::{to_bytes, Body};
+    use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
     use axum::middleware;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use tower::util::ServiceExt;
 
     fn test_state() -> SharedState {
@@ -416,6 +465,17 @@ mod tests {
                 state,
                 require_api_auth_middleware,
             ))
+    }
+
+    fn request_with_peer(method: Method, uri: &str, peer_ip: IpAddr, body: Body) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(body)
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(peer_ip, 49152)));
+        req
     }
 
     #[test]
@@ -580,6 +640,144 @@ mod tests {
         let state = state.lock().unwrap();
         assert!(state.require_api_auth);
         assert!(state.api_auth.verify_token(token));
+    }
+
+    #[tokio::test]
+    async fn appliance_lan_request_stays_open_even_when_auth_policy_is_on() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+            state.require_api_auth = true;
+            state.api_auth.require_api_auth = Some(true);
+        }
+        let app = auth_test_router(state);
+
+        let status = app
+            .clone()
+            .oneshot(request_with_peer(
+                Method::GET,
+                "/api/auth/status",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<Value>(
+            &to_bytes(status.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["requires_auth"].as_bool(), Some(false));
+        assert_eq!(body["claim_available"].as_bool(), Some(true));
+        assert_eq!(body["via_remote_access"].as_bool(), Some(false));
+
+        let response = app
+            .oneshot(request_with_peer(
+                Method::GET,
+                "/api/state",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn appliance_tunnel_request_requires_owner_token() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let issued = issue_local_owner_token(&state, Some("phone".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let status = app
+            .clone()
+            .oneshot(request_with_peer(
+                Method::GET,
+                "/api/auth/status",
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<Value>(
+            &to_bytes(status.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["requires_auth"].as_bool(), Some(true));
+        assert_eq!(body["claim_available"].as_bool(), Some(false));
+        assert_eq!(body["via_remote_access"].as_bool(), Some(true));
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(request_with_peer(
+                Method::GET,
+                "/api/state",
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .oneshot({
+                let mut req = request_with_peer(
+                    Method::GET,
+                    "/api/state",
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    Body::empty(),
+                );
+                req.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", issued.token).parse().unwrap(),
+                );
+                req
+            })
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn local_claim_endpoint_issues_additional_owner_tokens() {
+        let state = test_state();
+        let first = issue_local_owner_token(&state, Some("first".into())).unwrap();
+        let app = auth_test_router(state.clone());
+
+        let response = app
+            .oneshot({
+                let mut req = request_with_peer(
+                    Method::POST,
+                    "/api/auth/claim",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::from(json!({"label": "second"}).to_string()),
+                );
+                req.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let second = body["token"].as_str().expect("claim returns token");
+        assert_ne!(first.token, second);
+        let state = state.lock().unwrap();
+        assert_eq!(state.api_auth.tokens.len(), 2);
+        assert!(state.api_auth.verify_token(&first.token));
+        assert!(state.api_auth.verify_token(second));
     }
 
     #[tokio::test]
