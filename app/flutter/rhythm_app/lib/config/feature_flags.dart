@@ -37,4 +37,15 @@ class FeatureFlags {
     'ENTITLEMENTS_ENABLED',
     defaultValue: false,
   );
+
+  /// Enable Cloudflare Tunnel-backed remote access for Rhythm Server hubs.
+  ///
+  /// When false, the app ignores remote endpoints, hides remote access setup,
+  /// and uses the existing LAN-only server connection behavior.
+  ///
+  /// Configure in .env: REMOTE_ACCESS_TUNNEL_ENABLED=true/false
+  static const bool remoteAccessTunnel = bool.fromEnvironment(
+    'REMOTE_ACCESS_TUNNEL_ENABLED',
+    defaultValue: true,
+  );
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../config/feature_flags.dart';
 import '../models/plan_tier.dart';
 import '../providers/subscription_provider.dart';
 import '../screens/settings/dialogs/sign_in_modal.dart';
@@ -610,9 +611,8 @@ class _PriceText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final primaryColor = warm
-        ? _kProAmber
-        : CelestialColors.textPrimary.withValues(alpha: 0.92);
+    final primaryColor =
+        warm ? _kProAmber : CelestialColors.textPrimary.withValues(alpha: 0.92);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -1127,8 +1127,7 @@ class _GlyphPainter extends CustomPainter {
       ..strokeWidth = 1.1
       ..color = _kFreeMoon.withValues(alpha: 0.55);
     canvas.drawCircle(c, r, ring);
-    final crescent = Paint()
-      ..color = CelestialColors.backgroundCard;
+    final crescent = Paint()..color = CelestialColors.backgroundCard;
     canvas.drawCircle(c.translate(r * 0.32, -r * 0.05), r * 0.85, crescent);
   }
 
@@ -1325,11 +1324,12 @@ List<_Feature> _featuresFor(_UiTier tier) {
   switch (tier) {
     case _UiTier.free:
       return const [
-        _Feature(label: 'Adaptive lighting on this device',
+        _Feature(
+            label: 'Adaptive lighting on this device',
             status: _FeatureStatus.included),
-        _Feature(label: 'All Rooms control',
-            status: _FeatureStatus.included),
-        _Feature(label: 'Manual scenes & light profiles',
+        _Feature(label: 'All Rooms control', status: _FeatureStatus.included),
+        _Feature(
+            label: 'Manual scenes & light profiles',
             status: _FeatureStatus.included),
       ];
     case _UiTier.basic:
@@ -1351,7 +1351,7 @@ List<_Feature> _featuresFor(_UiTier tier) {
         ),
       ];
     case _UiTier.pro:
-      return const [
+      return [
         _Feature(
           label: 'Standby & sleep idle scenes',
           status: _FeatureStatus.included,
@@ -1377,11 +1377,12 @@ List<_Feature> _featuresFor(_UiTier tier) {
           status: _FeatureStatus.included,
           entitlement: Entitlement.timeSimulator,
         ),
-        _Feature(
-          label: 'Remote access from anywhere',
-          status: _FeatureStatus.comingSoon,
-          entitlement: Entitlement.remoteAccess,
-        ),
+        if (FeatureFlags.remoteAccessTunnel)
+          _Feature(
+            label: 'Remote access from anywhere',
+            status: _FeatureStatus.included,
+            entitlement: Entitlement.remoteAccess,
+          ),
       ];
   }
 }

@@ -4,6 +4,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../data/local_data_source.dart';
 import '../repositories/home_repository.dart';
+import '../services/account_cloud_sync_service.dart';
 import '../services/auth_service.dart';
 import '../services/settings_service.dart';
 import '../services/hue/hue_service_locator.dart';
@@ -38,6 +39,7 @@ class HomeProvider extends ChangeNotifier {
   // Subscriptions
   StreamSubscription<List<Home>>? _homesSubscription;
   StreamSubscription<List<Hub>>? _hubsSubscription;
+  Timer? _accountCloudSyncDebounce;
 
   // Initialization tracking
   Completer<void>? _initCompleter;
@@ -91,7 +93,8 @@ class HomeProvider extends ChangeNotifier {
       // On web, there's no onboarding flow to create a Home.
       // Ensure a default one exists so hub pairing works.
       if (kIsWeb && _homes.isEmpty) {
-        debugPrint('HomeProvider: Web platform with no homes, creating default');
+        debugPrint(
+            'HomeProvider: Web platform with no homes, creating default');
         final home = await _repository.createHome(
           name: 'My Home',
           ownerId: 'web-local',
@@ -102,7 +105,9 @@ class HomeProvider extends ChangeNotifier {
 
       // On web, auto-detect if we're served by a rhythm-server / HA addon.
       // Use Uri.base so the health check goes through ingress when applicable.
-      if (kIsWeb && getFirstHubOfType(HubType.server) == null && _currentHome != null) {
+      if (kIsWeb &&
+          getFirstHubOfType(HubType.server) == null &&
+          _currentHome != null) {
         try {
           final base = Uri.base;
           final baseUrl = base.toString();
@@ -110,8 +115,10 @@ class HomeProvider extends ChangeNotifier {
             baseUrl: baseUrl.endsWith('/') ? baseUrl : '$baseUrl/',
           ).healthCheck();
           if (ok) {
-            debugPrint('HomeProvider: Server detected at ${base.host}:${base.port}, auto-pairing');
-            await addServerHub(name: 'RhythmServer', host: base.host, port: base.port);
+            debugPrint(
+                'HomeProvider: Server detected at ${base.host}:${base.port}, auto-pairing');
+            await addServerHub(
+                name: 'RhythmServer', host: base.host, port: base.port);
           }
         } catch (_) {
           // Not served by a rhythm-server — user can pair manually
@@ -193,6 +200,7 @@ class HomeProvider extends ChangeNotifier {
       _hubsSubscription = _repository.watchHubsForHome(home.id).listen(
         (hubs) {
           _currentHomeHubs = hubs;
+          _scheduleAccountCloudSync('hubs_changed');
           notifyListeners();
         },
         onError: (e) => debugPrint('HomeProvider: Hubs watch error: $e'),
@@ -211,7 +219,8 @@ class HomeProvider extends ChangeNotifier {
             (h) => h.id == _currentHome!.id,
             orElse: () => homes.isNotEmpty ? homes.first : _currentHome!,
           );
-          if (updated.id != _currentHome!.id || !homes.any((h) => h.id == _currentHome!.id)) {
+          if (updated.id != _currentHome!.id ||
+              !homes.any((h) => h.id == _currentHome!.id)) {
             _setCurrentHome(homes.isNotEmpty ? homes.first : null);
           } else {
             _currentHome = updated;
@@ -219,6 +228,7 @@ class HomeProvider extends ChangeNotifier {
         } else if (homes.isNotEmpty) {
           _setCurrentHome(homes.first);
         }
+        _scheduleAccountCloudSync('homes_changed');
         notifyListeners();
       },
       onError: (e) => debugPrint('HomeProvider: Homes watch error: $e'),
@@ -286,8 +296,17 @@ class HomeProvider extends ChangeNotifier {
 
   /// Delete a home.
   Future<bool> deleteHome(String id) async {
+    final home = _repository.getHome(id);
     try {
       await _repository.deleteHome(id);
+      if (home != null) {
+        unawaited(
+          AccountCloudSyncService.instance.deleteHome(
+            homeId: home.id,
+            reason: 'home_deleted',
+          ),
+        );
+      }
 
       // If deleting current home, switch to another
       if (_currentHome?.id == id) {
@@ -320,7 +339,8 @@ class HomeProvider extends ChangeNotifier {
     if (_currentHome == null) return false;
 
     try {
-      final updated = await _repository.updateHomeLocation(_currentHome!.id, location);
+      final updated =
+          await _repository.updateHomeLocation(_currentHome!.id, location);
       if (updated != null) {
         _currentHome = updated;
         _loadHomes();
@@ -398,7 +418,8 @@ class HomeProvider extends ChangeNotifier {
     if (_currentHome == null) return false;
 
     try {
-      final updated = await _repository.updateHomeSleepSchedule(_currentHome!.id, schedule);
+      final updated =
+          await _repository.updateHomeSleepSchedule(_currentHome!.id, schedule);
       if (updated != null) {
         _currentHome = updated;
         _loadHomes();
@@ -418,7 +439,8 @@ class HomeProvider extends ChangeNotifier {
     if (_currentHome == null) return false;
 
     try {
-      final updated = await _repository.updateHomeCurveConfig(_currentHome!.id, curveConfig);
+      final updated = await _repository.updateHomeCurveConfig(
+          _currentHome!.id, curveConfig);
       if (updated != null) {
         _currentHome = updated;
         _loadHomes();
@@ -549,8 +571,17 @@ class HomeProvider extends ChangeNotifier {
 
   /// Delete a hub.
   Future<bool> deleteHub(String hubId) async {
+    final hub = _repository.getHub(hubId);
     try {
       await _repository.deleteHub(hubId);
+      if (hub != null) {
+        unawaited(
+          AccountCloudSyncService.instance.deleteHub(
+            hubId: hub.id,
+            reason: 'hub_deleted',
+          ),
+        );
+      }
       _loadCurrentHomeHubs();
       notifyListeners();
       return true;
@@ -646,19 +677,23 @@ class HomeProvider extends ChangeNotifier {
 
     // Create home if none exist
     if (_homes.isEmpty && currentUserId != null) {
-      debugPrint('HomeProvider.onUserSignIn: No homes, creating from onboarding prefs...');
+      debugPrint(
+          'HomeProvider.onUserSignIn: No homes, creating from onboarding prefs...');
       final prefs = SettingsService.instance.consumeOnboardingPreferences();
       await _createHomeFromPreferences(prefs);
     } else if (_homes.isNotEmpty) {
       SettingsService.instance.consumeOnboardingPreferences();
     }
 
-    debugPrint('HomeProvider.onUserSignIn: Complete. currentHome=${_currentHome?.id}');
+    debugPrint(
+        'HomeProvider.onUserSignIn: Complete. currentHome=${_currentHome?.id}');
+    _scheduleAccountCloudSync('user_sign_in');
     notifyListeners();
   }
 
   /// Create a home from onboarding preferences.
-  Future<void> _createHomeFromPreferences(OnboardingPreferencesData? prefs) async {
+  Future<void> _createHomeFromPreferences(
+      OnboardingPreferencesData? prefs) async {
     // Location
     HomeLocation? location;
     if (prefs?.latitude != null && prefs?.longitude != null) {
@@ -696,7 +731,8 @@ class HomeProvider extends ChangeNotifier {
       sleepSchedule: sleepSchedule,
       timezone: timezone,
     );
-    debugPrint('HomeProvider._createHomeFromPreferences: Created home: ${home?.id}');
+    debugPrint(
+        'HomeProvider._createHomeFromPreferences: Created home: ${home?.id}');
   }
 
   /// Called when user signs out.
@@ -714,10 +750,26 @@ class HomeProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _scheduleAccountCloudSync(String reason) {
+    _accountCloudSyncDebounce?.cancel();
+    _accountCloudSyncDebounce = Timer(const Duration(milliseconds: 500), () {
+      final home = _currentHome;
+      final hubs = List<Hub>.from(_currentHomeHubs);
+      unawaited(
+        AccountCloudSyncService.instance.syncHomeAndServerHubs(
+          home: home,
+          hubs: hubs,
+          reason: reason,
+        ),
+      );
+    });
+  }
+
   @override
   void dispose() {
     _homesSubscription?.cancel();
     _hubsSubscription?.cancel();
+    _accountCloudSyncDebounce?.cancel();
     super.dispose();
   }
 }

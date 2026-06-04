@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../backend/backend.dart';
 import '../providers/room_page_provider.dart';
+import 'account_cloud_sync_service.dart';
 import 'auth_service.dart';
 import 'settings_service.dart';
 
@@ -180,6 +181,12 @@ class CloudBackupService {
         'Cloud backups are not available right now.',
       );
     }
+
+    await AccountCloudSyncService.instance.syncHomeAndServerHubs(
+      home: home,
+      hubs: [serverHub],
+      reason: 'cloud_backup_capture',
+    );
 
     final opKey = _operationKey(serverHub);
     final inFlight = _capturesInFlight[opKey];

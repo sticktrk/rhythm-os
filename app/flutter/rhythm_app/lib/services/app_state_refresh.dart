@@ -9,6 +9,7 @@ import '../providers/room_page_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../providers/hub_connection_provider.dart';
+import 'account_cloud_sync_service.dart';
 import 'cloud_backup_service.dart';
 import 'demo_server_api.dart';
 import 'hue/hue_service_locator.dart';
@@ -92,6 +93,15 @@ class AppStateRefresh {
     await homeProvider.onUserSignIn();
     if (!context.mounted) {
       return const SyncResult.failure('Context not mounted after home init');
+    }
+
+    await AccountCloudSyncService.instance.syncHomeAndServerHubs(
+      home: homeProvider.currentHome,
+      hubs: homeProvider.currentHomeHubs,
+      reason: 'app_state_refresh',
+    );
+    if (!context.mounted) {
+      return const SyncResult.failure('Context not mounted after cloud sync');
     }
 
     await _restoreCloudAppSettingsIfAvailable(context, homeProvider);

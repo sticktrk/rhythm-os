@@ -1,3 +1,5 @@
+import '../config/feature_flags.dart';
+
 /// User-facing paid tier.
 ///
 /// New features are gated on [Entitlement], not on tier directly — consumers
@@ -130,7 +132,7 @@ extension EntitlementX on Entitlement {
 
   bool get isComingSoon => switch (this) {
         Entitlement.multiUserAccess => true,
-        Entitlement.remoteAccess => true,
+        Entitlement.remoteAccess => !FeatureFlags.remoteAccessTunnel,
         _ => false,
       };
 

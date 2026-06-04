@@ -20,6 +20,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmOtaUpdateStage,
         RhythmRoom,
         RoomModeState;
+import '../../config/feature_flags.dart';
+import '../../models/plan_tier.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 import '../../providers/server_sync_provider.dart';
@@ -27,9 +29,11 @@ import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ota_service.dart';
+import '../../services/remote_access_service.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
+import '../../widgets/plan_tier_modal.dart';
 import '../../widgets/report_bug_flow.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
@@ -1970,10 +1974,21 @@ class _RhythmServerAdvancedSettingsScreenState
   String? _authToken;
   bool _isAuthLoading = true;
   bool _isAuthUpdating = false;
+  bool _isRemoteAccessUpdating = false;
 
   bool get _hasAuthToken {
     final token = _authToken?.trim();
     return token != null && token.isNotEmpty;
+  }
+
+  bool get _apiAuthRequired => _authStatus?.requiresAuth ?? false;
+
+  Hub get _currentHub {
+    final hubs = context.read<HomeProvider>().currentHomeHubs;
+    return hubs
+        .where((hub) => hub.id == widget.hub.id)
+        .cast<Hub?>()
+        .firstWhere((hub) => hub != null, orElse: () => widget.hub)!;
   }
 
   @override
@@ -2066,6 +2081,53 @@ class _RhythmServerAdvancedSettingsScreenState
     }
   }
 
+  Future<void> _setRemoteAccessEnabled(bool enabled) async {
+    if (_isRemoteAccessUpdating) return;
+
+    if (enabled && !_apiAuthRequired) {
+      _showSnackBar('Enable API auth before turning on remote access.');
+      return;
+    }
+
+    final remoteAccess = RemoteAccessService.instance;
+    if (enabled && !remoteAccess.canUseRemoteAccess) {
+      await PlanTierModal.show(context,
+          highlightFeature: Entitlement.remoteAccess);
+      return;
+    }
+
+    final hub = _currentHub;
+    final homeProvider = context.read<HomeProvider>();
+    final syncProvider = context.read<ServerSyncProvider>();
+    setState(() => _isRemoteAccessUpdating = true);
+    try {
+      if (enabled) {
+        final result = await remoteAccess.enableForHub(
+          hub,
+          home: homeProvider.currentHome,
+        );
+        await homeProvider.updateHub(result.updatedHub);
+        _showSnackBar('Remote access enabled.');
+      } else {
+        final updatedHub = await remoteAccess.disableForHub(hub);
+        await homeProvider.updateHub(updatedHub);
+        _showSnackBar('Remote access disabled.');
+      }
+      syncProvider.connectIfAvailable();
+    } catch (error) {
+      _showSnackBar(
+        enabled
+            ? 'Could not enable remote access.'
+            : 'Could not disable remote access.',
+      );
+      debugPrint('Remote access update failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _isRemoteAccessUpdating = false);
+      }
+    }
+  }
+
   void _showSnackBar(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -2092,6 +2154,10 @@ class _RhythmServerAdvancedSettingsScreenState
                   children: [
                     const SizedBox(height: 8),
                     _buildApiAuthSection(),
+                    if (FeatureFlags.remoteAccessTunnel) ...[
+                      const SizedBox(height: 16),
+                      _buildRemoteAccessSection(),
+                    ],
                     const SizedBox(height: 16),
                     _buildDisableServerSection(),
                     const SizedBox(height: 40),
@@ -2188,6 +2254,57 @@ class _RhythmServerAdvancedSettingsScreenState
           busy: _isAuthLoading || _isAuthUpdating,
           onChanged:
               canToggle ? (next) => unawaited(_setApiAuthRequired(next)) : null,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRemoteAccessSection() {
+    context.watch<HomeProvider>();
+    final hub = _currentHub;
+    final configured = hub.remoteEndpoint != null;
+    final authRequired = _apiAuthRequired;
+    final prerequisitesMet = authRequired && _hasAuthToken;
+    final statusText = _isRemoteAccessUpdating
+        ? 'Saving'
+        : configured
+            ? 'Enabled'
+            : _isAuthLoading
+                ? 'Checking auth'
+                : _authStatus == null
+                    ? 'Auth status unavailable'
+                    : !authRequired
+                        ? 'Enable API Auth first'
+                        : !_hasAuthToken
+                            ? 'Owner token required'
+                            : 'Off';
+    final statusColor = configured
+        ? _enabledGreen
+        : prerequisitesMet
+            ? _warningAmber
+            : CelestialColors.textSecondary;
+    final canEnable =
+        !_isRemoteAccessUpdating && !_isAuthLoading && prerequisitesMet;
+    final canDisable = !_isRemoteAccessUpdating && configured;
+    final canToggle = configured ? canDisable : canEnable;
+
+    return _buildSection(
+      title: 'REMOTE ACCESS',
+      children: [
+        _buildSwitchRow(
+          icon: Icons.cloud_outlined,
+          iconColor: statusColor,
+          label: 'Remote Access',
+          tooltip:
+              'Uses a secure outbound tunnel so this server can be controlled away from home. Requires API Auth first.',
+          statusText: statusText,
+          statusColor: statusColor,
+          value: configured,
+          activeTrackColor: _teal,
+          busy: _isRemoteAccessUpdating,
+          onChanged: canToggle
+              ? (next) => unawaited(_setRemoteAccessEnabled(next))
+              : null,
         ),
       ],
     );
@@ -3608,8 +3725,7 @@ class _RebootOverlay extends StatefulWidget {
     required RhythmDiagnosticsApi client,
     required String headerTitle,
   }) async {
-    final result =
-        await Navigator.of(context, rootNavigator: true).push<bool>(
+    final result = await Navigator.of(context, rootNavigator: true).push<bool>(
       PageRouteBuilder(
         opaque: true,
         pageBuilder: (_, __, ___) => _RebootOverlay(

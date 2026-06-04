@@ -142,6 +142,10 @@ class Hub {
   @HiveField(11)
   final bool pendingSync;
 
+  /// Optional HTTPS tunnel endpoint for remote access.
+  @HiveField(12)
+  final HubEndpoint? remoteEndpoint;
+
   const Hub({
     required this.id,
     required this.homeId,
@@ -155,6 +159,7 @@ class Hub {
     required this.createdAt,
     required this.updatedAt,
     this.pendingSync = false,
+    this.remoteEndpoint,
   });
 
   /// Create a new Hub with default values.
@@ -166,6 +171,7 @@ class Hub {
     required HubEndpoint endpoint,
     bool enabled = true,
     String? token,
+    HubEndpoint? remoteEndpoint,
   }) {
     final now = DateTime.now();
     return Hub(
@@ -181,6 +187,7 @@ class Hub {
       createdAt: now,
       updatedAt: now,
       pendingSync: true,
+      remoteEndpoint: remoteEndpoint,
     );
   }
 
@@ -230,6 +237,7 @@ class Hub {
     required String host,
     int port = 54448,
     String? token,
+    HubEndpoint? remoteEndpoint,
   }) {
     return Hub.create(
       id: id,
@@ -238,6 +246,7 @@ class Hub {
       name: name,
       endpoint: HubEndpoint(host: host, port: port, useSsl: false),
       token: token,
+      remoteEndpoint: remoteEndpoint,
     );
   }
 
@@ -251,6 +260,9 @@ class Hub {
       ),
       name: json['name'] as String,
       endpoint: HubEndpoint.fromJson(json['endpoint'] as Map<String, dynamic>),
+      remoteEndpoint: json['remoteEndpoint'] is Map<String, dynamic>
+          ? HubEndpoint.fromJson(json['remoteEndpoint'] as Map<String, dynamic>)
+          : null,
       enabled: json['enabled'] as bool? ?? true,
       requiresCredentials: json['requiresCredentials'] as bool? ?? true,
       token: json['token'] as String?,
@@ -276,10 +288,12 @@ class Hub {
       'type': type.name,
       'name': name,
       'endpoint': endpoint.toJson(),
+      if (remoteEndpoint != null) 'remoteEndpoint': remoteEndpoint!.toJson(),
       'enabled': enabled,
       'requiresCredentials': requiresCredentials,
       if (token != null) 'token': token,
-      if (lastConnected != null) 'lastConnected': lastConnected!.toIso8601String(),
+      if (lastConnected != null)
+        'lastConnected': lastConnected!.toIso8601String(),
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
       'pendingSync': pendingSync,
@@ -293,10 +307,12 @@ class Hub {
       'type': type.name,
       'name': name,
       'endpoint': endpoint.toJson(),
+      if (remoteEndpoint != null) 'remoteEndpoint': remoteEndpoint!.toJson(),
       'enabled': enabled,
       'requiresCredentials': requiresCredentials,
       if (token != null) 'token': token,
-      if (lastConnected != null) 'lastConnected': lastConnected!.toIso8601String(),
+      if (lastConnected != null)
+        'lastConnected': lastConnected!.toIso8601String(),
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
     };
@@ -310,9 +326,11 @@ class Hub {
       'type': type.name,
       'name': name,
       'endpoint': endpoint.toJson(),
+      if (remoteEndpoint != null) 'remote_endpoint': remoteEndpoint!.toJson(),
       'enabled': enabled,
       if (token != null) 'token': token,
-      if (lastConnected != null) 'last_connected': lastConnected!.toUtc().toIso8601String(),
+      if (lastConnected != null)
+        'last_connected': lastConnected!.toUtc().toIso8601String(),
       'created_at': createdAt.toUtc().toIso8601String(),
       'updated_at': updatedAt.toUtc().toIso8601String(),
     };
@@ -329,6 +347,9 @@ class Hub {
       ),
       name: row['name'] as String,
       endpoint: HubEndpoint.fromJson(row['endpoint'] as Map<String, dynamic>),
+      remoteEndpoint: row['remote_endpoint'] is Map<String, dynamic>
+          ? HubEndpoint.fromJson(row['remote_endpoint'] as Map<String, dynamic>)
+          : null,
       enabled: row['enabled'] as bool? ?? true,
       requiresCredentials: row['type'] != 'server',
       token: row['token'] as String?,
@@ -347,6 +368,7 @@ class Hub {
     HubType? type,
     String? name,
     HubEndpoint? endpoint,
+    HubEndpoint? remoteEndpoint,
     bool? enabled,
     bool? requiresCredentials,
     String? token,
@@ -354,6 +376,7 @@ class Hub {
     DateTime? createdAt,
     DateTime? updatedAt,
     bool? pendingSync,
+    bool clearRemoteEndpoint = false,
   }) {
     return Hub(
       id: id ?? this.id,
@@ -361,6 +384,8 @@ class Hub {
       type: type ?? this.type,
       name: name ?? this.name,
       endpoint: endpoint ?? this.endpoint,
+      remoteEndpoint:
+          clearRemoteEndpoint ? null : remoteEndpoint ?? this.remoteEndpoint,
       enabled: enabled ?? this.enabled,
       requiresCredentials: requiresCredentials ?? this.requiresCredentials,
       token: token ?? this.token,
@@ -394,7 +419,8 @@ class Hub {
   }
 
   /// Whether this hub has valid credentials configured.
-  bool get hasCredentials => !requiresCredentials || (token != null && token!.isNotEmpty);
+  bool get hasCredentials =>
+      !requiresCredentials || (token != null && token!.isNotEmpty);
 
   /// Get the display type name.
   String get typeName {

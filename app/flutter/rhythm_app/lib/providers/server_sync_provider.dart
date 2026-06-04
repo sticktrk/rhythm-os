@@ -15,6 +15,7 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../config/feature_flags.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
@@ -31,6 +32,11 @@ bool _isGeneratedMoodSceneId(String? sceneId) =>
     sceneId != null &&
     (sceneId.startsWith('node-mood-scene-') ||
         sceneId.startsWith('node_mood_scene_'));
+
+bool _sameEndpoint(HubEndpoint? left, HubEndpoint? right) {
+  if (left == null || right == null) return left == right;
+  return left == right;
+}
 
 List<RhythmSceneDefinition> _userVisibleScenes(
   Iterable<RhythmSceneDefinition> scenes,
@@ -859,6 +865,10 @@ class ServerSyncProvider extends ChangeNotifier {
       if (serverHub.id == _serverHub?.id &&
           serverHub.endpoint.host == _serverHub?.endpoint.host &&
           serverHub.endpoint.port == _serverHub?.endpoint.port &&
+          serverHub.endpoint.useSsl == _serverHub?.endpoint.useSsl &&
+          (!FeatureFlags.remoteAccessTunnel ||
+              _sameEndpoint(
+                  serverHub.remoteEndpoint, _serverHub?.remoteEndpoint)) &&
           serverHub.token == _serverHub?.token) {
         return; // Same hub, no change
       }
@@ -874,9 +884,12 @@ class ServerSyncProvider extends ChangeNotifier {
         final auth = await _prepareServerHubAuth(pendingHub);
         if (_serverHub?.id != pendingHub.id) return;
         _serverHub = auth.hub;
+        final endpoint =
+            await _selectConnectionEndpoint(auth.hub, auth.authToken);
         _connection.connect(
-          auth.hub.endpoint.host,
-          port: auth.hub.endpoint.port,
+          endpoint.host,
+          port: endpoint.port,
+          useSsl: endpoint.useSsl,
           authToken: auth.authToken,
         );
       });
@@ -963,6 +976,41 @@ class ServerSyncProvider extends ChangeNotifier {
             ? null
             : existingToken,
       );
+    }
+  }
+
+  Future<HubEndpoint> _selectConnectionEndpoint(
+    Hub hub,
+    String? authToken,
+  ) async {
+    final remote = hub.remoteEndpoint;
+    if (!FeatureFlags.remoteAccessTunnel || remote == null) {
+      return hub.endpoint;
+    }
+
+    if (await _canReachEndpoint(hub.endpoint, authToken)) {
+      return hub.endpoint;
+    }
+
+    debugPrint(
+      'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
+      'unreachable, falling back to ${remote.host}:${remote.port}',
+    );
+    return remote;
+  }
+
+  Future<bool> _canReachEndpoint(
+    HubEndpoint endpoint,
+    String? authToken,
+  ) async {
+    try {
+      await RhythmAuthApi(
+        baseUrl: endpoint.baseUrl,
+        authToken: authToken,
+      ).getStatus().timeout(const Duration(seconds: 2));
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
