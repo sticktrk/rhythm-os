@@ -5,7 +5,7 @@ import 'solar_orbit.dart' show CelestialColors;
 /// Tabs on the global bottom navigation bar.
 ///
 /// Each tab swaps the body of [AppShell] while preserving its own navigator.
-enum MainNavTab { home, dailyRhythm, day, sleep, settings }
+enum MainNavTab { home, light, automations, devices, settings }
 
 /// Standard 5-destination bottom navigation bar.
 ///
@@ -20,11 +20,11 @@ class MainBottomNav extends StatelessWidget {
   final ValueChanged<MainNavTab> onTabSelected;
 
   /// Which tabs to render. Letting the parent decide lets us hide tabs
-  /// whose dependencies aren't met (e.g. Daily Rhythm with no synced server).
+  /// whose dependencies aren't met (e.g. Automations with no synced server).
   final List<MainNavTab> tabs;
 
   /// Tabs that should render but reject taps — used to keep slots like
-  /// Transition visible (so the navbar shape is stable) while their underlying
+  /// Automations visible (so the navbar shape is stable) while their underlying
   /// data isn't ready yet.
   final Set<MainNavTab> disabledTabs;
 
@@ -34,9 +34,9 @@ class MainBottomNav extends StatelessWidget {
     required this.onTabSelected,
     this.tabs = const [
       MainNavTab.home,
-      MainNavTab.day,
-      MainNavTab.dailyRhythm,
-      MainNavTab.sleep,
+      MainNavTab.light,
+      MainNavTab.automations,
+      MainNavTab.devices,
       MainNavTab.settings,
     ],
     this.disabledTabs = const {},
@@ -56,22 +56,22 @@ class MainBottomNav extends StatelessWidget {
           label: 'Home',
           enabled: enabled,
         ),
-      MainNavTab.dailyRhythm => NavigationDestination(
-          icon: const Icon(Icons.brightness_6_outlined),
-          selectedIcon: const Icon(Icons.brightness_6_rounded),
-          label: 'Transition',
+      MainNavTab.light => NavigationDestination(
+          icon: const Icon(Icons.light_mode_outlined),
+          selectedIcon: const Icon(Icons.light_mode_rounded),
+          label: 'Light',
           enabled: enabled,
         ),
-      MainNavTab.day => NavigationDestination(
-          icon: const Icon(Icons.wb_sunny_outlined),
-          selectedIcon: const Icon(Icons.wb_sunny_rounded),
-          label: 'Day',
+      MainNavTab.automations => NavigationDestination(
+          icon: const Icon(Icons.bolt_outlined),
+          selectedIcon: const Icon(Icons.bolt),
+          label: 'Automations',
           enabled: enabled,
         ),
-      MainNavTab.sleep => NavigationDestination(
-          icon: const Icon(Icons.bedtime_outlined),
-          selectedIcon: const Icon(Icons.bedtime_rounded),
-          label: 'Sleep',
+      MainNavTab.devices => NavigationDestination(
+          icon: const Icon(Icons.lightbulb_outline),
+          selectedIcon: const Icon(Icons.lightbulb),
+          label: 'Devices',
           enabled: enabled,
         ),
       MainNavTab.settings => NavigationDestination(

@@ -13,7 +13,6 @@ import '../../widgets/settings_row.dart';
 import '../power_usage_screen.dart';
 import 'sections/account_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
-import 'sections/lights_devices_section.dart';
 import 'sections/rhythm_server_section.dart';
 import 'sections/rhythm_app_section.dart';
 
@@ -83,12 +82,6 @@ class SettingsScreen extends StatelessWidget {
         const SettingsSectionHeader(title: 'Home'),
         SettingsGroup(
           children: [
-            SettingsRow(
-              icon: Icons.lightbulb_outline,
-              iconColor: const Color(0xFFFFB900),
-              label: 'Lights & Devices',
-              onTap: () => LightsDevicesDetailScreen.show(context),
-            ),
             _buildRhythmOsServerRow(),
           ],
         ),

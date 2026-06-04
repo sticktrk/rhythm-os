@@ -37,12 +37,22 @@ const Color _surfaceRecessed = Color(0xFF11161E);
 const Color _hairlineStrong = Color(0xFF2C3441);
 const Color _hairlineSoft = Color(0xFF1E2530);
 
+/// Which single automation this editor instance is the detail screen for.
+/// Each automation in the Automations list pushes its own detail; this picks
+/// which section (and which controls) render.
+enum AutomationDetail { automatic, button }
+
 class DefaultTransitionEditorScreen extends StatefulWidget {
   final Map<RhythmMode, Color> profileColors;
+
+  /// Which automation's detail to render — the schedule (orbital clock) or the
+  /// physical button binding. The transition-duration control is shown in both.
+  final AutomationDetail detail;
 
   const DefaultTransitionEditorScreen({
     super.key,
     required this.profileColors,
+    required this.detail,
   });
 
   @override
@@ -1054,7 +1064,7 @@ class _DefaultTransitionEditorScreenState
       body: SafeArea(
         child: Column(
           children: [
-            _buildHeader(context),
+            _buildDetailHeader(context),
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
@@ -1062,19 +1072,35 @@ class _DefaultTransitionEditorScreenState
                   final topSpacing = compactLayout ? 2.0 : 6.0;
                   final sectionSpacing = compactLayout ? 12.0 : 16.0;
                   final bottomSpacing = compactLayout ? 14.0 : 18.0;
+                  final isAutomatic =
+                      widget.detail == AutomationDetail.automatic;
+                  final dayColor = widget.profileColors[RhythmMode.day] ??
+                      _fallbackModeColor(RhythmMode.day);
+                  final sleepColor = widget.profileColors[RhythmMode.sleep] ??
+                      _fallbackModeColor(RhythmMode.sleep);
 
-                  // Whole page scrolls — sections expand to their natural
-                  // content height with no inner scrolling.
+                  // Whole page scrolls — the single section expands to its
+                  // natural content height with no inner scrolling. The
+                  // transition-duration control is shown for both automations.
                   return SingleChildScrollView(
                     padding: const EdgeInsets.symmetric(horizontal: 20),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         SizedBox(height: topSpacing),
-                        _buildHero(
-                          compactLayout: compactLayout,
-                          canUseTransitionButton: canUseTransitionButton,
-                        ),
+                        if (isAutomatic) ...[
+                          _buildTimeSection(
+                            dayColor: dayColor,
+                            sleepColor: sleepColor,
+                            compactLayout: compactLayout,
+                          ),
+                          _buildSaveResetSlot(),
+                        ] else
+                          _buildButtonSection(
+                            accentColor: _chromeAccent,
+                            compactLayout: compactLayout,
+                            unlocked: canUseTransitionButton,
+                          ),
                         SizedBox(height: sectionSpacing),
                         _buildDurationRow(compactLayout: compactLayout),
                         SizedBox(height: bottomSpacing),
@@ -1090,31 +1116,44 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  Widget _buildHeader(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
+  String get _detailTitle => switch (widget.detail) {
+        AutomationDetail.automatic => 'Day/Sleep Automatic',
+        AutomationDetail.button => 'Day/Sleep Button Toggle',
+      };
+
+  Widget _buildDetailHeader(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
         children: [
-          const Text(
-            'Transition',
-            style: TextStyle(
-              color: CelestialColors.textPrimary,
-              fontSize: 19,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.2,
+          GestureDetector(
+            onTap: () => Navigator.of(context).pop(),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: CelestialColors.accentBlue.withValues(alpha: 0.2),
+              ),
+              child: const Icon(
+                Icons.chevron_left,
+                color: CelestialColors.accentBlue,
+                size: 24,
+              ),
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            'How Day and Sleep change hands',
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.62),
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0.3,
+          Expanded(
+            child: Text(
+              _detailTitle,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
+          const SizedBox(width: 40),
         ],
       ),
     );
@@ -1178,56 +1217,6 @@ class _DefaultTransitionEditorScreenState
     );
   }
 
-  Widget _buildHero({
-    required bool compactLayout,
-    required bool canUseTransitionButton,
-  }) {
-    final dayColor = widget.profileColors[RhythmMode.day] ??
-        _fallbackModeColor(RhythmMode.day);
-    final sleepColor = widget.profileColors[RhythmMode.sleep] ??
-        _fallbackModeColor(RhythmMode.sleep);
-
-    // Clean solid surface — no radial orb, no breathe wash. The hero is
-    // just a grouping container for the two trigger sources; the energy
-    // belongs to the orbital editor inside the Time card, not the chrome.
-    return Container(
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: _hairlineSoft, width: 1),
-      ),
-      clipBehavior: Clip.antiAlias,
-      padding: EdgeInsets.fromLTRB(
-        14,
-        compactLayout ? 14 : 16,
-        14,
-        compactLayout ? 14 : 16,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildTimeSection(
-            dayColor: dayColor,
-            sleepColor: sleepColor,
-            compactLayout: compactLayout,
-          ),
-          const SizedBox(height: 10),
-          _buildButtonSection(
-            accentColor: _chromeAccent,
-            compactLayout: compactLayout,
-            unlocked: canUseTransitionButton,
-          ),
-          // Save/Reset cluster lives at hero scope (not inside the Time
-          // section's collapsible body) so toggling Time off can still be
-          // committed — otherwise the switch flips, the body hides, and the
-          // user has no way to push trigger_enabled=false to the backend.
-          _buildSaveResetSlot(),
-        ],
-      ),
-    );
-  }
-
   /// Schedule-based trigger section. Header with an enable switch; when on,
   /// the orbital editor + reset pill expand below. Section card visibly
   /// "powers down" when the switch is off.
@@ -1241,8 +1230,9 @@ class _DefaultTransitionEditorScreenState
       accent: _chromeAccent,
       header: _SourceSectionHeader(
         icon: Icons.access_time_rounded,
-        label: 'Time',
-        sublabel: _timeEnabled ? 'Transitions follow a schedule' : 'Off',
+        label: 'Schedule',
+        sublabel:
+            _timeEnabled ? 'Day & Sleep follow the sun & clock' : 'Off',
         accent: _chromeAccent,
         enabled: _timeEnabled,
         onChanged: _setTimeEnabled,

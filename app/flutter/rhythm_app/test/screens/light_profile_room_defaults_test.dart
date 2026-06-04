@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rhythm_app/screens/settings/light_profile_screen.dart';
+import 'package:rhythm_app/widgets/mode_room_behavior_section.dart';
 
 void main() {
   group('profile room default state mapping', () {

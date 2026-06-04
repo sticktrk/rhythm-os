@@ -5,14 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show
-        RhythmConnection,
-        RhythmConnectionState,
-        RhythmConstantCurve,
-        RhythmCurveConfig,
-        RhythmMode,
-        RhythmModeConfig,
-        RhythmSuperGaussianCurve;
+    show RhythmConnection, RhythmConnectionState, RhythmMode;
 import 'models/config_model.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
@@ -20,8 +13,9 @@ import 'providers/room_page_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'screens/all_rooms_screen.dart';
 import 'screens/server_disconnected_screen.dart';
-import 'screens/settings/default_transition_editor_screen.dart';
-import 'screens/settings/light_profile_screen.dart';
+import 'screens/settings/automations_screen.dart';
+import 'screens/settings/light_screen.dart';
+import 'screens/settings/sections/lights_devices_section.dart';
 import 'screens/settings/settings_screen.dart';
 import 'screens/sun_position_screen.dart';
 import 'services/analytics_service.dart';
@@ -39,8 +33,8 @@ import 'widgets/virtual_experience_banner.dart';
 /// Main app shell.
 ///
 /// Persistent 5-tab bottom navigation bar with an [IndexedStack] body.  Each
-/// tab owns its own [Navigator] so deeper pushes (e.g. Settings → Lights &
-/// Devices) stay inside the body slot and the navbar remains visible.
+/// tab owns its own [Navigator] so deeper pushes (e.g. Devices → Device Review)
+/// stay inside the body slot and the navbar remains visible.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -53,9 +47,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   static const _tabs = [
     MainNavTab.home,
-    MainNavTab.day,
-    MainNavTab.dailyRhythm,
-    MainNavTab.sleep,
+    MainNavTab.light,
+    MainNavTab.automations,
+    MainNavTab.devices,
     MainNavTab.settings,
   ];
 
@@ -203,9 +197,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   String _screenNameFor(MainNavTab tab) => switch (tab) {
         MainNavTab.home => 'home',
-        MainNavTab.dailyRhythm => 'daily_rhythm',
-        MainNavTab.day => 'day_profile',
-        MainNavTab.sleep => 'sleep_profile',
+        MainNavTab.light => 'light',
+        MainNavTab.automations => 'automations',
+        MainNavTab.devices => 'devices',
         MainNavTab.settings => 'settings',
       };
 
@@ -444,7 +438,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // would dip false during transient SSE/poll reconnects — including the
     // reconnect that fires right after any HTTP action against the server
     // (e.g. toggling the Time/Button trigger switches or starting a listen
-    // for a button press), evicting the user from the Transitions tab back
+    // for a button press), evicting the user from the Automations tab back
     // to Home mid-interaction.
     final serverSynced = context.select<ServerSyncProvider, bool>(
       (s) => s.hasBeenSynced,
@@ -452,7 +446,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final visibleTabs = _computeVisibleTabs(serverSynced: serverSynced);
     final disabledTabs = _computeDisabledTabs(serverSynced: serverSynced);
 
-    // If the current tab depends on a synced server (e.g. Daily Rhythm) and
+    // If the current tab depends on a synced server (e.g. Automations) and
     // the server hub was actually unpaired, bounce the user back to Home so
     // they can't sit on a disabled tab's body.
     if (disabledTabs.contains(_currentTab)) {
@@ -531,21 +525,21 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
     return const [
       MainNavTab.home,
-      MainNavTab.day,
-      MainNavTab.dailyRhythm,
-      MainNavTab.sleep,
+      MainNavTab.light,
+      MainNavTab.automations,
+      MainNavTab.devices,
       MainNavTab.settings,
     ];
   }
 
-  /// Tabs to grey-out and reject taps on. Daily Rhythm is disabled until the
+  /// Tabs to grey-out and reject taps on. Automations is disabled until the
   /// Rhythm server has completed at least one hello — the orbital editor
   /// needs real profile data to render meaningfully. Uses the sticky
   /// `hasBeenSynced` signal so the disabled state doesn't flicker on
   /// transient reconnects.
   Set<MainNavTab> _computeDisabledTabs({required bool serverSynced}) {
     return {
-      if (!serverSynced) MainNavTab.dailyRhythm,
+      if (!serverSynced) MainNavTab.automations,
     };
   }
 
@@ -569,9 +563,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Widget _buildTabRoot(MainNavTab tab) {
     return switch (tab) {
       MainNavTab.home => _buildHomeTab(),
-      MainNavTab.dailyRhythm => _buildDailyRhythmTab(),
-      MainNavTab.day => const LightProfileScreen(initialProfile: 'rhythm'),
-      MainNavTab.sleep => const LightProfileScreen(initialProfile: 'sleep'),
+      MainNavTab.light => const LightScreen(),
+      MainNavTab.automations => _buildAutomationsTab(),
+      MainNavTab.devices =>
+        const LightsDevicesDetailScreen(showBackButton: false),
       MainNavTab.settings => const SettingsScreen(),
     };
   }
@@ -588,20 +583,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
-  /// Daily Rhythm tab — wraps the editor in a [Consumer] so [profileColors]
-  /// stays in sync with the active server profiles even if they change while
-  /// the tab is alive.
-  Widget _buildDailyRhythmTab() {
-    return Consumer<ServerSyncProvider>(
-      builder: (context, serverSync, _) {
-        return DefaultTransitionEditorScreen(
-          profileColors: _resolveProfileColors(
-            serverSync.modeConfigs,
-            serverSync.profiles,
-          ),
-        );
-      },
-    );
+  /// Automations tab — a list of automations, each tapping into its own detail
+  /// screen (the orbital schedule, button binding, and per-mode room behavior).
+  Widget _buildAutomationsTab() {
+    return const AutomationsScreen();
   }
 
   /// Resolves the body for the Home tab through the existing
@@ -768,37 +753,6 @@ class _TabNavigator extends StatelessWidget {
   }
 }
 
-/// Maps each [RhythmMode] to the dominant color of its active profile, used to
-/// tint controls in [DefaultTransitionEditorScreen].
-Map<RhythmMode, Color> _resolveProfileColors(
-  List<RhythmModeConfig> modeConfigs,
-  List<RhythmCurveConfig> profiles,
-) {
-  final colors = <RhythmMode, Color>{};
-  for (final mc in modeConfigs) {
-    final profile = profiles.cast<RhythmCurveConfig?>().firstWhere(
-          (p) => p!.id == mc.activeProfileId,
-          orElse: () => null,
-        );
-    if (profile == null) continue;
-    colors[mc.mode] = _colorFromProfile(profile);
-  }
-  return colors;
-}
-
-Color _colorFromProfile(RhythmCurveConfig profile) {
-  final curve = profile.curve;
-  if (curve is RhythmConstantCurve && curve.directColor != null) {
-    final rgb = curve.directColor!.rgb;
-    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
-  }
-  if (curve is RhythmSuperGaussianCurve && curve.directColor != null) {
-    final rgb = curve.directColor!.rgb;
-    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
-  }
-  final midCct = (profile.minColorTemp + profile.maxColorTemp) ~/ 2;
-  return ColorUtils.cctToColor(midCct);
-}
 
 /// Pulsing icon for the server-connecting state.
 class _PulsingIcon extends StatefulWidget {

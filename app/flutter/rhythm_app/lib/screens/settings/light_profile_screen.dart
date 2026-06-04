@@ -10,11 +10,9 @@ import '../../api/hybrid_client.dart';
 import '../../config/feature_flags.dart';
 import '../../models/config_model.dart';
 import '../../models/plan_tier.dart';
-import '../../providers/room_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../utils/room_visibility.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/plan_tier_modal.dart';
 
@@ -25,7 +23,17 @@ import '../../widgets/plan_tier_modal.dart';
 class LightProfileScreen extends StatefulWidget {
   final String? initialProfile;
 
-  const LightProfileScreen({super.key, this.initialProfile});
+  /// When true, render only the scrollable content body — no [Scaffold],
+  /// [SafeArea], header, or outer scroll view — so the screen can be stacked
+  /// inside a host like `LightScreen` that supplies its own chrome and a single
+  /// shared scroll view.
+  final bool embedded;
+
+  const LightProfileScreen({
+    super.key,
+    this.initialProfile,
+    this.embedded = false,
+  });
 
   @override
   State<LightProfileScreen> createState() => _LightProfileScreenState();
@@ -50,7 +58,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   final Map<String, sdk.RhythmCurveConfig> _profileConfigs = {};
   List<sdk.RhythmModeConfig> _modeConfigs = const [];
   sdk.RhythmMode? _serverActiveMode;
-  Timer? _roomDefaultsDebounce;
   Timer? _curvePreviewRefreshTimer;
 
   // Light transition duration (from selected profile config).
@@ -83,7 +90,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   bool _brightnessExpanded = false;
   bool _colorTempExpanded = false;
   bool _idleExpanded = false;
-  bool _roomDefaultsExpanded = false;
   bool _advancedExpanded = false;
 
   // Sleep profile state: optional fixed color + optional fixed brightness.
@@ -153,7 +159,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   @override
   void dispose() {
     _serverSync.removeListener(_handleServerSyncChanged);
-    _roomDefaultsDebounce?.cancel();
     _curvePreviewRefreshTimer?.cancel();
     _glowController.dispose();
     super.dispose();
@@ -191,10 +196,7 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     }
   }
 
-  bool get _hasLocalDraft =>
-      _curveConfigDirty ||
-      _isSaving ||
-      (_roomDefaultsDebounce?.isActive ?? false);
+  bool get _hasLocalDraft => _curveConfigDirty || _isSaving;
 
   String _currentServerConfigSignature() {
     final buffer = StringBuffer()
@@ -1175,28 +1177,42 @@ class _LightProfileScreenState extends State<LightProfileScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (widget.embedded) return _buildBody();
     return Scaffold(
       backgroundColor: _Palette.bg,
       body: SafeArea(
         child: Column(
           children: [
             _buildHeader(),
-            Expanded(
-              child: _loading
-                  ? const Center(
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: _Palette.amber,
-                      ),
-                    )
-                  : _connected
-                      ? _buildContent()
-                      : _buildDisconnected(),
-            ),
+            Expanded(child: _buildBody()),
           ],
         ),
       ),
     );
+  }
+
+  Widget _buildBody() {
+    if (_loading) {
+      if (widget.embedded) {
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 48),
+          child: Center(
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: _Palette.amber,
+            ),
+          ),
+        );
+      }
+      return const Center(
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: _Palette.amber,
+        ),
+      );
+    }
+    if (!_connected) return _buildDisconnected();
+    return _buildContent();
   }
 
   Widget _buildHeader() {
@@ -1344,41 +1360,59 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         subscription.has(Entitlement.sleepPrimarySettings);
     final canUseAdvancedDay = subscription.has(Entitlement.advancedDayControls);
     final canUseTimeSimulator = subscription.has(Entitlement.timeSimulator);
+
+    final children = <Widget>[
+      _buildHeroIcon(),
+      const SizedBox(height: 24),
+      if (_isSleepProfile) ...[
+        // Sleep "look" — promoted out of Advanced so the Light tab shows the
+        // sleep brightness + color directly alongside Day's. Per-room
+        // on/off/standby behavior now lives on the Automations tab.
+        _ProLockWrap(
+          unlocked: canUseSleepPrimary,
+          entitlement: Entitlement.sleepPrimarySettings,
+          child: _buildSleepBrightnessCard(),
+        ),
+        const SizedBox(height: 14),
+        _ProLockWrap(
+          unlocked: canUseSleepPrimary,
+          entitlement: Entitlement.sleepPrimarySettings,
+          child: _buildSleepColorCard(),
+        ),
+        const SizedBox(height: 24),
+      ] else ...[
+        _buildBrightnessRangeCard(),
+        const SizedBox(height: 14),
+        _buildColorTempRangeCard(),
+        const SizedBox(height: 24),
+        _ProLockWrap(
+          unlocked: canUseTimeSimulator,
+          entitlement: Entitlement.timeSimulator,
+          child: _buildTimeSimulator(),
+        ),
+        const SizedBox(height: 24),
+      ],
+      _buildAdvancedSection(
+        canUseAdvancedDay: canUseAdvancedDay,
+        canUseSleepPrimary: canUseSleepPrimary,
+      ),
+      if (_curveConfigDirty || _isSaving) ...[
+        const SizedBox(height: 24),
+        _buildPendingChangesActions(),
+      ],
+      const SizedBox(height: 32),
+      _buildResetToDefaultsButton(),
+    ];
+
+    if (widget.embedded) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+        child: Column(children: children),
+      );
+    }
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
-      child: Column(
-        children: [
-          _buildHeroIcon(),
-          const SizedBox(height: 24),
-          if (!_isSleepProfile) ...[
-            _buildBrightnessRangeCard(),
-            const SizedBox(height: 14),
-            _buildColorTempRangeCard(),
-            const SizedBox(height: 24),
-            _ProLockWrap(
-              unlocked: canUseTimeSimulator,
-              entitlement: Entitlement.timeSimulator,
-              child: _buildTimeSimulator(),
-            ),
-            const SizedBox(height: 24),
-          ],
-          if (_isSleepProfile)
-            _buildSleepSceneSection()
-          else
-            _buildRoomDefaultsSection(),
-          const SizedBox(height: 14),
-          _buildAdvancedSection(
-            canUseAdvancedDay: canUseAdvancedDay,
-            canUseSleepPrimary: canUseSleepPrimary,
-          ),
-          if (_curveConfigDirty || _isSaving) ...[
-            const SizedBox(height: 24),
-            _buildPendingChangesActions(),
-          ],
-          const SizedBox(height: 32),
-          _buildResetToDefaultsButton(),
-        ],
-      ),
+      child: Column(children: children),
     );
   }
 
@@ -3286,345 +3320,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 
   // ---------------------------------------------------------------------------
-  // Room Defaults
-  // ---------------------------------------------------------------------------
-
-  Map<String, String> _roomDefaultsForCurrentMode() {
-    final config = _modeConfigForMode(_selectedMode);
-    if (config == null) return {};
-    return {
-      for (final rd in config.roomDefaults) rd.roomId: rd.state,
-    };
-  }
-
-  void _onRoomDefaultChanged(String roomId, String? newState) {
-    final defaults = Map<String, String>.from(_roomDefaultsForCurrentMode());
-    if (newState == null) {
-      defaults.remove(roomId);
-    } else {
-      defaults[roomId] = newState;
-    }
-
-    final updatedRoomDefaults = defaults.entries
-        .map((e) => sdk.RoomDefault(roomId: e.key, state: e.value))
-        .toList();
-
-    final hasConfig = _modeConfigs.any((c) => c.mode == _selectedMode);
-    List<sdk.RhythmModeConfig> updatedConfigs;
-    if (hasConfig) {
-      updatedConfigs = _modeConfigs.map((config) {
-        if (config.mode == _selectedMode) {
-          return config.copyWith(roomDefaults: updatedRoomDefaults);
-        }
-        return config;
-      }).toList();
-    } else {
-      updatedConfigs = [
-        ..._modeConfigs,
-        sdk.RhythmModeConfig(
-          mode: _selectedMode,
-          activeProfileId: '',
-          roomDefaults: updatedRoomDefaults,
-        ),
-      ];
-    }
-
-    // Update UI immediately, debounce the server push.
-    setState(() => _modeConfigs = updatedConfigs);
-
-    _roomDefaultsDebounce?.cancel();
-    _roomDefaultsDebounce = Timer(const Duration(milliseconds: 800), () {
-      if (!mounted) return;
-      context.read<ServerSyncProvider>().api.modeSet(configs: _modeConfigs);
-    });
-    AnalyticsService().logLightProfileRoomDefaultChanged(
-      profile: _selectedProfileId,
-      cleared: newState == null,
-    );
-  }
-
-  /// Sleep-profile rooms list — exposed inline (no dropdown).
-  ///
-  /// Framed as a "stage cue": when Sleep is activated, each room takes its
-  /// mark below. The amber crescent + kerned eyebrow + italic stage-direction
-  /// body explain cause-and-effect without burying it behind a collapsible.
-  Widget _buildSleepSceneSection() {
-    return Selector<RoomProvider, List<RoomDto>>(
-      selector: (_, provider) =>
-          provider.rooms.where(showsInAllRooms).toList(growable: false),
-      builder: (context, rooms, _) {
-        if (rooms.isEmpty) return const SizedBox.shrink();
-
-        final defaults = _roomDefaultsForCurrentMode();
-        const accent = _Palette.amber;
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Stage-cue header
-            Padding(
-              padding: const EdgeInsets.fromLTRB(4, 2, 4, 14),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 38,
-                    height: 38,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: accent.withValues(alpha: 0.08),
-                      border: Border.all(
-                        color: accent.withValues(alpha: 0.20),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: accent.withValues(alpha: 0.12),
-                          blurRadius: 18,
-                          spreadRadius: -6,
-                        ),
-                      ],
-                    ),
-                    child: Icon(
-                      Icons.bedtime_rounded,
-                      color: accent.withValues(alpha: 0.78),
-                      size: 18,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Text(
-                            'WHEN SLEEP IS ACTIVATED',
-                            style: TextStyle(
-                              color: accent.withValues(alpha: 0.78),
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 1.6,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Each room takes its mark below.',
-                          style: TextStyle(
-                            color: _Palette.textPrimary.withValues(alpha: 0.92),
-                            fontSize: 15,
-                            fontWeight: FontWeight.w400,
-                            fontStyle: FontStyle.italic,
-                            height: 1.35,
-                            letterSpacing: -0.1,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            // Cue line — gradient hairline that fades to nothing, evoking
-            // the line a stage cue runs along.
-            Container(
-              height: 1,
-              margin: const EdgeInsets.fromLTRB(4, 0, 4, 14),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.centerLeft,
-                  end: Alignment.centerRight,
-                  colors: [
-                    accent.withValues(alpha: 0.30),
-                    accent.withValues(alpha: 0.06),
-                    Colors.transparent,
-                  ],
-                  stops: const [0, 0.5, 1],
-                ),
-              ),
-            ),
-            // Rooms — exposed directly, no wrapper card.
-            for (int i = 0; i < rooms.length; i++) ...[
-              if (i > 0) const SizedBox(height: 6),
-              _RoomDefaultCard(
-                key: ValueKey(rooms[i].id),
-                roomId: rooms[i].id,
-                roomName: rooms[i].name,
-                state: defaults[rooms[i].id],
-                onStateChanged: (newState) =>
-                    _onRoomDefaultChanged(rooms[i].id, newState),
-              ),
-            ],
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildRoomDefaultsSection() {
-    return Selector<RoomProvider, List<RoomDto>>(
-      selector: (_, provider) =>
-          provider.rooms.where(showsInAllRooms).toList(growable: false),
-      builder: (context, rooms, child) {
-        if (rooms.isEmpty) return const SizedBox.shrink();
-
-        final defaults = _roomDefaultsForCurrentMode();
-        final roomIds = rooms.map((room) => room.id).toSet();
-        final visibleOverrideCount =
-            defaults.keys.where((roomId) => roomIds.contains(roomId)).length;
-        final expanded = _roomDefaultsExpanded;
-        final hasOverrides = visibleOverrideCount > 0;
-        const color = _Palette.blue;
-
-        return AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOutCubic,
-          padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 14 : 18),
-          decoration: BoxDecoration(
-            color: _Palette.card,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(
-              color: expanded ? color.withValues(alpha: 0.25) : _Palette.border,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header — tappable to expand/collapse.
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => setState(
-                    () => _roomDefaultsExpanded = !_roomDefaultsExpanded),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: color.withValues(alpha: 0.12),
-                      ),
-                      child: Icon(
-                        Icons.meeting_room_rounded,
-                        color: color.withValues(alpha: 0.7),
-                        size: 18,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Row(
-                        children: [
-                          const Flexible(
-                            child: Text(
-                              'Room Defaults',
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: _Palette.textPrimary,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: -0.1,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          InfoTooltip(
-                            message: 'Override the default state for each room '
-                                'while this profile is active. Useful for '
-                                'keeping certain rooms on, standby, or off '
-                                'regardless of the curve.',
-                            iconSize: 13,
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (!expanded && hasOverrides)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: color.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(6),
-                          border:
-                              Border.all(color: color.withValues(alpha: 0.2)),
-                        ),
-                        child: Text(
-                          '$visibleOverrideCount set',
-                          style: TextStyle(
-                            color: color.withValues(alpha: 0.8),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            fontFeatures: const [FontFeature.tabularFigures()],
-                          ),
-                        ),
-                      ),
-                    if (!expanded && !hasOverrides)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: color.withValues(alpha: 0.06),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'None',
-                          style: TextStyle(
-                            color: color.withValues(alpha: 0.4),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    const SizedBox(width: 6),
-                    AnimatedRotation(
-                      turns: expanded ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 250),
-                      curve: Curves.easeOutCubic,
-                      child: Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        color: _Palette.textSecondary.withValues(alpha: 0.3),
-                        size: 20,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOutCubic,
-                alignment: Alignment.topCenter,
-                child: expanded
-                    ? Padding(
-                        padding: const EdgeInsets.only(top: 14),
-                        child: Column(
-                          children: [
-                            for (int i = 0; i < rooms.length; i++) ...[
-                              if (i > 0) const SizedBox(height: 6),
-                              _RoomDefaultCard(
-                                key: ValueKey(rooms[i].id),
-                                roomId: rooms[i].id,
-                                roomName: rooms[i].name,
-                                state: defaults[rooms[i].id],
-                                onStateChanged: (newState) =>
-                                    _onRoomDefaultChanged(
-                                        rooms[i].id, newState),
-                              ),
-                            ],
-                          ],
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  // ---------------------------------------------------------------------------
   // Advanced — Pro-gated features collected under one expandable section.
   // Cards are always rendered; when the user lacks the relevant entitlement
   // the body is dimmed, pointer events are absorbed by an upsell tap target
@@ -3701,11 +3396,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                         ),
                       ),
                       const SizedBox(height: 2),
-                      Text(
-                        _isSleepProfile
-                            ? 'Custom sleep colors'
-                            : 'Fine-tune timing',
-                        style: const TextStyle(
+                      const Text(
+                        'Fine-tune timing',
+                        style: TextStyle(
                           color: _Palette.textSecondary,
                           fontSize: 11,
                           fontWeight: FontWeight.w500,
@@ -3741,35 +3434,15 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 ? Padding(
                     padding: const EdgeInsets.only(top: 14),
                     child: _isSleepProfile
-                        ? Column(
-                            children: [
-                              _ProLockWrap(
-                                unlocked: canUseSleepPrimary,
-                                entitlement: Entitlement.sleepPrimarySettings,
-                                child: _buildSleepBrightnessCard(),
-                              ),
-                              const SizedBox(height: 10),
-                              _ProLockWrap(
-                                unlocked: canUseSleepPrimary,
-                                entitlement: Entitlement.sleepPrimarySettings,
-                                child: _buildSleepColorCard(),
-                              ),
-                              const SizedBox(height: 10),
-                              _ProLockWrap(
-                                unlocked: canUseSleepPrimary,
-                                entitlement: Entitlement.sleepPrimarySettings,
-                                child: _buildTimingCard(),
-                              ),
-                            ],
+                        ? _ProLockWrap(
+                            unlocked: canUseSleepPrimary,
+                            entitlement: Entitlement.sleepPrimarySettings,
+                            child: _buildTimingCard(),
                           )
-                        : Column(
-                            children: [
-                              _ProLockWrap(
-                                unlocked: canUseAdvancedDay,
-                                entitlement: Entitlement.advancedDayControls,
-                                child: _buildTimingCard(),
-                              ),
-                            ],
+                        : _ProLockWrap(
+                            unlocked: canUseAdvancedDay,
+                            entitlement: Entitlement.advancedDayControls,
+                            child: _buildTimingCard(),
                           ),
                   )
                 : const SizedBox.shrink(),
@@ -4373,515 +4046,6 @@ class _TimeGradientPainter extends CustomPainter {
       showTimeMarkers != old.showTimeMarkers;
 }
 
-// -----------------------------------------------------------------------------
-// Room default card
-// -----------------------------------------------------------------------------
-
-enum _RoomDefaultMode { none, off, standby, active }
-
-_RoomDefaultMode _roomDefaultModeForState(String? state) => switch (state) {
-      'active' => _RoomDefaultMode.active,
-      'idle' || 'soft_off' || 'standby' => _RoomDefaultMode.standby,
-      'mood' || 'hard_off' => _RoomDefaultMode.off,
-      _ => _RoomDefaultMode.none,
-    };
-
-String? _stateFromRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
-      _RoomDefaultMode.active => 'active',
-      _RoomDefaultMode.standby => 'standby',
-      _RoomDefaultMode.off => 'hard_off',
-      _RoomDefaultMode.none => null,
-    };
-
-_RoomDefaultMode _nextRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
-      _RoomDefaultMode.active => _RoomDefaultMode.standby,
-      _RoomDefaultMode.standby => _RoomDefaultMode.off,
-      _RoomDefaultMode.off => _RoomDefaultMode.none,
-      _RoomDefaultMode.none => _RoomDefaultMode.active,
-    };
-
-String _roomDefaultLabel(_RoomDefaultMode mode) => switch (mode) {
-      _RoomDefaultMode.active => 'On',
-      _RoomDefaultMode.standby => 'Standby',
-      _RoomDefaultMode.off => 'Off',
-      _RoomDefaultMode.none => 'No override',
-    };
-
-@visibleForTesting
-String roomDefaultStateLabelForTesting(String? state) =>
-    _roomDefaultLabel(_roomDefaultModeForState(state));
-
-@visibleForTesting
-String? nextRoomDefaultStateForTesting(String? state) =>
-    _stateFromRoomDefaultMode(
-      _nextRoomDefaultMode(_roomDefaultModeForState(state)),
-    );
-
-class _RoomDefaultCard extends StatelessWidget {
-  final String roomId;
-  final String roomName;
-  final String? state; // null = no override, "active", "standby", "hard_off"
-  final ValueChanged<String?> onStateChanged;
-
-  const _RoomDefaultCard({
-    super.key,
-    required this.roomId,
-    required this.roomName,
-    required this.state,
-    required this.onStateChanged,
-  });
-
-  _RoomDefaultMode get _mode => _roomDefaultModeForState(state);
-
-  @override
-  Widget build(BuildContext context) {
-    final mode = _mode;
-    final hasOverride = mode != _RoomDefaultMode.none;
-
-    final bgColor = switch (mode) {
-      _RoomDefaultMode.active => const Color(0xFF1E1A12),
-      _RoomDefaultMode.standby => const Color(0xFF1D1A13),
-      _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.card,
-    };
-
-    final stateLabel = _roomDefaultLabel(mode);
-
-    final stateLabelColor = switch (mode) {
-      _RoomDefaultMode.active => const Color(0xFFD4A020),
-      _RoomDefaultMode.standby => _Palette.idle,
-      _RoomDefaultMode.off => _Palette.textSecondary,
-      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.4),
-    };
-
-    final indicatorColor = switch (mode) {
-      _RoomDefaultMode.active => const Color(0xFFD4A020),
-      _RoomDefaultMode.standby => _Palette.idle.withValues(alpha: 0.9),
-      _RoomDefaultMode.off => _Palette.textSecondary.withValues(alpha: 0.8),
-      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.75),
-    };
-
-    return Selector<RoomProvider,
-        ({MotionTimerInfo? motionTimer, bool hasSensor})>(
-      selector: (_, provider) => (
-        motionTimer: provider.getMotionTimer(roomId),
-        hasSensor: provider.hasMotionSensor(roomId),
-      ),
-      builder: (context, motionState, child) {
-        final motionTimer = motionState.motionTimer;
-        final hasSensor = motionState.hasSensor;
-
-        return GestureDetector(
-          onLongPress: () {
-            HapticFeedback.lightImpact();
-            onStateChanged('hard_off');
-          },
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            decoration: BoxDecoration(
-              color: bgColor,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: hasOverride
-                    ? _Palette.border
-                    : _Palette.border.withValues(alpha: 0.4),
-              ),
-            ),
-            padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
-            child: Row(
-              children: [
-                if (motionTimer != null)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 10),
-                    child: _RoomDefaultMotionIndicator(
-                      info: motionTimer,
-                      color: indicatorColor,
-                      onExpired: () =>
-                          context.read<RoomProvider>().clearMotionTimer(roomId),
-                    ),
-                  )
-                else if (hasSensor)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 10),
-                    child: Icon(
-                      Icons.sensors_rounded,
-                      size: 16,
-                      color: indicatorColor.withValues(alpha: 0.45),
-                    ),
-                  ),
-                Expanded(
-                  child: AnimatedOpacity(
-                    opacity: hasOverride ? 1.0 : 0.55,
-                    duration: const Duration(milliseconds: 300),
-                    child: Text(
-                      roomName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: _Palette.textPrimary,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-                if (hasOverride) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    stateLabel,
-                    style: TextStyle(
-                      color: stateLabelColor,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-                const SizedBox(width: 10),
-                _DefaultStateToggle(
-                  mode: mode,
-                  onModeChanged: (newMode) {
-                    HapticFeedback.lightImpact();
-                    onStateChanged(_stateFromRoomDefaultMode(newMode));
-                  },
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _RoomDefaultMotionIndicator extends StatefulWidget {
-  final MotionTimerInfo info;
-  final Color color;
-  final VoidCallback? onExpired;
-
-  const _RoomDefaultMotionIndicator({
-    required this.info,
-    required this.color,
-    this.onExpired,
-  });
-
-  @override
-  State<_RoomDefaultMotionIndicator> createState() =>
-      _RoomDefaultMotionIndicatorState();
-}
-
-class _RoomDefaultMotionIndicatorState
-    extends State<_RoomDefaultMotionIndicator>
-    with SingleTickerProviderStateMixin {
-  Timer? _countdownTimer;
-  int _interpolatedRemaining = 0;
-  late final AnimationController _pulseController;
-
-  @override
-  void initState() {
-    super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    );
-    _syncFromInfo();
-  }
-
-  @override
-  void didUpdateWidget(_RoomDefaultMotionIndicator oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.info != widget.info) {
-      _syncFromInfo();
-    }
-  }
-
-  void _syncFromInfo() {
-    if (widget.info.motionActive) {
-      _countdownTimer?.cancel();
-      _countdownTimer = null;
-      if (!_pulseController.isAnimating) {
-        _pulseController.repeat(reverse: true);
-      }
-      return;
-    }
-
-    _pulseController.stop();
-    _pulseController.value = 0;
-
-    if (widget.info.remainingSecs != null) {
-      _interpolatedRemaining = widget.info.remainingSecs!;
-      _startCountdown();
-      return;
-    }
-
-    _countdownTimer?.cancel();
-    _countdownTimer = null;
-  }
-
-  void _startCountdown() {
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      final elapsed =
-          DateTime.now().difference(widget.info.receivedAt).inSeconds;
-      final remaining = (widget.info.remainingSecs ?? 0) - elapsed;
-      if (remaining <= 0) {
-        _countdownTimer?.cancel();
-        _countdownTimer = null;
-        widget.onExpired?.call();
-        return;
-      }
-      setState(() {
-        _interpolatedRemaining = remaining.clamp(0, widget.info.timeoutSecs);
-      });
-    });
-  }
-
-  @override
-  void dispose() {
-    _countdownTimer?.cancel();
-    _pulseController.dispose();
-    super.dispose();
-  }
-
-  String _formatTime(int secs) {
-    if (secs >= 60) return '${(secs / 60).ceil()}m';
-    return '${secs}s';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (widget.info.motionActive) {
-      return AnimatedBuilder(
-        animation: _pulseController,
-        builder: (context, child) {
-          final scale = 1.0 + _pulseController.value * 0.1;
-          return Transform.scale(scale: scale, child: child);
-        },
-        child: Icon(
-          Icons.directions_walk_rounded,
-          size: 20,
-          color: widget.color,
-        ),
-      );
-    }
-
-    final progress = widget.info.timeoutSecs > 0
-        ? _interpolatedRemaining / widget.info.timeoutSecs
-        : 0.0;
-
-    return SizedBox(
-      width: 28,
-      height: 28,
-      child: CustomPaint(
-        painter: _RoomDefaultMiniCountdownPainter(
-          progress: progress,
-          color: widget.color,
-        ),
-        child: Center(
-          child: Text(
-            _formatTime(_interpolatedRemaining),
-            style: TextStyle(
-              color: widget.color,
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              height: 1,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _RoomDefaultMiniCountdownPainter extends CustomPainter {
-  final double progress;
-  final Color color;
-
-  _RoomDefaultMiniCountdownPainter({
-    required this.progress,
-    required this.color,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - 1.5;
-    const strokeWidth = 2.5;
-
-    canvas.drawCircle(
-      center,
-      radius,
-      Paint()
-        ..color = color.withValues(alpha: 0.15)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = strokeWidth,
-    );
-
-    if (progress > 0) {
-      canvas.drawArc(
-        Rect.fromCircle(center: center, radius: radius),
-        -math.pi / 2,
-        2 * math.pi * progress,
-        false,
-        Paint()
-          ..color = color.withValues(alpha: 0.7)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = strokeWidth
-          ..strokeCap = StrokeCap.round,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _RoomDefaultMiniCountdownPainter oldDelegate) =>
-      progress != oldDelegate.progress || color != oldDelegate.color;
-}
-
-// ---------------------------------------------------------------------------
-// Room default toggle matching the CelestialToggle from room_card.dart
-// ---------------------------------------------------------------------------
-
-class _DefaultStateToggle extends StatelessWidget {
-  final _RoomDefaultMode mode;
-  final ValueChanged<_RoomDefaultMode> onModeChanged;
-
-  const _DefaultStateToggle({
-    required this.mode,
-    required this.onModeChanged,
-  });
-
-  void _onTap() {
-    onModeChanged(_nextRoomDefaultMode(mode));
-  }
-
-  void _onLongPress() {
-    if (mode != _RoomDefaultMode.off) {
-      onModeChanged(_RoomDefaultMode.off);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: _onTap,
-      onLongPress: _onLongPress,
-      behavior: HitTestBehavior.opaque,
-      child: SizedBox(
-        width: 64,
-        height: 28,
-        child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 220),
-          switchInCurve: Curves.easeOut,
-          switchOutCurve: Curves.easeIn,
-          transitionBuilder: (child, animation) => FadeTransition(
-            opacity: animation,
-            child: ScaleTransition(
-              scale: Tween<double>(begin: 0.92, end: 1).animate(animation),
-              child: child,
-            ),
-          ),
-          child: mode == _RoomDefaultMode.none
-              ? _buildNoOverrideChip()
-              : _buildToggle(),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildNoOverrideChip() {
-    return Container(
-      key: const ValueKey('none'),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: _Palette.textSecondary.withValues(alpha: 0.22),
-          width: 1,
-        ),
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        'Auto',
-        style: TextStyle(
-          color: _Palette.textSecondary.withValues(alpha: 0.7),
-          fontSize: 10,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.4,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildToggle() {
-    final alignment = switch (mode) {
-      _RoomDefaultMode.off => Alignment.centerLeft,
-      _RoomDefaultMode.standby => Alignment.center,
-      _RoomDefaultMode.active => Alignment.centerRight,
-      _RoomDefaultMode.none => Alignment.centerRight, // unreachable
-    };
-
-    final trackGradient = switch (mode) {
-      _RoomDefaultMode.off || _RoomDefaultMode.none => const LinearGradient(
-          colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
-        ),
-      _RoomDefaultMode.standby => const LinearGradient(
-          colors: [Color(0xFF2D2A20), Color(0xFF50472D)],
-        ),
-      _RoomDefaultMode.active => const LinearGradient(
-          colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
-        ),
-    };
-
-    final thumbColor = switch (mode) {
-      _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.textSecondary,
-      _RoomDefaultMode.standby => _Palette.idle,
-      _RoomDefaultMode.active => Colors.white,
-    };
-
-    final thumbShadow = switch (mode) {
-      _RoomDefaultMode.active => [
-          BoxShadow(
-            color: _Palette.amber.withValues(alpha: 0.4),
-            blurRadius: 8,
-            spreadRadius: 1,
-          ),
-        ],
-      _RoomDefaultMode.standby => [
-          BoxShadow(
-            color: _Palette.idle.withValues(alpha: 0.28),
-            blurRadius: 8,
-            spreadRadius: 1,
-          ),
-        ],
-      _RoomDefaultMode.off || _RoomDefaultMode.none => <BoxShadow>[],
-    };
-
-    return AnimatedContainer(
-      key: const ValueKey('toggle'),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        gradient: trackGradient,
-      ),
-      padding: const EdgeInsets.all(3),
-      child: AnimatedAlign(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-        alignment: alignment,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          width: 22,
-          height: 22,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: thumbColor,
-            boxShadow: thumbShadow,
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _Palette {
   static const bg = Color(0xFF0B0E13);

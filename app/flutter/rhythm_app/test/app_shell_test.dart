@@ -690,32 +690,28 @@ void main() {
 
     expect(api.getModeCallCount, 0);
     expect(api.getProfilesCallCount, 0);
-    expect(find.text('Day Profile'), findsNothing);
+    expect(find.text('DAY'), findsNothing);
 
-    await tester.tap(find.text('Transition'));
+    // The Automations list reads already-synced provider data, so opening it
+    // must not trigger the profile-loading server API.
+    await tester.tap(find.text('Automations'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(find.text('How Day and Sleep change hands'), findsOneWidget);
+    expect(find.text('Day/Sleep Automatic'), findsOneWidget);
     expect(api.getModeCallCount, 0);
     expect(api.getProfilesCallCount, 0);
 
-    await tester.tap(find.text('Day'));
+    // The Light tab stacks the Day + Sleep look profiles; each loads its own
+    // config, so opening it triggers two profile loads.
+    await tester.tap(find.text('Light'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(api.getModeCallCount, 1);
-    expect(api.getProfilesCallCount, 1);
-    expect(api.getCurveDataCallCount, 1);
-    expect(find.text('Day Profile'), findsOneWidget);
-
-    await tester.tap(find.text('Sleep'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 10));
-
+    expect(find.text('DAY'), findsOneWidget);
+    expect(find.text('SLEEP'), findsOneWidget);
     expect(api.getModeCallCount, 2);
     expect(api.getProfilesCallCount, 2);
-    expect(find.text('Sleep Profile'), findsOneWidget);
   });
 
   testWidgets('mode toggle disables immediately while transition is pending',

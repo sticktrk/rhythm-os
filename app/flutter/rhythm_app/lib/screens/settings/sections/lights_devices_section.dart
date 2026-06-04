@@ -9,7 +9,11 @@ import '../../triage_screen.dart';
 
 /// Detail screen for light hub management and device review.
 class LightsDevicesDetailScreen extends StatelessWidget {
-  const LightsDevicesDetailScreen({super.key});
+  /// When false, the header omits the back chevron — used when this screen is
+  /// hosted as a root navigation tab (Devices) rather than pushed as a route.
+  final bool showBackButton;
+
+  const LightsDevicesDetailScreen({super.key, this.showBackButton = true});
 
   static Future<void> show(BuildContext context) {
     AnalyticsService().logScreenView('lights_devices_detail');
@@ -106,22 +110,25 @@ class LightsDevicesDetailScreen extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          GestureDetector(
-            onTap: () => Navigator.of(context).pop(),
-            child: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: CelestialColors.accentBlue.withValues(alpha: 0.2),
+          if (showBackButton)
+            GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CelestialColors.accentBlue.withValues(alpha: 0.2),
+                ),
+                child: const Icon(
+                  Icons.chevron_left,
+                  color: CelestialColors.accentBlue,
+                  size: 24,
+                ),
               ),
-              child: const Icon(
-                Icons.chevron_left,
-                color: CelestialColors.accentBlue,
-                size: 24,
-              ),
-            ),
-          ),
+            )
+          else
+            const SizedBox(width: 40),
           const Expanded(
             child: Text(
               'Lights & Devices',
