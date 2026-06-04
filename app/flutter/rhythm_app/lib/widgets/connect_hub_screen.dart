@@ -21,9 +21,11 @@ import 'success_modal.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmApiException,
+        RhythmAuthStatus,
         RhythmAuthApi,
         RhythmConfigApi,
         RhythmDiagnosticsApi;
+import '../config/feature_flags.dart';
 import '../providers/home_provider.dart';
 import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
@@ -1029,8 +1031,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   Future<String?> _resolveAuthTokenForDiscoveredHub(DiscoveredHub hub) async {
     final baseUrl = 'http://${hub.address}:${hub.port}';
-    final requiresAuth = await _serverRequiresAuth(baseUrl, hub.address);
-    if (!requiresAuth) return null;
+    final status = await _serverAuthStatus(baseUrl, hub.address);
+    final shouldClaimToken = status != null &&
+        status.claimAvailable &&
+        (status.requiresAuth || FeatureFlags.remoteAccessTunnel);
+    if (status?.requiresAuth != true && !shouldClaimToken) return null;
 
     final storedToken = _storedServerTokenFor(hub);
     if (storedToken != null) {
@@ -1047,16 +1052,24 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       }
     }
 
+    if (shouldClaimToken) {
+      final claim = await RhythmAuthApi(baseUrl: baseUrl).claimOwnerToken();
+      return claim.token;
+    }
+
     return _requestOwnerTokenViaBle(hub);
   }
 
-  Future<bool> _serverRequiresAuth(String baseUrl, String address) async {
+  Future<RhythmAuthStatus?> _serverAuthStatus(
+    String baseUrl,
+    String address,
+  ) async {
     try {
       final status = await RhythmAuthApi(baseUrl: baseUrl).getStatus();
-      return status.requiresAuth;
+      return status;
     } catch (error) {
       debugPrint('Auth status unavailable for $address: $error');
-      return false;
+      return null;
     }
   }
 

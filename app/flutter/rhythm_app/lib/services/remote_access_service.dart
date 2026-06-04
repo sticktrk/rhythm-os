@@ -14,11 +14,6 @@ typedef RemoteAccessApiFactory = RhythmRemoteAccessApi Function({
   String? authToken,
 });
 
-typedef RemoteAccessAuthStatusFactory = Future<RhythmAuthStatus> Function({
-  required HubEndpoint endpoint,
-  String? authToken,
-});
-
 class RemoteAccessEnableResult {
   const RemoteAccessEnableResult({
     required this.updatedHub,
@@ -54,12 +49,10 @@ class RemoteAccessActivationException implements Exception {
 class RemoteAccessService {
   RemoteAccessService._({
     RemoteAccessApiFactory? apiFactory,
-    RemoteAccessAuthStatusFactory? authStatusFactory,
     Duration activationPollDelay = const Duration(seconds: 2),
     int activationPollAttempts = 6,
     dynamic Function()? supabaseClientFactory,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
-        _authStatusFactory = authStatusFactory ?? _defaultAuthStatusFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
         _supabaseClientFactory = supabaseClientFactory;
@@ -70,14 +63,12 @@ class RemoteAccessService {
   @visibleForTesting
   factory RemoteAccessService.testing({
     RemoteAccessApiFactory? apiFactory,
-    RemoteAccessAuthStatusFactory? authStatusFactory,
     Duration activationPollDelay = Duration.zero,
     int activationPollAttempts = 1,
     dynamic Function()? supabaseClientFactory,
   }) {
     return RemoteAccessService._(
       apiFactory: apiFactory,
-      authStatusFactory: authStatusFactory,
       activationPollDelay: activationPollDelay,
       activationPollAttempts: activationPollAttempts,
       supabaseClientFactory: supabaseClientFactory,
@@ -85,7 +76,6 @@ class RemoteAccessService {
   }
 
   final RemoteAccessApiFactory _apiFactory;
-  final RemoteAccessAuthStatusFactory _authStatusFactory;
   final Duration _activationPollDelay;
   final int _activationPollAttempts;
   final dynamic Function()? _supabaseClientFactory;
@@ -103,7 +93,6 @@ class RemoteAccessService {
     Home? home,
   }) async {
     _ensureCanUse(serverHub);
-    await _ensureServerApiAuthEnabled(serverHub);
 
     await AccountCloudSyncService.instance.syncHomeAndServerHubs(
       home: home,
@@ -215,17 +204,6 @@ class RemoteAccessService {
     }
   }
 
-  Future<void> _ensureServerApiAuthEnabled(Hub serverHub) async {
-    final status = await _authStatusFactory(
-      endpoint: serverHub.endpoint,
-      authToken: serverHub.token,
-    );
-
-    if (!status.requiresAuth) {
-      throw StateError('Remote access requires API auth to be enabled first.');
-    }
-  }
-
   dynamic _supabaseClient() {
     final injectedClient = _supabaseClientFactory?.call();
     if (injectedClient != null) {
@@ -300,16 +278,6 @@ class RemoteAccessService {
       baseUrl: baseUrl,
       authToken: authToken,
     );
-  }
-
-  static Future<RhythmAuthStatus> _defaultAuthStatusFactory({
-    required HubEndpoint endpoint,
-    String? authToken,
-  }) {
-    return RhythmAuthApi(
-      baseUrl: endpoint.baseUrl,
-      authToken: authToken,
-    ).getStatus();
   }
 
   static Map<String, dynamic> buildBootstrapBody({

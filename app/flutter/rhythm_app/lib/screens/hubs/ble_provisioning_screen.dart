@@ -519,9 +519,12 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     if (provisioned != null && provisioned.isNotEmpty) return provisioned;
 
     try {
-      final status = await RhythmAuthApi(
-        baseUrl: 'http://$ip:54448',
-      ).getStatus();
+      final authApi = RhythmAuthApi(baseUrl: 'http://$ip:54448');
+      final status = await authApi.getStatus();
+      if (status.claimAvailable) {
+        final claim = await authApi.claimOwnerToken();
+        return claim.token;
+      }
       if (!status.requiresAuth) {
         return null;
       }

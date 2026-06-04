@@ -7,11 +7,11 @@ void main() {
       expect(PlanTier.basic.grants(Entitlement.cloudBackupRestore), isTrue);
       expect(PlanTier.basic.grants(Entitlement.multiDeviceSync), isTrue);
       expect(PlanTier.basic.grants(Entitlement.multiUserAccess), isTrue);
+      expect(PlanTier.basic.grants(Entitlement.remoteAccess), isTrue);
 
       expect(PlanTier.basic.grants(Entitlement.standby), isFalse);
       expect(PlanTier.basic.grants(Entitlement.advancedDayControls), isFalse);
       expect(PlanTier.basic.grants(Entitlement.sleepPrimarySettings), isFalse);
-      expect(PlanTier.basic.grants(Entitlement.remoteAccess), isFalse);
     });
 
     test('Pro grants every declared entitlement', () {
@@ -69,10 +69,13 @@ void main() {
       expect(Entitlement.multiUserAccess.isComingSoon, isTrue);
       expect(
           Entitlement.multiUserAccess.labelFor(PlanTier.basic), 'Coming soon');
-      expect(Entitlement.remoteAccess.minimumTier, PlanTier.pro);
-      expect(Entitlement.remoteAccess.isComingSoon, isTrue);
-      expect(Entitlement.remoteAccess.labelFor(PlanTier.basic), 'Pro only');
-      expect(Entitlement.remoteAccess.labelFor(PlanTier.pro), 'Coming soon');
+    });
+
+    test('enables remote access for testing', () {
+      expect(Entitlement.remoteAccess.minimumTier, PlanTier.basic);
+      expect(Entitlement.remoteAccess.isComingSoon, isFalse);
+      expect(Entitlement.remoteAccess.labelFor(PlanTier.basic), 'Included');
+      expect(Entitlement.remoteAccess.labelFor(PlanTier.pro), 'Included');
     });
   });
 

@@ -48,6 +48,7 @@ const Map<PlanTier, Set<Entitlement>> _grants = {
     Entitlement.cloudBackupRestore,
     Entitlement.multiDeviceSync,
     Entitlement.multiUserAccess,
+    Entitlement.remoteAccess,
   },
   PlanTier.pro: {
     Entitlement.cloudBackupRestore,
@@ -127,7 +128,7 @@ extension EntitlementX on Entitlement {
         Entitlement.sleepPrimarySettings => PlanTier.pro,
         Entitlement.transitionButton => PlanTier.pro,
         Entitlement.timeSimulator => PlanTier.pro,
-        Entitlement.remoteAccess => PlanTier.pro,
+        Entitlement.remoteAccess => PlanTier.basic,
       };
 
   bool get isComingSoon => switch (this) {

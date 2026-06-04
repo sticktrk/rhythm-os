@@ -941,12 +941,24 @@ class ServerSyncProvider extends ChangeNotifier {
     try {
       final authApi = RhythmAuthApi(baseUrl: hub.endpoint.baseUrl);
       final status = await authApi.getStatus();
-      if (!status.requiresAuth) {
-        return (hub: hub, authToken: null);
-      }
-
       if (existingToken != null && existingToken.isNotEmpty) {
         return (hub: hub, authToken: existingToken);
+      }
+
+      final shouldClaimToken = status.claimAvailable &&
+          (status.requiresAuth || FeatureFlags.remoteAccessTunnel);
+      if (shouldClaimToken) {
+        final claim = await authApi.claimOwnerToken();
+        final claimedHub = hub.copyWith(token: claim.token);
+        await _homeProvider.updateHub(claimedHub);
+        debugPrint(
+          'ServerSync: claimed owner token for ${hub.endpoint.host}:${hub.endpoint.port}',
+        );
+        return (hub: claimedHub, authToken: claim.token);
+      }
+
+      if (!status.requiresAuth) {
+        return (hub: hub, authToken: null);
       }
 
       if (!status.claimAvailable) {
@@ -957,13 +969,7 @@ class ServerSyncProvider extends ChangeNotifier {
         return (hub: hub, authToken: null);
       }
 
-      final claim = await authApi.claimOwnerToken();
-      final claimedHub = hub.copyWith(token: claim.token);
-      await _homeProvider.updateHub(claimedHub);
-      debugPrint(
-        'ServerSync: claimed owner token for ${hub.endpoint.host}:${hub.endpoint.port}',
-      );
-      return (hub: claimedHub, authToken: claim.token);
+      return (hub: hub, authToken: null);
     } catch (error) {
       debugPrint(
         'ServerSync: unable to resolve API auth for ${hub.endpoint.host}:${hub.endpoint.port}: $error',

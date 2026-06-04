@@ -1973,15 +1973,12 @@ class _RhythmServerAdvancedSettingsScreenState
   RhythmAuthStatus? _authStatus;
   String? _authToken;
   bool _isAuthLoading = true;
-  bool _isAuthUpdating = false;
   bool _isRemoteAccessUpdating = false;
 
   bool get _hasAuthToken {
     final token = _authToken?.trim();
     return token != null && token.isNotEmpty;
   }
-
-  bool get _apiAuthRequired => _authStatus?.requiresAuth ?? false;
 
   Hub get _currentHub {
     final hubs = context.read<HomeProvider>().currentHomeHubs;
@@ -2023,71 +2020,8 @@ class _RhythmServerAdvancedSettingsScreenState
     }
   }
 
-  Future<void> _setApiAuthRequired(bool requireApiAuth) async {
-    if (_isAuthUpdating) return;
-
-    final currentStatus = _authStatus;
-    if (requireApiAuth &&
-        !_hasAuthToken &&
-        (currentStatus?.ownerConfigured ?? false)) {
-      _showSnackBar(
-        'This server already has an owner token. Reconnect with that token before enabling API auth.',
-      );
-      return;
-    }
-
-    final homeProvider = context.read<HomeProvider>();
-    final syncProvider = context.read<ServerSyncProvider>();
-
-    setState(() => _isAuthUpdating = true);
-    try {
-      final update = await _authApi().setSettings(
-        requireApiAuth: requireApiAuth,
-        label: 'Rhythm app',
-      );
-
-      final issuedToken = update.token?.trim();
-      if (issuedToken != null && issuedToken.isNotEmpty) {
-        _authToken = issuedToken;
-        final updatedHub = widget.hub.copyWith(token: issuedToken);
-        final saved = await homeProvider.updateHub(updatedHub);
-        unawaited(
-          syncProvider.connection.connect(
-            widget.hub.endpoint.host,
-            port: widget.hub.endpoint.port,
-            authToken: issuedToken,
-          ),
-        );
-        if (!saved && mounted) {
-          _showSnackBar(
-            'API auth enabled, but the owner token could not be saved.',
-          );
-        }
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _authStatus = update;
-        _isAuthUpdating = false;
-      });
-
-      if (requireApiAuth && issuedToken != null && issuedToken.isNotEmpty) {
-        _showSnackBar('API auth enabled and owner token saved.');
-      }
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _isAuthUpdating = false);
-      _showSnackBar('Could not update API auth settings.');
-    }
-  }
-
   Future<void> _setRemoteAccessEnabled(bool enabled) async {
     if (_isRemoteAccessUpdating) return;
-
-    if (enabled && !_apiAuthRequired) {
-      _showSnackBar('Enable API auth before turning on remote access.');
-      return;
-    }
 
     final remoteAccess = RemoteAccessService.instance;
     if (enabled && !remoteAccess.canUseRemoteAccess) {
@@ -2102,8 +2036,10 @@ class _RhythmServerAdvancedSettingsScreenState
     setState(() => _isRemoteAccessUpdating = true);
     try {
       if (enabled) {
+        final tokenHub =
+            await _ensureOwnerTokenForRemoteAccess(hub, homeProvider);
         final result = await remoteAccess.enableForHub(
-          hub,
+          tokenHub,
           home: homeProvider.currentHome,
         );
         await homeProvider.updateHub(result.updatedHub);
@@ -2128,6 +2064,31 @@ class _RhythmServerAdvancedSettingsScreenState
         setState(() => _isRemoteAccessUpdating = false);
       }
     }
+  }
+
+  Future<Hub> _ensureOwnerTokenForRemoteAccess(
+    Hub hub,
+    HomeProvider homeProvider,
+  ) async {
+    final existingToken = hub.token?.trim();
+    if (existingToken != null && existingToken.isNotEmpty) {
+      _authToken = existingToken;
+      return hub;
+    }
+
+    final claim = await _authApi().claimOwnerToken();
+    final token = claim.token.trim();
+    if (token.isEmpty) {
+      throw StateError('Server returned an empty owner token.');
+    }
+
+    _authToken = token;
+    final updatedHub = hub.copyWith(token: token);
+    final saved = await homeProvider.updateHub(updatedHub);
+    if (!saved && mounted) {
+      _showSnackBar('Owner token created, but could not be saved.');
+    }
+    return updatedHub;
   }
 
   void _showSnackBar(String message) {
@@ -2155,12 +2116,10 @@ class _RhythmServerAdvancedSettingsScreenState
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const SizedBox(height: 8),
-                    _buildApiAuthSection(),
                     if (FeatureFlags.remoteAccessTunnel) ...[
-                      const SizedBox(height: 16),
                       _buildRemoteAccessSection(),
+                      const SizedBox(height: 16),
                     ],
-                    const SizedBox(height: 16),
                     _buildDisableServerSection(),
                     const SizedBox(height: 40),
                   ],
@@ -2216,69 +2175,24 @@ class _RhythmServerAdvancedSettingsScreenState
     );
   }
 
-  Widget _buildApiAuthSection() {
-    final authRequired = _authStatus?.requiresAuth ?? false;
-    final canToggle = !_isAuthLoading &&
-        !_isAuthUpdating &&
-        _authStatus != null &&
-        (!authRequired || _hasAuthToken);
-
-    final statusText = _isAuthUpdating
-        ? 'Saving'
-        : _isAuthLoading
-            ? 'Loading'
-            : _authStatus == null
-                ? 'Unavailable'
-                : authRequired && !_hasAuthToken
-                    ? 'On, token missing'
-                    : authRequired
-                        ? 'On'
-                        : 'Off';
-    final statusColor = _isAuthLoading || _authStatus == null
-        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
-        : authRequired
-            ? _enabledGreen
-            : _warningAmber;
-
-    return _buildSection(
-      title: 'SECURITY',
-      children: [
-        _buildSwitchRow(
-          icon: Icons.lock_outline_rounded,
-          iconColor: statusColor,
-          label: 'Require API Auth',
-          tooltip:
-              'Requires a saved bearer token before apps can control this server.',
-          statusText: statusText,
-          statusColor: statusColor,
-          value: authRequired,
-          activeTrackColor: _teal,
-          busy: _isAuthLoading || _isAuthUpdating,
-          onChanged:
-              canToggle ? (next) => unawaited(_setApiAuthRequired(next)) : null,
-        ),
-      ],
-    );
-  }
-
   Widget _buildRemoteAccessSection() {
     context.watch<HomeProvider>();
     final hub = _currentHub;
     final configured = hub.remoteEndpoint != null;
-    final authRequired = _apiAuthRequired;
-    final prerequisitesMet = authRequired && _hasAuthToken;
+    final canCreateToken = _authStatus?.claimAvailable ?? false;
+    final prerequisitesMet = _hasAuthToken || canCreateToken;
     final statusText = _isRemoteAccessUpdating
         ? 'Saving'
         : configured
             ? 'Enabled'
             : _isAuthLoading
-                ? 'Checking auth'
+                ? 'Checking'
                 : _authStatus == null
-                    ? 'Auth status unavailable'
-                    : !authRequired
-                        ? 'Enable API Auth first'
+                    ? 'Unavailable'
+                    : !_hasAuthToken && canCreateToken
+                        ? 'Ready'
                         : !_hasAuthToken
-                            ? 'Owner token required'
+                            ? 'Token unavailable'
                             : 'Off';
     final statusColor = configured
         ? _enabledGreen
@@ -2298,7 +2212,7 @@ class _RhythmServerAdvancedSettingsScreenState
           iconColor: statusColor,
           label: 'Remote Access',
           tooltip:
-              'Uses a secure outbound tunnel so this server can be controlled away from home. Requires API Auth first.',
+              'Uses a secure outbound tunnel so this server can be controlled away from home.',
           statusText: statusText,
           statusColor: statusColor,
           value: configured,
