@@ -110,7 +110,6 @@ class SettingsScreen extends StatelessWidget {
     return Consumer2<HomeProvider, ServerSyncProvider>(
       builder: (context, homeProvider, serverSync, child) {
         final serverHub = homeProvider.activeServerHub;
-        final serverCount = homeProvider.currentHomeServerHubs.length;
         final serverState = serverSync.connectionState;
         final isOnline = serverState == RhythmConnectionState.connected;
         final isConnecting = serverState == RhythmConnectionState.connecting ||
@@ -135,11 +134,7 @@ class SettingsScreen extends StatelessWidget {
           icon: Icons.developer_board,
           iconColor: const Color(0xFF00BCD4),
           label: 'RhythmOS Server',
-          value: serverHub == null
-              ? null
-              : serverCount > 1
-                  ? '${serverHub.name} · $serverCount saved'
-                  : serverHub.name,
+          value: serverHub?.name,
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [

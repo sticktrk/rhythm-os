@@ -26,9 +26,7 @@ class HubsSection extends StatelessWidget {
                 // ── RhythmServer ──
                 Builder(
                   builder: (context) {
-                    final serverHubs = homeProvider.currentHomeServerHubs;
                     final bridgeHub = homeProvider.activeServerHub;
-                    final serverCount = serverHubs.length;
                     final serverState = serverSync.connectionState;
                     final isOnline =
                         serverState == RhythmConnectionState.connected;
@@ -87,11 +85,7 @@ class HubsSection extends StatelessWidget {
                         ],
                       ),
                       showChevron: false,
-                      value: bridgeHub == null
-                          ? null
-                          : serverCount > 1
-                              ? '${bridgeHub.name} · $serverCount saved'
-                              : bridgeHub.name,
+                      value: bridgeHub?.name,
                       onTap: bridgeHub != null
                           ? () => RhythmServerDetailScreen.show(context)
                           : () => ConnectHubScreen.show(

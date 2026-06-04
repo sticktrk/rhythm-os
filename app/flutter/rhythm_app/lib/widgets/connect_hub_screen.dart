@@ -38,6 +38,16 @@ enum ConnectHubMode { rhythmServer, hue }
 @visibleForTesting
 const int rhythmServerDefaultPort = 54448;
 
+String _rhythmServerEndpointKey(String host, int port) => '$host:$port';
+
+@visibleForTesting
+bool rhythmServerEndpointIsConnectingForTesting({
+  required String? connectingEndpoint,
+  required String host,
+  required int port,
+}) =>
+    connectingEndpoint == _rhythmServerEndpointKey(host, port);
+
 const _mdnsProbeTimeout = Duration(milliseconds: 900);
 const _mdnsProbeSettleTimeout = Duration(seconds: 2);
 const _subnetProbeTimeout = Duration(milliseconds: 250);
@@ -223,6 +233,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   bool _isScanning = false;
   bool _isBleScanning = false;
   bool _isConnecting = false;
+  String? _connectingEndpoint;
   String? _connectError;
   String? _connectErrorMessage;
   String? _bleScanError;
@@ -381,6 +392,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     setState(() {
       _isScanning = true;
       _discoveredDevices = [];
+      _connectingEndpoint = null;
       _connectError = null;
       _connectErrorMessage = null;
     });
@@ -766,6 +778,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     return service.name.isNotEmpty ? service.name : 'RhythmServer';
   }
 
+  String _discoveredEndpointKey(DiscoveredHub hub) =>
+      _rhythmServerEndpointKey(hub.address, hub.port);
+
   /// Submit the inline manual-IP form.
   Future<void> _submitManualIp() async {
     final input = _manualIpController.text.trim();
@@ -815,8 +830,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Future<void> _connectToDevice(DiscoveredHub hub) async {
     AnalyticsService().logRhythmServerDiscoveredConnect(hub.address);
     if (!kIsWeb) HapticFeedback.mediumImpact();
+    final endpointKey = _discoveredEndpointKey(hub);
     setState(() {
       _isConnecting = true;
+      _connectingEndpoint = endpointKey;
       _connectError = null;
       _connectErrorMessage = null;
     });
@@ -828,7 +845,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
-        _connectError = hub.address;
+        _connectingEndpoint = null;
+        _connectError = endpointKey;
         _connectErrorMessage = error.message;
       });
       return;
@@ -837,7 +855,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
-        _connectError = hub.address;
+        _connectingEndpoint = null;
+        _connectError = endpointKey;
         _connectErrorMessage = 'Could not authorize this Box';
       });
       return;
@@ -869,7 +888,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       if (result == null) {
         setState(() {
           _isConnecting = false;
-          _connectError = hub.address;
+          _connectingEndpoint = null;
+          _connectError = endpointKey;
           _connectErrorMessage = 'Could not save this Box';
         });
         return;
@@ -894,13 +914,20 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         hubType: 'RhythmServer',
       );
 
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectingEndpoint = null;
+      });
+
       if (mounted && widget.isModal) {
         Navigator.of(context).pop();
       }
     } else {
       setState(() {
         _isConnecting = false;
-        _connectError = hub.address;
+        _connectingEndpoint = null;
+        _connectError = endpointKey;
         _connectErrorMessage = 'Could not reach this Box';
       });
     }
@@ -1591,8 +1618,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   Widget _buildRecentDeviceCard(RecentServer server) {
     final isOnline = RecentServersService.instance.isOnline(server.id);
-    final hasError = _connectError == server.host;
-    final isBusy = _isConnecting && !hasError;
+    final endpointKey = _rhythmServerEndpointKey(server.host, server.port);
+    final hasError = _connectError == endpointKey;
+    final isBusy = _connectingEndpoint == endpointKey;
     final b = _breathe.value;
 
     // Reuse the connect path: the recent entry behaves exactly like a
@@ -1788,8 +1816,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   }
 
   Widget _buildExistingDeviceCard(DiscoveredHub hub) {
-    final hasError = _connectError == hub.address;
-    final isBusy = _isConnecting && !hasError;
+    final endpointKey = _discoveredEndpointKey(hub);
+    final hasError = _connectError == endpointKey;
+    final isBusy = _connectingEndpoint == endpointKey;
     final b = _breathe.value;
 
     return GestureDetector(

@@ -104,6 +104,27 @@ void main() {
       expect(rhythmDiscoveryHostCandidates(service), ['rhythm-box.local']);
     });
 
+    test('scopes connecting state to the selected endpoint', () {
+      const connectingEndpoint = '192.168.5.10:54448';
+
+      expect(
+        rhythmServerEndpointIsConnectingForTesting(
+          connectingEndpoint: connectingEndpoint,
+          host: '192.168.5.10',
+          port: rhythmServerDefaultPort,
+        ),
+        isTrue,
+      );
+      expect(
+        rhythmServerEndpointIsConnectingForTesting(
+          connectingEndpoint: connectingEndpoint,
+          host: '192.168.5.11',
+          port: rhythmServerDefaultPort,
+        ),
+        isFalse,
+      );
+    });
+
     test('builds same-subnet fallback candidates from private local IPs', () {
       final candidates = rhythmSubnetScanCandidates([
         '192.168.5.42',
