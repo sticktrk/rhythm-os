@@ -547,9 +547,11 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
       final token = ownerToken?.trim();
       final hasSavedToken = hub.token?.trim().isNotEmpty == true;
+      var selectedHub = hub;
       if (token != null && token.isNotEmpty && !hasSavedToken) {
-        await homeProvider.updateHub(hub.copyWith(token: token));
+        selectedHub = hub.copyWith(token: token);
       }
+      await homeProvider.activateServerHub(selectedHub);
       await RecentServersService.instance.record(
         name: hub.name,
         host: ip,
@@ -559,12 +561,15 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       return;
     }
 
-    await homeProvider.addServerHub(
+    final hub = await homeProvider.addServerHub(
       name: displayName,
       host: ip,
       port: 54448,
       token: ownerToken,
     );
+    if (hub != null) {
+      await homeProvider.activateServerHub(hub);
+    }
     await RecentServersService.instance.record(
       name: displayName,
       host: ip,

@@ -841,8 +841,7 @@ class ServerSyncProvider extends ChangeNotifier {
     // Demo mode: set the server hub reference so UI sees a hub,
     // but don't actually connect to the fake 127.0.0.1 host.
     if (HueServiceLocator.isDemoMode) {
-      final hubs = _homeProvider.currentHomeHubs;
-      final serverHub = hubs.where((h) => h.type == HubType.server).firstOrNull;
+      final serverHub = _homeProvider.activeServerHub;
       if (serverHub != null) {
         final hubChanged = _serverHub?.id != serverHub.id;
         _serverHub = serverHub;
@@ -858,8 +857,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
 
-    final hubs = _homeProvider.currentHomeHubs;
-    final serverHub = hubs.where((h) => h.type == HubType.server).firstOrNull;
+    final serverHub = _homeProvider.activeServerHub;
 
     if (serverHub != null) {
       if (serverHub.id == _serverHub?.id &&

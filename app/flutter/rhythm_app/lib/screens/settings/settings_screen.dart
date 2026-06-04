@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart' show HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../../backend/auth/auth_user.dart';
 import '../../config/platform_capabilities.dart';
@@ -110,7 +109,8 @@ class SettingsScreen extends StatelessWidget {
   Widget _buildRhythmOsServerRow() {
     return Consumer2<HomeProvider, ServerSyncProvider>(
       builder: (context, homeProvider, serverSync, child) {
-        final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+        final serverHub = homeProvider.activeServerHub;
+        final serverCount = homeProvider.currentHomeServerHubs.length;
         final serverState = serverSync.connectionState;
         final isOnline = serverState == RhythmConnectionState.connected;
         final isConnecting = serverState == RhythmConnectionState.connecting ||
@@ -135,6 +135,11 @@ class SettingsScreen extends StatelessWidget {
           icon: Icons.developer_board,
           iconColor: const Color(0xFF00BCD4),
           label: 'RhythmOS Server',
+          value: serverHub == null
+              ? null
+              : serverCount > 1
+                  ? '${serverHub.name} · $serverCount saved'
+                  : serverHub.name,
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [

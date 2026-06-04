@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 
 import '../../providers/home_provider.dart';
@@ -16,9 +15,7 @@ Future<void> startMatterPairingFlow(
 }) async {
   final homeProvider = context.read<HomeProvider>();
   final syncProvider = context.read<ServerSyncProvider>();
-  final serverHub = homeProvider.currentHomeHubs
-      .where((hub) => hub.type == HubType.server)
-      .firstOrNull;
+  final serverHub = homeProvider.activeServerHub;
   if (serverHub == null) return;
 
   final addMethod = await _resolveMatterAddMethod(

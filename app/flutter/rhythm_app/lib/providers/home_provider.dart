@@ -17,6 +17,77 @@ typedef ResolvedLocation = ({
   String source, // 'home', 'hue', 'ha', 'default'
 });
 
+Hub? _preferredServerHub(Iterable<Hub> hubs) {
+  final serverHubs = hubs.where((hub) => hub.type == HubType.server).toList();
+  if (serverHubs.isEmpty) return null;
+
+  final enabled = serverHubs.where((hub) => hub.enabled).toList();
+  final candidates = enabled.isNotEmpty ? enabled : serverHubs;
+  candidates.sort((left, right) {
+    final leftRecency = left.lastConnected ?? left.updatedAt;
+    final rightRecency = right.lastConnected ?? right.updatedAt;
+    return rightRecency.compareTo(leftRecency);
+  });
+  return candidates.first;
+}
+
+@visibleForTesting
+Hub? preferredServerHubForTesting(Iterable<Hub> hubs) =>
+    _preferredServerHub(hubs);
+
+@visibleForTesting
+List<Hub> activateServerHubSnapshotForTesting({
+  required Iterable<Hub> hubs,
+  required Hub selectedHub,
+  required DateTime now,
+}) {
+  var selectedSeen = false;
+  final nextHubs = <Hub>[];
+
+  for (final hub in hubs) {
+    if (hub.type != HubType.server) {
+      nextHubs.add(hub);
+      continue;
+    }
+
+    if (hub.id == selectedHub.id) {
+      selectedSeen = true;
+      nextHubs.add(
+        selectedHub.copyWith(
+          enabled: true,
+          lastConnected: now,
+          updatedAt: now,
+          pendingSync: true,
+        ),
+      );
+      continue;
+    }
+
+    nextHubs.add(
+      hub.enabled
+          ? hub.copyWith(
+              enabled: false,
+              updatedAt: now,
+              pendingSync: true,
+            )
+          : hub,
+    );
+  }
+
+  if (!selectedSeen) {
+    nextHubs.add(
+      selectedHub.copyWith(
+        enabled: true,
+        lastConnected: now,
+        updatedAt: now,
+        pendingSync: true,
+      ),
+    );
+  }
+
+  return nextHubs;
+}
+
 /// Provider for Home and Hub state management.
 ///
 /// Provides reactive state for UI to observe:
@@ -48,6 +119,8 @@ class HomeProvider extends ChangeNotifier {
   List<Home> get homes => _homes;
   Home? get currentHome => _currentHome;
   List<Hub> get currentHomeHubs => _currentHomeHubs;
+  List<Hub> get currentHomeServerHubs => getHubsByType(HubType.server);
+  Hub? get activeServerHub => _preferredServerHub(currentHomeHubs);
   bool get isLoading => _isLoading;
   String? get error => _error;
   HomeRepository get repository => _repository;
@@ -599,13 +672,52 @@ class HomeProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Make one Rhythm Server hub active without deleting other saved servers.
+  ///
+  /// Server owner tokens are local-only secrets. Keeping inactive server hub
+  /// records preserves those tokens so switching back to another box does not
+  /// strand the app behind a server-side hashed owner token.
+  Future<Hub?> activateServerHub(Hub selectedHub) async {
+    if (selectedHub.type != HubType.server) return null;
+
+    try {
+      final now = DateTime.now();
+      final hubs = _repository.getHubsForHome(selectedHub.homeId);
+      final nextHubs = activateServerHubSnapshotForTesting(
+        hubs: hubs,
+        selectedHub: selectedHub,
+        now: now,
+      );
+
+      for (final hub in nextHubs) {
+        if (hub.type != HubType.server) continue;
+        await _repository.updateHub(hub);
+      }
+
+      final activatedMatches =
+          nextHubs.where((hub) => hub.id == selectedHub.id);
+      final activatedHub =
+          activatedMatches.isEmpty ? null : activatedMatches.first;
+      _loadCurrentHomeHubs();
+      notifyListeners();
+      return activatedHub;
+    } catch (e) {
+      _error = 'Failed to switch server hub: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
   /// Get hubs by type.
   List<Hub> getHubsByType(HubType type) {
-    return _currentHomeHubs.where((h) => h.type == type).toList();
+    return currentHomeHubs.where((h) => h.type == type).toList();
   }
 
   /// Get the first hub of a specific type, or null if none exist.
   Hub? getFirstHubOfType(HubType type) {
+    if (type == HubType.server) {
+      return activeServerHub;
+    }
     final hubs = getHubsByType(type);
     return hubs.isNotEmpty ? hubs.first : null;
   }

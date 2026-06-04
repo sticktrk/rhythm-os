@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
 import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
-import '../../hubs/rhythmserver_settings_screen.dart';
 import '../../triage_screen.dart';
 import '../../../widgets/connect_hub_screen.dart';
+import 'rhythm_server_section.dart';
 
 /// Hubs section — RhythmServer connection and device review.
 class HubsSection extends StatelessWidget {
@@ -27,8 +26,9 @@ class HubsSection extends StatelessWidget {
                 // ── RhythmServer ──
                 Builder(
                   builder: (context) {
-                    final bridgeHub =
-                        homeProvider.getFirstHubOfType(HubType.server);
+                    final serverHubs = homeProvider.currentHomeServerHubs;
+                    final bridgeHub = homeProvider.activeServerHub;
+                    final serverCount = serverHubs.length;
                     final serverState = serverSync.connectionState;
                     final isOnline =
                         serverState == RhythmConnectionState.connected;
@@ -87,11 +87,17 @@ class HubsSection extends StatelessWidget {
                         ],
                       ),
                       showChevron: false,
+                      value: bridgeHub == null
+                          ? null
+                          : serverCount > 1
+                              ? '${bridgeHub.name} · $serverCount saved'
+                              : bridgeHub.name,
                       onTap: bridgeHub != null
-                          ? () => RhythmServerSettingsScreen.show(context,
-                              hub: bridgeHub)
-                          : () => ConnectHubScreen.show(context,
-                              mode: ConnectHubMode.rhythmServer),
+                          ? () => RhythmServerDetailScreen.show(context)
+                          : () => ConnectHubScreen.show(
+                                context,
+                                mode: ConnectHubMode.rhythmServer,
+                              ),
                     );
                   },
                 ),

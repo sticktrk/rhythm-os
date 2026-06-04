@@ -922,13 +922,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           token.isNotEmpty &&
           savedHub.token?.trim() != token) {
         final updatedHub = savedHub.copyWith(token: token);
-        final updated = await homeProvider.updateHub(updatedHub);
-        if (!updated) return null;
-        await _removeOtherServerHubs(homeProvider, keepHubId: updatedHub.id);
-        return updatedHub;
+        return homeProvider.activateServerHub(updatedHub);
       }
-      await _removeOtherServerHubs(homeProvider, keepHubId: savedHub.id);
-      return savedHub;
+      return homeProvider.activateServerHub(savedHub);
     }
 
     final hub = await homeProvider.addServerHub(
@@ -938,21 +934,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       token: authToken,
     );
     if (hub != null) {
-      await _removeOtherServerHubs(homeProvider, keepHubId: hub.id);
+      return homeProvider.activateServerHub(hub);
     }
     return hub;
-  }
-
-  Future<void> _removeOtherServerHubs(
-    HomeProvider homeProvider, {
-    required String keepHubId,
-  }) async {
-    final others = homeProvider.currentHomeHubs
-        .where((hub) => hub.type == HubType.server && hub.id != keepHubId)
-        .toList(growable: false);
-    for (final hub in others) {
-      await homeProvider.deleteHub(hub.id);
-    }
   }
 
   Future<void> _startLocalRhythmServer() async {
