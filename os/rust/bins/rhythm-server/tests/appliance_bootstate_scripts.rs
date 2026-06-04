@@ -23,6 +23,14 @@ fn launch_script() -> PathBuf {
         .join("install/rpiz/buildroot/board/rhythm/rpiz/rootfs-overlay/usr/bin/rhythm-launch")
 }
 
+fn init_script_dir() -> PathBuf {
+    repo_root().join("install/rpiz/buildroot/board/rhythm/rpiz/rootfs-overlay/etc/init.d")
+}
+
+fn cloudflared_script() -> PathBuf {
+    init_script_dir().join("rhythm-cloudflared")
+}
+
 fn unique_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -273,4 +281,30 @@ exit 0
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fs::read_to_string(bootstate_log).unwrap(), "fail\n");
+}
+
+#[test]
+fn cloudflared_service_is_manual_and_resource_guarded() {
+    assert!(
+        !init_script_dir().join("S44cloudflared").exists(),
+        "cloudflared must not auto-start from rcS"
+    );
+
+    let script = cloudflared_script();
+    let metadata = fs::metadata(&script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            metadata.permissions().mode() & 0o111,
+            0,
+            "cloudflared service script must be executable"
+        );
+    }
+
+    let body = fs::read_to_string(script).unwrap();
+    assert!(body.contains("RHYTHM_CLOUDFLARED_MAX_RESTARTS"));
+    assert!(body.contains("RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB"));
+    assert!(body.contains("start_cloudflared_child"));
+    assert!(body.contains("connector restart limit reached"));
 }

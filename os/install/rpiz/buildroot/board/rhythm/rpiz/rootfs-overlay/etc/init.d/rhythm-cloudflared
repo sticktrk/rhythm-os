@@ -21,6 +21,9 @@ TOKEN_FILE="${RHYTHM_CLOUDFLARED_TOKEN_FILE:-$DATA_DIR/cloudflared/connector_tok
 PROTOCOL="${RHYTHM_CLOUDFLARED_PROTOCOL:-http2}"
 LOGLEVEL="${RHYTHM_CLOUDFLARED_LOGLEVEL:-warn}"
 HA_CONNECTIONS="${RHYTHM_CLOUDFLARED_HA_CONNECTIONS:-1}"
+MAX_RESTARTS="${RHYTHM_CLOUDFLARED_MAX_RESTARTS:-5}"
+VMEM_LIMIT_KB="${RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB:-262144}"
+NICE_LEVEL="${RHYTHM_CLOUDFLARED_NICE:-10}"
 METRICS_ADDR="${RHYTHM_CLOUDFLARED_METRICS:-127.0.0.1:54449}"
 PIDFILE="${RHYTHM_CLOUDFLARED_PIDFILE:-/var/run/rhythm-cloudflared.pid}"
 CHILD_PIDFILE="${RHYTHM_CLOUDFLARED_CHILD_PIDFILE:-/var/run/rhythm-cloudflared-child.pid}"
@@ -45,6 +48,11 @@ resolve_log_dir() {
 
 LOGFILE="$(resolve_log_dir)/cloudflared.log"
 
+case "$HA_CONNECTIONS" in ''|*[!0-9]*) HA_CONNECTIONS=1 ;; esac
+case "$MAX_RESTARTS" in ''|*[!0-9]*) MAX_RESTARTS=5 ;; esac
+case "$VMEM_LIMIT_KB" in ''|*[!0-9]*) VMEM_LIMIT_KB=262144 ;; esac
+case "$NICE_LEVEL" in ''|*[!0-9]*) NICE_LEVEL=10 ;; esac
+
 log() {
     mkdir -p "$(dirname "$LOGFILE")"
     printf 'cloudflared: %s\n' "$*" >> "$LOGFILE"
@@ -56,11 +64,6 @@ pid_is_running() {
 
 child_pid_is_running() {
     [ -f "$CHILD_PIDFILE" ] && kill -0 "$(cat "$CHILD_PIDFILE")" 2>/dev/null
-}
-
-cloudflared_supports_flag() {
-    "$CLOUDFLARED_BIN" tunnel run --help 2>&1 | grep -q -- "$1" \
-        || "$CLOUDFLARED_BIN" tunnel --help 2>&1 | grep -q -- "$1"
 }
 
 epoch_secs() {
@@ -83,6 +86,8 @@ write_status() {
         printf 'protocol=%s\n' "$PROTOCOL"
         printf 'loglevel=%s\n' "$LOGLEVEL"
         printf 'ha_connections=%s\n' "$HA_CONNECTIONS"
+        printf 'max_restarts=%s\n' "$MAX_RESTARTS"
+        printf 'vmem_limit_kb=%s\n' "$VMEM_LIMIT_KB"
     } > "$tmp"
     mv -f "$tmp" "$STATUS_FILE"
 }
@@ -95,17 +100,30 @@ read_token() {
     return 0
 }
 
-build_args() {
-    set -- tunnel --no-autoupdate --protocol "$PROTOCOL" --loglevel "$LOGLEVEL" --metrics "$METRICS_ADDR"
-    if [ -n "$HA_CONNECTIONS" ]; then
-        if cloudflared_supports_flag "--ha-connections"; then
-            set -- "$@" --ha-connections "$HA_CONNECTIONS"
-        else
-            log "ha-connections unsupported by $CLOUDFLARED_BIN"
+start_cloudflared_child() {
+    (
+        if [ "$VMEM_LIMIT_KB" != "0" ]; then
+            ulimit -v "$VMEM_LIMIT_KB" 2>/dev/null || true
         fi
+
+        if command -v nice >/dev/null 2>&1; then
+            exec nice -n "$NICE_LEVEL" "$CLOUDFLARED_BIN" "$@"
+        fi
+
+        exec "$CLOUDFLARED_BIN" "$@"
+    ) >>"$LOGFILE" 2>&1 &
+    child_pid="$!"
+}
+
+launch_connector() {
+    set -- tunnel --no-autoupdate --protocol "$PROTOCOL" --loglevel "$LOGLEVEL" --metrics "$METRICS_ADDR"
+    if [ "$HA_CONNECTIONS" != "0" ]; then
+        set -- "$@" --ha-connections "$HA_CONNECTIONS"
     fi
     set -- "$@" run --token "$token"
-    command_args="$*"
+
+    log "starting connector: protocol=$PROTOCOL metrics=$METRICS_ADDR ha_connections=${HA_CONNECTIONS:-default} vmem_limit_kb=$VMEM_LIMIT_KB"
+    start_cloudflared_child "$@"
 }
 
 stop_child() {
@@ -134,10 +152,7 @@ supervise() {
             break
         fi
 
-        build_args
-        log "starting connector: protocol=$PROTOCOL metrics=$METRICS_ADDR ha_connections=${HA_CONNECTIONS:-default}"
-        "$CLOUDFLARED_BIN" $command_args >>"$LOGFILE" 2>&1 &
-        child_pid="$!"
+        launch_connector
         echo "$child_pid" > "$CHILD_PIDFILE"
         last_started_epoch_secs="$(epoch_secs)"
         state="running"
@@ -161,6 +176,14 @@ supervise() {
         fi
 
         restart_count=$((restart_count + 1))
+        if [ "$MAX_RESTARTS" != "0" ] && [ "$restart_count" -ge "$MAX_RESTARTS" ]; then
+            log "connector restart limit reached restart_count=$restart_count max_restarts=$MAX_RESTARTS"
+            state="failed"
+            next_restart_epoch_secs=""
+            write_status
+            break
+        fi
+
         next_restart_epoch_secs=$((last_exit_epoch_secs + backoff))
         state="backoff"
         write_status
@@ -173,7 +196,9 @@ supervise() {
         fi
     done
 
-    state="stopped"
+    if [ "$state" != "failed" ]; then
+        state="stopped"
+    fi
     child_pid=""
     next_restart_epoch_secs=""
     write_status

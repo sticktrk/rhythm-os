@@ -244,7 +244,13 @@ Defaults are tuned for the original Pi Zero W:
 RHYTHM_CLOUDFLARED_PROTOCOL=http2
 RHYTHM_CLOUDFLARED_LOGLEVEL=warn
 RHYTHM_CLOUDFLARED_HA_CONNECTIONS=1
+RHYTHM_CLOUDFLARED_MAX_RESTARTS=5
+RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB=262144
+RHYTHM_CLOUDFLARED_NICE=10
 ```
+
+The service caps the connector process and stops retrying after repeated
+failures so a tunnel problem cannot turn into an appliance-wide crash loop.
 
 Override those in `/etc/default/rhythm` or `/etc/default/rhythm-dev` if a
 field test needs Cloudflare's default `auto` transport or more HA connections.

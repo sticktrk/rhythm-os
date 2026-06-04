@@ -737,7 +737,20 @@ impl RemoteAccessController for InitScriptRemoteAccessController {
     }
 
     fn start(&self, _runtime_dir: &Path, _config: &StoredRemoteAccessConfig) -> anyhow::Result<()> {
-        self.run_init_script("restart")
+        if !self.init_script.exists() {
+            return Ok(());
+        }
+        let controller = self.clone();
+        thread::spawn(move || {
+            if let Err(error) = controller.run_init_script("restart") {
+                log::warn!(
+                    target: "sys",
+                    "cloudflared service restart failed: {:#}",
+                    error
+                );
+            }
+        });
+        Ok(())
     }
 
     fn stop(&self, _runtime_dir: &Path) -> anyhow::Result<()> {
@@ -1256,6 +1269,14 @@ mod tests {
         ))
     }
 
+    #[cfg(unix)]
+    fn write_executable(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn normalize_hostname_accepts_urls_and_hosts() {
         assert_eq!(
@@ -1344,6 +1365,56 @@ cloudflared_tunnel_server_locations{edge_location=\"ewr01\"} 1\n";
                 .trim(),
             "connector-secret"
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_script_start_is_nonblocking() {
+        let root = temp_root("init-script-start");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("cloudflared-service");
+        let marker = root.join("marker");
+        write_executable(
+            &script,
+            r#"#!/bin/sh
+dir="$(dirname "$0")"
+sleep 1
+printf '%s\n' "$1" > "$dir/marker"
+"#,
+        );
+
+        let controller =
+            InitScriptRemoteAccessController::new("/bin/true", &script, "/tmp/pid", "/tmp/child");
+        let started = std::time::Instant::now();
+        controller
+            .start(
+                &root,
+                &StoredRemoteAccessConfig {
+                    schema_version: 1,
+                    enabled: true,
+                    hostname: "hub.devices.rhythm.lighting".into(),
+                    connector_token: "secret".into(),
+                    tunnel_id: None,
+                    tunnel_name: None,
+                    updated_at_epoch_ms: current_epoch_ms(),
+                },
+            )
+            .unwrap();
+
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "init script start should not block API request"
+        );
+
+        for _ in 0..20 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(std::fs::read_to_string(marker).unwrap().trim(), "restart");
 
         let _ = std::fs::remove_dir_all(root);
     }
