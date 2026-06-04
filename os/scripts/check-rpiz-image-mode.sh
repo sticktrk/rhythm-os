@@ -23,6 +23,7 @@ CONFIG_FILE="$OUTPUT_DIR/.config"
 TARGET_DIR="$OUTPUT_DIR/target"
 DEFAULTS_FILE="$TARGET_DIR/etc/default/rhythm"
 DEV_DEFAULTS_FILE="$TARGET_DIR/etc/default/rhythm-dev"
+IMAGE_VERSION_FILE="$TARGET_DIR/etc/rhythm-image-version"
 PROD_PAA_TRUST_STORE_PATH="${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-/data/matter/paa-root-certs}"
 
 [ -f "$CONFIG_FILE" ] || fail "missing Buildroot config: $CONFIG_FILE"
@@ -46,6 +47,7 @@ reject_config_line() {
 require_line "$CONFIG_FILE" 'BR2_PACKAGE_RHYTHM_CLOUDFLARED=y'
 [ -x "$TARGET_DIR/usr/bin/cloudflared" ] || fail "missing executable /usr/bin/cloudflared"
 [ -x "$TARGET_DIR/etc/init.d/rhythm-cloudflared" ] || fail "missing executable /etc/init.d/rhythm-cloudflared"
+[ -s "$IMAGE_VERSION_FILE" ] || fail "missing $IMAGE_VERSION_FILE"
 
 case "$IMAGE_MODE" in
     dev)

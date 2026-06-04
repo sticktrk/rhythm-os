@@ -276,6 +276,10 @@ async fn check_update(
             let json = serde_json::json!({
                 "current_version": info.current_version,
                 "latest_version": info.latest_version,
+                "current_package_version": info.current_package_version,
+                "latest_package_version": info.latest_package_version,
+                "current_image_version": info.current_image_version,
+                "latest_image_version": info.latest_image_version,
                 "update_available": info.update_available,
                 "update_reason": info.update_reason,
                 "install_targets": info.install_targets,

@@ -17,6 +17,7 @@ RHYTHM_DEFAULTS_DIR="${TARGET_DIR}/etc/default"
 RHYTHM_DEFAULTS="${RHYTHM_DEFAULTS_DIR}/rhythm"
 RHYTHM_DEV_DEFAULTS="${RHYTHM_DEFAULTS_DIR}/rhythm-dev"
 RHYTHM_PROD_PAA_TRUST_STORE_PATH="${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-/data/matter/paa-root-certs}"
+RHYTHM_IMAGE_VERSION="${RHYTHM_IMAGE_VERSION:-unknown}"
 
 is_truthy() {
     case "${1:-}" in
@@ -147,6 +148,7 @@ if [ -e "${TARGET_DIR}/lib/ld-musl-arm.so.1" ] \
 fi
 
 mkdir -p "$RHYTHM_DEFAULTS_DIR"
+printf '%s\n' "$RHYTHM_IMAGE_VERSION" > "${TARGET_DIR}/etc/rhythm-image-version"
 rm -f "$RHYTHM_DEFAULTS" "$RHYTHM_DEV_DEFAULTS"
 if is_truthy "${RHYTHM_DEV_MODE:-}"; then
     cat > "$RHYTHM_DEV_DEFAULTS" <<'EOF'

@@ -328,6 +328,20 @@ setup_upload_ssh() {
     ssh-keyscan -H "$RHYTHM_UPDATES_SSH_HOST" > "$known_hosts_path"
 }
 
+fetch_previous_rpiz_manifest() {
+    local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
+    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
+    local previous_manifest="$TEMP_RELEASE_DIR/previous-rpiz-manifest.json"
+
+    scp -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" \
+        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR/rpiz/manifest.json" \
+        "$previous_manifest" >/dev/null 2>&1 || true
+
+    if [ -f "$previous_manifest" ]; then
+        echo "$previous_manifest"
+    fi
+}
+
 prune_uploaded_server_releases() {
     local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
     local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
@@ -350,6 +364,7 @@ upload_rpiz_feed() {
     local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
     local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
     local package_args=()
+    local previous_manifest=""
 
     echo ""
     echo "=== Building rpiz release artifacts locally ==="
@@ -366,6 +381,14 @@ upload_rpiz_feed() {
     cp -R "$PROJECT_ROOT/dist/bin/rpiz" "$artifact_root/"
 
     echo ""
+    echo "=== Configuring SSH upload ==="
+    setup_upload_ssh
+    previous_manifest="$(fetch_previous_rpiz_manifest)"
+    if [ -n "$previous_manifest" ]; then
+        package_args+=(--previous-rpiz-manifest "$previous_manifest")
+    fi
+
+    echo ""
     echo "=== Packaging rpiz OTA feed ==="
     if [ -n "${RHYTHM_RELEASE_RPIZ_IMAGE_ROOT:-}" ]; then
         package_args+=(--image-root "$RHYTHM_RELEASE_RPIZ_IMAGE_ROOT")
@@ -375,10 +398,6 @@ upload_rpiz_feed() {
         --output-dir "$output_dir" \
         --version "$version" \
         "${package_args[@]}"
-
-    echo ""
-    echo "=== Configuring SSH upload ==="
-    setup_upload_ssh
 
     echo ""
     echo "=== Uploading rpiz OTA feed ==="

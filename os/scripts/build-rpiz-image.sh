@@ -340,6 +340,8 @@ if [ ! -x "$SERVER_BINARY" ]; then
     echo "Build it first with: ./scripts/build-server.sh --release --target rpiz"
     exit 1
 fi
+RHYTHM_IMAGE_VERSION="${RHYTHM_IMAGE_VERSION:-$("$SCRIPT_DIR/resolve-version.sh" server)}"
+export RHYTHM_IMAGE_VERSION
 
 if [ -n "$WIFI_SSID" ]; then
     WIFI_COUNTRY="$(printf '%s' "$WIFI_COUNTRY" | tr '[:lower:]' '[:upper:]')"

@@ -18,6 +18,7 @@ ARTIFACT_ROOT="$PROJECT_ROOT/dist/bin"
 OUTPUT_DIR="$PROJECT_ROOT/out/server-updates"
 VERSION=""
 IMAGE_ROOT=""
+PREVIOUS_RPIZ_MANIFEST=""
 DRY_RUN=false
 
 sha256_file() {
@@ -49,6 +50,9 @@ Options:
   --output-dir PATH     Output directory for packaged feed (default: $OUTPUT_DIR)
   --version VERSION     Version to package (default: resolve workspace/server version)
   --image-root PATH     Optional rpiz image directory to publish alongside the OTA manifest
+  --previous-rpiz-manifest PATH
+                       Existing rpiz manifest whose images should be carried
+                       forward when this package has no --image-root
   --dry-run             Print planned outputs without writing files
   -h, --help            Show this help
 EOF
@@ -70,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --image-root)
             IMAGE_ROOT="$2"
+            shift 2
+            ;;
+        --previous-rpiz-manifest)
+            PREVIOUS_RPIZ_MANIFEST="$2"
             shift 2
             ;;
         --dry-run)
@@ -99,6 +107,16 @@ fi
 if [ -n "$IMAGE_ROOT" ] && [ ! -d "$IMAGE_ROOT" ]; then
     echo "Error: --image-root does not exist: $IMAGE_ROOT"
     exit 1
+fi
+if [ -n "$PREVIOUS_RPIZ_MANIFEST" ]; then
+    if [ ! -f "$PREVIOUS_RPIZ_MANIFEST" ]; then
+        echo "Error: --previous-rpiz-manifest does not exist: $PREVIOUS_RPIZ_MANIFEST"
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: --previous-rpiz-manifest requires jq" >&2
+        exit 1
+    fi
 fi
 
 TARGETS="macos-arm64 macos-x86_64 linux-amd64 linux-aarch64 rpiz"
@@ -195,7 +213,7 @@ for target in $TARGETS; do
                     image_kind="rootfs_image"
                     ;;
             esac
-            image_json="{\"name\":\"$(json_escape "$image_name")\",\"kind\":\"$image_kind\",\"url\":\"v$VERSION/$(json_escape "$image_name")\",\"sha256\":\"$image_sha\",\"size\":$image_size"
+            image_json="{\"name\":\"$(json_escape "$image_name")\",\"kind\":\"$image_kind\",\"url\":\"v$VERSION/$(json_escape "$image_name")\",\"version\":\"$VERSION\",\"sha256\":\"$image_sha\",\"size\":$image_size"
             case "$image_name" in
                 *.gz)
                     image_json="$image_json,\"compression\":\"gzip\""
@@ -214,6 +232,11 @@ for target in $TARGETS; do
             images_json="$images_json${image_entries[$i]}"
         done
         images_json="$images_json]"
+    elif [ "$target" = "rpiz" ] && [ -n "$PREVIOUS_RPIZ_MANIFEST" ]; then
+        images_json="$(jq -c '.images // []' "$PREVIOUS_RPIZ_MANIFEST")"
+        if [ "$images_json" != "[]" ]; then
+            echo "Carried forward rpiz image entries from $PREVIOUS_RPIZ_MANIFEST"
+        fi
     fi
 
     cat > "$manifest_path" <<EOF
@@ -224,6 +247,7 @@ for target in $TARGETS; do
     "name": "$(basename "$archive_path")",
     "kind": "archive_bundle",
     "url": "v$VERSION/$(basename "$archive_path")",
+    "version": "$VERSION",
     "sha256": "$archive_sha",
     "size": $archive_size,
     "install": [$install_json]

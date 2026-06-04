@@ -31,11 +31,13 @@ const APPLIANCE_BOOT_DEVICE: &str = "/dev/mmcblk0p1";
 const APPLIANCE_ROOTFS_A_DEVICE: &str = "/dev/mmcblk0p2";
 const APPLIANCE_ROOTFS_B_DEVICE: &str = "/dev/mmcblk0p3";
 const APPLIANCE_OTA_STAGING_DIR: &str = "/data/ota";
+const APPLIANCE_INACTIVE_ROOT_MOUNT: &str = "/data/ota/inactive-rootfs";
 const APPLIANCE_CMDLINE_PATH: &str = "/boot/cmdline.txt";
 const APPLIANCE_CMDLINE_BACKUP_PATH: &str = "/boot/cmdline.txt.bak";
 const APPLIANCE_BOOT_STATE_PATH: &str = "/boot/rhythm-bootstate.env";
 const APPLIANCE_BOOT_STATE_BACKUP_PATH: &str = "/boot/rhythm-bootstate.env.bak";
 const APPLIANCE_BOOT_STATE_MIRROR_PATH: &str = "/data/ota/bootstate.env";
+const APPLIANCE_IMAGE_VERSION_PATH: &str = "/etc/rhythm-image-version";
 const APPLIANCE_REBOOT_FALLBACK_SECS: u64 = 30;
 const APPLIANCE_ROOTFS_APPLY_GUARD_SECS: u64 = 10 * 60;
 
@@ -136,6 +138,7 @@ pub enum OtaUpdateState {
 pub enum UpdateReason {
     VersionMismatch,
     ComponentDrift,
+    ImageBaseDrift,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -173,6 +176,8 @@ pub struct UpdateImageAsset {
     pub kind: ReleaseArtifactKind,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
@@ -187,6 +192,14 @@ pub struct OtaStatus {
     pub current_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_package_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_package_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_image_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_image_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +234,10 @@ impl OtaStatusHandle {
                 state: OtaUpdateState::Idle,
                 current_version: current_version.to_string(),
                 latest_version: None,
+                current_package_version: Some(current_version.to_string()),
+                latest_package_version: None,
+                current_image_version: appliance_image_base_version(),
+                latest_image_version: None,
                 target_version: None,
                 update_available: None,
                 update_reason: None,
@@ -268,6 +285,10 @@ impl OtaStatusHandle {
                 state: OtaUpdateState::Error,
                 current_version: "unknown".to_string(),
                 latest_version: None,
+                current_package_version: None,
+                latest_package_version: None,
+                current_image_version: None,
+                latest_image_version: None,
                 target_version: None,
                 update_available: None,
                 update_reason: None,
@@ -284,6 +305,10 @@ impl OtaStatusHandle {
         self.with_status(|status| {
             status.state = OtaUpdateState::Checking;
             status.checked_at_epoch_ms = Some(now_ms());
+            status.current_package_version = Some(status.current_version.clone());
+            status.latest_package_version = None;
+            status.current_image_version = appliance_image_base_version();
+            status.latest_image_version = None;
             status.target_version = None;
             status.update_reason = None;
             status.checksum_verified = None;
@@ -301,7 +326,12 @@ impl OtaStatusHandle {
             } else {
                 OtaUpdateState::Idle
             };
+            status.current_version = info.current_version.clone();
             status.latest_version = Some(info.latest_version.clone());
+            status.current_package_version = Some(info.current_package_version.clone());
+            status.latest_package_version = Some(info.latest_package_version.clone());
+            status.current_image_version = info.current_image_version.clone();
+            status.latest_image_version = info.latest_image_version.clone();
             status.update_available = Some(info.update_available);
             status.update_reason = info.update_reason;
             status.checked_at_epoch_ms = Some(now_ms());
@@ -316,6 +346,13 @@ impl OtaStatusHandle {
                 Some(UpdateReason::ComponentDrift) => {
                     format!("Repairing OTA bundle for v{}", info.latest_version)
                 }
+                Some(UpdateReason::ImageBaseDrift) => match info.latest_image_version.as_deref() {
+                    Some(image_version) => format!(
+                        "Updating appliance image to v{} before v{}",
+                        image_version, info.latest_version
+                    ),
+                    None => format!("Updating appliance image before v{}", info.latest_version),
+                },
                 None => "Already up to date".to_string(),
             });
             status.last_error = None;
@@ -352,6 +389,8 @@ impl OtaStatusHandle {
         self.with_status(|status| {
             status.state = OtaUpdateState::Restarting;
             status.latest_version = Some(new_version.to_string());
+            status.current_package_version = Some(previous_version.to_string());
+            status.latest_package_version = Some(new_version.to_string());
             status.target_version = Some(new_version.to_string());
             status.update_available = Some(false);
             status.update_reason = None;
@@ -390,6 +429,10 @@ impl OtaStatusHandle {
 pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: String,
+    pub current_package_version: String,
+    pub latest_package_version: String,
+    pub current_image_version: Option<String>,
+    pub latest_image_version: Option<String>,
     pub update_available: bool,
     pub update_reason: Option<UpdateReason>,
     pub download_url: Option<String>,
@@ -403,6 +446,13 @@ pub struct UpdateInfo {
 pub struct ApplyResult {
     pub checksum_verified: Option<bool>,
     pub installed_targets: Vec<String>,
+}
+
+struct PackageInstallPlan<'a> {
+    download_url: &'a str,
+    asset_name: &'a str,
+    expected_sha256: Option<&'a str>,
+    install_targets: &'a [InstallTarget],
 }
 
 #[derive(Clone, Debug)]
@@ -456,11 +506,12 @@ impl UpdateInfo {
     {
         if restart_strategy() == RestartStrategy::ApplianceReboot {
             if let Some(image_asset) = self.preferred_appliance_image_asset() {
+                let package_plan = self.package_install_plan()?;
                 return apply_appliance_image_blocking(
                     image_asset,
                     &self.current_version,
                     &self.latest_version,
-                    self.expected_sha256.as_deref(),
+                    package_plan.as_ref(),
                     &progress,
                 );
             }
@@ -485,10 +536,24 @@ impl UpdateInfo {
     }
 
     fn preferred_appliance_image_asset(&self) -> Option<&UpdateImageAsset> {
-        self.image_assets
-            .iter()
-            .filter(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
-            .min_by_key(|asset| if artifact_uses_gzip(asset) { 0 } else { 1 })
+        preferred_rootfs_image_asset(
+            &self.image_assets,
+            appliance_image_base_version().as_deref(),
+        )
+    }
+
+    fn package_install_plan(&self) -> Result<Option<PackageInstallPlan<'_>>, String> {
+        match (self.download_url.as_deref(), self.asset_name.as_deref()) {
+            (Some(download_url), Some(asset_name)) => Ok(Some(PackageInstallPlan {
+                download_url,
+                asset_name,
+                expected_sha256: self.expected_sha256.as_deref(),
+                install_targets: &self.resolved_install_targets,
+            })),
+            (None, None) => Ok(None),
+            (Some(_), None) => Err("No release asset for this platform".to_string()),
+            (None, Some(_)) => Err("No download URL for this platform".to_string()),
+        }
     }
 }
 
@@ -512,6 +577,8 @@ struct UpdateManifest {
 struct ManifestArtifact {
     name: String,
     url: String,
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     sha256: Option<String>,
     #[serde(default)]
@@ -549,6 +616,7 @@ enum InstallSlot {
 
 #[derive(Clone, Debug)]
 struct ResolvedPackage {
+    version: String,
     asset_name: String,
     download_url: String,
     expected_sha256: Option<String>,
@@ -639,31 +707,73 @@ fn check_manifest_blocking(
     let image_assets = manifest
         .images
         .iter()
-        .map(|image| resolve_manifest_image(&manifest_url, image))
+        .map(|image| resolve_manifest_image(&manifest_url, image, &manifest.version))
         .collect::<Result<Vec<_>, _>>()?;
     let package = manifest
         .package
         .as_ref()
-        .map(|artifact| resolve_package_artifact(&manifest_url, artifact, &install_root))
+        .map(|artifact| {
+            resolve_package_artifact(&manifest_url, artifact, &install_root, &manifest.version)
+        })
         .transpose()?;
-    let appliance_rootfs_only =
-        restart_strategy() == RestartStrategy::ApplianceReboot && has_rootfs_image(&image_assets);
+    let appliance = restart_strategy() == RestartStrategy::ApplianceReboot;
+    let appliance_image_base_version = appliance.then(appliance_image_base_version).flatten();
+    let latest_image_version = latest_rootfs_image_version(&image_assets);
+    let latest_package_version = package
+        .as_ref()
+        .map(|package| package.version.clone())
+        .unwrap_or_else(|| {
+            normalize_version_candidate(&manifest.version)
+                .unwrap_or_else(|| manifest.version.clone())
+        });
+    let appliance_rootfs_update = appliance
+        && preferred_rootfs_image_asset(&image_assets, appliance_image_base_version.as_deref())
+            .is_some();
+    let appliance_rootfs_only = appliance && has_rootfs_image(&image_assets);
 
     if package.is_none() && !appliance_rootfs_only {
         return Err("Update manifest did not provide an archive bundle payload".to_string());
     }
 
-    let version_mismatch = manifest.version != current_version;
-    let component_drift = !version_mismatch
+    let package_update = version_needs_update(&latest_package_version, current_version);
+    let package_downgrade = version_is_older(&latest_package_version, current_version);
+    if appliance_rootfs_update && package_downgrade && package.is_some() {
+        return Err(format!(
+            "Update manifest package version {} is older than current {}; refusing appliance image update without a non-downgrade package overlay",
+            latest_package_version, current_version
+        ));
+    }
+    if appliance_rootfs_update
+        && package.is_none()
+        && latest_image_version
+            .as_deref()
+            .is_some_and(|image_version| version_is_older(image_version, current_version))
+    {
+        let image_version = latest_image_version.as_deref().unwrap_or("unknown");
+        return Err(format!(
+            "Update manifest image version {} is older than current package {}; refusing image-only update",
+            image_version, current_version
+        ));
+    }
+
+    let component_drift = !package_update
+        && !package_downgrade
+        && !appliance_rootfs_update
         && package
             .as_ref()
             .map(|package| {
-                detect_component_drift(&manifest.version, &install_root, &package.install_targets)
+                detect_component_drift(
+                    &latest_package_version,
+                    &install_root,
+                    &package.install_targets,
+                )
             })
             .unwrap_or(false);
 
-    let update_reason = if version_mismatch {
+    let update_reason = if package_update {
         Some(UpdateReason::VersionMismatch)
+    } else if appliance_rootfs_update {
+        Some(UpdateReason::ImageBaseDrift)
     } else if component_drift {
         Some(UpdateReason::ComponentDrift)
     } else {
@@ -673,7 +783,11 @@ fn check_manifest_blocking(
 
     Ok(UpdateInfo {
         current_version: current_version.to_string(),
-        latest_version: manifest.version.clone(),
+        latest_version: latest_package_version.clone(),
+        current_package_version: current_version.to_string(),
+        latest_package_version: latest_package_version.clone(),
+        current_image_version: appliance_image_base_version,
+        latest_image_version,
         update_available,
         update_reason,
         download_url: update_available
@@ -704,6 +818,10 @@ fn no_update_info(current_version: &str) -> UpdateInfo {
     UpdateInfo {
         current_version: current_version.to_string(),
         latest_version: current_version.to_string(),
+        current_package_version: current_version.to_string(),
+        latest_package_version: current_version.to_string(),
+        current_image_version: appliance_image_base_version(),
+        latest_image_version: None,
         update_available: false,
         update_reason: None,
         download_url: None,
@@ -761,6 +879,7 @@ fn resolve_package_artifact(
     manifest_url: &str,
     artifact: &ManifestArtifact,
     install_root: &Path,
+    manifest_version: &str,
 ) -> Result<ResolvedPackage, String> {
     if artifact.kind != Some(ReleaseArtifactKind::ArchiveBundle) {
         return Err("Manifest package kind must be archive_bundle".to_string());
@@ -775,6 +894,8 @@ fn resolve_package_artifact(
     if !asset_name.ends_with(".tar.gz") {
         return Err("Manifest package must reference a .tar.gz archive bundle".to_string());
     }
+    let version = manifest_artifact_version(artifact, &download_url, manifest_version)
+        .unwrap_or_else(|| manifest_version.to_string());
     let install_targets = if artifact.install.is_empty() {
         default_bundle_install_targets(install_root)
     } else {
@@ -782,6 +903,7 @@ fn resolve_package_artifact(
     };
 
     Ok(ResolvedPackage {
+        version,
         asset_name,
         download_url,
         expected_sha256: artifact.sha256.clone(),
@@ -850,6 +972,7 @@ fn default_archive_path(
 fn resolve_manifest_image(
     manifest_url: &str,
     artifact: &ManifestArtifact,
+    manifest_version: &str,
 ) -> Result<UpdateImageAsset, String> {
     let download_url = resolve_download_url(manifest_url, &artifact.url)?;
     let name = if artifact.name.is_empty() {
@@ -858,15 +981,31 @@ fn resolve_manifest_image(
         artifact.name.clone()
     };
     let kind = artifact.kind.unwrap_or_else(|| infer_image_kind(&name));
+    let version = manifest_artifact_version(artifact, &download_url, manifest_version);
 
     Ok(UpdateImageAsset {
         name,
         kind,
         url: download_url,
+        version,
         sha256: artifact.sha256.clone(),
         size: artifact.size,
         compression: artifact.compression.clone(),
     })
+}
+
+fn manifest_artifact_version(
+    artifact: &ManifestArtifact,
+    download_url: &str,
+    manifest_version: &str,
+) -> Option<String> {
+    artifact
+        .version
+        .as_deref()
+        .and_then(normalize_version_candidate)
+        .or_else(|| infer_release_version_from_url(&artifact.url))
+        .or_else(|| infer_release_version_from_url(download_url))
+        .or_else(|| normalize_version_candidate(manifest_version))
 }
 
 fn infer_image_kind(name: &str) -> ReleaseArtifactKind {
@@ -881,6 +1020,58 @@ fn has_rootfs_image(image_assets: &[UpdateImageAsset]) -> bool {
     image_assets
         .iter()
         .any(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
+}
+
+fn latest_rootfs_image_version(image_assets: &[UpdateImageAsset]) -> Option<String> {
+    image_assets
+        .iter()
+        .filter(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
+        .filter_map(|asset| asset.version.clone())
+        .max_by(|left, right| compare_optional_release_versions(Some(left), Some(right)))
+}
+
+fn preferred_rootfs_image_asset<'a>(
+    image_assets: &'a [UpdateImageAsset],
+    local_image_version: Option<&str>,
+) -> Option<&'a UpdateImageAsset> {
+    image_assets
+        .iter()
+        .filter(|asset| asset.kind == ReleaseArtifactKind::RootfsImage)
+        .filter(|asset| image_asset_requires_apply(asset, local_image_version))
+        .max_by(|left, right| compare_rootfs_image_assets(left, right))
+}
+
+fn compare_rootfs_image_assets(
+    left: &UpdateImageAsset,
+    right: &UpdateImageAsset,
+) -> std::cmp::Ordering {
+    compare_optional_release_versions(left.version.as_deref(), right.version.as_deref())
+        .then_with(|| artifact_uses_gzip(left).cmp(&artifact_uses_gzip(right)))
+}
+
+fn compare_optional_release_versions(
+    left: Option<&str>,
+    right: Option<&str>,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            compare_release_versions(left, right).unwrap_or_else(|| left.cmp(right))
+        }
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn image_asset_requires_apply(asset: &UpdateImageAsset, local_image_version: Option<&str>) -> bool {
+    let Some(remote_version) = asset.version.as_deref() else {
+        return local_image_version.is_none();
+    };
+
+    match local_image_version {
+        Some(local_version) => version_needs_update(remote_version, local_version),
+        None => true,
+    }
 }
 
 fn parse_appliance_slot_from_cmdline(cmdline: &str) -> Result<ApplianceSlot, String> {
@@ -978,6 +1169,40 @@ fn ensure_mount(path: &str, device: &str, fs_type: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn unmount_mountpoint(path: &Path) -> Result<(), String> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| format!("Mount path is not valid UTF-8: {}", path.display()))?;
+    if !mountpoint_is_active(path_str) {
+        return Ok(());
+    }
+
+    let status = Command::new("/bin/umount")
+        .arg(path)
+        .status()
+        .or_else(|_| Command::new("umount").arg(path).status())
+        .map_err(|e| format!("Failed to unmount {}: {}", path.display(), e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Unmounting {} failed with status {:?}",
+            path.display(),
+            status.code()
+        ));
+    }
+
+    Ok(())
+}
+
+fn mount_appliance_rootfs_slot(slot: ApplianceSlot) -> Result<PathBuf, String> {
+    let mount_path = PathBuf::from(APPLIANCE_INACTIVE_ROOT_MOUNT);
+    if mountpoint_is_active(APPLIANCE_INACTIVE_ROOT_MOUNT) {
+        unmount_mountpoint(&mount_path)?;
+    }
+    ensure_mount(APPLIANCE_INACTIVE_ROOT_MOUNT, slot.root_device(), "ext2")?;
+    Ok(mount_path)
 }
 
 fn appliance_pending_boot_state_body(
@@ -1170,7 +1395,7 @@ fn apply_appliance_image_blocking(
     image_asset: &UpdateImageAsset,
     current_version: &str,
     latest_version: &str,
-    fallback_sha256: Option<&str>,
+    package_plan: Option<&PackageInstallPlan<'_>>,
     progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
     let client = reqwest::blocking::Client::builder()
@@ -1205,7 +1430,7 @@ fn apply_appliance_image_blocking(
         },
     )?;
 
-    let expected_sha256 = image_asset.sha256.as_deref().or(fallback_sha256);
+    let expected_sha256 = image_asset.sha256.as_deref();
     let checksum_verified = match expected_sha256 {
         Some(expected) => {
             progress(UpdateProgress::stage(
@@ -1246,6 +1471,8 @@ fn apply_appliance_image_blocking(
             OtaUpdateStage::Finalizing,
             "Preparing updated boot slot",
         ));
+        let overlay_result =
+            customize_inactive_rootfs(target_slot, image_asset, package_plan, progress)?;
         finalize_appliance_boot_switch(
             current_slot,
             target_slot,
@@ -1255,23 +1482,151 @@ fn apply_appliance_image_blocking(
             update_appliance_cmdline_for_slot,
             write_appliance_idle_boot_state,
         )?;
-        Ok::<(), String>(())
+        Ok::<(Option<bool>, Vec<String>), String>(overlay_result)
     })();
     apply_guard.disarm();
 
-    if let Err(error) = apply_result {
-        remove_if_exists(&download_path);
-        return Err(error);
-    }
+    let (package_checksum_verified, overlay_targets) = match apply_result {
+        Ok(result) => result,
+        Err(error) => {
+            remove_if_exists(&download_path);
+            return Err(error);
+        }
+    };
     remove_if_exists(&download_path);
 
+    let mut installed_targets = vec![format!("rootfs_{}", target_slot.as_str())];
+    installed_targets.extend(overlay_targets);
+    installed_targets.push(format!("boot_slot_{}", target_slot.as_str()));
+
     Ok(ApplyResult {
-        checksum_verified,
-        installed_targets: vec![
-            format!("rootfs_{}", target_slot.as_str()),
-            format!("boot_slot_{}", target_slot.as_str()),
-        ],
+        checksum_verified: combine_image_package_checksum(
+            checksum_verified,
+            package_checksum_verified,
+            package_plan.is_some(),
+        ),
+        installed_targets,
     })
+}
+
+fn customize_inactive_rootfs(
+    target_slot: ApplianceSlot,
+    image_asset: &UpdateImageAsset,
+    package_plan: Option<&PackageInstallPlan<'_>>,
+    progress: &(impl Fn(UpdateProgress) + Send + Sync),
+) -> Result<(Option<bool>, Vec<String>), String> {
+    progress(UpdateProgress::stage(
+        OtaUpdateStage::Finalizing,
+        format!("Mounting inactive rootfs slot {}", target_slot.as_str()),
+    ));
+    let mount_path = mount_appliance_rootfs_slot(target_slot)?;
+    let customize_result = (|| {
+        write_appliance_image_version_marker(&mount_path, image_asset.version.as_deref())?;
+
+        let Some(package_plan) = package_plan else {
+            return Ok((None, Vec::new()));
+        };
+
+        let remapped_targets =
+            remap_install_targets_to_root(package_plan.install_targets, &mount_path)?;
+        let package_download_path = artifact_staging_path(package_plan.asset_name);
+        let package_result = apply_payload_blocking_with_download_path(
+            package_plan.download_url,
+            package_plan.asset_name,
+            package_plan.expected_sha256,
+            &remapped_targets,
+            &package_download_path,
+            progress,
+        )?;
+        let installed_targets = package_result
+            .installed_targets
+            .into_iter()
+            .map(|target| format!("inactive_rootfs/{}", target))
+            .collect();
+        Ok((package_result.checksum_verified, installed_targets))
+    })();
+    let unmount_result = unmount_mountpoint(&mount_path);
+
+    match (customize_result, unmount_result) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(unmount_error)) => Err(format!(
+            "{}; additionally failed to unmount inactive rootfs: {}",
+            error, unmount_error
+        )),
+    }
+}
+
+fn write_appliance_image_version_marker(
+    root: &Path,
+    image_version: Option<&str>,
+) -> Result<(), String> {
+    let Some(image_version) = image_version.and_then(normalize_version_candidate) else {
+        return Ok(());
+    };
+    let marker_path = root.join(APPLIANCE_IMAGE_VERSION_PATH.trim_start_matches('/'));
+    if let Some(parent) = marker_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to prepare {}: {}", parent.display(), e))?;
+    }
+    fs::write(&marker_path, format!("{}\n", image_version))
+        .map_err(|e| format!("Failed to write {}: {}", marker_path.display(), e))?;
+    Ok(())
+}
+
+fn remap_install_targets_to_root(
+    install_targets: &[InstallTarget],
+    root: &Path,
+) -> Result<Vec<InstallTarget>, String> {
+    install_targets
+        .iter()
+        .map(|target| {
+            let relative = destination_relative_to_root(&target.destination)?;
+            Ok(InstallTarget {
+                archive_path: target.archive_path.clone(),
+                destination: root.join(relative),
+                required: target.required,
+            })
+        })
+        .collect()
+}
+
+fn destination_relative_to_root(destination: &Path) -> Result<PathBuf, String> {
+    let relative = if destination.is_absolute() {
+        destination
+            .strip_prefix("/")
+            .map_err(|e| format!("Invalid install target {}: {}", destination.display(), e))?
+    } else {
+        destination
+    };
+
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "Install target cannot escape inactive rootfs: {}",
+            destination.display()
+        ));
+    }
+
+    Ok(relative.to_path_buf())
+}
+
+fn combine_image_package_checksum(
+    image_checksum_verified: Option<bool>,
+    package_checksum_verified: Option<bool>,
+    package_present: bool,
+) -> Option<bool> {
+    if package_present {
+        return (image_checksum_verified == Some(true) && package_checksum_verified == Some(true))
+            .then_some(true);
+    }
+
+    image_checksum_verified
 }
 
 fn default_bundle_install_targets(install_root: &Path) -> Vec<InstallTarget> {
@@ -1372,6 +1727,90 @@ fn normalize_version_candidate(token: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+fn appliance_image_base_version() -> Option<String> {
+    let path = std::env::var_os("RHYTHM_IMAGE_VERSION_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(APPLIANCE_IMAGE_VERSION_PATH));
+    read_version_marker(&path)
+}
+
+fn read_version_marker(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| normalize_version_candidate(raw.trim()))
+}
+
+fn infer_release_version_from_url(asset_url: &str) -> Option<String> {
+    asset_url.split(['/', '?', '#']).find_map(|segment| {
+        segment
+            .strip_prefix('v')
+            .and_then(normalize_version_candidate)
+    })
+}
+
+fn version_needs_update(candidate: &str, current: &str) -> bool {
+    match compare_release_versions(candidate, current) {
+        Some(std::cmp::Ordering::Greater) => true,
+        Some(_) => false,
+        None => normalize_version_candidate(candidate) != normalize_version_candidate(current),
+    }
+}
+
+fn version_is_older(candidate: &str, current: &str) -> bool {
+    compare_release_versions(candidate, current) == Some(std::cmp::Ordering::Less)
+}
+
+fn compare_release_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left = parse_release_version(left)?;
+    let right = parse_release_version(right)?;
+
+    Some(
+        left.major
+            .cmp(&right.major)
+            .then_with(|| left.minor.cmp(&right.minor))
+            .then_with(|| left.patch.cmp(&right.patch))
+            .then_with(|| match (&left.pre, &right.pre) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(left_pre), Some(right_pre)) => left_pre.cmp(right_pre),
+            }),
+    )
+}
+
+struct ParsedReleaseVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre: Option<String>,
+}
+
+fn parse_release_version(value: &str) -> Option<ParsedReleaseVersion> {
+    let normalized = normalize_version_candidate(value)?;
+    let without_metadata = normalized
+        .split_once('+')
+        .map_or(normalized.as_str(), |(core, _)| core);
+    let (core, pre) = without_metadata
+        .split_once('-')
+        .map_or((without_metadata, None), |(core, pre)| {
+            (core, (!pre.is_empty()).then(|| pre.to_string()))
+        });
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(ParsedReleaseVersion {
+        major,
+        minor,
+        patch,
+        pre,
+    })
+}
+
 /// Download and install a new payload, replacing the current server bundle.
 fn apply_payload_blocking(
     download_url: &str,
@@ -1380,11 +1819,6 @@ fn apply_payload_blocking(
     install_targets: &[InstallTarget],
     progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("rhythm-server")
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
     let install_root = install_target_executable()?;
     let resolved_targets = if install_targets.is_empty() {
         default_bundle_install_targets(&install_root)
@@ -1393,26 +1827,44 @@ fn apply_payload_blocking(
     };
     let download_path = install_root.with_extension("download");
 
-    remove_if_exists(&download_path);
-    cleanup_install_artifacts(&resolved_targets);
+    apply_payload_blocking_with_download_path(
+        download_url,
+        asset_name,
+        expected_sha256,
+        &resolved_targets,
+        &download_path,
+        progress,
+    )
+}
+
+fn apply_payload_blocking_with_download_path(
+    download_url: &str,
+    asset_name: &str,
+    expected_sha256: Option<&str>,
+    resolved_targets: &[InstallTarget],
+    download_path: &Path,
+    progress: &(impl Fn(UpdateProgress) + Send + Sync),
+) -> Result<ApplyResult, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("rhythm-server")
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    remove_if_exists(download_path);
+    cleanup_install_artifacts(resolved_targets);
 
     let download_message = format!("Downloading {}", asset_name);
     progress(UpdateProgress::stage(
         OtaUpdateStage::Downloading,
         download_message.clone(),
     ));
-    download_release_with_progress(
-        &client,
-        download_url,
-        &download_path,
-        |downloaded, total| {
-            progress(UpdateProgress::downloading(
-                download_message.clone(),
-                downloaded,
-                total,
-            ));
-        },
-    )?;
+    download_release_with_progress(&client, download_url, download_path, |downloaded, total| {
+        progress(UpdateProgress::downloading(
+            download_message.clone(),
+            downloaded,
+            total,
+        ));
+    })?;
 
     let checksum_verified = match expected_sha256 {
         Some(expected) => {
@@ -1420,9 +1872,9 @@ fn apply_payload_blocking(
                 OtaUpdateStage::Verifying,
                 "Verifying update bundle checksum",
             ));
-            let actual = compute_sha256_hex(&download_path)?;
+            let actual = compute_sha256_hex(download_path)?;
             if actual != expected.to_ascii_lowercase() {
-                remove_if_exists(&download_path);
+                remove_if_exists(download_path);
                 return Err(format!(
                     "SHA256 mismatch for {}: expected {}, got {}",
                     asset_name, expected, actual
@@ -1437,10 +1889,10 @@ fn apply_payload_blocking(
         OtaUpdateStage::Staging,
         "Staging update bundle",
     ));
-    let staged_targets = stage_install_targets(&download_path, asset_name, &resolved_targets)
+    let staged_targets = stage_install_targets(download_path, asset_name, resolved_targets)
         .inspect_err(|_error| {
-            cleanup_install_artifacts(&resolved_targets);
-            remove_if_exists(&download_path);
+            cleanup_install_artifacts(resolved_targets);
+            remove_if_exists(download_path);
         })?;
     progress(UpdateProgress::stage(
         OtaUpdateStage::Installing,
@@ -1448,14 +1900,14 @@ fn apply_payload_blocking(
     ));
     let installed_targets = commit_staged_targets(&staged_targets).inspect_err(|_error| {
         cleanup_staged_files(&staged_targets);
-        remove_if_exists(&download_path);
+        remove_if_exists(download_path);
     })?;
 
     progress(UpdateProgress::stage(
         OtaUpdateStage::Finalizing,
         "Cleaning up update artifacts",
     ));
-    remove_if_exists(&download_path);
+    remove_if_exists(download_path);
 
     Ok(ApplyResult {
         checksum_verified,
@@ -2816,6 +3268,7 @@ mod tests {
             name: "rootfs.ext2".to_string(),
             kind: ReleaseArtifactKind::RootfsImage,
             url: "https://example.invalid/rootfs.ext2".to_string(),
+            version: Some("0.4.147".to_string()),
             sha256: None,
             size: None,
             compression: None,
@@ -2824,6 +3277,7 @@ mod tests {
             name: "rootfs.ext2.gz".to_string(),
             kind: ReleaseArtifactKind::RootfsImage,
             url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+            version: Some("0.4.147".to_string()),
             sha256: None,
             size: None,
             compression: Some("gzip".to_string()),
@@ -2832,6 +3286,7 @@ mod tests {
             name: "appliance.img".to_string(),
             kind: ReleaseArtifactKind::DiskImage,
             url: "https://example.invalid/appliance.img".to_string(),
+            version: Some("0.4.147".to_string()),
             sha256: None,
             size: None,
             compression: None,
@@ -2853,6 +3308,10 @@ mod tests {
         let info = UpdateInfo {
             current_version: "0.4.146".to_string(),
             latest_version: "0.4.147".to_string(),
+            current_package_version: "0.4.146".to_string(),
+            latest_package_version: "0.4.147".to_string(),
+            current_image_version: Some("0.4.146".to_string()),
+            latest_image_version: Some("0.4.147".to_string()),
             update_available: true,
             update_reason: Some(UpdateReason::VersionMismatch),
             download_url: None,
@@ -2864,6 +3323,7 @@ mod tests {
                     name: "rootfs.ext2".to_string(),
                     kind: ReleaseArtifactKind::RootfsImage,
                     url: "https://example.invalid/rootfs.ext2".to_string(),
+                    version: Some("0.4.147".to_string()),
                     sha256: None,
                     size: None,
                     compression: None,
@@ -2872,6 +3332,7 @@ mod tests {
                     name: "rootfs.ext2.gz".to_string(),
                     kind: ReleaseArtifactKind::RootfsImage,
                     url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+                    version: Some("0.4.147".to_string()),
                     sha256: None,
                     size: None,
                     compression: Some("gzip".to_string()),
@@ -2885,6 +3346,136 @@ mod tests {
                 .map(|asset| asset.name.as_str()),
             Some("rootfs.ext2.gz")
         );
+    }
+
+    #[test]
+    fn appliance_rootfs_selection_uses_image_base_version() {
+        let rootfs = UpdateImageAsset {
+            name: "rootfs.ext2.gz".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rpiz/v0.4.256/rootfs.ext2.gz".to_string(),
+            version: Some("0.4.256".to_string()),
+            sha256: None,
+            size: None,
+            compression: Some("gzip".to_string()),
+        };
+
+        assert!(
+            image_asset_requires_apply(&rootfs, None),
+            "missing local image marker should force a rootfs update"
+        );
+        assert!(image_asset_requires_apply(&rootfs, Some("0.4.200")));
+        assert!(!image_asset_requires_apply(&rootfs, Some("0.4.256")));
+        assert!(
+            !image_asset_requires_apply(&rootfs, Some("0.4.257")),
+            "a newer local image marker must not be downgraded"
+        );
+        assert_eq!(
+            preferred_rootfs_image_asset(std::slice::from_ref(&rootfs), Some("0.4.200"))
+                .map(|asset| asset.name.as_str()),
+            Some("rootfs.ext2.gz")
+        );
+        assert!(
+            preferred_rootfs_image_asset(std::slice::from_ref(&rootfs), Some("0.4.256")).is_none()
+        );
+
+        let newer_uncompressed = UpdateImageAsset {
+            name: "rootfs.ext2".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rpiz/v0.4.257/rootfs.ext2".to_string(),
+            version: Some("0.4.257".to_string()),
+            sha256: None,
+            size: None,
+            compression: None,
+        };
+        assert_eq!(
+            preferred_rootfs_image_asset(&[rootfs, newer_uncompressed], Some("0.4.200"))
+                .map(|asset| asset.version.as_deref()),
+            Some(Some("0.4.257"))
+        );
+    }
+
+    #[test]
+    fn release_version_helpers_handle_urls_and_prereleases() {
+        assert_eq!(
+            infer_release_version_from_url("../rpiz/v0.4.256-beta/rootfs.ext2.gz").as_deref(),
+            Some("0.4.256-beta")
+        );
+        assert!(version_needs_update("0.4.257-beta", "0.4.256-beta"));
+        assert!(version_needs_update("0.4.257", "0.4.257-beta"));
+        assert!(!version_needs_update("0.4.257-beta", "0.4.257"));
+        assert!(!version_needs_update("0.4.256", "0.4.257"));
+    }
+
+    #[test]
+    fn remap_install_targets_keeps_package_inside_inactive_rootfs() {
+        let root = PathBuf::from("/data/ota/inactive-rootfs");
+        let targets = vec![
+            InstallTarget {
+                archive_path: "rhythm-server".to_string(),
+                destination: PathBuf::from("/usr/bin/rhythm-server"),
+                required: true,
+            },
+            InstallTarget {
+                archive_path: "rhythm-chipd".to_string(),
+                destination: PathBuf::from("usr/bin/rhythm-chipd"),
+                required: true,
+            },
+        ];
+
+        let remapped = remap_install_targets_to_root(&targets, &root).unwrap();
+
+        assert_eq!(
+            remapped[0].destination,
+            PathBuf::from("/data/ota/inactive-rootfs/usr/bin/rhythm-server")
+        );
+        assert_eq!(
+            remapped[1].destination,
+            PathBuf::from("/data/ota/inactive-rootfs/usr/bin/rhythm-chipd")
+        );
+
+        let escape = remap_install_targets_to_root(
+            &[InstallTarget {
+                archive_path: "bad".to_string(),
+                destination: PathBuf::from("../bad"),
+                required: true,
+            }],
+            &root,
+        )
+        .unwrap_err();
+        assert!(escape.contains("cannot escape inactive rootfs"));
+    }
+
+    #[test]
+    fn write_appliance_image_version_marker_writes_normalized_version() {
+        let dir = unique_test_dir("ota-image-version-write");
+        write_appliance_image_version_marker(&dir, Some("v2.0.0-beta")).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("etc/rhythm-image-version")).unwrap(),
+            "2.0.0-beta\n"
+        );
+
+        let invalid_dir = unique_test_dir("ota-image-version-invalid");
+        write_appliance_image_version_marker(&invalid_dir, Some("not-a-version")).unwrap();
+        assert!(!invalid_dir.join("etc/rhythm-image-version").exists());
+
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(invalid_dir);
+    }
+
+    #[test]
+    fn combine_image_package_checksum_requires_both_when_package_is_present() {
+        assert_eq!(
+            combine_image_package_checksum(Some(true), None, false),
+            Some(true)
+        );
+        assert_eq!(
+            combine_image_package_checksum(Some(true), Some(true), true),
+            Some(true)
+        );
+        assert_eq!(combine_image_package_checksum(Some(true), None, true), None);
+        assert_eq!(combine_image_package_checksum(None, Some(true), true), None);
     }
 
     #[test]
@@ -2957,6 +3548,7 @@ mod tests {
             &ManifestArtifact {
                 name: "rhythm-server-rpiz.tar.gz".to_string(),
                 url: "v1/rhythm-server-rpiz.tar.gz".to_string(),
+                version: None,
                 sha256: None,
                 size: None,
                 kind: Some(ReleaseArtifactKind::DiskImage),
@@ -2964,6 +3556,7 @@ mod tests {
                 install: Vec::new(),
             },
             &install_root,
+            "1.0.0",
         )
         .unwrap_err();
 
@@ -2978,6 +3571,7 @@ mod tests {
             &ManifestArtifact {
                 name: "rhythm-server-rpiz.zip".to_string(),
                 url: "v1/rhythm-server-rpiz.zip".to_string(),
+                version: None,
                 sha256: None,
                 size: None,
                 kind: Some(ReleaseArtifactKind::ArchiveBundle),
@@ -2985,6 +3579,7 @@ mod tests {
                 install: Vec::new(),
             },
             &install_root,
+            "1.0.0",
         )
         .unwrap_err();
 
@@ -3034,6 +3629,7 @@ mod tests {
             &ManifestArtifact {
                 name: String::new(),
                 url: "rhythm-server.tar.gz".to_string(),
+                version: None,
                 sha256: Some("abc123".to_string()),
                 size: Some(2048),
                 kind: Some(ReleaseArtifactKind::ArchiveBundle),
@@ -3041,8 +3637,10 @@ mod tests {
                 install: Vec::new(),
             },
             &install_root,
+            "1.2.3",
         )
         .unwrap();
+        assert_eq!(package.version, "1.2.3");
         assert_eq!(package.asset_name, "rhythm-server.tar.gz");
         assert_eq!(
             package.download_url,
@@ -3075,16 +3673,19 @@ mod tests {
             &ManifestArtifact {
                 name: String::new(),
                 url: "rootfs.ext2.gz".to_string(),
+                version: None,
                 sha256: Some("def456".to_string()),
                 size: Some(4096),
                 kind: None,
                 compression: Some("gzip".to_string()),
                 install: Vec::new(),
             },
+            "2.0.0",
         )
         .unwrap();
         assert_eq!(rootfs.name, "rootfs.ext2.gz");
         assert_eq!(rootfs.kind, ReleaseArtifactKind::RootfsImage);
+        assert_eq!(rootfs.version.as_deref(), Some("2.0.0"));
         assert_eq!(rootfs.size, Some(4096));
         assert_eq!(rootfs.compression.as_deref(), Some("gzip"));
 
@@ -3093,12 +3694,14 @@ mod tests {
             &ManifestArtifact {
                 name: "appliance.img".to_string(),
                 url: "appliance.img".to_string(),
+                version: None,
                 sha256: None,
                 size: None,
                 kind: None,
                 compression: None,
                 install: Vec::new(),
             },
+            "2.0.0",
         )
         .unwrap();
         assert_eq!(disk.kind, ReleaseArtifactKind::DiskImage);
@@ -3688,6 +4291,10 @@ mod tests {
         let update = UpdateInfo {
             current_version: "1.0.0".to_string(),
             latest_version: "1.1.0".to_string(),
+            current_package_version: "1.0.0".to_string(),
+            latest_package_version: "1.1.0".to_string(),
+            current_image_version: Some("1.0.0".to_string()),
+            latest_image_version: Some("1.1.0".to_string()),
             update_available: true,
             update_reason: Some(UpdateReason::VersionMismatch),
             download_url: Some("https://example.invalid/rhythm.tar.gz".to_string()),
@@ -3702,6 +4309,7 @@ mod tests {
                 name: "rootfs.ext2.gz".to_string(),
                 kind: ReleaseArtifactKind::RootfsImage,
                 url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+                version: Some("1.1.0".to_string()),
                 sha256: Some("def456".to_string()),
                 size: Some(128),
                 compression: Some("gzip".to_string()),
@@ -3713,6 +4321,10 @@ mod tests {
         let ready = handle.snapshot();
         assert_eq!(ready.state, OtaUpdateState::Ready);
         assert_eq!(ready.latest_version.as_deref(), Some("1.1.0"));
+        assert_eq!(ready.current_package_version.as_deref(), Some("1.0.0"));
+        assert_eq!(ready.latest_package_version.as_deref(), Some("1.1.0"));
+        assert_eq!(ready.current_image_version.as_deref(), Some("1.0.0"));
+        assert_eq!(ready.latest_image_version.as_deref(), Some("1.1.0"));
         assert_eq!(ready.update_available, Some(true));
         assert_eq!(ready.update_reason, Some(UpdateReason::VersionMismatch));
         assert_eq!(ready.message.as_deref(), Some("Update available: v1.1.0"));
@@ -3840,6 +4452,8 @@ mod tests {
         assert!(info.install_targets.is_empty());
         assert!(info.image_assets.is_empty());
         assert!(info.resolved_install_targets.is_empty());
+        assert_eq!(info.current_package_version, "1.2.3");
+        assert_eq!(info.latest_package_version, "1.2.3");
     }
 
     #[test]
@@ -4118,6 +4732,7 @@ mod tests {
                 "package": {
                     "name": "",
                     "url": "release/rhythm-server.tar.gz",
+                    "version": "2.0.0",
                     "sha256": "abc123",
                     "kind": "archive_bundle",
                     "install": [
@@ -4129,6 +4744,7 @@ mod tests {
                     {
                         "name": "",
                         "url": "images/rootfs.ext2.gz",
+                        "version": "2.0.0",
                         "kind": "rootfs_image",
                         "compression": "gzip",
                         "sha256": "def456",
@@ -4147,6 +4763,9 @@ mod tests {
 
         assert_eq!(info.current_version, "1.0.0");
         assert_eq!(info.latest_version, "2.0.0");
+        assert_eq!(info.current_package_version, "1.0.0");
+        assert_eq!(info.latest_package_version, "2.0.0");
+        assert_eq!(info.latest_image_version.as_deref(), Some("2.0.0"));
         assert!(info.update_available);
         assert_eq!(info.update_reason, Some(UpdateReason::VersionMismatch));
         assert_eq!(info.asset_name.as_deref(), Some("rhythm-server.tar.gz"));
@@ -4168,6 +4787,265 @@ mod tests {
         assert_eq!(info.image_assets[0].kind, ReleaseArtifactKind::RootfsImage);
         assert_eq!(info.image_assets[0].compression.as_deref(), Some("gzip"));
         assert_eq!(info.resolved_install_targets.len(), 2);
+    }
+
+    #[test]
+    fn check_manifest_blocking_reports_image_base_drift_when_marker_is_older() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = unique_test_dir("ota-image-marker-older");
+        let marker = dir.join("rhythm-image-version");
+        fs::write(&marker, "1.0.0\n").unwrap();
+        std::env::set_var("RHYTHM_IMAGE_VERSION_PATH", &marker);
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "2.0.0",
+                "package": {
+                    "name": "rhythm-server-rpiz.tar.gz",
+                    "url": "v2.0.0/rhythm-server-rpiz.tar.gz",
+                    "version": "2.0.0",
+                    "kind": "archive_bundle",
+                    "install": [
+                        {"slot": "self", "required": true}
+                    ]
+                },
+                "images": [
+                    {
+                        "name": "rootfs.ext2.gz",
+                        "url": "v2.0.0/rootfs.ext2.gz",
+                        "version": "2.0.0",
+                        "kind": "rootfs_image",
+                        "compression": "gzip"
+                    }
+                ]
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let info = check_blocking("2.0.0", UpdateChannel::Stable).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_IMAGE_VERSION_PATH");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+        let _ = fs::remove_dir_all(dir);
+
+        assert!(info.update_available);
+        assert_eq!(info.update_reason, Some(UpdateReason::ImageBaseDrift));
+        assert_eq!(info.current_package_version, "2.0.0");
+        assert_eq!(info.latest_package_version, "2.0.0");
+        assert_eq!(info.current_image_version.as_deref(), Some("1.0.0"));
+        assert_eq!(info.latest_image_version.as_deref(), Some("2.0.0"));
+        assert!(
+            info.download_url.is_some(),
+            "image-base drift with a package must overlay binaries into the inactive rootfs"
+        );
+    }
+
+    #[test]
+    fn check_manifest_blocking_reports_image_base_drift_when_marker_is_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = unique_test_dir("ota-image-marker-missing");
+        std::env::set_var("RHYTHM_IMAGE_VERSION_PATH", dir.join("missing-marker"));
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "2.0.0",
+                "package": {
+                    "name": "rhythm-server-rpiz.tar.gz",
+                    "url": "v2.0.0/rhythm-server-rpiz.tar.gz",
+                    "version": "2.0.0",
+                    "kind": "archive_bundle",
+                    "install": [
+                        {"slot": "self", "required": true}
+                    ]
+                },
+                "images": [
+                    {
+                        "name": "rootfs.ext2.gz",
+                        "url": "v2.0.0/rootfs.ext2.gz",
+                        "version": "2.0.0",
+                        "kind": "rootfs_image",
+                        "compression": "gzip"
+                    }
+                ]
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let info = check_blocking("2.0.0", UpdateChannel::Stable).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_IMAGE_VERSION_PATH");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+        let _ = fs::remove_dir_all(dir);
+
+        assert!(info.update_available);
+        assert_eq!(info.update_reason, Some(UpdateReason::ImageBaseDrift));
+        assert_eq!(info.current_image_version, None);
+        assert_eq!(info.latest_image_version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn check_manifest_blocking_is_up_to_date_when_package_and_image_versions_match() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = unique_test_dir("ota-image-marker-current");
+        let marker = dir.join("rhythm-image-version");
+        fs::write(&marker, "2.0.0\n").unwrap();
+        std::env::set_var("RHYTHM_IMAGE_VERSION_PATH", &marker);
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "2.0.0",
+                "package": {
+                    "name": "rhythm-server-rpiz.tar.gz",
+                    "url": "v2.0.0/rhythm-server-rpiz.tar.gz",
+                    "version": "2.0.0",
+                    "kind": "archive_bundle",
+                    "install": [
+                        {"slot": "self", "required": true}
+                    ]
+                },
+                "images": [
+                    {
+                        "name": "rootfs.ext2.gz",
+                        "url": "v2.0.0/rootfs.ext2.gz",
+                        "version": "2.0.0",
+                        "kind": "rootfs_image",
+                        "compression": "gzip"
+                    }
+                ]
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let info = check_blocking("2.0.0", UpdateChannel::Stable).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_IMAGE_VERSION_PATH");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+        let _ = fs::remove_dir_all(dir);
+
+        assert!(!info.update_available);
+        assert_eq!(info.update_reason, None);
+        assert_eq!(info.current_image_version.as_deref(), Some("2.0.0"));
+        assert_eq!(info.latest_image_version.as_deref(), Some("2.0.0"));
+        assert_eq!(info.download_url, None);
+    }
+
+    #[test]
+    fn check_manifest_blocking_uses_package_version_over_manifest_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "99.0.0",
+                "package": {
+                    "name": "rhythm-server-linux-amd64.tar.gz",
+                    "url": "v2.0.0/rhythm-server-linux-amd64.tar.gz",
+                    "version": "2.0.0",
+                    "kind": "archive_bundle"
+                },
+                "images": [
+                    {
+                        "name": "rootfs.ext2.gz",
+                        "url": "v3.0.0/rootfs.ext2.gz",
+                        "version": "3.0.0",
+                        "kind": "rootfs_image",
+                        "compression": "gzip"
+                    }
+                ]
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let info = check_blocking("1.0.0", UpdateChannel::Beta).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+
+        assert!(info.update_available);
+        assert_eq!(info.update_reason, Some(UpdateReason::VersionMismatch));
+        assert_eq!(info.latest_version, "2.0.0");
+        assert_eq!(info.latest_package_version, "2.0.0");
+        assert_eq!(info.latest_image_version.as_deref(), Some("3.0.0"));
+    }
+
+    #[test]
+    fn check_manifest_blocking_does_not_install_older_package_without_image_drift() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "1.0.0",
+                "package": {
+                    "name": "rhythm-server-linux-amd64.tar.gz",
+                    "url": "v1.0.0/rhythm-server-linux-amd64.tar.gz",
+                    "version": "1.0.0",
+                    "kind": "archive_bundle"
+                }
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let info = check_blocking("2.0.0", UpdateChannel::Beta).unwrap();
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+
+        assert!(!info.update_available);
+        assert_eq!(info.update_reason, None);
+        assert_eq!(info.current_package_version, "2.0.0");
+        assert_eq!(info.latest_package_version, "1.0.0");
+        assert_eq!(info.download_url, None);
+    }
+
+    #[test]
+    fn check_manifest_blocking_refuses_appliance_image_when_package_would_downgrade() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
+        std::env::set_var("RHYTHM_PLATFORM_CONTEXT", "server");
+        let manifest_url = spawn_json_fixture(
+            r#"{
+                "version": "1.0.0",
+                "package": {
+                    "name": "rhythm-server-rpiz.tar.gz",
+                    "url": "v1.0.0/rhythm-server-rpiz.tar.gz",
+                    "version": "1.0.0",
+                    "kind": "archive_bundle"
+                },
+                "images": [
+                    {
+                        "name": "rootfs.ext2.gz",
+                        "url": "v999.0.0/rootfs.ext2.gz",
+                        "version": "999.0.0",
+                        "kind": "rootfs_image",
+                        "compression": "gzip"
+                    }
+                ]
+            }"#,
+        );
+        std::env::set_var("RHYTHM_UPDATE_MANIFEST_URL", manifest_url);
+
+        let error = string_error(check_blocking("2.0.0", UpdateChannel::Stable));
+
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
+        std::env::remove_var("RHYTHM_PLATFORM_CONTEXT");
+
+        assert!(
+            error.contains("package version 1.0.0 is older than current 2.0.0"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
