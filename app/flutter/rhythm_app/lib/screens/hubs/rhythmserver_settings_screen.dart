@@ -2116,9 +2116,11 @@ class _RhythmServerAdvancedSettingsScreenState
       syncProvider.connectIfAvailable();
     } catch (error) {
       _showSnackBar(
-        enabled
-            ? 'Could not enable remote access.'
-            : 'Could not disable remote access.',
+        enabled && error is RemoteAccessActivationException
+            ? 'Remote access tunnel is not reachable yet.'
+            : enabled
+                ? 'Could not enable remote access.'
+                : 'Could not disable remote access.',
       );
       debugPrint('Remote access update failed: $error');
     } finally {

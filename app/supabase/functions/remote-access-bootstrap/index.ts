@@ -8,7 +8,8 @@ import {
 } from '../_shared/auth.ts'
 
 const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
-const DEFAULT_REMOTE_ACCESS_DOMAIN = 'devices.rhythm.lighting'
+const DEFAULT_REMOTE_ACCESS_DOMAIN = 'rhythm.lighting'
+const LEGACY_REMOTE_ACCESS_DOMAIN = 'devices.rhythm.lighting'
 const DEFAULT_ORIGIN_SERVICE = 'http://localhost:54448'
 
 type CloudflareResponse<T> = {
@@ -63,22 +64,37 @@ Deno.serve((req) =>
       const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID')
       const zoneId = requireEnv('CLOUDFLARE_ZONE_ID')
       const apiToken = requireCloudflareApiToken()
-      const domain = readEnv('RHYTHM_REMOTE_ACCESS_DOMAIN', DEFAULT_REMOTE_ACCESS_DOMAIN)
-        .replace(/^\.+|\.+$/g, '')
+      const domain = remoteAccessDomain()
       const originService =
         readEnv('RHYTHM_REMOTE_ACCESS_ORIGIN', DEFAULT_ORIGIN_SERVICE)
 
       const existing = await readExistingMapping(adminClient, hubId)
       const tunnelName = existing?.tunnel_name ?? `rhythm-${hubId}`
-      const hostname = existing?.hostname ?? `${hubId}.${domain}`.toLowerCase()
+      const desiredHostname = `${hubId}.${domain}`.toLowerCase()
+      const hostname = hostnameForDomain(
+        existing?.hostname,
+        desiredHostname,
+        domain,
+      )
       const tunnel = existing
         ? { id: existing.tunnel_id, name: existing.tunnel_name }
         : await createTunnel(accountId, apiToken, tunnelName)
       const connectorToken =
         tunnel.token ?? (await getTunnelToken(accountId, apiToken, tunnel.id))
 
-      await putTunnelConfiguration(accountId, apiToken, tunnel.id, hostname, originService)
-      await upsertDnsRecord(zoneId, apiToken, hostname, `${tunnel.id}.cfargotunnel.com`)
+      await putTunnelConfiguration(
+        accountId,
+        apiToken,
+        tunnel.id,
+        hostname,
+        originService,
+      )
+      await upsertDnsRecord(
+        zoneId,
+        apiToken,
+        hostname,
+        `${tunnel.id}.cfargotunnel.com`,
+      )
 
       const remoteEndpoint = endpointForHostname(hostname)
       await adminClient.from('hub_remote_access').upsert({
@@ -519,6 +535,29 @@ function endpointForHostname(hostname: string): { host: string; port: number; us
     port: 443,
     useSsl: true,
   }
+}
+
+function remoteAccessDomain(): string {
+  const domain = readEnv(
+    'RHYTHM_REMOTE_ACCESS_DOMAIN',
+    DEFAULT_REMOTE_ACCESS_DOMAIN,
+  )
+    .replace(/^\.+|\.+$/g, '')
+    .toLowerCase()
+  return domain === LEGACY_REMOTE_ACCESS_DOMAIN
+    ? DEFAULT_REMOTE_ACCESS_DOMAIN
+    : domain
+}
+
+function hostnameForDomain(
+  existingHostname: string | undefined,
+  desiredHostname: string,
+  domain: string,
+): string {
+  if (!existingHostname) return desiredHostname
+
+  const normalized = existingHostname.toLowerCase()
+  return normalized.endsWith(`.${domain}`) ? normalized : desiredHostname
 }
 
 function requireEnv(name: string): string {

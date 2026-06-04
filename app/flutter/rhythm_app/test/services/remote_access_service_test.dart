@@ -37,6 +37,68 @@ void main() {
       expect(body, {'hub_id': 'hub-1'});
     });
 
+    test('activation waits for the public remote endpoint to answer', () async {
+      final checkedEndpoints = <String>[];
+      final service = RemoteAccessService.testing(
+        endpointHealthFactory: ({
+          required HubEndpoint endpoint,
+          String? authToken,
+        }) async {
+          checkedEndpoints.add('${endpoint.baseUrl}|$authToken');
+          return true;
+        },
+      );
+      final api = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+      );
+      const remoteEndpoint = HubEndpoint(
+        host: 'hub.rhythm.lighting',
+        port: 443,
+        useSsl: true,
+      );
+
+      final status = await service.waitForActivationForTesting(
+        api: api,
+        remoteEndpoint: remoteEndpoint,
+        authToken: 'owner-token',
+        initialStatus: _remoteStatus(),
+      );
+
+      expect(status.serviceRunning, isTrue);
+      expect(checkedEndpoints, ['https://hub.rhythm.lighting:443|owner-token']);
+    });
+
+    test('activation fails when the public remote endpoint is unreachable',
+        () async {
+      final service = RemoteAccessService.testing(
+        activationPollAttempts: 2,
+        endpointHealthFactory: ({
+          required HubEndpoint endpoint,
+          String? authToken,
+        }) async =>
+            false,
+      );
+      final api = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+        statuses: [_remoteStatus(registeredConnections: 1)],
+      );
+
+      await expectLater(
+        service.waitForActivationForTesting(
+          api: api,
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+          authToken: 'owner-token',
+          initialStatus: _remoteStatus(registeredConnections: 1),
+        ),
+        throwsA(isA<RemoteAccessActivationException>()),
+      );
+      expect(api.statusCalls, 1);
+    });
+
     test('disable falls back to the remote endpoint when LAN is unreachable',
         () async {
       final calls = <String>[];
@@ -111,18 +173,51 @@ Hub _serverHub({HubEndpoint? remoteEndpoint}) {
   );
 }
 
+RhythmRemoteAccessStatus _remoteStatus({
+  bool serviceRunning = true,
+  int? registeredConnections,
+}) {
+  return RhythmRemoteAccessStatus(
+    enabled: true,
+    configured: true,
+    hostname: 'hub.rhythm.lighting',
+    updatedAtEpochMs: 0,
+    cloudflaredAvailable: true,
+    serviceAvailable: true,
+    serviceRunning: serviceRunning,
+    restartCount: 0,
+    metricsAvailable: true,
+    connectorHealthy:
+        registeredConnections != null && registeredConnections > 0,
+    registeredConnections: registeredConnections,
+  );
+}
+
 class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
   _FakeRemoteAccessApi({
     required this.baseUrl,
-    required this.onClear,
+    this.onClear,
+    this.statuses = const [],
   }) : super(baseUrl: 'http://127.0.0.1');
 
   final String baseUrl;
-  final Future<void> Function() onClear;
+  final Future<void> Function()? onClear;
+  final List<RhythmRemoteAccessStatus> statuses;
+  int statusCalls = 0;
+
+  @override
+  Future<RhythmRemoteAccessStatus> getStatus() async {
+    final index = statusCalls;
+    statusCalls += 1;
+    if (statuses.isEmpty) return _remoteStatus();
+    final resolvedIndex =
+        index >= statuses.length ? statuses.length - 1 : index;
+    return statuses[resolvedIndex];
+  }
 
   @override
   Future<RhythmRemoteAccessStatus> clearConfig() async {
-    await onClear();
+    await onClear?.call();
     return const RhythmRemoteAccessStatus(
       enabled: false,
       configured: false,
