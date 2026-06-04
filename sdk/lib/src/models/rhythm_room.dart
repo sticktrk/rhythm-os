@@ -185,6 +185,7 @@ class RhythmNodeProfileSettings {
   final String? moodSceneId;
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
+  final Map<String, RhythmLightProfileNodeOverride> profileOverrides;
   final Map<String, dynamic> raw;
 
   const RhythmNodeProfileSettings({
@@ -194,6 +195,7 @@ class RhythmNodeProfileSettings {
     this.moodSceneId,
     this.fadeSetting,
     this.motionTimeoutSetting,
+    this.profileOverrides = const {},
     this.raw = const <String, dynamic>{},
   });
 
@@ -207,6 +209,7 @@ class RhythmNodeProfileSettings {
       moodSceneId == null &&
       fadeSetting == null &&
       motionTimeoutSetting == null &&
+      profileOverrides.isEmpty &&
       raw.isEmpty;
 
   factory RhythmNodeProfileSettings.fromJson(Map<String, dynamic> json) {
@@ -218,7 +221,8 @@ class RhythmNodeProfileSettings {
       ..remove('active_light_scene_id')
       ..remove('idle_profile_id')
       ..remove('fade_ms')
-      ..remove('motion_timeout_secs');
+      ..remove('motion_timeout_secs')
+      ..remove('profile_overrides');
     final moodProfileId = json['mood_profile_id'] as String? ??
         json['idle_profile_id'] as String?;
     final moodSceneId = json['mood_scene_id'] as String? ??
@@ -232,6 +236,7 @@ class RhythmNodeProfileSettings {
           moodSceneId == null || moodSceneId.isEmpty ? null : moodSceneId,
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
+      profileOverrides: _profileOverridesFromJson(json['profile_overrides']),
       raw: raw,
     );
   }
@@ -245,7 +250,74 @@ class RhythmNodeProfileSettings {
         if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
         if (motionTimeoutSetting != null)
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),
+        if (profileOverrides.isNotEmpty)
+          'profile_overrides': {
+            for (final entry in profileOverrides.entries)
+              entry.key: entry.value.toJson(),
+          },
       };
+}
+
+class RhythmLightProfileNodeOverride {
+  final RhythmTimerSetting? fadeSetting;
+  final RhythmTimerSetting? motionTimeoutSetting;
+  final Map<String, dynamic> raw;
+
+  const RhythmLightProfileNodeOverride({
+    this.fadeSetting,
+    this.motionTimeoutSetting,
+    this.raw = const <String, dynamic>{},
+  });
+
+  int? get fadeMs => fadeSetting?.fixedValue;
+  int? get motionTimeoutSecs => motionTimeoutSetting?.fixedValue;
+
+  bool get isEmpty =>
+      fadeSetting == null && motionTimeoutSetting == null && raw.isEmpty;
+
+  factory RhythmLightProfileNodeOverride.fromJson(Map<String, dynamic> json) {
+    final raw = Map<String, dynamic>.from(json)
+      ..remove('fade_ms')
+      ..remove('motion_timeout_secs');
+    return RhythmLightProfileNodeOverride(
+      fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
+      motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
+      raw: raw,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        ...raw,
+        if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
+        if (motionTimeoutSetting != null)
+          'motion_timeout_secs': motionTimeoutSetting!.toJson(),
+      };
+}
+
+Map<String, RhythmLightProfileNodeOverride> _profileOverridesFromJson(
+  Object? value,
+) {
+  final map = value is Map<String, dynamic>
+      ? value
+      : value is Map
+          ? value.cast<String, dynamic>()
+          : null;
+  if (map == null) return const {};
+
+  final overrides = <String, RhythmLightProfileNodeOverride>{};
+  for (final entry in map.entries) {
+    final profileId = entry.key.trim();
+    if (profileId.isEmpty) continue;
+    final overrideValue = entry.value;
+    final overrideMap = overrideValue is Map<String, dynamic>
+        ? overrideValue
+        : overrideValue is Map
+            ? overrideValue.cast<String, dynamic>()
+            : null;
+    if (overrideMap == null) continue;
+    overrides[profileId] = RhythmLightProfileNodeOverride.fromJson(overrideMap);
+  }
+  return Map.unmodifiable(overrides);
 }
 
 RhythmTimerSetting? _timerSettingFromJson(

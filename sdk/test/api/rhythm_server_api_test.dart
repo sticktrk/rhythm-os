@@ -383,6 +383,43 @@ void main() {
           )).called(1);
     });
 
+    test('nodeProfileOverridesSet sends profile override patch endpoint',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/profile-overrides'),
+            statusCode: 204,
+          ));
+
+      await api.nodeProfileOverridesSet(
+        nodeId: 'node-1',
+        profileOverrides: {
+          'rhythm': {'motion_timeout_secs': 600},
+          'sleep': null,
+        },
+      );
+
+      verify(() => dio.put(
+            'api/nodes/profile-overrides',
+            data: {
+              'node_id': 'node-1',
+              'profile_overrides': {
+                'rhythm': {
+                  'motion_timeout_secs': {
+                    'mode': 'fixed',
+                    'value': 600,
+                  },
+                },
+                'sleep': null,
+              },
+            },
+            queryParameters: null,
+          )).called(1);
+    });
+
     test('nodePreferencesSet sends mood state', () async {
       when(() => dio.put(
             any(),
@@ -529,23 +566,25 @@ void main() {
   });
 
   group('motion timeout writes', () {
-    test('motionTimeoutSet can clear the timeout with null', () async {
+    test('motionTimeoutSet falls back to node preferences endpoint', () async {
       when(() => dio.put(
             any(),
             data: any(named: 'data'),
             queryParameters: any(named: 'queryParameters'),
           )).thenAnswer((_) async => Response(
-            requestOptions: RequestOptions(path: 'api/nodes/motion-timeout'),
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
             statusCode: 204,
           ));
 
       await api.motionTimeoutSet(nodeId: 'node-1', timeoutSecs: null);
 
       verify(() => dio.put(
-            'api/nodes/motion-timeout',
+            'api/nodes/preferences',
             data: {
               'node_id': 'node-1',
-              'timeout_secs': null,
+              'profile_settings': {
+                'motion_timeout_secs': null,
+              },
             },
             queryParameters: null,
           )).called(1);

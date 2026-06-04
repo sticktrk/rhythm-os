@@ -230,6 +230,14 @@ void main() {
             'mood_scene_id': 'sleep-scene',
             'fade_ms': {'mode': 'fixed', 'value': 1200},
             'motion_timeout_secs': {'mode': 'fixed', 'value': 300},
+            'profile_overrides': {
+              'rhythm': {
+                'motion_timeout_secs': {'mode': 'fixed', 'value': 450},
+              },
+              'focus': {
+                'fade_ms': {'mode': 'fixed', 'value': 800},
+              },
+            },
           },
         });
 
@@ -239,6 +247,19 @@ void main() {
         expect(room.profileSettings?.moodSceneId, 'sleep-scene');
         expect(room.profileSettings?.fadeMs, 1200);
         expect(room.profileSettings?.motionTimeoutSecs, 300);
+        expect(
+          room.profileSettings?.profileOverrides['rhythm']?.motionTimeoutSecs,
+          450,
+        );
+        expect(room.profileSettings?.profileOverrides['focus']?.fadeMs, 800);
+        expect(room.profileSettings?.toJson()['profile_overrides'], {
+          'rhythm': {
+            'motion_timeout_secs': {'mode': 'fixed', 'value': 450},
+          },
+          'focus': {
+            'fade_ms': {'mode': 'fixed', 'value': 800},
+          },
+        });
       });
 
       test('parses legacy active_light_scene_id as mood_scene_id', () {

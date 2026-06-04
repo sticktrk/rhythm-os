@@ -639,6 +639,17 @@ class RhythmServerApi {
     });
   }
 
+  /// Patch per-profile node overrides.
+  Future<void> nodeProfileOverridesSet({
+    required String nodeId,
+    required Map<String, dynamic>? profileOverrides,
+  }) async {
+    await _safePut('api/nodes/profile-overrides', data: {
+      'node_id': nodeId,
+      'profile_overrides': _normalizeProfileOverrides(profileOverrides),
+    });
+  }
+
   /// Push room preferences (rhythm_enabled, disabled, state).
   Future<void> roomPreferencesSet({
     required String roomId,
@@ -1133,10 +1144,10 @@ class RhythmServerApi {
       _log.warning('motionTimeoutSet skipped: missing node id');
       return;
     }
-    await _safePut('api/nodes/motion-timeout', data: {
-      'node_id': effectiveNodeId,
-      'timeout_secs': timeoutSecs,
-    });
+    await nodePreferencesSet(
+      nodeId: effectiveNodeId,
+      profileSettings: {'motion_timeout_secs': timeoutSecs},
+    );
   }
 
 // =========================================================================
@@ -2113,8 +2124,46 @@ class RhythmServerApi {
             'fade_ms' ||
             'motion_timeout_secs' =>
               _normalizeTimerSettingValue(entry.value),
+            'profile_overrides' => _normalizeProfileOverrides(entry.value),
             _ => entry.value,
           },
+    };
+  }
+
+  Map<String, dynamic>? _normalizeProfileOverrides(dynamic value) {
+    if (value == null) return null;
+    final map = value is Map<String, dynamic>
+        ? value
+        : value is Map
+            ? value.cast<String, dynamic>()
+            : null;
+    if (map == null) return null;
+
+    return <String, dynamic>{
+      for (final entry in map.entries)
+        if (entry.key.trim().isNotEmpty)
+          entry.key: entry.value == null
+              ? null
+              : _normalizeProfileOverride(entry.value),
+    };
+  }
+
+  Map<String, dynamic>? _normalizeProfileOverride(dynamic value) {
+    final map = value is Map<String, dynamic>
+        ? value
+        : value is Map
+            ? value.cast<String, dynamic>()
+            : null;
+    if (map == null) return null;
+
+    return <String, dynamic>{
+      for (final entry in map.entries)
+        entry.key: switch (entry.key) {
+          'fade_ms' ||
+          'motion_timeout_secs' =>
+            _normalizeTimerSettingValue(entry.value),
+          _ => entry.value,
+        },
     };
   }
 
