@@ -623,6 +623,7 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         .context("building triage queue snapshot")?;
     let runtime_health_json =
         build_runtime_health_json(state, created_at).context("building runtime health snapshot")?;
+    let remote_access_status_json = rhythm_os::remote_access::status_snapshot_json(state);
 
     let searched_log_dirs = discover_log_dirs(&runtime);
     let mut diagnostics = BundleDiagnostics::new(
@@ -679,6 +680,12 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
         &mut generated_files,
         "runtime_health.json",
         runtime_health_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "remote_access_status.json",
+        remote_access_status_json.as_bytes(),
     )?;
     append_generated_file(
         &mut builder,
@@ -2951,6 +2958,11 @@ mod tests {
             b"secret-token",
         )
         .unwrap();
+        fs::write(
+            data_dir.join("remote_access.json"),
+            br#"{"schema_version":1,"enabled":true,"hostname":"hub.devices.rhythm.lighting","connector_token":"secret-token","tunnel_id":"tunnel-id","tunnel_name":"tunnel-name","updated_at_epoch_ms":1780588319000}"#,
+        )
+        .unwrap();
 
         let state: SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
@@ -2960,6 +2972,9 @@ mod tests {
             guard.platform_type = "appliance";
             guard.platform_context = "rpiz";
             guard.data_dir = data_dir.display().to_string();
+            guard.storage = Some(Box::new(
+                rhythm_os::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
+            ));
         }
 
         let bundle = build_debug_bundle(&state).unwrap();
@@ -3012,6 +3027,7 @@ mod tests {
         assert!(files.contains_key("topology_debug.json"));
         assert!(files.contains_key("triage_queue.json"));
         assert!(files.contains_key("runtime_health.json"));
+        assert!(files.contains_key("remote_access_status.json"));
         assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("matter_controller.json"));
@@ -3058,6 +3074,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
+            .any(|value| value["archive_path"] == "remote_access_status.json"));
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|value| value["archive_path"] == "log_summary.json"));
         assert!(manifest["process"]["pid"]
             .as_u64()
@@ -3066,6 +3087,17 @@ mod tests {
         let diagnostics: Value =
             serde_json::from_slice(files.get("bundle_diagnostics.json").unwrap()).unwrap();
         assert_eq!(diagnostics["kind"], "debug_bundle_diagnostics");
+        let remote_access_status: Value =
+            serde_json::from_slice(files.get("remote_access_status.json").unwrap()).unwrap();
+        assert_eq!(
+            remote_access_status["hostname"],
+            "hub.devices.rhythm.lighting"
+        );
+        assert_eq!(remote_access_status["configured"], true);
+        assert!(
+            !String::from_utf8_lossy(files.get("remote_access_status.json").unwrap())
+                .contains("secret-token")
+        );
         assert_eq!(
             diagnostics["persisted_data_dir"],
             data_dir.display().to_string()

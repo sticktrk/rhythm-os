@@ -208,6 +208,29 @@ pub async fn get_status(State(state): State<SharedState>) -> ApiResponse {
     }
 }
 
+pub fn status_snapshot(state: &SharedState) -> serde_json::Value {
+    let runtime = runtime_status(state);
+    match load_config(state) {
+        Ok(config) => serde_json::to_value(RemoteAccessStatusBody::from_parts(
+            config.map(|config| config.redacted_status()),
+            runtime,
+        ))
+        .unwrap_or_else(|_| json!({"status": "error", "error": "serialize status"})),
+        Err(e) => {
+            let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(None, runtime))
+                .unwrap_or_else(|_| json!({"status": "error"}));
+            value["status"] = json!("error");
+            value["config_error"] = json!(e.to_string());
+            value
+        }
+    }
+}
+
+pub fn status_snapshot_json(state: &SharedState) -> String {
+    serde_json::to_string_pretty(&status_snapshot(state))
+        .unwrap_or_else(|_| "{\"status\":\"error\"}".to_string())
+}
+
 pub async fn put_config(
     State(state): State<SharedState>,
     Json(body): Json<PutRemoteAccessConfig>,
