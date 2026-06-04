@@ -14,6 +14,11 @@ typedef RemoteAccessApiFactory = RhythmRemoteAccessApi Function({
   String? authToken,
 });
 
+typedef RemoteAccessStateLoader = Future<RhythmHello> Function({
+  required HubEndpoint endpoint,
+  String? authToken,
+});
+
 class RemoteAccessEnableResult {
   const RemoteAccessEnableResult({
     required this.updatedHub,
@@ -52,10 +57,12 @@ class RemoteAccessService {
     Duration activationPollDelay = const Duration(seconds: 2),
     int activationPollAttempts = 6,
     dynamic Function()? supabaseClientFactory,
+    RemoteAccessStateLoader? stateLoader,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
-        _supabaseClientFactory = supabaseClientFactory;
+        _supabaseClientFactory = supabaseClientFactory,
+        _stateLoader = stateLoader ?? _defaultStateLoader;
 
   static final RemoteAccessService instance = RemoteAccessService._();
   static const _bootstrapFunctionName = 'remote-access-bootstrap';
@@ -66,12 +73,14 @@ class RemoteAccessService {
     Duration activationPollDelay = Duration.zero,
     int activationPollAttempts = 1,
     dynamic Function()? supabaseClientFactory,
+    RemoteAccessStateLoader? stateLoader,
   }) {
     return RemoteAccessService._(
       apiFactory: apiFactory,
       activationPollDelay: activationPollDelay,
       activationPollAttempts: activationPollAttempts,
       supabaseClientFactory: supabaseClientFactory,
+      stateLoader: stateLoader ?? _emptyStateLoader,
     );
   }
 
@@ -79,6 +88,7 @@ class RemoteAccessService {
   final Duration _activationPollDelay;
   final int _activationPollAttempts;
   final dynamic Function()? _supabaseClientFactory;
+  final RemoteAccessStateLoader _stateLoader;
 
   bool get isEnabledByFlag => FeatureFlags.remoteAccessTunnel;
 
@@ -100,10 +110,15 @@ class RemoteAccessService {
       reason: 'remote_access_enable',
     );
 
+    final serverInstanceId = await _serverInstanceIdFor(serverHub);
     final client = _supabaseClient();
     final response = await client.functions.invoke(
       _bootstrapFunctionName,
-      body: buildBootstrapBody(serverHub: serverHub, home: home),
+      body: buildBootstrapBody(
+        serverHub: serverHub,
+        home: home,
+        serverInstanceId: serverInstanceId,
+      ),
     );
     final data = Map<String, dynamic>.from(response.data as Map);
     final remoteEndpoint = HubEndpoint.fromJson(
@@ -151,7 +166,10 @@ class RemoteAccessService {
     );
   }
 
-  Future<Hub> disableForHub(Hub serverHub) async {
+  Future<Hub> disableForHub(
+    Hub serverHub, {
+    Home? home,
+  }) async {
     if (!FeatureFlags.remoteAccessTunnel) {
       throw StateError('Remote access is not enabled in this build.');
     }
@@ -160,16 +178,15 @@ class RemoteAccessService {
           'Remote access is only supported for Rhythm Server hubs.');
     }
 
+    final serverInstanceId = await _serverInstanceIdFor(serverHub);
     Object? lastError;
     StackTrace? lastStackTrace;
+    var deviceConfigCleared = false;
     for (final endpoint in _disableEndpoints(serverHub)) {
       try {
         await _apiForEndpoint(endpoint, serverHub.token).clearConfig();
-        return serverHub.copyWith(
-          clearRemoteEndpoint: true,
-          updatedAt: DateTime.now(),
-          pendingSync: true,
-        );
+        deviceConfigCleared = true;
+        break;
       } catch (error, stackTrace) {
         lastError = error;
         lastStackTrace = stackTrace;
@@ -180,10 +197,24 @@ class RemoteAccessService {
       }
     }
 
-    if (lastError != null && lastStackTrace != null) {
+    if (!deviceConfigCleared && lastError != null && lastStackTrace != null) {
       Error.throwWithStackTrace(lastError, lastStackTrace);
     }
-    throw StateError('Remote access has no endpoint to disable.');
+    if (!deviceConfigCleared) {
+      throw StateError('Remote access has no endpoint to disable.');
+    }
+
+    await _tearDownCloudRemoteAccess(
+      serverHub,
+      home: home,
+      serverInstanceId: serverInstanceId,
+    );
+
+    return serverHub.copyWith(
+      clearRemoteEndpoint: true,
+      updatedAt: DateTime.now(),
+      pendingSync: true,
+    );
   }
 
   void _ensureCanUse(Hub serverHub) {
@@ -214,6 +245,22 @@ class RemoteAccessService {
       return auth.client;
     }
     throw StateError('Remote access requires a Supabase backend.');
+  }
+
+  Future<void> _tearDownCloudRemoteAccess(
+    Hub serverHub, {
+    Home? home,
+    String? serverInstanceId,
+  }) async {
+    final client = _supabaseClient();
+    await client.functions.invoke(
+      _bootstrapFunctionName,
+      body: buildTeardownBody(
+        serverHub: serverHub,
+        home: home,
+        serverInstanceId: serverInstanceId,
+      ),
+    );
   }
 
   RhythmRemoteAccessApi _apiForEndpoint(
@@ -270,6 +317,28 @@ class RemoteAccessService {
     return [serverHub.endpoint, remote];
   }
 
+  Future<String> _serverInstanceIdFor(Hub serverHub) async {
+    for (final endpoint in _disableEndpoints(serverHub)) {
+      try {
+        final state = await _stateLoader(
+          endpoint: endpoint,
+          authToken: serverHub.token,
+        );
+        final serverInstanceId = state.serverInstanceId?.trim();
+        if (serverInstanceId != null && serverInstanceId.isNotEmpty) {
+          return serverInstanceId;
+        }
+      } catch (error) {
+        debugPrint(
+          'RemoteAccessService: failed to read server identity via '
+          '${endpoint.baseUrl}: $error',
+        );
+      }
+    }
+
+    return _fallbackServerInstanceId(serverHub.endpoint);
+  }
+
   static RhythmRemoteAccessApi _defaultApiFactory({
     required String baseUrl,
     String? authToken,
@@ -280,17 +349,58 @@ class RemoteAccessService {
     );
   }
 
+  static Future<RhythmHello> _defaultStateLoader({
+    required HubEndpoint endpoint,
+    String? authToken,
+  }) {
+    return RhythmConfigApi(
+      baseUrl: endpoint.baseUrl,
+      authToken: authToken,
+    ).getState();
+  }
+
+  static Future<RhythmHello> _emptyStateLoader({
+    required HubEndpoint endpoint,
+    String? authToken,
+  }) async {
+    return RhythmHello.fromJson(const {});
+  }
+
+  static String _fallbackServerInstanceId(HubEndpoint endpoint) {
+    return 'endpoint:${endpoint.baseUrl.toLowerCase()}';
+  }
+
   static Map<String, dynamic> buildBootstrapBody({
     required Hub serverHub,
     Home? home,
+    String? serverInstanceId,
   }) {
+    final normalizedServerInstanceId = serverInstanceId?.trim();
     return {
       'hub_id': serverHub.id,
+      if (normalizedServerInstanceId != null &&
+          normalizedServerInstanceId.isNotEmpty)
+        'server_instance_id': normalizedServerInstanceId,
       if (home != null) ...{
         'home': AccountCloudSyncService.homeSnapshotPayload(home),
         'server_hub':
             AccountCloudSyncService.serverHubSnapshotPayload(serverHub),
       },
+    };
+  }
+
+  static Map<String, dynamic> buildTeardownBody({
+    required Hub serverHub,
+    Home? home,
+    String? serverInstanceId,
+  }) {
+    return {
+      ...buildBootstrapBody(
+        serverHub: serverHub,
+        home: home,
+        serverInstanceId: serverInstanceId,
+      ),
+      'action': 'disable',
     };
   }
 }

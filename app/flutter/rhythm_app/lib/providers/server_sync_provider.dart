@@ -38,6 +38,11 @@ bool _sameEndpoint(HubEndpoint? left, HubEndpoint? right) {
   return left == right;
 }
 
+typedef ServerEndpointReachability = Future<bool> Function(
+  HubEndpoint endpoint,
+  String? authToken,
+);
+
 List<RhythmSceneDefinition> _userVisibleScenes(
   Iterable<RhythmSceneDefinition> scenes,
 ) =>
@@ -77,6 +82,7 @@ class ServerSyncProvider extends ChangeNotifier {
   final RhythmConnection _connection;
   final RoomProvider _roomProvider;
   final HomeProvider _homeProvider;
+  final ServerEndpointReachability? _endpointReachability;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -108,6 +114,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Last known server hub for auto-connect.
   Hub? _serverHub;
+
+  /// Endpoint currently selected for the SDK connection.
+  HubEndpoint? _activeConnectionEndpoint;
+  bool _remoteFailoverInProgress = false;
+  DateTime _lastRemoteFailoverAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _remoteFailoverCooldown = Duration(seconds: 10);
 
   /// All hub infos from the last server hello: [{type, address, connected}, ...].
   List<Map<String, dynamic>> _lastHubInfos = [];
@@ -226,6 +238,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// The server entry currently selected for the active connection.
   Hub? get connectedServerHub => _serverHub;
+
+  /// Endpoint currently selected for the active SDK connection.
+  HubEndpoint? get activeConnectionEndpoint => _activeConnectionEndpoint;
 
   /// Firmware version reported by server.
   String get firmwareVersion => _firmwareVersion;
@@ -801,9 +816,11 @@ class ServerSyncProvider extends ChangeNotifier {
     required RhythmConnection connection,
     required RoomProvider roomProvider,
     required HomeProvider homeProvider,
+    @visibleForTesting ServerEndpointReachability? endpointReachability,
   })  : _connection = connection,
         _roomProvider = roomProvider,
-        _homeProvider = homeProvider {
+        _homeProvider = homeProvider,
+        _endpointReachability = endpointReachability {
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
@@ -884,6 +901,7 @@ class ServerSyncProvider extends ChangeNotifier {
         _serverHub = auth.hub;
         final endpoint =
             await _selectConnectionEndpoint(auth.hub, auth.authToken);
+        _activeConnectionEndpoint = endpoint;
         _connection.connect(
           endpoint.host,
           port: endpoint.port,
@@ -895,6 +913,7 @@ class ServerSyncProvider extends ChangeNotifier {
       debugPrint('ServerSync: connectIfAvailable — hub removed, disconnecting');
       final removedHub = _serverHub;
       _serverHub = null;
+      _activeConnectionEndpoint = null;
       Future.microtask(() async {
         final localServer = LocalRhythmServerService.instance;
         if (removedHub != null &&
@@ -1007,6 +1026,11 @@ class ServerSyncProvider extends ChangeNotifier {
     HubEndpoint endpoint,
     String? authToken,
   ) async {
+    final reachability = _endpointReachability;
+    if (reachability != null) {
+      return reachability(endpoint, authToken);
+    }
+
     try {
       await RhythmAuthApi(
         baseUrl: endpoint.baseUrl,
@@ -1520,9 +1544,69 @@ class ServerSyncProvider extends ChangeNotifier {
       _triagePendingCount = 0;
       _triagePendingDevices = 0;
       _triagePendingRooms = 0;
+      _maybeFailOverToRemoteEndpoint(current);
     }
 
     notifyListeners();
+  }
+
+  void _maybeFailOverToRemoteEndpoint(RhythmConnectionState current) {
+    if (!FeatureFlags.remoteAccessTunnel ||
+        _remoteFailoverInProgress ||
+        (current != RhythmConnectionState.reconnecting &&
+            current != RhythmConnectionState.disconnected)) {
+      return;
+    }
+
+    final hub = _serverHub;
+    final remote = hub?.remoteEndpoint;
+    final activeEndpoint = _activeConnectionEndpoint;
+    if (hub == null ||
+        remote == null ||
+        !_sameEndpoint(activeEndpoint, hub.endpoint)) {
+      return;
+    }
+
+    final token = hub.token?.trim();
+    if (token == null || token.isEmpty) {
+      debugPrint(
+        'ServerSync: LAN endpoint lost but remote access has no saved owner token',
+      );
+      return;
+    }
+
+    final now = DateTime.now();
+    if (now.difference(_lastRemoteFailoverAt) < _remoteFailoverCooldown) {
+      return;
+    }
+    _lastRemoteFailoverAt = now;
+    _remoteFailoverInProgress = true;
+
+    Future.microtask(() async {
+      try {
+        final currentHub = _serverHub;
+        if (currentHub?.id != hub.id ||
+            !_sameEndpoint(_activeConnectionEndpoint, hub.endpoint)) {
+          return;
+        }
+
+        debugPrint(
+          'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
+          'lost, reconnecting through ${remote.host}:${remote.port}',
+        );
+        _activeConnectionEndpoint = remote;
+        await _connection.connect(
+          remote.host,
+          port: remote.port,
+          useSsl: remote.useSsl,
+          authToken: token,
+        );
+      } catch (error) {
+        debugPrint('ServerSync: remote access failover failed: $error');
+      } finally {
+        _remoteFailoverInProgress = false;
+      }
+    });
   }
 
   // ============================================================================

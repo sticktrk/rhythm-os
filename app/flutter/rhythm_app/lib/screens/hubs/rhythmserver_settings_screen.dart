@@ -30,6 +30,7 @@ import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ota_service.dart';
 import '../../services/remote_access_service.dart';
+import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
@@ -105,7 +106,6 @@ class RhythmServerSettingsScreen extends StatefulWidget {
 
 class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     with SingleTickerProviderStateMixin {
-  late final RhythmDiagnosticsApi _client;
   final OtaService _otaService = OtaService();
 
   bool _isOnline = false;
@@ -147,14 +147,17 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         _ => Icons.developer_board,
       };
 
+  Hub get _currentHub {
+    final hubs = context.read<HomeProvider>().currentHomeHubs;
+    return hubs
+        .where((hub) => hub.id == widget.hub.id)
+        .cast<Hub?>()
+        .firstWhere((hub) => hub != null, orElse: () => widget.hub)!;
+  }
+
   @override
   void initState() {
     super.initState();
-    _client = RhythmDiagnosticsApi(
-      host: widget.hub.endpoint.host,
-      port: widget.hub.endpoint.port,
-      authToken: widget.hub.token,
-    );
 
     _glowController = AnimationController(
       duration: const Duration(milliseconds: 2000),
@@ -170,6 +173,18 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     unawaited(_loadOtaSupport());
 
     AnalyticsService().logScreenView('rhythmserver_settings');
+  }
+
+  Future<ResolvedServerEndpoint> _resolveServerEndpoint() {
+    return ServerEndpointResolver.resolve(
+      _currentHub,
+      syncProvider: context.read<ServerSyncProvider>(),
+    );
+  }
+
+  Future<RhythmDiagnosticsApi> _diagnosticsClient() async {
+    final resolved = await _resolveServerEndpoint();
+    return resolved.diagnosticsApi();
   }
 
   @override
@@ -209,19 +224,22 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Future<void> _loadOtaSupport() async {
     final syncProvider = context.read<ServerSyncProvider>();
+    final resolved = await _resolveServerEndpoint();
     await _otaService.initialize(
-      host: widget.hub.endpoint.host,
-      port: widget.hub.endpoint.port,
+      host: resolved.endpoint.host,
+      port: resolved.endpoint.port,
+      useSsl: resolved.endpoint.useSsl,
       fallbackCurrentVersion: syncProvider.firmwareVersion,
       fallbackPlatformType: syncProvider.serverPlatformType,
       fallbackPlatformContext: syncProvider.serverPlatformContext,
       resetCheckStateOnInitialize: true,
-      authToken: widget.hub.token,
+      authToken: resolved.hub.token,
     );
   }
 
   Future<void> _checkHealth() async {
-    final online = await _client.healthCheck();
+    final client = await _diagnosticsClient();
+    final online = await client.healthCheck();
     if (mounted) {
       setState(() {
         _isOnline = online;
@@ -566,7 +584,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ),
               const SizedBox(height: 4),
               Text(
-                widget.hub.endpoint.host,
+                _currentHub.endpoint.host,
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.7),
                   fontSize: 12,
@@ -721,7 +739,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   Future<void> _showServerSettings() {
     return Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => _RhythmServerAdvancedSettingsScreen(hub: widget.hub),
+        builder: (_) => _RhythmServerAdvancedSettingsScreen(hub: _currentHub),
       ),
     );
   }
@@ -912,7 +930,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (_isSubmittingDebugBundle) return;
     setState(() => _isSubmittingDebugBundle = true);
     try {
-      await showReportBugFlow(context, serverHub: widget.hub);
+      await showReportBugFlow(context, serverHub: _currentHub);
     } finally {
       if (mounted) {
         setState(() => _isSubmittingDebugBundle = false);
@@ -1076,22 +1094,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           _buildOtaButton(
             label: 'Install Update',
             icon: Icons.download_rounded,
-            onTap: () {
-              AnalyticsService().logOtaUpdateStarted(
-                currentVersion,
-                release.version,
-              );
-              _otaService.startUpdate(
-                widget.hub.endpoint.host,
-                port: widget.hub.endpoint.port,
-                authToken: widget.hub.token,
-              );
-              _OtaUpdateOverlay.show(
-                context,
-                otaService: _otaService,
-                connection: context.read<ServerSyncProvider>().connection,
-              );
-            },
+            onTap: () => unawaited(
+              _startOtaUpdate(currentVersion, release.version),
+            ),
           ),
         ];
 
@@ -1282,6 +1287,30 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         : 'v$version';
   }
 
+  Future<void> _startOtaUpdate(
+    String currentVersion,
+    String targetVersion,
+  ) async {
+    final resolved = await _resolveServerEndpoint();
+    if (!mounted) return;
+
+    AnalyticsService().logOtaUpdateStarted(
+      currentVersion,
+      targetVersion,
+    );
+    unawaited(_otaService.startUpdate(
+      resolved.endpoint.host,
+      port: resolved.endpoint.port,
+      useSsl: resolved.endpoint.useSsl,
+      authToken: resolved.hub.token,
+    ));
+    _OtaUpdateOverlay.show(
+      context,
+      otaService: _otaService,
+      connection: context.read<ServerSyncProvider>().connection,
+    );
+  }
+
   Widget _buildOtaButton({
     required String label,
     IconData? icon,
@@ -1461,7 +1490,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     setState(() => _isRebooting = true);
 
-    final dispatched = await _client.reboot();
+    final client = await _diagnosticsClient();
+    final dispatched = await client.reboot();
 
     if (!mounted) return;
 
@@ -1479,7 +1509,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
     final cameBack = await _RebootOverlay.show(
       context,
-      client: _client,
+      client: client,
       headerTitle: _headerTitle,
     );
     if (!mounted) return;
@@ -1685,7 +1715,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     setState(() => _isFactoryResetting = true);
 
     final syncProvider = context.read<ServerSyncProvider>();
-    final success = await _client.factoryReset(
+    final client = await _diagnosticsClient();
+    final success = await client.factoryReset(
       platformType: syncProvider.serverPlatformType,
       platformContext: syncProvider.serverPlatformContext,
     );
@@ -1995,17 +2026,20 @@ class _RhythmServerAdvancedSettingsScreenState
     unawaited(_loadAuthStatus());
   }
 
-  RhythmAuthApi _authApi() {
-    return RhythmAuthApi(
-      baseUrl: widget.hub.endpoint.baseUrl,
-      authToken: _authToken,
-    );
+  Future<RhythmAuthApi> _authApi({bool localOnly = false}) async {
+    final resolved = localOnly
+        ? ServerEndpointResolver.local(_currentHub)
+        : await ServerEndpointResolver.resolve(
+            _currentHub,
+            syncProvider: context.read<ServerSyncProvider>(),
+          );
+    return resolved.authApi(authToken: _authToken);
   }
 
   Future<void> _loadAuthStatus() async {
     setState(() => _isAuthLoading = true);
     try {
-      final status = await _authApi().getStatus();
+      final status = await (await _authApi()).getStatus();
       if (!mounted) return;
       setState(() {
         _authStatus = status;
@@ -2045,7 +2079,10 @@ class _RhythmServerAdvancedSettingsScreenState
         await homeProvider.updateHub(result.updatedHub);
         _showSnackBar('Remote access enabled.');
       } else {
-        final updatedHub = await remoteAccess.disableForHub(hub);
+        final updatedHub = await remoteAccess.disableForHub(
+          hub,
+          home: homeProvider.currentHome,
+        );
         await homeProvider.updateHub(updatedHub);
         _showSnackBar('Remote access disabled.');
       }
@@ -2076,7 +2113,7 @@ class _RhythmServerAdvancedSettingsScreenState
       return hub;
     }
 
-    final claim = await _authApi().claimOwnerToken();
+    final claim = await (await _authApi(localOnly: true)).claimOwnerToken();
     final token = claim.token.trim();
     if (token.isEmpty) {
       throw StateError('Server returned an empty owner token.');

@@ -5,6 +5,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../services/hue/hue_service_locator.dart';
+import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/device_detail_sheet.dart';
 import 'matter_add_method.dart';
 import 'matter_device_add_screen.dart';
@@ -25,10 +26,16 @@ Future<void> startMatterPairingFlow(
   );
   if (!context.mounted || addMethod == null) return;
 
+  final serverEndpoint = await ServerEndpointResolver.resolve(
+    serverHub,
+    syncProvider: syncProvider,
+  );
+  if (!context.mounted) return;
+
   final pairingResult = await MatterDeviceAddScreen.show(
     context,
-    endpoint: serverHub.endpoint,
-    authToken: serverHub.token,
+    endpoint: serverEndpoint.endpoint,
+    authToken: serverEndpoint.hub.token,
     addMethod: addMethod,
   );
   if (!context.mounted || pairingResult == null) return;
@@ -40,10 +47,10 @@ Future<void> startMatterPairingFlow(
   }
   if (!context.mounted) return;
 
-  final resolved = await _resolvePairedMatterDevice(context, pairingResult);
+  final pairedDevice = await _resolvePairedMatterDevice(context, pairingResult);
   if (!context.mounted) return;
 
-  if (resolved == null) {
+  if (pairedDevice == null) {
     final allowsRoomless = syncProvider.supportsMatterRoomlessDevices;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -59,8 +66,8 @@ Future<void> startMatterPairingFlow(
 
   await showDeviceNodeAssignmentFlow(
     context,
-    device: resolved.device,
-    currentParentNodeId: resolved.parentNodeId,
+    device: pairedDevice.device,
+    currentParentNodeId: pairedDevice.parentNodeId,
     allowNoRoom: syncProvider.supportsMatterRoomlessDevices,
   );
 }

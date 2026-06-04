@@ -37,6 +37,36 @@ void main() {
       expect(body, {'hub_id': 'hub-1'});
     });
 
+    test('bootstrap body includes server instance id when available', () {
+      final body = RemoteAccessService.buildBootstrapBody(
+        serverHub: _serverHub(),
+        serverInstanceId: ' srv-test-instance ',
+      );
+
+      expect(body, {
+        'hub_id': 'hub-1',
+        'server_instance_id': 'srv-test-instance',
+      });
+    });
+
+    test('teardown body marks the bootstrap function for disable', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+
+      final body = RemoteAccessService.buildTeardownBody(
+        serverHub: _serverHub(),
+        home: home,
+      );
+
+      expect(body['hub_id'], 'hub-1');
+      expect(body['action'], 'disable');
+      expect(body['home'], isA<Map<String, dynamic>>());
+      expect(body['server_hub'], isA<Map<String, dynamic>>());
+    });
+
     test('activation succeeds when the local connector is healthy', () async {
       final service = RemoteAccessService.testing();
       final api = _FakeRemoteAccessApi(
@@ -92,6 +122,7 @@ void main() {
     test('disable falls back to the remote endpoint when LAN is unreachable',
         () async {
       final calls = <String>[];
+      final supabase = _FakeSupabaseClient();
       final service = RemoteAccessService.testing(
         apiFactory: ({required String baseUrl, String? authToken}) {
           return _FakeRemoteAccessApi(
@@ -104,6 +135,7 @@ void main() {
             },
           );
         },
+        supabaseClientFactory: () => supabase,
       );
       final hub = _serverHub(
         remoteEndpoint: const HubEndpoint(
@@ -119,6 +151,16 @@ void main() {
         'http://192.168.5.123:54448|owner-token',
         'https://hub.devices.rhythm.lighting:443|owner-token',
       ]);
+      expect(supabase.functions.invocations, hasLength(1));
+      expect(
+        supabase.functions.invocations.single.name,
+        'remote-access-bootstrap',
+      );
+      expect(supabase.functions.invocations.single.body, {
+        'hub_id': 'hub-1',
+        'server_instance_id': 'endpoint:http://192.168.5.123:54448',
+        'action': 'disable',
+      });
       expect(updated.remoteEndpoint, isNull);
       expect(updated.pendingSync, isTrue);
     });
@@ -126,6 +168,7 @@ void main() {
     test('disable surfaces the endpoint failure when no fallback exists',
         () async {
       final calls = <String>[];
+      final supabase = _FakeSupabaseClient();
       final service = RemoteAccessService.testing(
         apiFactory: ({required String baseUrl, String? authToken}) {
           return _FakeRemoteAccessApi(
@@ -136,6 +179,7 @@ void main() {
             },
           );
         },
+        supabaseClientFactory: () => supabase,
       );
 
       await expectLater(
@@ -143,6 +187,7 @@ void main() {
         throwsA(isA<RhythmApiException>()),
       );
       expect(calls, ['http://192.168.5.123:54448']);
+      expect(supabase.functions.invocations, isEmpty);
     });
   });
 }
@@ -220,4 +265,29 @@ class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
       connectorHealthy: false,
     );
   }
+}
+
+class _FakeSupabaseClient {
+  final functions = _FakeFunctions();
+}
+
+class _FakeFunctions {
+  final invocations = <({String name, Map<String, dynamic> body})>[];
+
+  Future<_FakeFunctionResponse> invoke(
+    String name, {
+    Object? body,
+  }) async {
+    invocations.add((
+      name: name,
+      body: Map<String, dynamic>.from(body as Map),
+    ));
+    return const _FakeFunctionResponse({'status': 'ok'});
+  }
+}
+
+class _FakeFunctionResponse {
+  const _FakeFunctionResponse(this.data);
+
+  final Object? data;
 }

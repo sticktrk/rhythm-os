@@ -359,12 +359,35 @@ class _FakeRhythmConnection extends RhythmConnection {
   bool isConnected = true;
   int reconnectCalls = 0;
   bool? lastReconnectAuthoritative;
+  final List<
+      ({
+        String host,
+        int port,
+        bool useSsl,
+        String? authToken,
+      })> connectCalls = [];
 
   @override
   bool get connected => isConnected;
 
   @override
   RhythmServerApi get api => fakeApi;
+
+  @override
+  Future<void> connect(
+    String host, {
+    int port = 80,
+    bool useSsl = false,
+    String? webBaseUrl,
+    String? authToken,
+  }) async {
+    connectCalls.add((
+      host: host,
+      port: port,
+      useSsl: useSsl,
+      authToken: authToken,
+    ));
+  }
 
   @override
   Future<void> reconnect({bool authoritative = false}) async {
@@ -428,6 +451,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   @override
   Stream<RhythmConnectionState> get connectionStateStream =>
       _connectionStateController.stream;
+
+  void emitConnectionState(RhythmConnectionState state) {
+    _connectionStateController.add(state);
+  }
 
   void emitHello(RhythmHello hello) {
     _helloController.add(hello);
@@ -2081,6 +2108,53 @@ void main() {
 
       expect(connection.reconnectCalls, 1);
       expect(connection.lastReconnectAuthoritative, isTrue);
+    });
+
+    test('fails over from LAN to remote endpoint when LAN reconnects',
+        () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '127.0.0.1',
+            port: 54448,
+            token: 'owner-token',
+            remoteEndpoint: const HubEndpoint(
+              host: 'server.rhythm.lighting',
+              port: 443,
+              useSsl: true,
+            ),
+          ),
+        ]),
+        endpointReachability: (endpoint, authToken) async {
+          expect(authToken, 'owner-token');
+          return endpoint.host == '127.0.0.1';
+        },
+      );
+      addTearDown(provider.dispose);
+
+      provider.connectIfAvailable();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(connection.connectCalls, hasLength(1));
+      expect(connection.connectCalls.single.host, '127.0.0.1');
+      expect(connection.connectCalls.single.authToken, 'owner-token');
+
+      connection.emitConnectionState(RhythmConnectionState.reconnecting);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectCalls, hasLength(2));
+      expect(connection.connectCalls.last.host, 'server.rhythm.lighting');
+      expect(connection.connectCalls.last.port, 443);
+      expect(connection.connectCalls.last.useSsl, isTrue);
+      expect(connection.connectCalls.last.authToken, 'owner-token');
     });
 
     test('refreshes authoritative state when preview tick is missing',

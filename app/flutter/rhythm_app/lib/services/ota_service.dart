@@ -448,6 +448,7 @@ class OtaService extends ChangeNotifier {
   String? _host;
   String? _authToken;
   int _port = 80;
+  bool _useSsl = false;
 
   OtaState _state = OtaState.idle;
   _OtaStrategy _strategy = _OtaStrategy.unknown;
@@ -507,13 +508,14 @@ class OtaService extends ChangeNotifier {
   Future<void> initialize({
     required String host,
     int port = 80,
+    bool useSsl = false,
     String? fallbackCurrentVersion,
     String? fallbackPlatformType,
     String? fallbackPlatformContext,
     bool resetCheckStateOnInitialize = false,
     String? authToken,
   }) async {
-    _configureClient(host, port, authToken);
+    _configureClient(host, port, useSsl, authToken);
 
     final fallbackVersion = _normalizeVersion(fallbackCurrentVersion);
     if (fallbackVersion != null) {
@@ -643,9 +645,10 @@ class OtaService extends ChangeNotifier {
   Future<void> startUpdate(
     String deviceIp, {
     int port = 80,
+    bool useSsl = false,
     String? authToken,
   }) async {
-    _configureClient(deviceIp, port, authToken ?? _authToken);
+    _configureClient(deviceIp, port, useSsl, authToken ?? _authToken);
     if (_strategy == _OtaStrategy.selfPull) {
       await _startSelfPullUpdate();
       return;
@@ -662,7 +665,13 @@ class OtaService extends ChangeNotifier {
 
     _updateSub?.cancel();
     _updateSub = _legacyApi
-        .startUpdate(release, deviceHost: deviceIp, port: port)
+        .startUpdate(
+      release,
+      deviceHost: deviceIp,
+      port: port,
+      useSsl: useSsl,
+      authToken: authToken ?? _authToken,
+    )
         .listen(
       _onLegacyProgress,
       onError: (Object error) {
@@ -1045,9 +1054,10 @@ class OtaService extends ChangeNotifier {
     }
   }
 
-  void _configureClient(String host, int port, String? authToken) {
+  void _configureClient(String host, int port, bool useSsl, String? authToken) {
     if (_host == host &&
         _port == port &&
+        _useSsl == useSsl &&
         _authToken == authToken &&
         _dio != null) {
       return;
@@ -1055,10 +1065,12 @@ class OtaService extends ChangeNotifier {
 
     _host = host;
     _port = port;
+    _useSsl = useSsl;
     _authToken = authToken;
     _dio?.close();
+    final scheme = useSsl ? 'https' : 'http';
     _dio = Dio(BaseOptions(
-      baseUrl: port == 80 ? 'http://$host/' : 'http://$host:$port/',
+      baseUrl: '$scheme://$host:$port/',
       connectTimeout: const Duration(seconds: 5),
       receiveTimeout: const Duration(seconds: 10),
       headers: _bearerAuthHeaders(authToken),

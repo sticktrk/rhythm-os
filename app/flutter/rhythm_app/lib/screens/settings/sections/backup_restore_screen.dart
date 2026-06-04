@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart' show Hub, HubType;
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmBundleApi, RhythmConnectionState;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 
 import '../../../providers/home_provider.dart';
 import '../../../providers/room_page_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
 import '../../../services/cloud_backup_service.dart';
+import '../../../services/server_endpoint_resolver.dart';
 import '../../../services/settings_service.dart';
 import '../../triage_screen.dart';
 import '../../../widgets/settings_row.dart';
@@ -523,13 +523,14 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
     _showProgressDialog(context, message: 'Restoring backup...');
     try {
+      final resolved = await ServerEndpointResolver.resolve(
+        serverHub,
+        syncProvider: serverSync,
+      );
       debugPrint(
-        'BackupRestoreScreen: manual restore using ${serverHub.endpoint.baseUrl}',
+        'BackupRestoreScreen: manual restore using ${resolved.baseUrl}',
       );
-      final api = RhythmBundleApi(
-        baseUrl: serverHub.endpoint.baseUrl,
-        authToken: serverHub.token,
-      );
+      final api = resolved.bundleApi();
       await api.putBackupBundle(snapshot.backupBundle);
       final scopeKey = RoomPageProvider.layoutScopeFor(
         home: homeProvider.currentHome,

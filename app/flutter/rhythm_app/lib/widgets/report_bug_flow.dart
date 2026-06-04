@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmApiException, RhythmDiagnosticsApi;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmApiException;
 
 import '../providers/server_sync_provider.dart';
 import '../services/debug_bundle_submission_service.dart';
+import '../services/server_endpoint_resolver.dart';
 import 'solar_orbit.dart';
 
 const Color _teal = Color(0xFF26C6DA);
@@ -136,11 +136,11 @@ Future<void> showReportBugFlow(
       final serverVersion = syncProvider.firmwareVersion == '0.0.0'
           ? 'Unknown'
           : _formatVersion(syncProvider.firmwareVersion);
-      final client = RhythmDiagnosticsApi(
-        host: serverHub.endpoint.host,
-        port: serverHub.endpoint.port,
-        authToken: serverHub.token,
+      final resolved = await ServerEndpointResolver.resolve(
+        serverHub,
+        syncProvider: syncProvider,
       );
+      final client = resolved.diagnosticsApi();
       final bundle = await client.downloadDebugBundle();
       submission = await DebugBundleSubmissionService.instance.submit(
         serverHub: serverHub,

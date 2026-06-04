@@ -15,6 +15,7 @@ import 'api/hybrid_client.dart';
 import 'onboarding/onboarding_flow.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
+import 'services/app_log_service.dart';
 import 'services/entitlements_service.dart';
 import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
@@ -32,6 +33,7 @@ import 'config/supabase_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  AppLogService.instance.install();
   if (kDebugMode) {
     RhythmSdk.enableLogging(level: Level.FINE);
   }
@@ -56,6 +58,7 @@ void main() async {
   // Initialize SettingsService BEFORE Backend (for onboardingComplete check)
   // This also performs one-time migration from SharedPreferences to Hive
   await SettingsService.instance.initialize();
+  await AppLogService.instance.initializeStorage();
   // Local-only recent servers list. Initialized here so the connect screen
   // can render cached entries before HomeProvider/mDNS come up.
   await RecentServersService.instance.initialize();

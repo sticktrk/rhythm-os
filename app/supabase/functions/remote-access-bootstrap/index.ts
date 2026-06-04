@@ -44,6 +44,23 @@ type HubRow = {
   type: string
 }
 
+type RemoteAccessAction = 'enable' | 'disable'
+
+type RemoteAccessEndpoint = {
+  host: string
+  port: number
+  useSsl: boolean
+}
+
+type RemoteAccessMapping = {
+  hub_id: string
+  home_id: string
+  hostname: string
+  tunnel_id: string
+  tunnel_name: string
+  server_instance_id?: string | null
+}
+
 Deno.serve((req) =>
   withAuthenticatedRequest(req, async ({ userId, adminClient }) => {
     if (req.method !== 'POST') {
@@ -55,12 +72,27 @@ Deno.serve((req) =>
     if (!hubId) {
       return jsonResponse({ error: 'Missing hub_id' }, 400)
     }
+    const actionResult = readRemoteAccessAction(body)
+    if (actionResult instanceof Response) return actionResult
+    const action = actionResult
 
     const ensured = await ensureServerHubRows(adminClient, userId, hubId, body)
     if (ensured instanceof Response) return ensured
     const { hub } = ensured
+    const serverInstanceId = readServerInstanceId(body)
+    const serverEndpoint = readServerEndpoint(body)
 
     try {
+      if (action === 'disable') {
+        return await disableRemoteAccess({
+          adminClient,
+          hubId,
+          homeId: hub.home_id,
+          serverInstanceId,
+          serverEndpoint,
+        })
+      }
+
       const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID')
       const zoneId = requireEnv('CLOUDFLARE_ZONE_ID')
       const apiToken = requireCloudflareApiToken()
@@ -68,7 +100,12 @@ Deno.serve((req) =>
       const originService =
         readEnv('RHYTHM_REMOTE_ACCESS_ORIGIN', DEFAULT_ORIGIN_SERVICE)
 
-      const existing = await readExistingMapping(adminClient, hubId)
+      const existing = await readExistingMapping(adminClient, {
+        hubId,
+        homeId: hub.home_id,
+        serverInstanceId,
+        serverEndpoint,
+      })
       const tunnelName = existing?.tunnel_name ?? `rhythm-${hubId}`
       const desiredHostname = `${hubId}.${domain}`.toLowerCase()
       const hostname = hostnameForDomain(
@@ -96,13 +133,14 @@ Deno.serve((req) =>
       )
 
       const remoteEndpoint = endpointForHostname(hostname)
-      await adminClient.from('hub_remote_access').upsert({
-        hub_id: hubId,
-        home_id: hub.home_id,
+      await saveRemoteAccessMapping(adminClient, {
+        hubId,
+        existingHubId: existing?.hub_id,
+        homeId: hub.home_id,
         hostname,
-        tunnel_id: tunnel.id,
-        tunnel_name: tunnel.name,
-        updated_at: new Date().toISOString(),
+        tunnelId: tunnel.id,
+        tunnelName: tunnel.name,
+        serverInstanceId,
       })
       await adminClient
         .from('hubs')
@@ -117,6 +155,7 @@ Deno.serve((req) =>
         remote_endpoint: remoteEndpoint,
         tunnel_id: tunnel.id,
         tunnel_name: tunnel.name,
+        server_instance_id: serverInstanceId,
         connector_token: connectorToken,
       })
     } catch (error) {
@@ -124,6 +163,75 @@ Deno.serve((req) =>
     }
   })
 )
+
+function readRemoteAccessAction(body: JsonObject): RemoteAccessAction | Response {
+  const action = readString(body, 'action')
+  if (!action || action === 'enable') return 'enable'
+  if (action === 'disable') return 'disable'
+  return jsonResponse({ error: 'Invalid action' }, 400)
+}
+
+function readServerInstanceId(body: JsonObject): string | null {
+  const raw =
+    readString(body, 'server_instance_id') ??
+    readString(body, 'remote_access_device_key')
+  const value = raw?.trim().toLowerCase()
+  if (!value) return null
+  return value.slice(0, 256)
+}
+
+function readServerEndpoint(body: JsonObject): RemoteAccessEndpoint | null {
+  const hubSnapshot = readJsonObject(body, 'server_hub')
+  if (!hubSnapshot) return null
+  try {
+    return normalizeEndpoint(hubSnapshot, 'endpoint')
+  } catch (_) {
+    return null
+  }
+}
+
+async function disableRemoteAccess({
+  adminClient,
+  hubId,
+  homeId,
+  serverInstanceId,
+  serverEndpoint,
+}: {
+  adminClient: any
+  hubId: string
+  homeId: string
+  serverInstanceId: string | null
+  serverEndpoint: RemoteAccessEndpoint | null
+}): Promise<Response> {
+  const existing = await readExistingMapping(adminClient, {
+    hubId,
+    homeId,
+    serverInstanceId,
+    serverEndpoint,
+  })
+
+  if (existing) {
+    const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID')
+    const zoneId = requireEnv('CLOUDFLARE_ZONE_ID')
+    const apiToken = requireCloudflareApiToken()
+
+    await deleteDnsRecordIfPresent(zoneId, apiToken, existing.hostname)
+    await deleteTunnelIfPresent(accountId, apiToken, existing.tunnel_id)
+    await deleteRemoteAccessMapping(adminClient, existing.hub_id)
+  }
+
+  await clearHubRemoteEndpoint(adminClient, hubId)
+  if (existing && existing.hub_id !== hubId) {
+    await clearHubRemoteEndpoint(adminClient, existing.hub_id)
+  }
+
+  return jsonResponse({
+    status: 'ok',
+    hub_id: hubId,
+    remote_access_deleted: existing != null,
+    server_instance_id: serverInstanceId,
+  })
+}
 
 async function ensureServerHubRows(
   adminClient: any,
@@ -319,7 +427,7 @@ function normalizeServerHubSnapshot(
 function normalizeEndpoint(
   data: JsonObject,
   key: string,
-): { host: string; port: number; useSsl: boolean } {
+): RemoteAccessEndpoint {
   const endpoint = readJsonObject(data, key)
   if (!endpoint) throw new RequestError(400, `Missing ${key}`)
 
@@ -339,9 +447,40 @@ function normalizeEndpoint(
 function normalizeOptionalEndpoint(
   data: JsonObject,
   key: string,
-): { host: string; port: number; useSsl: boolean } | null {
+): RemoteAccessEndpoint | null {
   if (!(key in data) || data[key] == null) return null
   return normalizeEndpoint(data, key)
+}
+
+function endpointsMatch(
+  storedEndpoint: unknown,
+  requestedEndpoint: RemoteAccessEndpoint,
+): boolean {
+  const parsed = parseEndpointValue(storedEndpoint)
+  if (!parsed) return false
+  return (
+    parsed.host.trim().toLowerCase() ===
+      requestedEndpoint.host.trim().toLowerCase() &&
+    parsed.port === requestedEndpoint.port &&
+    parsed.useSsl === requestedEndpoint.useSsl
+  )
+}
+
+function parseEndpointValue(value: unknown): RemoteAccessEndpoint | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+
+  const endpoint = value as JsonObject
+  const host = readString(endpoint, 'host')
+  const port = readInt(endpoint, 'port')
+  if (!host || port == null) return null
+
+  return {
+    host,
+    port,
+    useSsl: endpoint.useSsl === true || endpoint.use_ssl === true,
+  }
 }
 
 function readJsonObject(data: JsonObject, key: string): JsonObject | null {
@@ -390,19 +529,145 @@ class RequestError extends Error {
   }
 }
 
-async function readExistingMapping(adminClient: any, hubId: string): Promise<{
-  hostname: string
-  tunnel_id: string
-  tunnel_name: string
-} | null> {
+const REMOTE_ACCESS_MAPPING_SELECT =
+  'hub_id, home_id, hostname, tunnel_id, tunnel_name, server_instance_id'
+
+async function readExistingMapping(
+  adminClient: any,
+  params: {
+    hubId: string
+    homeId: string
+    serverInstanceId: string | null
+    serverEndpoint: RemoteAccessEndpoint | null
+  },
+): Promise<RemoteAccessMapping | null> {
+  const byHub = await readExistingMappingByHubId(adminClient, params.hubId)
+  if (byHub) return byHub
+
+  if (params.serverInstanceId) {
+    const { data, error } = await adminClient
+      .from('hub_remote_access')
+      .select(REMOTE_ACCESS_MAPPING_SELECT)
+      .eq('home_id', params.homeId)
+      .eq('server_instance_id', params.serverInstanceId)
+      .maybeSingle()
+
+    if (error) throw new Error(error.message)
+    if (data) return data as RemoteAccessMapping
+  }
+
+  if (params.serverEndpoint) {
+    return await readExistingMappingByHomeEndpoint(
+      adminClient,
+      params.homeId,
+      params.serverEndpoint,
+    )
+  }
+
+  return null
+}
+
+async function readExistingMappingByHubId(
+  adminClient: any,
+  hubId: string,
+): Promise<RemoteAccessMapping | null> {
   const { data, error } = await adminClient
     .from('hub_remote_access')
-    .select('hostname, tunnel_id, tunnel_name')
+    .select(REMOTE_ACCESS_MAPPING_SELECT)
     .eq('hub_id', hubId)
     .maybeSingle()
 
   if (error) throw new Error(error.message)
-  return data ?? null
+  return (data as RemoteAccessMapping | null) ?? null
+}
+
+async function readExistingMappingByHomeEndpoint(
+  adminClient: any,
+  homeId: string,
+  serverEndpoint: RemoteAccessEndpoint,
+): Promise<RemoteAccessMapping | null> {
+  const { data: hubs, error: hubsError } = await adminClient
+    .from('hubs')
+    .select('id, endpoint')
+    .eq('home_id', homeId)
+    .eq('type', 'server')
+
+  if (hubsError) throw new Error(hubsError.message)
+
+  const hubRows = (hubs as Array<{ id?: string; endpoint?: unknown }> | null) ??
+    []
+  const matchingHubIds = hubRows
+    .filter((hub) => hub.id && endpointsMatch(hub.endpoint, serverEndpoint))
+    .map((hub) => hub.id as string)
+
+  if (matchingHubIds.length === 0) return null
+
+  const { data, error } = await adminClient
+    .from('hub_remote_access')
+    .select(REMOTE_ACCESS_MAPPING_SELECT)
+    .in('hub_id', matchingHubIds)
+    .limit(1)
+
+  if (error) throw new Error(error.message)
+  const mappings = (data as RemoteAccessMapping[] | null) ?? []
+  return mappings[0] ?? null
+}
+
+async function saveRemoteAccessMapping(
+  adminClient: any,
+  params: {
+    hubId: string
+    existingHubId?: string
+    homeId: string
+    hostname: string
+    tunnelId: string
+    tunnelName: string
+    serverInstanceId: string | null
+  },
+): Promise<void> {
+  const payload = {
+    hub_id: params.hubId,
+    home_id: params.homeId,
+    hostname: params.hostname,
+    tunnel_id: params.tunnelId,
+    tunnel_name: params.tunnelName,
+    server_instance_id: params.serverInstanceId,
+    updated_at: new Date().toISOString(),
+  }
+
+  if (params.existingHubId) {
+    const { error } = await adminClient
+      .from('hub_remote_access')
+      .update(payload)
+      .eq('hub_id', params.existingHubId)
+    if (error) throw new Error(error.message)
+    return
+  }
+
+  const { error } = await adminClient.from('hub_remote_access').insert(payload)
+  if (error) throw new Error(error.message)
+}
+
+async function deleteRemoteAccessMapping(
+  adminClient: any,
+  hubId: string,
+): Promise<void> {
+  const { error } = await adminClient
+    .from('hub_remote_access')
+    .delete()
+    .eq('hub_id', hubId)
+  if (error) throw new Error(error.message)
+}
+
+async function clearHubRemoteEndpoint(
+  adminClient: any,
+  hubId: string,
+): Promise<void> {
+  const { error } = await adminClient
+    .from('hubs')
+    .update({ remote_endpoint: null })
+    .eq('id', hubId)
+  if (error) throw new Error(error.message)
 }
 
 async function createTunnel(
@@ -501,6 +766,40 @@ async function upsertDnsRecord(
   }, 'create Cloudflare DNS record')
 }
 
+async function deleteDnsRecordIfPresent(
+  zoneId: string,
+  apiToken: string,
+  hostname: string,
+): Promise<void> {
+  const query = new URLSearchParams({ type: 'CNAME', name: hostname })
+  const records = await cloudflare<DnsRecord[]>(
+    `/zones/${zoneId}/dns_records?${query.toString()}`,
+    apiToken,
+    undefined,
+    'list Cloudflare DNS records',
+  )
+
+  for (const record of records) {
+    await cloudflareDeleteIfPresent(
+      `/zones/${zoneId}/dns_records/${record.id}`,
+      apiToken,
+      'delete Cloudflare DNS record',
+    )
+  }
+}
+
+async function deleteTunnelIfPresent(
+  accountId: string,
+  apiToken: string,
+  tunnelId: string,
+): Promise<void> {
+  await cloudflareDeleteIfPresent(
+    `/accounts/${accountId}/cfd_tunnel/${tunnelId}`,
+    apiToken,
+    'delete Cloudflare tunnel',
+  )
+}
+
 async function cloudflare<T = unknown>(
   path: string,
   apiToken: string,
@@ -528,6 +827,32 @@ async function cloudflare<T = unknown>(
   return data.result
 }
 
+async function cloudflareDeleteIfPresent(
+  path: string,
+  apiToken: string,
+  operation: string,
+): Promise<void> {
+  const response = await fetch(`${CLOUDFLARE_API_BASE}${path}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      'Content-Type': 'application/json',
+    },
+  })
+
+  if (response.status === 404) return
+
+  const data = (await response.json()) as CloudflareResponse<unknown>
+  if (!response.ok || !data.success) {
+    const message = data.errors?.map((error) => error.message).filter(Boolean).join('; ')
+    throw new Error(
+      `Cloudflare ${operation} failed (${response.status}): ${
+        message || 'request failed'
+      }`,
+    )
+  }
+}
+
 function endpointForHostname(hostname: string): { host: string; port: number; useSsl: boolean } {
   return {
     host: hostname,
@@ -553,9 +878,7 @@ function hostnameForDomain(
   desiredHostname: string,
 ): string {
   if (!existingHostname) return desiredHostname
-
-  const normalized = existingHostname.toLowerCase()
-  return normalized === desiredHostname ? normalized : desiredHostname
+  return existingHostname.toLowerCase()
 }
 
 function requireEnv(name: string): string {

@@ -10,6 +10,7 @@ import '../backend/backend.dart';
 import '../providers/room_page_provider.dart';
 import 'account_cloud_sync_service.dart';
 import 'auth_service.dart';
+import 'server_endpoint_resolver.dart';
 import 'settings_service.dart';
 
 /// Single cloud snapshot for the signed-in user.
@@ -302,10 +303,8 @@ class CloudBackupService {
     required String reason,
     Home? home,
   }) async {
-    final api = RhythmBundleApi(
-      baseUrl: serverHub.endpoint.baseUrl,
-      authToken: serverHub.token,
-    );
+    final resolved = await ServerEndpointResolver.resolve(serverHub);
+    final api = resolved.bundleApi();
 
     // Persist the secret-bearing GET /api/backup payload. The PUT response is
     // intentionally redacted and must not replace the stored backup.

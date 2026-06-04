@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -6,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
 import '../backend/backend.dart';
+import 'app_log_service.dart';
 import 'auth_service.dart';
 
 class DebugBundleSubmission {
@@ -99,22 +103,16 @@ class DebugBundleSubmissionService {
 
     final packageInfo = await _loadPackageInfo();
     final submissionId = _uuid.v4();
-    final sanitizedFileName = _sanitizeFileName(bundle.fileName);
-    final storagePath = _buildStoragePath(
-      userId: userId,
-      submissionId: submissionId,
-      fileName: sanitizedFileName,
-    );
+    final uploadBundle = await _bundleWithAppLog(bundle);
+    late final _UploadedDebugBundle uploadedBundle;
 
     try {
-      await client.storage.from(bucketName).uploadBinary(
-            storagePath,
-            bundle.bytes,
-            fileOptions: FileOptions(
-              contentType: bundle.contentType,
-              upsert: false,
-            ),
-          );
+      uploadedBundle = await _uploadBundle(
+        client: client,
+        userId: userId,
+        submissionId: submissionId,
+        bundle: uploadBundle,
+      );
     } catch (error) {
       throw DebugBundleSubmissionException(
         _formatUploadError(error),
@@ -140,10 +138,10 @@ class DebugBundleSubmissionService {
             'server_port': serverHub.endpoint.port,
             'server_version': serverVersion,
             'server_platform_context': serverPlatformContext,
-            'bundle_storage_path': storagePath,
-            'bundle_file_name': sanitizedFileName,
-            'bundle_content_type': bundle.contentType,
-            'bundle_size_bytes': bundle.bytes.length,
+            'bundle_storage_path': uploadedBundle.storagePath,
+            'bundle_file_name': uploadedBundle.fileName,
+            'bundle_content_type': uploadedBundle.contentType,
+            'bundle_size_bytes': uploadedBundle.sizeBytes,
           })
           .select()
           .single();
@@ -151,7 +149,7 @@ class DebugBundleSubmissionService {
       submission =
           DebugBundleSubmission.fromRow(Map<String, dynamic>.from(row));
     } catch (error) {
-      await _deleteUploadedBundle(client, storagePath);
+      await _deleteUploadedBundle(client, uploadedBundle.storagePath);
       throw DebugBundleSubmissionException(
         _formatInsertError(error),
         cause: error,
@@ -185,12 +183,26 @@ class DebugBundleSubmissionService {
     }
 
     final packageInfo = await _loadPackageInfo();
+    final submissionId = _uuid.v4();
+    _UploadedDebugBundle? uploadedBundle;
+    try {
+      uploadedBundle = await _uploadBundle(
+        client: client,
+        userId: userId,
+        submissionId: submissionId,
+        bundle: await _appOnlyBundle(),
+      );
+    } catch (error) {
+      debugPrint(
+          'DebugBundleSubmissionService: app log upload skipped: $error');
+    }
 
     late final DebugBundleSubmission submission;
     try {
       final row = await client
           .from(tableName)
           .insert({
+            'id': submissionId,
             'user_id': userId,
             'user_email': auth.currentUser?.email,
             'is_anonymous': auth.isAnonymous,
@@ -205,6 +217,14 @@ class DebugBundleSubmissionService {
             if (serverVersion != null) 'server_version': serverVersion,
             if (serverPlatformContext != null)
               'server_platform_context': serverPlatformContext,
+            if (uploadedBundle != null)
+              'bundle_storage_path': uploadedBundle.storagePath,
+            if (uploadedBundle != null)
+              'bundle_file_name': uploadedBundle.fileName,
+            if (uploadedBundle != null)
+              'bundle_content_type': uploadedBundle.contentType,
+            if (uploadedBundle != null)
+              'bundle_size_bytes': uploadedBundle.sizeBytes,
           })
           .select()
           .single();
@@ -212,6 +232,9 @@ class DebugBundleSubmissionService {
       submission =
           DebugBundleSubmission.fromRow(Map<String, dynamic>.from(row));
     } catch (error) {
+      if (uploadedBundle != null) {
+        await _deleteUploadedBundle(client, uploadedBundle.storagePath);
+      }
       throw DebugBundleSubmissionException(
         _formatInsertError(error),
         cause: error,
@@ -225,6 +248,164 @@ class DebugBundleSubmissionService {
       githubIssueNumber: issueReport.number,
       githubIssueError: issueReport.error,
     );
+  }
+
+  Future<_UploadedDebugBundle> _uploadBundle({
+    required SupabaseClient client,
+    required String userId,
+    required String submissionId,
+    required RhythmDebugBundle bundle,
+  }) async {
+    final sanitizedFileName = _sanitizeFileName(bundle.fileName);
+    final storagePath = _buildStoragePath(
+      userId: userId,
+      submissionId: submissionId,
+      fileName: sanitizedFileName,
+    );
+
+    await client.storage.from(bucketName).uploadBinary(
+          storagePath,
+          bundle.bytes,
+          fileOptions: FileOptions(
+            contentType: bundle.contentType,
+            upsert: false,
+          ),
+        );
+
+    return _UploadedDebugBundle(
+      storagePath: storagePath,
+      fileName: sanitizedFileName,
+      contentType: bundle.contentType,
+      sizeBytes: bundle.bytes.length,
+    );
+  }
+
+  Future<RhythmDebugBundle> _bundleWithAppLog(RhythmDebugBundle bundle) async {
+    return _appendAppLogToBundle(
+      bundle: bundle,
+      appLogText: await AppLogService.instance.snapshotText(),
+    );
+  }
+
+  Future<RhythmDebugBundle> _appOnlyBundle() async {
+    final archive = Archive();
+    _addAppLogFiles(
+      archive,
+      await AppLogService.instance.snapshotText(),
+    );
+    return _encodeArchive(
+      archive: archive,
+      fileName: _appOnlyBundleFileName(),
+    );
+  }
+
+  @visibleForTesting
+  static RhythmDebugBundle appendAppLogToBundleForTesting({
+    required RhythmDebugBundle bundle,
+    required String appLogText,
+  }) {
+    return _appendAppLogToBundle(bundle: bundle, appLogText: appLogText);
+  }
+
+  static RhythmDebugBundle _appendAppLogToBundle({
+    required RhythmDebugBundle bundle,
+    required String appLogText,
+  }) {
+    final archive = _decodeTarGz(bundle.bytes) ??
+        (Archive()
+          ..addFile(ArchiveFile.bytes(
+            'server/${_safeArchiveFileName(bundle.fileName)}',
+            bundle.bytes,
+          ))
+          ..addFile(ArchiveFile.string(
+            'server/README.txt',
+            'The original server bundle could not be decoded by the app. '
+                'It is preserved as server/${_safeArchiveFileName(bundle.fileName)}.\n',
+          )));
+    _addAppLogFiles(archive, appLogText);
+    return _encodeArchive(
+      archive: archive,
+      fileName: _ensureTarGzFileName(bundle.fileName),
+    );
+  }
+
+  static Archive? _decodeTarGz(Uint8List bytes) {
+    try {
+      final tarBytes = GZipDecoder().decodeBytes(bytes);
+      final decoded = TarDecoder().decodeBytes(tarBytes, storeData: true);
+      return _cloneArchive(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Archive _cloneArchive(Archive source) {
+    final archive = Archive()..comment = source.comment;
+    for (final file in source) {
+      final copy = file.isDirectory
+          ? ArchiveFile.directory(file.name)
+          : file.isSymbolicLink
+              ? ArchiveFile.symlink(file.name, file.symbolicLink!)
+              : ArchiveFile.bytes(file.name, file.readBytes() ?? Uint8List(0));
+      copy
+        ..mode = file.mode
+        ..ownerId = file.ownerId
+        ..groupId = file.groupId
+        ..creationTime = file.creationTime
+        ..lastModTime = file.lastModTime
+        ..crc32 = file.crc32
+        ..comment = file.comment
+        ..compression = file.compression
+        ..compressionLevel = file.compressionLevel;
+      archive.addFile(copy);
+    }
+    return archive;
+  }
+
+  static void _addAppLogFiles(Archive archive, String appLogText) {
+    archive.addFile(ArchiveFile.string('app/app.log', appLogText));
+    archive.addFile(ArchiveFile.string(
+      'app/metadata.json',
+      jsonEncode({
+        'kind': 'rhythm_app_log',
+        'generated_at': DateTime.now().toUtc().toIso8601String(),
+        'path': 'app/app.log',
+      }),
+    ));
+  }
+
+  static RhythmDebugBundle _encodeArchive({
+    required Archive archive,
+    required String fileName,
+  }) {
+    final tarBytes = TarEncoder().encodeBytes(archive);
+    final gzipBytes = GZipEncoder().encodeBytes(tarBytes);
+    return RhythmDebugBundle(
+      fileName: fileName,
+      bytes: Uint8List.fromList(gzipBytes),
+      contentType: 'application/gzip',
+    );
+  }
+
+  static String _appOnlyBundleFileName() {
+    final timestamp = DateTime.now()
+        .toUtc()
+        .toIso8601String()
+        .replaceAll(RegExp(r'[^0-9A-Za-z]'), '');
+    return 'rhythm-app-debug-bundle-$timestamp.tar.gz';
+  }
+
+  static String _ensureTarGzFileName(String fileName) {
+    final safeName = _safeArchiveFileName(fileName);
+    if (safeName.endsWith('.tar.gz')) return safeName;
+    if (safeName.endsWith('.gz')) return safeName;
+    return '$safeName.tar.gz';
+  }
+
+  static String _safeArchiveFileName(String fileName) {
+    final leaf = fileName.split('/').last.split('\\').last.trim();
+    final sanitized = leaf.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    return sanitized.isEmpty ? 'rhythm-debug-bundle.tar.gz' : sanitized;
   }
 
   Future<_GitHubIssueReport> _createGitHubIssue(
@@ -395,6 +576,20 @@ class _GitHubIssueReport {
       error: _extractResponseMessage(data),
     );
   }
+}
+
+class _UploadedDebugBundle {
+  const _UploadedDebugBundle({
+    required this.storagePath,
+    required this.fileName,
+    required this.contentType,
+    required this.sizeBytes,
+  });
+
+  final String storagePath;
+  final String fileName;
+  final String contentType;
+  final int sizeBytes;
 }
 
 DateTime? _tryParseDateTime(dynamic value) {
