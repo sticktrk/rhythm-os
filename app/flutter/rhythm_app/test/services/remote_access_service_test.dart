@@ -37,62 +37,52 @@ void main() {
       expect(body, {'hub_id': 'hub-1'});
     });
 
-    test('activation waits for the public remote endpoint to answer', () async {
-      final checkedEndpoints = <String>[];
-      final service = RemoteAccessService.testing(
-        endpointHealthFactory: ({
-          required HubEndpoint endpoint,
-          String? authToken,
-        }) async {
-          checkedEndpoints.add('${endpoint.baseUrl}|$authToken');
-          return true;
-        },
-      );
+    test('activation succeeds when the local connector is healthy', () async {
+      final service = RemoteAccessService.testing();
       final api = _FakeRemoteAccessApi(
         baseUrl: 'http://192.168.5.123:54448',
-      );
-      const remoteEndpoint = HubEndpoint(
-        host: 'hub.rhythm.lighting',
-        port: 443,
-        useSsl: true,
       );
 
       final status = await service.waitForActivationForTesting(
         api: api,
-        remoteEndpoint: remoteEndpoint,
-        authToken: 'owner-token',
-        initialStatus: _remoteStatus(),
+        initialStatus: _remoteStatus(registeredConnections: 1),
       );
 
       expect(status.serviceRunning, isTrue);
-      expect(checkedEndpoints, ['https://hub.rhythm.lighting:443|owner-token']);
+      expect(status.connectorHealthy, isTrue);
     });
 
-    test('activation fails when the public remote endpoint is unreachable',
-        () async {
+    test('activation waits for the connector to become healthy', () async {
       final service = RemoteAccessService.testing(
         activationPollAttempts: 2,
-        endpointHealthFactory: ({
-          required HubEndpoint endpoint,
-          String? authToken,
-        }) async =>
-            false,
       );
       final api = _FakeRemoteAccessApi(
         baseUrl: 'http://192.168.5.123:54448',
         statuses: [_remoteStatus(registeredConnections: 1)],
       );
 
+      final status = await service.waitForActivationForTesting(
+        api: api,
+        initialStatus: _remoteStatus(),
+      );
+
+      expect(status.connectorHealthy, isTrue);
+      expect(api.statusCalls, 1);
+    });
+
+    test('activation fails when the connector never becomes healthy', () async {
+      final service = RemoteAccessService.testing(
+        activationPollAttempts: 2,
+      );
+      final api = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+        statuses: [_remoteStatus()],
+      );
+
       await expectLater(
         service.waitForActivationForTesting(
           api: api,
-          remoteEndpoint: const HubEndpoint(
-            host: 'hub.rhythm.lighting',
-            port: 443,
-            useSsl: true,
-          ),
-          authToken: 'owner-token',
-          initialStatus: _remoteStatus(registeredConnections: 1),
+          initialStatus: _remoteStatus(),
         ),
         throwsA(isA<RemoteAccessActivationException>()),
       );

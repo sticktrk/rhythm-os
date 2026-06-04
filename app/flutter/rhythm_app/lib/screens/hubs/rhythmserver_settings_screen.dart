@@ -2117,7 +2117,7 @@ class _RhythmServerAdvancedSettingsScreenState
     } catch (error) {
       _showSnackBar(
         enabled && error is RemoteAccessActivationException
-            ? 'Remote access tunnel is not reachable yet.'
+            ? 'Remote access tunnel is still starting.'
             : enabled
                 ? 'Could not enable remote access.'
                 : 'Could not disable remote access.',

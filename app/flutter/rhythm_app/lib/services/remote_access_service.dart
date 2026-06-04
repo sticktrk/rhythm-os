@@ -1,4 +1,3 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -16,11 +15,6 @@ typedef RemoteAccessApiFactory = RhythmRemoteAccessApi Function({
 });
 
 typedef RemoteAccessAuthStatusFactory = Future<RhythmAuthStatus> Function({
-  required HubEndpoint endpoint,
-  String? authToken,
-});
-
-typedef RemoteAccessEndpointHealthFactory = Future<bool> Function({
   required HubEndpoint endpoint,
   String? authToken,
 });
@@ -48,8 +42,9 @@ class RemoteAccessActivationException implements Exception {
 
   @override
   String toString() {
-    return 'Remote access tunnel did not become reachable '
-        '(service_running=${status.serviceRunning}, '
+    return 'Remote access tunnel did not finish starting '
+        '(configured=${status.configured}, '
+        'service_running=${status.serviceRunning}, '
         'connector_healthy=${status.connectorHealthy}, '
         'registered_connections=${status.registeredConnections}, '
         'metrics_error=${status.metricsError})';
@@ -60,14 +55,11 @@ class RemoteAccessService {
   RemoteAccessService._({
     RemoteAccessApiFactory? apiFactory,
     RemoteAccessAuthStatusFactory? authStatusFactory,
-    RemoteAccessEndpointHealthFactory? endpointHealthFactory,
     Duration activationPollDelay = const Duration(seconds: 2),
     int activationPollAttempts = 6,
     dynamic Function()? supabaseClientFactory,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _authStatusFactory = authStatusFactory ?? _defaultAuthStatusFactory,
-        _endpointHealthFactory =
-            endpointHealthFactory ?? _defaultEndpointHealthFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
         _supabaseClientFactory = supabaseClientFactory;
@@ -79,7 +71,6 @@ class RemoteAccessService {
   factory RemoteAccessService.testing({
     RemoteAccessApiFactory? apiFactory,
     RemoteAccessAuthStatusFactory? authStatusFactory,
-    RemoteAccessEndpointHealthFactory? endpointHealthFactory,
     Duration activationPollDelay = Duration.zero,
     int activationPollAttempts = 1,
     dynamic Function()? supabaseClientFactory,
@@ -87,7 +78,6 @@ class RemoteAccessService {
     return RemoteAccessService._(
       apiFactory: apiFactory,
       authStatusFactory: authStatusFactory,
-      endpointHealthFactory: endpointHealthFactory,
       activationPollDelay: activationPollDelay,
       activationPollAttempts: activationPollAttempts,
       supabaseClientFactory: supabaseClientFactory,
@@ -96,7 +86,6 @@ class RemoteAccessService {
 
   final RemoteAccessApiFactory _apiFactory;
   final RemoteAccessAuthStatusFactory _authStatusFactory;
-  final RemoteAccessEndpointHealthFactory _endpointHealthFactory;
   final Duration _activationPollDelay;
   final int _activationPollAttempts;
   final dynamic Function()? _supabaseClientFactory;
@@ -155,8 +144,6 @@ class RemoteAccessService {
     );
     final status = await _waitForActivation(
       api: api,
-      remoteEndpoint: remoteEndpoint,
-      authToken: serverHub.token,
       initialStatus: initialStatus,
     );
 
@@ -264,22 +251,16 @@ class RemoteAccessService {
   @visibleForTesting
   Future<RhythmRemoteAccessStatus> waitForActivationForTesting({
     required RhythmRemoteAccessApi api,
-    required HubEndpoint remoteEndpoint,
-    required String? authToken,
     required RhythmRemoteAccessStatus initialStatus,
   }) {
     return _waitForActivation(
       api: api,
-      remoteEndpoint: remoteEndpoint,
-      authToken: authToken,
       initialStatus: initialStatus,
     );
   }
 
   Future<RhythmRemoteAccessStatus> _waitForActivation({
     required RhythmRemoteAccessApi api,
-    required HubEndpoint remoteEndpoint,
-    required String? authToken,
     required RhythmRemoteAccessStatus initialStatus,
   }) async {
     var latest = initialStatus;
@@ -291,16 +272,16 @@ class RemoteAccessService {
         latest = await api.getStatus();
       }
 
-      final reachable = latest.configured &&
-          latest.serviceRunning &&
-          await _endpointHealthFactory(
-            endpoint: remoteEndpoint,
-            authToken: authToken,
-          );
-      if (reachable) return latest;
+      if (_isActivated(latest)) return latest;
     }
 
     throw RemoteAccessActivationException(latest);
+  }
+
+  bool _isActivated(RhythmRemoteAccessStatus status) {
+    return status.configured &&
+        status.serviceRunning &&
+        status.connectorHealthy;
   }
 
   List<HubEndpoint> _disableEndpoints(Hub serverHub) {
@@ -331,31 +312,6 @@ class RemoteAccessService {
     ).getStatus();
   }
 
-  static Future<bool> _defaultEndpointHealthFactory({
-    required HubEndpoint endpoint,
-    String? authToken,
-  }) async {
-    try {
-      final response = await Dio(
-        BaseOptions(
-          baseUrl: _normalizeBaseUrl(endpoint.baseUrl),
-          connectTimeout: const Duration(seconds: 5),
-          receiveTimeout: const Duration(seconds: 5),
-          headers: authToken?.trim().isNotEmpty == true
-              ? {'Authorization': 'Bearer ${authToken!.trim()}'}
-              : null,
-        ),
-      ).get<Map<String, dynamic>>('health');
-      return response.statusCode == 200;
-    } catch (error) {
-      debugPrint(
-        'RemoteAccessService: remote endpoint health failed for '
-        '${endpoint.baseUrl}: $error',
-      );
-      return false;
-    }
-  }
-
   static Map<String, dynamic> buildBootstrapBody({
     required Hub serverHub,
     Home? home,
@@ -368,10 +324,5 @@ class RemoteAccessService {
             AccountCloudSyncService.serverHubSnapshotPayload(serverHub),
       },
     };
-  }
-
-  static String _normalizeBaseUrl(String baseUrl) {
-    final trimmed = baseUrl.trim();
-    return trimmed.endsWith('/') ? trimmed : '$trimmed/';
   }
 }
