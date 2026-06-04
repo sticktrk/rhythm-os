@@ -37,3 +37,6 @@ verify_jwt = false
 
 [functions.matter-device-profiles]
 verify_jwt = false
+
+[functions.remote-access-bootstrap]
+verify_jwt = false
