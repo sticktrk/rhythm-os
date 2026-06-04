@@ -62,6 +62,18 @@ void main() {
       expect(server!.requests, ['/api/diag/debug-bundle']);
     });
 
+    test('downloadDebugBundle supports full base URLs', () async {
+      server = await _FakeDiagnosticsServer.start();
+      final api = RhythmDiagnosticsApi.fromBaseUrl(
+        baseUrl: 'http://127.0.0.1:${server!.port}',
+      );
+
+      final bundle = await api.downloadDebugBundle();
+
+      expect(bundle.bytes, [1, 2, 3, 4]);
+      expect(server!.requests, ['/api/diag/debug-bundle']);
+    });
+
     test('downloadDebugBundle uses its extended receive timeout', () async {
       server = await _FakeDiagnosticsServer.start(
         debugBundleDelay: const Duration(milliseconds: 60),

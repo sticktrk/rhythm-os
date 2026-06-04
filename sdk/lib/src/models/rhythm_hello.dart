@@ -11,6 +11,7 @@ import 'rhythm_settings.dart';
 /// Full state from the Rhythm server on connect (GET /api/state).
 class RhythmHello {
   final String version;
+  final String? serverInstanceId;
   final String platformType;
   final String platformContext;
   final int? listenPort;
@@ -39,6 +40,7 @@ class RhythmHello {
 
   const RhythmHello({
     required this.version,
+    this.serverInstanceId,
     required this.platformType,
     required this.platformContext,
     this.listenPort,
@@ -98,6 +100,7 @@ class RhythmHello {
         jsonMap(activeProfileMap?['effective']) ?? const <String, dynamic>{};
     return RhythmHello(
       version: json['version'] as String? ?? '0.0.0',
+      serverInstanceId: json['server_instance_id'] as String?,
       platformType: json['platform'] as String? ?? 'desktop',
       platformContext: json['context'] as String? ?? 'server',
       listenPort:

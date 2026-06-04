@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
+import '../api_auth.dart';
 import '../models/rhythm_firmware.dart';
 
 /// OTA firmware update service.
@@ -12,8 +13,7 @@ import '../models/rhythm_firmware.dart';
 class RhythmOtaApi {
   static final _log = Logger('rhythm_sdk.ota');
 
-  static const _manifestUrl =
-      'https://dl.rhythm.lighting/esp32/manifest.json';
+  static const _manifestUrl = 'https://dl.rhythm.lighting/esp32/manifest.json';
 
   /// Check for a firmware update.
   ///
@@ -40,9 +40,11 @@ class RhythmOtaApi {
     RhythmFirmwareRelease release, {
     required String deviceHost,
     int port = 80,
+    bool useSsl = false,
+    String? authToken,
   }) async* {
-    final baseUrl =
-        port != 80 ? 'http://$deviceHost:$port' : 'http://$deviceHost';
+    final scheme = useSsl ? 'https' : 'http';
+    final baseUrl = '$scheme://$deviceHost:$port';
 
     // 1. Download firmware binary from CDN
     _log.config('OTA: downloading firmware from ${release.url}');
@@ -84,15 +86,20 @@ class RhythmOtaApi {
     final uploadDio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 120),
+      headers: bearerAuthHeaders(authToken),
     ));
     try {
       RhythmOtaState currentState = RhythmOtaState.uploading;
+      final uploadHeaders = {
+        ...?bearerAuthHeaders(authToken),
+        'Content-Length': firmware.length,
+      };
       final uploadResponse = await uploadDio.post<Map<String, dynamic>>(
         '$baseUrl/api/ota/upload',
         data: Stream.fromIterable([firmware]),
         options: Options(
           contentType: 'application/octet-stream',
-          headers: {'Content-Length': firmware.length},
+          headers: uploadHeaders,
         ),
         onSendProgress: (sent, total) {
           if (total > 0) {
@@ -111,17 +118,19 @@ class RhythmOtaApi {
       } else {
         final message =
             uploadResponse.data?['message'] as String? ?? 'Upload failed';
-        yield RhythmOtaProgress(state: RhythmOtaState.error, errorMessage: message);
+        yield RhythmOtaProgress(
+            state: RhythmOtaState.error, errorMessage: message);
         return;
       }
     } catch (e) {
       String errorMsg = 'OTA failed: $e';
       if (e is DioException && e.response?.data is Map<String, dynamic>) {
-        errorMsg = (e.response!.data as Map<String, dynamic>)['message']
-                as String? ??
-            errorMsg;
+        errorMsg =
+            (e.response!.data as Map<String, dynamic>)['message'] as String? ??
+                errorMsg;
       }
-      yield RhythmOtaProgress(state: RhythmOtaState.error, errorMessage: errorMsg);
+      yield RhythmOtaProgress(
+          state: RhythmOtaState.error, errorMessage: errorMsg);
       return;
     } finally {
       uploadDio.close();
@@ -135,6 +144,7 @@ class RhythmOtaApi {
     final versionDio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 3),
       receiveTimeout: const Duration(seconds: 3),
+      headers: bearerAuthHeaders(authToken),
     ));
     try {
       while (DateTime.now().isBefore(deadline)) {
@@ -162,10 +172,8 @@ class RhythmOtaApi {
 
   /// Compare semver strings. Returns true if [remote] is newer than [local].
   bool _isNewer(String remote, String local) {
-    final rParts =
-        remote.split('.').map((s) => int.tryParse(s) ?? 0).toList();
-    final lParts =
-        local.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final rParts = remote.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final lParts = local.split('.').map((s) => int.tryParse(s) ?? 0).toList();
     while (rParts.length < 3) {
       rParts.add(0);
     }

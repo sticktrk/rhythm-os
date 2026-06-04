@@ -25,13 +25,28 @@ class RhythmDiagnosticsApi {
   RhythmDiagnosticsApi({
     required String host,
     int port = 80,
+    bool useSsl = false,
+    Duration connectTimeout = defaultConnectTimeout,
+    Duration receiveTimeout = defaultReceiveTimeout,
+    Duration debugBundleReceiveTimeout = defaultDebugBundleReceiveTimeout,
+    String? authToken,
+  }) : this.fromBaseUrl(
+          baseUrl: _endpointBaseUrl(host: host, port: port, useSsl: useSsl),
+          connectTimeout: connectTimeout,
+          receiveTimeout: receiveTimeout,
+          debugBundleReceiveTimeout: debugBundleReceiveTimeout,
+          authToken: authToken,
+        );
+
+  RhythmDiagnosticsApi.fromBaseUrl({
+    required String baseUrl,
     Duration connectTimeout = defaultConnectTimeout,
     Duration receiveTimeout = defaultReceiveTimeout,
     Duration debugBundleReceiveTimeout = defaultDebugBundleReceiveTimeout,
     String? authToken,
   })  : _debugBundleReceiveTimeout = debugBundleReceiveTimeout,
         _dio = Dio(BaseOptions(
-          baseUrl: 'http://$host:$port/',
+          baseUrl: _normalizeBaseUrl(baseUrl),
           connectTimeout: connectTimeout,
           receiveTimeout: receiveTimeout,
           headers: bearerAuthHeaders(authToken),
@@ -271,4 +286,21 @@ class RhythmDiagnosticsApi {
     final normalizedContext = platformContext?.trim().toLowerCase();
     return normalizedType == 'rpiz' || normalizedContext == 'rpiz';
   }
+}
+
+String _endpointBaseUrl({
+  required String host,
+  required int port,
+  required bool useSsl,
+}) {
+  final scheme = useSsl ? 'https' : 'http';
+  return '$scheme://$host:$port/';
+}
+
+String _normalizeBaseUrl(String baseUrl) {
+  final trimmed = baseUrl.trim();
+  if (trimmed.isEmpty) {
+    throw ArgumentError.value(baseUrl, 'baseUrl', 'must not be empty');
+  }
+  return trimmed.endsWith('/') ? trimmed : '$trimmed/';
 }

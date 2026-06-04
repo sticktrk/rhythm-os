@@ -6,6 +6,7 @@ void main() {
     test('parses a populated state payload with current settings', () {
       final hello = RhythmHello.fromJson({
         'version': '1.2.3',
+        'server_instance_id': 'srv-test-instance',
         'platform': 'linux',
         'context': 'embedded',
         'listen_port': 8080,
@@ -89,6 +90,7 @@ void main() {
       });
 
       expect(hello.version, '1.2.3');
+      expect(hello.serverInstanceId, 'srv-test-instance');
       expect(hello.platformType, 'linux');
       expect(hello.platformContext, 'embedded');
       expect(hello.listenPort, 8080);
