@@ -31,9 +31,10 @@ const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLOCK_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const CLOUDFLARED_BIN: &str = "/usr/bin/cloudflared";
-const CLOUDFLARED_INIT: &str = "/etc/init.d/S44cloudflared";
+const CLOUDFLARED_INIT: &str = "/etc/init.d/rhythm-cloudflared";
 const CLOUDFLARED_PIDFILE: &str = "/var/run/rhythm-cloudflared.pid";
 const CLOUDFLARED_CHILD_PIDFILE: &str = "/var/run/rhythm-cloudflared-child.pid";
+const REMOTE_ACCESS_STARTUP_RECONCILE_DELAY: Duration = Duration::from_secs(60);
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -167,13 +168,6 @@ fn main() -> Result<()> {
                 CLOUDFLARED_CHILD_PIDFILE,
             ),
         ));
-    }
-    if let Err(error) = rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
-        warn!(
-            target: "sys",
-            "Remote access runtime did not reconcile at startup: {:#}",
-            error
-        );
     }
     install_factory_reset_hook(&state)?;
     hydrate_persisted_wifi_credentials(&state);
@@ -579,10 +573,31 @@ async fn run_server(
 
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
     spawn_boot_success_marker(state.clone());
+    spawn_remote_access_startup_reconcile(state.clone());
 
     axum::serve(listener, server).await?;
 
     Ok(())
+}
+
+fn spawn_remote_access_startup_reconcile(state: SharedState) {
+    std::thread::Builder::new()
+        .name("remote-access-startup".to_string())
+        .spawn(move || {
+            std::thread::sleep(REMOTE_ACCESS_STARTUP_RECONCILE_DELAY);
+            match rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
+                Ok(()) => info!(
+                    target: "sys",
+                    "Remote access runtime reconciled after appliance startup delay"
+                ),
+                Err(error) => warn!(
+                    target: "sys",
+                    "Remote access runtime did not reconcile after appliance startup delay: {:#}",
+                    error
+                ),
+            }
+        })
+        .expect("Failed to spawn remote-access startup reconcile thread");
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

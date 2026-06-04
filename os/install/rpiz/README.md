@@ -229,12 +229,14 @@ RHYTHM_BLE_PROVISION_ALWAYS=1 /usr/bin/rhythm-server --data-dir /data --log-leve
 ## Remote access tunnel
 
 The rpiz image includes the pinned Cloudflare ARMv6 `cloudflared` release
-asset, installed at `/usr/bin/cloudflared`, plus `/etc/init.d/S44cloudflared`.
+asset, installed at `/usr/bin/cloudflared`, plus
+`/etc/init.d/rhythm-cloudflared`.
 
 The service is inert until the app enables remote access. Enabling remote
 access writes `/data/cloudflared/connector_token` through the authenticated
-local API, then restarts `S44cloudflared`. On later boots, the init service
-starts the connector automatically when that token file exists.
+local API, then restarts `rhythm-cloudflared`. On later boots,
+`rhythm-server` starts the connector after the appliance HTTP API is already
+listening, so tunnel startup cannot block the core device boot path.
 
 Defaults are tuned for the original Pi Zero W:
 
