@@ -43,6 +43,10 @@ reject_config_line() {
     fi
 }
 
+require_line "$CONFIG_FILE" 'BR2_PACKAGE_RHYTHM_CLOUDFLARED=y'
+[ -x "$TARGET_DIR/usr/bin/cloudflared" ] || fail "missing executable /usr/bin/cloudflared"
+[ -x "$TARGET_DIR/etc/init.d/S44cloudflared" ] || fail "missing executable /etc/init.d/S44cloudflared"
+
 case "$IMAGE_MODE" in
     dev)
         require_line "$CONFIG_FILE" 'BR2_TARGET_GENERIC_ROOT_PASSWD="rhythm"'

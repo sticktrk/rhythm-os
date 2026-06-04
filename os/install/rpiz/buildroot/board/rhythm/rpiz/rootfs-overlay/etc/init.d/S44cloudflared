@@ -1,0 +1,244 @@
+#!/bin/sh
+
+set -eu
+
+DEFAULTS="${RHYTHM_DEFAULTS:-/etc/default/rhythm}"
+DEV_DEFAULTS="${RHYTHM_DEV_DEFAULTS:-/etc/default/rhythm-dev}"
+
+if [ -r "$DEFAULTS" ]; then
+    # shellcheck disable=SC1090
+    . "$DEFAULTS"
+fi
+
+if [ -r "$DEV_DEFAULTS" ]; then
+    # shellcheck disable=SC1090
+    . "$DEV_DEFAULTS"
+fi
+
+DATA_DIR="${RHYTHM_DATA_DIR:-/data}"
+CLOUDFLARED_BIN="${RHYTHM_CLOUDFLARED_BIN:-/usr/bin/cloudflared}"
+TOKEN_FILE="${RHYTHM_CLOUDFLARED_TOKEN_FILE:-$DATA_DIR/cloudflared/connector_token}"
+PROTOCOL="${RHYTHM_CLOUDFLARED_PROTOCOL:-http2}"
+LOGLEVEL="${RHYTHM_CLOUDFLARED_LOGLEVEL:-warn}"
+HA_CONNECTIONS="${RHYTHM_CLOUDFLARED_HA_CONNECTIONS:-1}"
+METRICS_ADDR="${RHYTHM_CLOUDFLARED_METRICS:-127.0.0.1:54449}"
+PIDFILE="${RHYTHM_CLOUDFLARED_PIDFILE:-/var/run/rhythm-cloudflared.pid}"
+CHILD_PIDFILE="${RHYTHM_CLOUDFLARED_CHILD_PIDFILE:-/var/run/rhythm-cloudflared-child.pid}"
+STATUS_FILE="${RHYTHM_CLOUDFLARED_STATUS_FILE:-$DATA_DIR/cloudflared/status.env}"
+BACKOFF_INITIAL_SECS="${RHYTHM_CLOUDFLARED_BACKOFF_INITIAL_SECS:-2}"
+BACKOFF_MAX_SECS="${RHYTHM_CLOUDFLARED_BACKOFF_MAX_SECS:-60}"
+LOG_DIR_DEFAULT=/data/log
+LOG_DIR_FALLBACK=/var/log
+
+resolve_log_dir() {
+    if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
+        printf '%s\n' "$RHYTHM_LOG_DIR"
+        return 0
+    fi
+
+    if grep -qs '[[:space:]]/data[[:space:]]' /proc/mounts 2>/dev/null; then
+        printf '%s\n' "$LOG_DIR_DEFAULT"
+    else
+        printf '%s\n' "$LOG_DIR_FALLBACK"
+    fi
+}
+
+LOGFILE="$(resolve_log_dir)/cloudflared.log"
+
+log() {
+    mkdir -p "$(dirname "$LOGFILE")"
+    printf 'cloudflared: %s\n' "$*" >> "$LOGFILE"
+}
+
+pid_is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+child_pid_is_running() {
+    [ -f "$CHILD_PIDFILE" ] && kill -0 "$(cat "$CHILD_PIDFILE")" 2>/dev/null
+}
+
+cloudflared_supports_flag() {
+    "$CLOUDFLARED_BIN" tunnel run --help 2>&1 | grep -q -- "$1" \
+        || "$CLOUDFLARED_BIN" tunnel --help 2>&1 | grep -q -- "$1"
+}
+
+epoch_secs() {
+    date +%s 2>/dev/null || printf '0\n'
+}
+
+write_status() {
+    mkdir -p "$(dirname "$STATUS_FILE")"
+    tmp="${STATUS_FILE}.$$"
+    {
+        printf 'state=%s\n' "${state:-unknown}"
+        printf 'supervisor_pid=%s\n' "${supervisor_pid:-}"
+        printf 'child_pid=%s\n' "${child_pid:-}"
+        printf 'restart_count=%s\n' "${restart_count:-0}"
+        printf 'last_started_epoch_secs=%s\n' "${last_started_epoch_secs:-}"
+        printf 'last_exit_epoch_secs=%s\n' "${last_exit_epoch_secs:-}"
+        printf 'last_exit_code=%s\n' "${last_exit_code:-}"
+        printf 'next_restart_epoch_secs=%s\n' "${next_restart_epoch_secs:-}"
+        printf 'metrics_addr=%s\n' "$METRICS_ADDR"
+        printf 'protocol=%s\n' "$PROTOCOL"
+        printf 'loglevel=%s\n' "$LOGLEVEL"
+        printf 'ha_connections=%s\n' "$HA_CONNECTIONS"
+    } > "$tmp"
+    mv -f "$tmp" "$STATUS_FILE"
+}
+
+read_token() {
+    token="$(sed -n '1p' "$TOKEN_FILE" | tr -d '\r\n')"
+    if [ -z "$token" ]; then
+        return 1
+    fi
+    return 0
+}
+
+build_args() {
+    set -- tunnel --no-autoupdate --protocol "$PROTOCOL" --loglevel "$LOGLEVEL" --metrics "$METRICS_ADDR"
+    if [ -n "$HA_CONNECTIONS" ]; then
+        if cloudflared_supports_flag "--ha-connections"; then
+            set -- "$@" --ha-connections "$HA_CONNECTIONS"
+        else
+            log "ha-connections unsupported by $CLOUDFLARED_BIN"
+        fi
+    fi
+    set -- "$@" run --token "$token"
+    command_args="$*"
+}
+
+stop_child() {
+    if child_pid_is_running; then
+        kill "$(cat "$CHILD_PIDFILE")" 2>/dev/null || true
+    fi
+}
+
+supervise() {
+    supervisor_pid="$$"
+    child_pid=""
+    restart_count=0
+    last_started_epoch_secs=""
+    last_exit_epoch_secs=""
+    last_exit_code=""
+    next_restart_epoch_secs=""
+    state="starting"
+    write_status
+
+    trap 'state=stopping; write_status; stop_child; state=stopped; child_pid=""; write_status; rm -f "$PIDFILE" "$CHILD_PIDFILE"; exit 0' INT TERM
+
+    backoff="$BACKOFF_INITIAL_SECS"
+    while [ -s "$TOKEN_FILE" ]; do
+        if ! read_token; then
+            log "connector token is empty"
+            break
+        fi
+
+        build_args
+        log "starting connector: protocol=$PROTOCOL metrics=$METRICS_ADDR ha_connections=${HA_CONNECTIONS:-default}"
+        "$CLOUDFLARED_BIN" $command_args >>"$LOGFILE" 2>&1 &
+        child_pid="$!"
+        echo "$child_pid" > "$CHILD_PIDFILE"
+        last_started_epoch_secs="$(epoch_secs)"
+        state="running"
+        next_restart_epoch_secs=""
+        write_status
+
+        set +e
+        wait "$child_pid"
+        last_exit_code="$?"
+        set -e
+
+        last_exit_epoch_secs="$(epoch_secs)"
+        log "connector exited pid=$child_pid code=$last_exit_code"
+        child_pid=""
+        rm -f "$CHILD_PIDFILE"
+        state="exited"
+        write_status
+
+        if [ ! -s "$TOKEN_FILE" ]; then
+            break
+        fi
+
+        restart_count=$((restart_count + 1))
+        next_restart_epoch_secs=$((last_exit_epoch_secs + backoff))
+        state="backoff"
+        write_status
+        sleep "$backoff" || true
+        if [ "$backoff" -lt "$BACKOFF_MAX_SECS" ]; then
+            backoff=$((backoff * 2))
+            if [ "$backoff" -gt "$BACKOFF_MAX_SECS" ]; then
+                backoff="$BACKOFF_MAX_SECS"
+            fi
+        fi
+    done
+
+    state="stopped"
+    child_pid=""
+    next_restart_epoch_secs=""
+    write_status
+    rm -f "$PIDFILE" "$CHILD_PIDFILE"
+}
+
+start() {
+    mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$CHILD_PIDFILE")" "$(dirname "$STATUS_FILE")" "$(dirname "$LOGFILE")"
+
+    if pid_is_running; then
+        return 0
+    fi
+
+    if [ ! -x "$CLOUDFLARED_BIN" ]; then
+        state="unavailable"
+        supervisor_pid=""
+        child_pid=""
+        write_status
+        log "binary not available at $CLOUDFLARED_BIN"
+        return 0
+    fi
+
+    if [ ! -s "$TOKEN_FILE" ]; then
+        state="not_configured"
+        supervisor_pid=""
+        child_pid=""
+        write_status
+        log "connector token not configured"
+        return 0
+    fi
+
+    supervise >>"$LOGFILE" 2>&1 &
+    echo "$!" > "$PIDFILE"
+    log "started supervisor pid $(cat "$PIDFILE")"
+}
+
+stop() {
+    stop_child
+    if pid_is_running; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE" "$CHILD_PIDFILE"
+    state="stopped"
+    supervisor_pid=""
+    child_pid=""
+    write_status
+}
+
+case "${1:-}" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    status)
+        if pid_is_running; then
+            echo "running"
+            exit 0
+        fi
+        echo "stopped"
+        exit 1
+        ;;
+esac

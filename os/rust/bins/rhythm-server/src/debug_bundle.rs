@@ -31,8 +31,10 @@ const LOG_BASENAMES: &[&str] = &[
     "rhythm-matter.log",
     "wifi.log",
     "bluetooth.log",
+    "cloudflared.log",
 ];
 const EXACT_PERSISTED_FILES: &[&str] = &["topology.json", "canonical_registry.json", "rooms.json"];
+const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
 #[cfg(target_os = "linux")]
 const THREAD_SNAPSHOT_ENTRY_LIMIT: usize = 64;
@@ -966,6 +968,16 @@ fn discover_persisted_artifacts(
             diagnostics
                 .missing_persisted_files
                 .push((*file_name).to_string());
+        }
+    }
+
+    for file_name in REMOTE_ACCESS_DEBUG_FILES {
+        let source_path = data_dir.join(file_name);
+        if source_path.is_file() {
+            discovered.push(FileArtifact {
+                source_path,
+                archive_path: format!("persisted/{file_name}"),
+            });
         }
     }
 
@@ -2892,6 +2904,7 @@ mod tests {
         fs::create_dir_all(&log_dir).unwrap();
         fs::write(log_dir.join("rhythm-server.log"), b"server-log").unwrap();
         fs::write(log_dir.join("rhythm-matter.log.1"), b"matter-log").unwrap();
+        fs::write(log_dir.join("cloudflared.log"), b"cloudflared-log").unwrap();
         fs::write(data_dir.join("topology.json"), br#"{"rooms":[]}"#).unwrap();
         fs::write(
             data_dir.join("canonical_registry.json"),
@@ -2922,6 +2935,22 @@ mod tests {
             b"devices",
         )
         .unwrap();
+        fs::create_dir_all(data_dir.join("cloudflared")).unwrap();
+        fs::write(
+            data_dir.join("cloudflared").join("hostname"),
+            b"hub.devices.rhythm.lighting\n",
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("cloudflared").join("status.env"),
+            b"state=running\nrestart_count=1\n",
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("cloudflared").join("connector_token"),
+            b"secret-token",
+        )
+        .unwrap();
 
         let state: SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
@@ -2946,6 +2975,10 @@ mod tests {
             Some(b"matter-log".as_slice())
         );
         assert_eq!(
+            files.get("logs/cloudflared.log").map(Vec::as_slice),
+            Some(b"cloudflared-log".as_slice())
+        );
+        assert_eq!(
             files.get("persisted/topology.json").map(Vec::as_slice),
             Some(br#"{"rooms":[]}"#.as_slice())
         );
@@ -2961,6 +2994,19 @@ mod tests {
                 .map(Vec::as_slice),
             Some(br#"{"rooms":[{"id":"office"}]}"#.as_slice())
         );
+        assert_eq!(
+            files
+                .get("persisted/cloudflared/hostname")
+                .map(Vec::as_slice),
+            Some(b"hub.devices.rhythm.lighting\n".as_slice())
+        );
+        assert_eq!(
+            files
+                .get("persisted/cloudflared/status.env")
+                .map(Vec::as_slice),
+            Some(b"state=running\nrestart_count=1\n".as_slice())
+        );
+        assert!(!files.contains_key("persisted/cloudflared/connector_token"));
         assert!(files.contains_key("state.json"));
         assert!(files.contains_key("profile_bundle.json"));
         assert!(files.contains_key("topology_debug.json"));
@@ -2975,13 +3021,13 @@ mod tests {
         let manifest: Value = serde_json::from_slice(files.get("manifest.json").unwrap()).unwrap();
         assert_eq!(manifest["kind"], "debug_bundle");
         assert_eq!(manifest["platform_context"], "rpiz");
-        assert_eq!(manifest["captured_logs"].as_array().unwrap().len(), 2);
+        assert_eq!(manifest["captured_logs"].as_array().unwrap().len(), 3);
         assert_eq!(
             manifest["captured_persisted_files"]
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            5
         );
         assert!(manifest["missing_persisted_files"]
             .as_array()
@@ -3103,8 +3149,8 @@ mod tests {
         let log_summary: Value =
             serde_json::from_slice(files.get("log_summary.json").unwrap()).unwrap();
         assert_eq!(log_summary["schema_version"], DEBUG_BUNDLE_SCHEMA_VERSION);
-        assert_eq!(log_summary["total_lines_scanned"], 2);
-        assert_eq!(log_summary["files"].as_array().unwrap().len(), 2);
+        assert_eq!(log_summary["total_lines_scanned"], 3);
+        assert_eq!(log_summary["files"].as_array().unwrap().len(), 3);
 
         let _ = fs::remove_dir_all(root);
     }

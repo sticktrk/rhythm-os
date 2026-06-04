@@ -62,6 +62,14 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/auth/status", get(get_auth_status))
         .route("/api/auth/claim", post(post_auth_claim))
         .route("/api/auth/settings", put(put_auth_settings))
+        .route(
+            "/api/remote-access/status",
+            get(crate::remote_access::get_status),
+        )
+        .route(
+            "/api/remote-access/config",
+            put(crate::remote_access::put_config).delete(crate::remote_access::delete_config),
+        )
         .route("/api/state", get(get_state))
         .route(
             "/api/profile-bundle",

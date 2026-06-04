@@ -14,6 +14,7 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 - Prunes appliance logs in place on a background loop so the long-running append-only file descriptors stay bounded
 - Brings up `usb0` at `192.168.7.2/24` for first-boot API testing over the Pi Zero OTG port
 - Optionally embeds Wi-Fi credentials for Pi Zero W / Zero 2 W images
+- Bundles `cloudflared` and the BusyBox init service used by app-controlled remote access tunnels
 
 ## Build the server binary
 
@@ -224,6 +225,27 @@ provisioning sidecar on with:
 ```bash
 RHYTHM_BLE_PROVISION_ALWAYS=1 /usr/bin/rhythm-server --data-dir /data --log-level info
 ```
+
+## Remote access tunnel
+
+The rpiz image includes the pinned Cloudflare ARMv6 `cloudflared` release
+asset, installed at `/usr/bin/cloudflared`, plus `/etc/init.d/S44cloudflared`.
+
+The service is inert until the app enables remote access. Enabling remote
+access writes `/data/cloudflared/connector_token` through the authenticated
+local API, then restarts `S44cloudflared`. On later boots, the init service
+starts the connector automatically when that token file exists.
+
+Defaults are tuned for the original Pi Zero W:
+
+```sh
+RHYTHM_CLOUDFLARED_PROTOCOL=http2
+RHYTHM_CLOUDFLARED_LOGLEVEL=warn
+RHYTHM_CLOUDFLARED_HA_CONNECTIONS=1
+```
+
+Override those in `/etc/default/rhythm` or `/etc/default/rhythm-dev` if a
+field test needs Cloudflare's default `auto` transport or more HA connections.
 
 ## Appliance log pruning
 

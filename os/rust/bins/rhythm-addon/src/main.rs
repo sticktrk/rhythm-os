@@ -82,6 +82,16 @@ fn main() -> Result<()> {
         s.request_hub_bootstrap_fn = Some(Arc::new(|state| {
             rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
         }));
+        s.remote_access_controller = Some(Arc::new(
+            rhythm_os::remote_access::child_process_controller_from_env(),
+        ));
+    }
+    if let Err(error) = rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
+        warn!(
+            target: "sys",
+            "Remote access runtime did not reconcile at startup: {:#}",
+            error
+        );
     }
     install_factory_reset_hook(&state)?;
 

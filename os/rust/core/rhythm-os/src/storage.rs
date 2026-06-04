@@ -128,6 +128,26 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Load remote access tunnel configuration. Default: no configured tunnel.
+    fn load_remote_access_config(
+        &self,
+    ) -> Result<Option<crate::remote_access::StoredRemoteAccessConfig>> {
+        Ok(None)
+    }
+
+    /// Persist remote access tunnel configuration. Default: no-op.
+    fn save_remote_access_config(
+        &self,
+        _config: &crate::remote_access::StoredRemoteAccessConfig,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Clear remote access tunnel configuration. Default: no-op.
+    fn clear_remote_access_config(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Clear all persisted state that should not survive a full factory reset.
     ///
     /// Active desktop/server platforms use this to remove stale keyed hub
@@ -135,7 +155,8 @@ pub trait Storage: Send + Sync {
     /// resurrected after a reset.
     fn clear_factory_reset_state(&self) -> Result<()> {
         self.clear_commissioning_wifi_credentials()?;
-        self.clear_api_auth()
+        self.clear_api_auth()?;
+        self.clear_remote_access_config()
     }
 }
 
@@ -881,6 +902,47 @@ impl Storage for FileStorage {
         self.remove_if_exists("auth.json")
     }
 
+    fn load_remote_access_config(
+        &self,
+    ) -> Result<Option<crate::remote_access::StoredRemoteAccessConfig>> {
+        let path = self.file_path("remote_access.json");
+        match self.read_json::<crate::remote_access::StoredRemoteAccessConfig>("remote_access.json")
+        {
+            Ok(config) => Ok(Some(config)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load remote access config {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted remote access config at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_remote_access_config(
+        &self,
+        config: &crate::remote_access::StoredRemoteAccessConfig,
+    ) -> Result<()> {
+        let json = serde_json::to_string_pretty(config)?;
+        self.write_atomic("remote_access.json", json.as_bytes())
+    }
+
+    fn clear_remote_access_config(&self) -> Result<()> {
+        self.remove_if_exists("remote_access.json")?;
+        self.remove_if_exists("cloudflared/connector_token")?;
+        self.remove_if_exists("cloudflared/hostname")
+    }
+
     fn clear_factory_reset_state(&self) -> Result<()> {
         for name in [
             "rooms.json",
@@ -897,6 +959,7 @@ impl Storage for FileStorage {
         ] {
             self.remove_if_exists(name)?;
         }
+        self.clear_remote_access_config()?;
         self.clear_hub_registry_files()?;
 
         self.clear_integration_state_dirs()?;
@@ -1339,6 +1402,19 @@ mod tests {
         assert!(storage.load_api_auth().unwrap().is_none());
         storage.save_api_auth(&auth).unwrap();
         storage.clear_api_auth().unwrap();
+        assert!(storage.load_remote_access_config().unwrap().is_none());
+        storage
+            .save_remote_access_config(&crate::remote_access::StoredRemoteAccessConfig {
+                schema_version: 1,
+                enabled: true,
+                hostname: "hub.devices.rhythm.lighting".into(),
+                connector_token: "secret".into(),
+                tunnel_id: Some("tunnel-id".into()),
+                tunnel_name: Some("tunnel-name".into()),
+                updated_at_epoch_ms: 1,
+            })
+            .unwrap();
+        storage.clear_remote_access_config().unwrap();
         storage.clear_factory_reset_state().unwrap();
     }
 
@@ -2157,6 +2233,34 @@ mod tests {
         }
 
         #[test]
+        fn remote_access_save_load_and_clear_roundtrip() {
+            let (storage, path) = temp_storage();
+            let config = crate::remote_access::StoredRemoteAccessConfig {
+                schema_version: 1,
+                enabled: true,
+                hostname: "hub.devices.rhythm.lighting".into(),
+                connector_token: "connector-secret".into(),
+                tunnel_id: Some("tunnel-id".into()),
+                tunnel_name: Some("tunnel-name".into()),
+                updated_at_epoch_ms: 123,
+            };
+
+            storage.save_remote_access_config(&config).unwrap();
+            let loaded = storage.load_remote_access_config().unwrap();
+            assert_eq!(loaded, Some(config));
+
+            std::fs::create_dir_all(path.join("cloudflared")).unwrap();
+            std::fs::write(path.join("cloudflared").join("connector_token"), "secret").unwrap();
+            std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
+
+            storage.clear_remote_access_config().unwrap();
+            assert!(storage.load_remote_access_config().unwrap().is_none());
+            assert!(!path.join("cloudflared").join("connector_token").exists());
+            assert!(!path.join("cloudflared").join("hostname").exists());
+            cleanup(&path);
+        }
+
+        #[test]
         fn clear_factory_reset_state_removes_persisted_files() {
             let (storage, path) = temp_storage();
             storage
@@ -2231,6 +2335,20 @@ mod tests {
                     password: "secret".into(),
                 })
                 .unwrap();
+            storage
+                .save_remote_access_config(&crate::remote_access::StoredRemoteAccessConfig {
+                    schema_version: 1,
+                    enabled: true,
+                    hostname: "hub.devices.rhythm.lighting".into(),
+                    connector_token: "connector-secret".into(),
+                    tunnel_id: Some("tunnel-id".into()),
+                    tunnel_name: Some("tunnel-name".into()),
+                    updated_at_epoch_ms: 123,
+                })
+                .unwrap();
+            std::fs::create_dir_all(path.join("cloudflared")).unwrap();
+            std::fs::write(path.join("cloudflared").join("connector_token"), "secret").unwrap();
+            std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
             std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
             std::fs::write(
@@ -2258,6 +2376,9 @@ mod tests {
                 "canonical_registry.json",
                 "topology.json",
                 "commissioning_wifi.json",
+                "remote_access.json",
+                "cloudflared/connector_token",
+                "cloudflared/hostname",
                 "hub_registry_hue_192_168_1_2.json",
             ] {
                 assert!(!path.join(name).exists(), "{} should be removed", name);

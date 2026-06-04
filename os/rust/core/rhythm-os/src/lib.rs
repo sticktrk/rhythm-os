@@ -26,6 +26,7 @@ pub mod pairing;
 pub mod periodic;
 pub mod provisioning;
 pub mod registry;
+pub mod remote_access;
 pub mod room_sync;
 pub mod routes;
 pub mod scenes;

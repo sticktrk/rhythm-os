@@ -21,6 +21,7 @@ use crate::factory_default_config::{
     factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
+use crate::remote_access::RemoteAccessController;
 use crate::storage::{Storage, StoredMotionTimerEntry};
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
@@ -603,6 +604,13 @@ pub struct AppState {
     #[allow(clippy::type_complexity)]
     pub after_factory_reset_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
 
+    /// Platform-owned remote access runtime controller.
+    ///
+    /// Shared HTTP handlers own persistence and redaction. Concrete targets
+    /// install a controller to start/stop cloudflared through their platform's
+    /// lifecycle mechanism.
+    pub remote_access_controller: Option<Arc<dyn RemoteAccessController>>,
+
     /// Firmware version string (set by the binary crate).
     pub firmware_version: &'static str,
 
@@ -709,6 +717,7 @@ impl Default for AppState {
             request_hub_bootstrap_fn: None,
             commissioning_wifi_credentials_provider: None,
             after_factory_reset_fn: None,
+            remote_access_controller: None,
             firmware_version: "0.0.0",
             platform_type: "desktop",
             platform_context: "server",

@@ -38,6 +38,14 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT"],
     },
     SharedRoute {
+        path: "/api/remote-access/status",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/remote-access/config",
+        methods: &["PUT", "DELETE"],
+    },
+    SharedRoute {
         path: "/api/state",
         methods: &["GET"],
     },

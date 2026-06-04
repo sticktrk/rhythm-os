@@ -1770,6 +1770,7 @@ dependencies = [
  "log",
  "rhythm-os",
  "rhythm-server",
+ "serde",
  "serde_json",
  "tokio",
  "tracing-subscriber",

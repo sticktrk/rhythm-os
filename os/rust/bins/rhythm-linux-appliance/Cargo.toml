@@ -21,6 +21,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 log = "0.4"
 uuid = "1"
 

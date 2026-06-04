@@ -30,6 +30,10 @@ const RHYTHM_DEV_MODE_ENV: &str = "RHYTHM_DEV_MODE";
 const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLOCK_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+const CLOUDFLARED_BIN: &str = "/usr/bin/cloudflared";
+const CLOUDFLARED_INIT: &str = "/etc/init.d/S44cloudflared";
+const CLOUDFLARED_PIDFILE: &str = "/var/run/rhythm-cloudflared.pid";
+const CLOUDFLARED_CHILD_PIDFILE: &str = "/var/run/rhythm-cloudflared-child.pid";
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -155,6 +159,21 @@ fn main() -> Result<()> {
         }));
         s.commissioning_wifi_credentials_provider =
             Some(Arc::new(wifi::load_configured_credentials));
+        s.remote_access_controller = Some(Arc::new(
+            rhythm_os::remote_access::InitScriptRemoteAccessController::new(
+                CLOUDFLARED_BIN,
+                CLOUDFLARED_INIT,
+                CLOUDFLARED_PIDFILE,
+                CLOUDFLARED_CHILD_PIDFILE,
+            ),
+        ));
+    }
+    if let Err(error) = rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
+        warn!(
+            target: "sys",
+            "Remote access runtime did not reconcile at startup: {:#}",
+            error
+        );
     }
     install_factory_reset_hook(&state)?;
     hydrate_persisted_wifi_credentials(&state);
