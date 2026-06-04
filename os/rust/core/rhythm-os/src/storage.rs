@@ -6,6 +6,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use log::{debug, info, warn};
+use rand::RngCore;
 use rhythm_core::room::RoomManager;
 use rhythm_core::RuntimeConfig;
 use rhythm_core::{
@@ -13,6 +14,7 @@ use rhythm_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt::Write as _;
 
 use crate::canonical::identity::HubKey;
 use crate::hub::HubCredentials;
@@ -113,6 +115,21 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Load stable server metadata. Default: no configured identity.
+    fn load_server_metadata(&self) -> Result<Option<StoredServerMetadata>> {
+        Ok(None)
+    }
+
+    /// Persist stable server metadata. Default: no-op.
+    fn save_server_metadata(&self, _metadata: &StoredServerMetadata) -> Result<()> {
+        Ok(())
+    }
+
+    /// Clear stable server metadata. Default: no-op.
+    fn clear_server_metadata(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Load local API auth state. Default: no configured tokens.
     fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
         Ok(None)
@@ -158,6 +175,33 @@ pub trait Storage: Send + Sync {
         self.clear_api_auth()?;
         self.clear_remote_access_config()
     }
+}
+
+const STORED_SERVER_METADATA_SCHEMA_VERSION: u32 = 1;
+
+fn stored_server_metadata_schema_version() -> u32 {
+    STORED_SERVER_METADATA_SCHEMA_VERSION
+}
+
+/// Stable server-installation metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredServerMetadata {
+    #[serde(default = "stored_server_metadata_schema_version")]
+    pub schema_version: u32,
+    pub server_instance_id: String,
+}
+
+/// Generate an opaque stable server-installation identifier.
+pub fn generate_server_instance_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+
+    let mut id = String::with_capacity(36);
+    id.push_str("srv-");
+    for byte in bytes {
+        write!(&mut id, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    id
 }
 
 /// Stored light profile configurations for persistence.
@@ -873,6 +917,39 @@ impl Storage for FileStorage {
         }
     }
 
+    fn load_server_metadata(&self) -> Result<Option<StoredServerMetadata>> {
+        let path = self.file_path("server_metadata.json");
+        match self.read_json::<StoredServerMetadata>("server_metadata.json") {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load server metadata {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted server metadata at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_server_metadata(&self, metadata: &StoredServerMetadata) -> Result<()> {
+        let json = serde_json::to_string_pretty(metadata)?;
+        self.write_atomic("server_metadata.json", json.as_bytes())
+    }
+
+    fn clear_server_metadata(&self) -> Result<()> {
+        self.remove_if_exists("server_metadata.json")
+    }
+
     fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
         let path = self.file_path("auth.json");
         match self.read_json::<crate::auth::StoredApiAuth>("auth.json") {
@@ -989,6 +1066,8 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     if s.storage.is_none() {
         return;
     }
+
+    ensure_server_instance_id(s);
 
     if let Some(storage) = s.storage.as_ref() {
         match storage.load_light_profiles() {
@@ -1212,6 +1291,48 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     }
 
     info!(target: "sys", "Persisted state loaded");
+}
+
+fn ensure_server_instance_id(s: &mut crate::state::AppState) {
+    let loaded_id = s
+        .storage
+        .as_ref()
+        .and_then(|storage| match storage.load_server_metadata() {
+            Ok(Some(metadata)) => {
+                let id = metadata.server_instance_id.trim();
+                if id.is_empty() {
+                    None
+                } else {
+                    Some(id.to_string())
+                }
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(target: "sys", "Failed to load server metadata: {}", e);
+                None
+            }
+        });
+
+    if let Some(id) = loaded_id {
+        s.server_instance_id = id;
+        return;
+    }
+
+    if s.server_instance_id.trim().is_empty() {
+        s.server_instance_id = generate_server_instance_id();
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        let metadata = StoredServerMetadata {
+            schema_version: STORED_SERVER_METADATA_SCHEMA_VERSION,
+            server_instance_id: s.server_instance_id.clone(),
+        };
+        if let Err(e) = storage.save_server_metadata(&metadata) {
+            warn!(target: "sys", "Failed to persist server metadata: {}", e);
+        } else {
+            info!(target: "sys", "Generated server instance metadata");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2229,6 +2350,48 @@ mod tests {
             storage.clear_commissioning_wifi_credentials().unwrap();
             let cleared = storage.load_commissioning_wifi_credentials().unwrap();
             assert!(cleared.is_none());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn server_metadata_save_load_and_clear_roundtrip() {
+            let (storage, path) = temp_storage();
+            let metadata = StoredServerMetadata {
+                schema_version: 1,
+                server_instance_id: "srv-test-instance".into(),
+            };
+
+            storage.save_server_metadata(&metadata).unwrap();
+            let loaded = storage.load_server_metadata().unwrap();
+            assert_eq!(loaded, Some(metadata));
+
+            storage.clear_server_metadata().unwrap();
+            assert!(storage.load_server_metadata().unwrap().is_none());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_generates_and_reuses_server_instance_id() {
+            let (storage, path) = temp_storage();
+            let mut app = crate::state::AppState::default();
+            app.storage = Some(Box::new(storage));
+
+            load_persisted_state(&mut app);
+
+            let generated_id = app.server_instance_id.clone();
+            assert!(generated_id.starts_with("srv-"));
+            let persisted = FileStorage::new(path.to_str().unwrap())
+                .unwrap()
+                .load_server_metadata()
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.server_instance_id, generated_id);
+
+            let mut restarted = crate::state::AppState::default();
+            restarted.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+            load_persisted_state(&mut restarted);
+            assert_eq!(restarted.server_instance_id, generated_id);
+
             cleanup(&path);
         }
 

@@ -2269,6 +2269,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         input_bindings_dto,
         profiles_dto,
         firmware_version,
+        server_instance_id,
         platform_type,
         platform_ctx,
         listen_port,
@@ -2401,6 +2402,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             build_input_bindings_dto_inner(&s),
             build_profiles_dto_inner(&s),
             s.firmware_version,
+            s.server_instance_id.clone(),
             s.platform_type,
             s.platform_context,
             s.listen_port,
@@ -2476,6 +2478,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     let snapshot = StateSnapshot {
         last_tick_epoch_ms,
         version: firmware_version.to_string(),
+        server_instance_id,
         platform: platform_type.to_string(),
         context: platform_ctx.to_string(),
         listen_port,
@@ -17611,6 +17614,7 @@ mod tests {
 
         // Top-level structure
         assert!(parsed["version"].is_string());
+        assert!(parsed["server_instance_id"].is_string());
         assert!(parsed["platform"].is_string());
         assert!(parsed["context"].is_string());
         assert!(parsed["hubs"].is_array());

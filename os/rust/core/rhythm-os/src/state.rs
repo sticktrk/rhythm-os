@@ -22,7 +22,7 @@ use crate::factory_default_config::{
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::remote_access::RemoteAccessController;
-use crate::storage::{Storage, StoredMotionTimerEntry};
+use crate::storage::{generate_server_instance_id, Storage, StoredMotionTimerEntry};
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
 /// Ephemeral startup-bootstrap retry state for one configured hub.
@@ -614,6 +614,12 @@ pub struct AppState {
     /// Firmware version string (set by the binary crate).
     pub firmware_version: &'static str,
 
+    /// Stable random identifier for this server installation.
+    ///
+    /// Used by cloud services to recognize the same Rhythm server when
+    /// different app installs have different local hub IDs.
+    pub server_instance_id: String,
+
     /// Platform type: "desktop" or "appliance".
     pub platform_type: &'static str,
 
@@ -719,6 +725,7 @@ impl Default for AppState {
             after_factory_reset_fn: None,
             remote_access_controller: None,
             firmware_version: "0.0.0",
+            server_instance_id: generate_server_instance_id(),
             platform_type: "desktop",
             platform_context: "server",
             data_dir: String::new(),
@@ -1158,6 +1165,7 @@ mod tests {
         assert!(state.room_observed_power.is_empty());
         assert!(state.last_active_mode_change_utc_ms.is_some());
         assert_eq!(state.firmware_version, "0.0.0");
+        assert!(state.server_instance_id.starts_with("srv-"));
         assert_eq!(state.platform_type, "desktop");
         assert_eq!(state.platform_context, "server");
     }

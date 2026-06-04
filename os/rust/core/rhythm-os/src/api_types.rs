@@ -142,6 +142,7 @@ pub struct StateSnapshot {
     /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
     pub last_tick_epoch_ms: u64,
     pub version: String,
+    pub server_instance_id: String,
     pub platform: String,
     pub context: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1138,6 +1139,7 @@ mod tests {
     fn state_snapshot_omits_listen_port_when_none() {
         let snap = StateSnapshot {
             version: "1.0.0".into(),
+            server_instance_id: "srv-test".into(),
             platform: "desktop".into(),
             context: "server".into(),
             listen_port: None,
@@ -1191,6 +1193,7 @@ mod tests {
         assert!(json.get("listen_port").is_none());
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
         assert_eq!(json["version"], "1.0.0");
+        assert_eq!(json["server_instance_id"], "srv-test");
         assert_eq!(json["platform"], "desktop");
         assert_eq!(json["context"], "server");
         assert_eq!(json["active_profile"]["effective"]["fade_ms"], 500);
@@ -1215,6 +1218,7 @@ mod tests {
     fn state_snapshot_includes_listen_port_when_set() {
         let snap = StateSnapshot {
             version: "1.0.0".into(),
+            server_instance_id: "srv-test".into(),
             platform: "desktop".into(),
             context: "ha_addon".into(),
             listen_port: Some(8099),
