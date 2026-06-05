@@ -14,6 +14,9 @@ class AutoSliderSettingRow extends StatelessWidget {
   final IconData icon;
   final String title;
   final Color color;
+
+  /// Color of the title text. Defaults to the muted secondary tone.
+  final Color titleColor;
   final bool isAuto;
   final double sliderValue;
   final double effectiveValue;
@@ -32,6 +35,7 @@ class AutoSliderSettingRow extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.color,
+    this.titleColor = textSecondary,
     required this.isAuto,
     required this.sliderValue,
     required this.effectiveValue,
@@ -73,8 +77,8 @@ class AutoSliderSettingRow extends StatelessWidget {
                       child: Text(
                         title,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: textSecondary,
+                        style: TextStyle(
+                          color: titleColor,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),

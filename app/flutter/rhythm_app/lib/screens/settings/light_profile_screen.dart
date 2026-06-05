@@ -6,15 +6,15 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
-import '../../api/hybrid_client.dart';
 import '../../config/feature_flags.dart';
 import '../../models/config_model.dart';
 import '../../models/plan_tier.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../widgets/plan_tier_modal.dart';
 import '../../widgets/auto_slider_setting_row.dart';
+import '../../widgets/info_tooltip.dart';
+import '../../widgets/pro_lock.dart';
 
 /// Full-screen modal for configuring the light profile.
 ///
@@ -39,13 +39,7 @@ class LightProfileScreen extends StatefulWidget {
   State<LightProfileScreen> createState() => _LightProfileScreenState();
 }
 
-enum _TimeOffsetDispatchAction { preview, reset, absorb }
-
-class _LightProfileScreenState extends State<LightProfileScreen>
-    with SingleTickerProviderStateMixin {
-  static const Duration _defaultBatchDispatchSpacing =
-      Duration(milliseconds: 500);
-
+class _LightProfileScreenState extends State<LightProfileScreen> {
   static const List<String> _profileOrder = [
     'rhythm',
     'sleep',
@@ -58,7 +52,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   final Map<String, sdk.RhythmCurveConfig> _profileConfigs = {};
   List<sdk.RhythmModeConfig> _modeConfigs = const [];
   sdk.RhythmMode? _serverActiveMode;
-  Timer? _curvePreviewRefreshTimer;
 
   // Light transition duration (from selected profile config).
   double _fadeMs = 500;
@@ -87,8 +80,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   bool _intervalAuto = false;
 
   // Expand/collapse state for range cards.
-  bool _brightnessExpanded = false;
-  bool _colorTempExpanded = false;
   bool _idleExpanded = false;
   bool _advancedExpanded = false;
 
@@ -112,27 +103,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   String? _serverConfigSignature;
   late final ServerSyncProvider _serverSync;
 
-  // Time simulator state.
-  CurveData? _curveData;
-  double _timeOffsetMinutes = 0;
-  double _sliderFraction = 0.5; // raw 0..1 position on the track
-  bool _isDraggingTime = false;
-  bool _timeOffsetApplied = false;
-  bool _timeOffsetPreviewActive = false;
-  _TimeOffsetDispatchAction? _timeOffsetDispatchAction;
-  bool _curvePreviewRefreshQueued = false;
-  bool _curvePreviewRefreshInFlight = false;
-  int _curvePreviewRequestId = 0;
-
-  /// Compressed position mapping: 97 entries (0..96) mapping 15-min intervals
-  /// to non-linear positions (0.0..1.0). Regions with rapid kelvin/brightness
-  /// change get more space; flat night/day regions are compressed.
-  List<double>? _compressedPositions;
-
-  // Glow animation for the header icon.
-  late AnimationController _glowController;
-  late Animation<double> _glowAnimation;
-
   @override
   void initState() {
     super.initState();
@@ -143,14 +113,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       null => 'rhythm',
     };
 
-    _glowController = AnimationController(
-      duration: const Duration(milliseconds: 2500),
-      vsync: this,
-    )..repeat(reverse: true);
-    _glowAnimation = Tween<double>(begin: 0.3, end: 0.7).animate(
-      CurvedAnimation(parent: _glowController, curve: Curves.easeInOut),
-    );
-
     _serverSync = context.read<ServerSyncProvider>();
     _serverSync.addListener(_handleServerSyncChanged);
     unawaited(_loadConfig());
@@ -159,8 +121,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   @override
   void dispose() {
     _serverSync.removeListener(_handleServerSyncChanged);
-    _curvePreviewRefreshTimer?.cancel();
-    _glowController.dispose();
     super.dispose();
   }
 
@@ -305,26 +265,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   sdk.RhythmCurveConfig? get _selectedProfileConfig =>
       _profileConfigs[_selectedProfileId];
 
-  sdk.RhythmDirectColor? get _selectedDirectColor {
-    final curve = _selectedProfileConfig?.curve;
-    return switch (curve) {
-      sdk.RhythmSuperGaussianCurve(:final directColor) => directColor,
-      sdk.RhythmConstantCurve(:final directColor) => directColor,
-      _ => null,
-    };
-  }
-
-  Color? get _selectedFixedColor {
-    final directColor = _selectedDirectColor;
-    if (directColor == null) return null;
-    return Color.fromARGB(
-      255,
-      directColor.rgb.r,
-      directColor.rgb.g,
-      directColor.rgb.b,
-    );
-  }
-
   Future<void> _loadConfig({bool checkConnection = true}) async {
     if (_configLoadInFlight) return;
     _configLoadInFlight = true;
@@ -428,14 +368,12 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       } else {
         _applyIdleFallback();
       }
-      await _loadCurveData(profileId: initialProfileId);
       if (!mounted) return;
 
       setState(() {
         _selectedProfileId = initialProfileId;
         _connected = syncProvider.hasBeenSynced;
         _loading = false;
-        _sliderFraction = _hourToNowFraction();
         _serverConfigSignature = _currentServerConfigSignature();
       });
     } catch (e) {
@@ -454,91 +392,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         _handleServerSyncChanged();
       }
     }
-  }
-
-  Future<void> _loadCurveData(
-      {sdk.RhythmCurveConfig? config, String? profileId}) async {
-    try {
-      final id = profileId ?? _selectedProfileId;
-      final requestId = ++_curvePreviewRequestId;
-
-      final localData =
-          _tryBuildLocalGaussianCurveData(config ?? _profileConfigs[id]);
-      if (localData != null) {
-        _applyCurveData(localData, requestId);
-        return;
-      }
-
-      final preview = await context.read<ServerSyncProvider>().api.getCurveData(
-            id: id,
-            overrides: config,
-          );
-      if (preview == null) return;
-      _applyCurveData(_curveDataFromSdk(preview), requestId);
-    } catch (e) {
-      debugPrint('LightProfile: Failed to load curve data: $e');
-    }
-  }
-
-  CurveData? _tryBuildLocalGaussianCurveData(sdk.RhythmCurveConfig? config) {
-    if (config == null) return null;
-
-    final curve = config.curve;
-    if (curve is! sdk.RhythmSuperGaussianCurve || curve.directColor != null) {
-      return null;
-    }
-
-    try {
-      final api = context.read<RhythmApi>();
-      if (api is! HybridApiClient) return null;
-
-      final dto = _toCurveConfigDto(config);
-      if (dto == null) return null;
-
-      return api.getCurveDataHighRes(
-        config: dto,
-        samplesPerHour: 4,
-      );
-    } catch (e) {
-      debugPrint('LightProfile: Local Gaussian preview unavailable: $e');
-      return null;
-    }
-  }
-
-  CurveData _curveDataFromSdk(sdk.RhythmCurveData preview) => CurveData(
-        hours: preview.hours,
-        brightness: preview.brightness,
-        kelvin: preview.kelvin,
-        solar: SolarInfo(
-          sunrise: preview.solar.sunrise,
-          sunset: preview.solar.sunset,
-          solarNoon: preview.solar.solarNoon,
-          solarMidnight: preview.solar.solarMidnight,
-          dayLength: preview.solar.dayLength,
-          dawn: preview.solar.dawn != null
-              ? TwilightPhase(
-                  civil: preview.solar.dawn!.civil,
-                  nautical: preview.solar.dawn!.nautical,
-                  astronomical: preview.solar.dawn!.astronomical,
-                )
-              : null,
-          dusk: preview.solar.dusk != null
-              ? TwilightPhase(
-                  civil: preview.solar.dusk!.civil,
-                  nautical: preview.solar.dusk!.nautical,
-                  astronomical: preview.solar.dusk!.astronomical,
-                )
-              : null,
-        ),
-      );
-
-  void _applyCurveData(CurveData data, int requestId) {
-    if (!mounted || requestId != _curvePreviewRequestId) return;
-
-    setState(() {
-      _curveData = data;
-      _compressedPositions = _computeCompressedMapping(data);
-    });
   }
 
   void _onCurveChanged(void Function() update) {
@@ -568,37 +421,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       if (baselineIdle != draftIdle) return true;
     }
     return false;
-  }
-
-  void _onPreviewRangeChanged(void Function() update) {
-    _onCurveChanged(update);
-    _queueDraftCurvePreviewRefresh();
-  }
-
-  void _queueDraftCurvePreviewRefresh() {
-    if (_selectedProfileConfig == null || _isSleepProfile) return;
-    _curvePreviewRefreshQueued = true;
-    if (_curvePreviewRefreshInFlight ||
-        (_curvePreviewRefreshTimer?.isActive ?? false)) {
-      return;
-    }
-
-    _curvePreviewRefreshTimer =
-        Timer(const Duration(milliseconds: 90), () async {
-      _curvePreviewRefreshTimer = null;
-      if (!_curvePreviewRefreshQueued || !mounted) return;
-
-      _curvePreviewRefreshQueued = false;
-      _curvePreviewRefreshInFlight = true;
-      try {
-        await _loadCurveData(config: _buildDraftConfig());
-      } finally {
-        _curvePreviewRefreshInFlight = false;
-        if (mounted && _curvePreviewRefreshQueued) {
-          _queueDraftCurvePreviewRefresh();
-        }
-      }
-    });
   }
 
   String _formatInterval(double secs) {
@@ -834,131 +656,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Compressed mapping — rate-of-change based position distribution
-  // ---------------------------------------------------------------------------
-
-  /// Build a non-linear mapping from 15-minute time slots to slider positions.
-  /// Segments where kelvin/brightness change rapidly get more space.
-  /// Flat night/day plateaus are compressed.
-  List<double> _computeCompressedMapping(CurveData? data) {
-    const n = 96; // 15-minute intervals
-
-    if (data == null || data.hours.isEmpty) {
-      return List.generate(n + 1, (i) => i / n);
-    }
-
-    final weights = <double>[];
-    for (int i = 0; i < n; i++) {
-      final h0 = (i / n) * 24;
-      final h1 = ((i + 1) / n) * 24;
-
-      final k0 = _interpolateCurve(data.hours, data.kelvin, h0);
-      final k1 = _interpolateCurve(data.hours, data.kelvin, h1);
-      final b0 = _interpolateCurve(data.hours, data.brightness, h0);
-      final b1 = _interpolateCurve(data.hours, data.brightness, h1);
-
-      // Normalized rate of change.
-      final dK = (k1 - k0).abs() / 5000; // ~5000K range
-      final dB = (b1 - b0).abs() / 100; // 100% range
-      final rate = dK + dB;
-
-      // Minimum weight so flat regions aren't invisible — just narrow.
-      weights.add(math.max(rate, 0.003));
-    }
-
-    final totalWeight = weights.reduce((a, b) => a + b);
-    final positions = <double>[0.0];
-    var cumulative = 0.0;
-    for (int i = 0; i < n; i++) {
-      cumulative += weights[i] / totalWeight;
-      positions.add(cumulative);
-    }
-    return positions;
-  }
-
-  /// Convert a slider position (0..1) back to an hour (0..24).
-  double _positionToHour(double position) {
-    final p = _compressedPositions;
-    if (p == null) return position * 24;
-
-    // Binary-ish search: find the segment containing this position.
-    for (int i = 0; i < p.length - 1; i++) {
-      if (position <= p[i + 1]) {
-        final segSpan = p[i + 1] - p[i];
-        final t = segSpan > 0 ? (position - p[i]) / segSpan : 0.0;
-        final hourStart = (i / 96) * 24;
-        final hourEnd = ((i + 1) / 96) * 24;
-        return hourStart + t * (hourEnd - hourStart);
-      }
-    }
-    return 24.0;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Time simulator helpers
-  // ---------------------------------------------------------------------------
-
-  double _currentHour() {
-    final now = DateTime.now();
-    return now.hour + now.minute / 60.0;
-  }
-
-  double _selectedHour() {
-    final h = _currentHour() + _timeOffsetMinutes / 60.0;
-    return ((h % 24) + 24) % 24;
-  }
-
-  bool _isSignificantTimeOffset(double offsetMinutes) =>
-      offsetMinutes.abs() > 0.5;
-
-  bool get _hasTimeOffset => _isSignificantTimeOffset(_timeOffsetMinutes);
-
-  bool get _showTimeOffsetActions => _hasTimeOffset || _timeOffsetPreviewActive;
-
-  String _formatHour(double hour) {
-    final h = hour.floor() % 24;
-    final m = ((hour - hour.floor()) * 60).round();
-    final period = h >= 12 ? 'PM' : 'AM';
-    final h12 = h == 0 ? 12 : (h > 12 ? h - 12 : h);
-    return '$h12:${m.toString().padLeft(2, '0')} $period';
-  }
-
-  int _kelvinAtHour(double hour) {
-    if (_curveData == null || _curveData!.hours.isEmpty) return 3000;
-    return _interpolateCurve(_curveData!.hours, _curveData!.kelvin, hour)
-        .toInt();
-  }
-
-  int _brightnessAtHour(double hour) {
-    if (_curveData == null || _curveData!.hours.isEmpty) return 50;
-    return _interpolateCurve(_curveData!.hours, _curveData!.brightness, hour)
-        .toInt();
-  }
-
-  Color _previewColorAtHour(double hour) {
-    final fixedColor = _selectedFixedColor;
-    if (fixedColor != null) return fixedColor;
-
-    final kelvin = _kelvinAtHour(hour);
-    if (kelvin > 0) {
-      return ColorUtils.curveColorForCCT(kelvin);
-    }
-    return _Palette.amber;
-  }
-
-  String _previewValueLabel(double hour) {
-    final brightness = _brightnessAtHour(hour);
-    final kelvin = _kelvinAtHour(hour);
-    if (_selectedFixedColor != null) {
-      return '${_formatHour(hour)}  $brightness%  Fixed Color';
-    }
-    if (kelvin > 0) {
-      return '${_formatHour(hour)}  $brightness%  ${kelvin}K';
-    }
-    return '${_formatHour(hour)}  $brightness%';
-  }
-
   Future<void> _syncActiveConfigModel(sdk.RhythmCurveConfig config) async {
     final serverSync = context.read<ServerSyncProvider>();
     final activeProfileId = serverSync.activeProfileId;
@@ -995,142 +692,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  void _onSliderInteraction(double dx, double trackWidth) {
-    final fraction = (dx / trackWidth).clamp(0.0, 1.0);
-    final tappedHour = _positionToHour(fraction);
-
-    double offset = (tappedHour - _currentHour()) * 60;
-    offset = (offset / 5).roundToDouble() * 5;
-
-    setState(() {
-      _timeOffsetMinutes = offset;
-      _sliderFraction = fraction;
-      _timeOffsetApplied = false;
-    });
-  }
-
-  bool get _timeOffsetDispatching => _timeOffsetDispatchAction != null;
-
-  bool _isTimeOffsetDispatching(_TimeOffsetDispatchAction action) =>
-      _timeOffsetDispatchAction == action;
-
-  Future<void> _applyTimeOffset() async {
-    if (_timeOffsetDispatching) return;
-    final previewOffset = _timeOffsetMinutes;
-    setState(
-        () => _timeOffsetDispatchAction = _TimeOffsetDispatchAction.preview);
-
-    try {
-      final result = await _sendTimeOffset(offsetMinutes: previewOffset);
-      await _waitForTimeOffsetDispatch(result);
-      if (!mounted) return;
-      setState(() {
-        _timeOffsetApplied =
-            (_timeOffsetMinutes - previewOffset).abs() <= 0.5 &&
-                _isSignificantTimeOffset(previewOffset);
-        _timeOffsetPreviewActive = _isSignificantTimeOffset(previewOffset);
-      });
-      AnalyticsService().logLightProfilePreviewAction(
-        profile: _selectedProfileId,
-        action: 'apply',
-        offsetMinutes: previewOffset,
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _timeOffsetDispatchAction = null);
-      }
-    }
-  }
-
-  Future<sdk.RhythmDispatchResult> _sendTimeOffset({
-    required double offsetMinutes,
-  }) {
-    final api = context.read<ServerSyncProvider>().api;
-    return api.nodeOffsetPreviewResult(timeOffset: offsetMinutes);
-  }
-
-  Future<void> _waitForTimeOffsetDispatch(
-      sdk.RhythmDispatchResult result) async {
-    final duration = result.estimatedDispatchDuration ??
-        (result.queued
-            ? _dispatchDurationForCount(result.dispatchCount ?? 1)
-            : null);
-    if (duration == null || duration <= Duration.zero) return;
-    await Future<void>.delayed(duration);
-  }
-
-  Duration? _dispatchDurationForCount(int count) {
-    if (count <= 1) return null;
-    return Duration(
-      milliseconds: _defaultBatchDispatchSpacing.inMilliseconds * (count - 1),
-    );
-  }
-
-  Future<void> _resetTimeOffset() async {
-    if (_timeOffsetDispatching) return;
-    final previousOffset = _timeOffsetMinutes;
-    setState(() {
-      _timeOffsetMinutes = 0;
-      _sliderFraction = _hourToNowFraction();
-      _timeOffsetApplied = false;
-      _timeOffsetPreviewActive = false;
-      _timeOffsetDispatchAction = _TimeOffsetDispatchAction.reset;
-    });
-    try {
-      final result = await _sendTimeOffset(offsetMinutes: 0);
-      await _waitForTimeOffsetDispatch(result);
-      AnalyticsService().logLightProfilePreviewAction(
-        profile: _selectedProfileId,
-        action: 'reset',
-        offsetMinutes: previousOffset,
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _timeOffsetDispatchAction = null);
-      }
-    }
-  }
-
-  Future<void> _absorbTimeOffset() async {
-    if (_timeOffsetDispatching) return;
-    final absorbedOffset = _timeOffsetMinutes;
-    setState(
-        () => _timeOffsetDispatchAction = _TimeOffsetDispatchAction.absorb);
-
-    try {
-      final result = await context
-          .read<ServerSyncProvider>()
-          .api
-          .absorbTimeOffsetResult(absorbedOffset, id: _selectedProfileId);
-      if (!mounted) return;
-      final sdkConfig = result.config;
-      if (sdkConfig != null) {
-        _profileConfigs[_selectedProfileId] = sdkConfig;
-        _applyProfileConfig(sdkConfig);
-        await _syncActiveConfigModel(sdkConfig);
-        await _loadCurveData(profileId: _selectedProfileId);
-      }
-      await _waitForTimeOffsetDispatch(result.dispatch);
-      if (!mounted) return;
-      setState(() {
-        _timeOffsetMinutes = 0;
-        _sliderFraction = _hourToNowFraction();
-        _timeOffsetApplied = false;
-        _timeOffsetPreviewActive = false;
-        _curveConfigDirty = false;
-      });
-      AnalyticsService().logLightProfilePreviewAction(
-        profile: _selectedProfileId,
-        action: 'absorb',
-        offsetMinutes: absorbedOffset,
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _timeOffsetDispatchAction = null);
-      }
-    }
-  }
-
   Future<void> _resetToDefaults() async {
     final api = context.read<ServerSyncProvider>().api;
     final sdkConfig = await api.resetConfig(id: _selectedProfileId);
@@ -1139,13 +700,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       _profileConfigs[_selectedProfileId] = sdkConfig;
       _applyProfileConfig(sdkConfig);
       await _syncActiveConfigModel(sdkConfig);
-      await _loadCurveData(profileId: _selectedProfileId);
     }
     setState(() {
-      _timeOffsetMinutes = 0;
-      _sliderFraction = _hourToNowFraction();
       _curveConfigDirty = false;
-      _timeOffsetApplied = false;
     });
     AnalyticsService().logLightProfileReset(_selectedProfileId);
   }
@@ -1158,17 +715,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         backgroundColor: error ? Colors.red.shade700 : Colors.green.shade700,
       ),
     );
-  }
-
-  /// Current time as a compressed slider fraction.
-  double _hourToNowFraction() {
-    final p = _compressedPositions;
-    if (p == null) return _currentHour() / 24;
-    final idx = (_currentHour() / 24 * 96).clamp(0.0, 96.0);
-    final lower = idx.floor().clamp(0, 95);
-    final upper = (lower + 1).clamp(0, 96);
-    final t = idx - lower;
-    return p[lower] + t * (p[upper] - p[lower]);
   }
 
   // ---------------------------------------------------------------------------
@@ -1359,22 +905,19 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     final canUseSleepPrimary =
         subscription.has(Entitlement.sleepPrimarySettings);
     final canUseAdvancedDay = subscription.has(Entitlement.advancedDayControls);
-    final canUseTimeSimulator = subscription.has(Entitlement.timeSimulator);
 
     final children = <Widget>[
-      _buildHeroIcon(),
-      const SizedBox(height: 24),
       if (_isSleepProfile) ...[
         // Sleep "look" — promoted out of Advanced so the Light tab shows the
         // sleep brightness + color directly alongside Day's. Per-room
         // on/off/standby behavior now lives on the Automations tab.
-        _ProLockWrap(
+        ProLockWrap(
           unlocked: canUseSleepPrimary,
           entitlement: Entitlement.sleepPrimarySettings,
           child: _buildSleepBrightnessCard(),
         ),
         const SizedBox(height: 14),
-        _ProLockWrap(
+        ProLockWrap(
           unlocked: canUseSleepPrimary,
           entitlement: Entitlement.sleepPrimarySettings,
           child: _buildSleepColorCard(),
@@ -1384,12 +927,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
         _buildBrightnessRangeCard(),
         const SizedBox(height: 14),
         _buildColorTempRangeCard(),
-        const SizedBox(height: 24),
-        _ProLockWrap(
-          unlocked: canUseTimeSimulator,
-          entitlement: Entitlement.timeSimulator,
-          child: _buildTimeSimulator(),
-        ),
         const SizedBox(height: 24),
       ],
       // Advanced (timing fine-tune) is hidden for now behind a feature flag
@@ -1408,8 +945,10 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     ];
 
     if (widget.embedded) {
+      // Host (LightScreen layer card) supplies the outer inset and a header,
+      // so keep the embedded body padding tight and let the card frame it.
       return Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 18),
         child: Column(children: children),
       );
     }
@@ -2180,133 +1719,123 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     const color = _Palette.amber;
     final minPct = _minBrightness.round();
     final maxPct = _maxBrightness.round();
-    final expanded = _brightnessExpanded;
 
-    return GestureDetector(
-      onTap: () => setState(() => _brightnessExpanded = !_brightnessExpanded),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic,
-        padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 10 : 18),
-        decoration: BoxDecoration(
-          color: _Palette.card,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color: expanded ? color.withValues(alpha: 0.25) : _Palette.border,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: color.withValues(alpha: 0.12),
-                  ),
-                  child: const Icon(Icons.wb_sunny_rounded,
-                      color: color, size: 18),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color.withValues(alpha: 0.12),
                 ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Brightness',
-                    style: TextStyle(
-                      color: _Palette.textPrimary,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -0.1,
-                    ),
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: color.withValues(alpha: 0.15)),
-                  ),
-                  child: Text(
-                    '$minPct%',
-                    style: TextStyle(
-                      color: color.withValues(alpha: 0.5),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 5),
-                  child: Text(
-                    '–',
-                    style: TextStyle(
-                      color: _Palette.textSecondary.withValues(alpha: 0.3),
-                      fontSize: 13,
-                    ),
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: color.withValues(alpha: 0.25)),
-                  ),
-                  child: Text(
-                    '$maxPct%',
-                    style: const TextStyle(
-                      color: color,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      fontFeatures: [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                AnimatedRotation(
-                  turns: expanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeOutCubic,
-                  child: Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    color: _Palette.textSecondary.withValues(alpha: 0.3),
-                    size: 20,
-                  ),
-                ),
-              ],
-            ),
-            AnimatedSize(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOutCubic,
-              alignment: Alignment.topCenter,
-              child: expanded
-                  ? Padding(
-                      padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
-                      child: _DualRangeBar(
-                        minValue: _minBrightness,
-                        maxValue: _maxBrightness,
-                        hardMin: 1,
-                        hardMax: 100,
-                        minThumbMax: 50,
-                        maxThumbMin: 20,
-                        tint: color,
-                        divisions: 99,
-                        onMinChanged: (v) =>
-                            _onPreviewRangeChanged(() => _minBrightness = v),
-                        onMaxChanged: (v) =>
-                            _onPreviewRangeChanged(() => _maxBrightness = v),
+                child: const Icon(Icons.wb_sunny_rounded,
+                    color: color, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Row(
+                  children: [
+                    const Flexible(
+                      child: Text(
+                        'Brightness',
+                        style: TextStyle(
+                          color: _Palette.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.1,
+                        ),
                       ),
-                    )
-                  : const SizedBox.shrink(),
+                    ),
+                    const SizedBox(width: 4),
+                    InfoTooltip(
+                      accentColor: color,
+                      message:
+                          'The lowest and highest brightness your lights reach '
+                          'through the day. The curve eases between these two '
+                          'values as it rises and falls.',
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: color.withValues(alpha: 0.15)),
+                ),
+                child: Text(
+                  '$minPct%',
+                  style: TextStyle(
+                    color: color.withValues(alpha: 0.5),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 5),
+                child: Text(
+                  '–',
+                  style: TextStyle(
+                    color: _Palette.textSecondary.withValues(alpha: 0.3),
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: color.withValues(alpha: 0.25)),
+                ),
+                child: Text(
+                  '$maxPct%',
+                  style: const TextStyle(
+                    color: color,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
+            child: _DualRangeBar(
+              minValue: _minBrightness,
+              maxValue: _maxBrightness,
+              hardMin: 1,
+              hardMax: 100,
+              minThumbMax: 50,
+              maxThumbMin: 20,
+              tint: color,
+              divisions: 99,
+              onMinChanged: (v) =>
+                  _onCurveChanged(() => _minBrightness = v),
+              onMaxChanged: (v) =>
+                  _onCurveChanged(() => _maxBrightness = v),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -2318,162 +1847,136 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   Widget _buildColorTempRangeCard() {
     final warmColor = ColorUtils.curveColorForCCT(_minColorTemp.round());
     final coolColor = ColorUtils.curveColorForCCT(_maxColorTemp.round());
-    final expanded = _colorTempExpanded;
 
-    return GestureDetector(
-      onTap: () => setState(() => _colorTempExpanded = !_colorTempExpanded),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic,
-        padding: EdgeInsets.fromLTRB(18, 18, 18, expanded ? 10 : 18),
-        decoration: BoxDecoration(
-          color: _Palette.card,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-            color:
-                expanded ? warmColor.withValues(alpha: 0.2) : _Palette.border,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      colors: [
-                        warmColor.withValues(alpha: 0.18),
-                        coolColor.withValues(alpha: 0.18),
-                      ],
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+      decoration: BoxDecoration(
+        color: _Palette.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: warmColor.withValues(alpha: 0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    colors: [
+                      warmColor.withValues(alpha: 0.18),
+                      coolColor.withValues(alpha: 0.18),
+                    ],
+                  ),
+                ),
+                child: Icon(Icons.thermostat_rounded,
+                    color: warmColor, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Row(
+                  children: [
+                    const Flexible(
+                      child: Text(
+                        'Sun Hue',
+                        style: TextStyle(
+                          color: _Palette.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: -0.1,
+                        ),
+                      ),
                     ),
-                  ),
-                  child: Icon(Icons.thermostat_rounded,
-                      color: warmColor, size: 18),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Color Temperature',
-                    style: TextStyle(
-                      color: _Palette.textPrimary,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -0.1,
+                    const SizedBox(width: 4),
+                    InfoTooltip(
+                      accentColor: warmColor,
+                      message:
+                          'The warmest and coolest white your lights reach '
+                          'through the day — warm at dawn and dusk, cool around '
+                          'midday.',
                     ),
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: warmColor.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: warmColor.withValues(alpha: 0.2)),
-                  ),
-                  child: Text(
-                    '${_minColorTemp.round()}K',
-                    style: TextStyle(
-                      color: warmColor,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 5),
-                  child: Text(
-                    '–',
-                    style: TextStyle(
-                      color: _Palette.textSecondary.withValues(alpha: 0.3),
-                      fontSize: 13,
-                    ),
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: coolColor.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: coolColor.withValues(alpha: 0.2)),
-                  ),
-                  child: Text(
-                    '${_maxColorTemp.round()}K',
-                    style: TextStyle(
-                      color: coolColor,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                AnimatedRotation(
-                  turns: expanded ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeOutCubic,
-                  child: Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    color: _Palette.textSecondary.withValues(alpha: 0.3),
-                    size: 20,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            // Kelvin gradient strip — always visible as a preview
-            Container(
-              height: 6,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(3),
-                gradient: LinearGradient(
-                  colors: List.generate(8, (i) {
-                    final k = _minColorTemp +
-                        (i / 7) * (_maxColorTemp - _minColorTemp);
-                    return ColorUtils.curveColorForCCT(k.round());
-                  }),
+                  ],
                 ),
               ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: warmColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: warmColor.withValues(alpha: 0.2)),
+                ),
+                child: Text(
+                  '${_minColorTemp.round()}K',
+                  style: TextStyle(
+                    color: warmColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 5),
+                child: Text(
+                  '–',
+                  style: TextStyle(
+                    color: _Palette.textSecondary.withValues(alpha: 0.3),
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: coolColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: coolColor.withValues(alpha: 0.2)),
+                ),
+                child: Text(
+                  '${_maxColorTemp.round()}K',
+                  style: TextStyle(
+                    color: coolColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
+            child: _DualRangeBar(
+              minValue: _minColorTemp,
+              maxValue: _maxColorTemp,
+              hardMin: 1500,
+              hardMax: 6500,
+              minThumbMax: 4000,
+              maxThumbMin: 2000,
+              tint: warmColor,
+              minThumbColor: warmColor,
+              maxThumbColor: coolColor,
+              gradient: LinearGradient(
+                colors: List.generate(12, (i) {
+                  final k = 1500 + (i / 11) * 5000;
+                  return ColorUtils.curveColorForCCT(k.round());
+                }),
+              ),
+              divisions: 50,
+              onMinChanged: (v) =>
+                  _onCurveChanged(() => _minColorTemp = v),
+              onMaxChanged: (v) =>
+                  _onCurveChanged(() => _maxColorTemp = v),
             ),
-            AnimatedSize(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOutCubic,
-              alignment: Alignment.topCenter,
-              child: expanded
-                  ? Padding(
-                      padding: const EdgeInsets.fromLTRB(2, 12, 2, 4),
-                      child: _DualRangeBar(
-                        minValue: _minColorTemp,
-                        maxValue: _maxColorTemp,
-                        hardMin: 1500,
-                        hardMax: 6500,
-                        minThumbMax: 4000,
-                        maxThumbMin: 2000,
-                        tint: warmColor,
-                        minThumbColor: warmColor,
-                        maxThumbColor: coolColor,
-                        gradient: LinearGradient(
-                          colors: List.generate(12, (i) {
-                            final k = 1500 + (i / 11) * 5000;
-                            return ColorUtils.curveColorForCCT(k.round());
-                          }),
-                        ),
-                        divisions: 50,
-                        onMinChanged: (v) =>
-                            _onPreviewRangeChanged(() => _minColorTemp = v),
-                        onMaxChanged: (v) =>
-                            _onPreviewRangeChanged(() => _maxColorTemp = v),
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -2520,388 +2023,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       onAuto: onAuto,
       onManual: onManual,
       tooltip: tooltip,
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Time Simulator
-  // ---------------------------------------------------------------------------
-
-  Widget _buildTimeSimulator() {
-    final selectedHour = _selectedHour();
-    final previewColor = _previewColorAtHour(selectedHour);
-    final active = _hasTimeOffset;
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        gradient: const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Color(0xFF06080C),
-            Color(0xFF0A0D13),
-          ],
-        ),
-        border: Border.all(
-          color: active
-              ? _Palette.amber.withValues(alpha: 0.30)
-              : Colors.white.withValues(alpha: 0.04),
-        ),
-        boxShadow: [
-          // Outer cast — sits on the surrounding card.
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.35),
-            blurRadius: 8,
-            spreadRadius: -2,
-            offset: const Offset(0, 2),
-          ),
-          // Warm amber bloom when the simulator is engaged.
-          if (active)
-            BoxShadow(
-              color: _Palette.amber.withValues(alpha: 0.12),
-              blurRadius: 24,
-              spreadRadius: -6,
-            ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Eyebrow: small "horizon" marker + label.
-          Row(
-            children: [
-              Container(
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: active
-                      ? _Palette.amber
-                      : _Palette.amber.withValues(alpha: 0.35),
-                  boxShadow: active
-                      ? [
-                          BoxShadow(
-                            color: _Palette.amber.withValues(alpha: 0.6),
-                            blurRadius: 6,
-                          ),
-                        ]
-                      : null,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'TIME SIMULATOR',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: _Palette.amber.withValues(alpha: 0.75),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 2.0,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              // Tiny right-side readout: live kelvin value when engaged,
-              // otherwise the drag-to-simulate prompt.
-              Flexible(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 200),
-                    child: active
-                        ? Text(
-                            _previewValueLabel(selectedHour),
-                            key: const ValueKey('readout'),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: previewColor.withValues(alpha: 0.85),
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.2,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          )
-                        : Text(
-                            'Drag to simulate',
-                            key: const ValueKey('hint'),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: _Palette.textSecondary
-                                  .withValues(alpha: 0.45),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              letterSpacing: 0.1,
-                            ),
-                          ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // The gradient slider — the magical part.
-          _buildGradientSlider(),
-          // Apply / Reset + Absorb buttons.
-          AnimatedSize(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOutCubic,
-            child: _showTimeOffsetActions
-                ? Padding(
-                    padding: const EdgeInsets.only(top: 14),
-                    child: _buildTimeOffsetActions(),
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTimeOffsetActions() {
-    final children = <Widget>[];
-
-    if (_timeOffsetPreviewActive) {
-      children.add(_buildResetTimeButton());
-      if (_timeOffsetApplied && !_isSleepProfile) {
-        children
-          ..add(const SizedBox(width: 12))
-          ..add(_buildAbsorbTimeButton());
-      } else if (_hasTimeOffset) {
-        children
-          ..add(const SizedBox(width: 12))
-          ..add(_buildApplyTimeButton());
-      }
-    } else {
-      children
-        ..add(_buildClearTimeButton())
-        ..add(const SizedBox(width: 12))
-        ..add(_buildApplyTimeButton());
-    }
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: children,
-    );
-  }
-
-  Widget _buildGradientSlider() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final trackWidth = constraints.maxWidth;
-
-        return GestureDetector(
-          onTapDown: (details) {
-            _onSliderInteraction(details.localPosition.dx, trackWidth);
-          },
-          onHorizontalDragStart: (details) {
-            setState(() => _isDraggingTime = true);
-            _onSliderInteraction(details.localPosition.dx, trackWidth);
-          },
-          onHorizontalDragUpdate: (details) {
-            _onSliderInteraction(details.localPosition.dx, trackWidth);
-          },
-          onHorizontalDragEnd: (_) {
-            setState(() => _isDraggingTime = false);
-          },
-          child: AnimatedBuilder(
-            animation: _glowAnimation,
-            builder: (context, child) {
-              return CustomPaint(
-                painter: _TimeGradientPainter(
-                  curveData: _curveData,
-                  compressedPositions: _compressedPositions,
-                  currentHour: _currentHour(),
-                  thumbFraction: _sliderFraction,
-                  selectedHour: _selectedHour(),
-                  fixedColor: _selectedFixedColor,
-                  isDragging: _isDraggingTime,
-                  hasOffset: _hasTimeOffset,
-                  glowPhase: _glowAnimation.value,
-                  showTimeMarkers: true,
-                ),
-                size: Size(trackWidth, 74),
-              );
-            },
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildClearTimeButton() {
-    return GestureDetector(
-      onTap: _timeOffsetDispatching
-          ? null
-          : () {
-              setState(() {
-                _timeOffsetMinutes = 0;
-                _sliderFraction = _hourToNowFraction();
-                _timeOffsetApplied = false;
-                _timeOffsetPreviewActive = false;
-              });
-            },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        decoration: BoxDecoration(
-          color: _Palette.card,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: _Palette.border.withValues(alpha: 0.6),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.close_rounded,
-              color: _Palette.textSecondary.withValues(alpha: 0.5),
-              size: 14,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              'Clear',
-              style: TextStyle(
-                color: _Palette.textSecondary.withValues(alpha: 0.6),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildApplyTimeButton() {
-    final busy = _isTimeOffsetDispatching(_TimeOffsetDispatchAction.preview);
-    return GestureDetector(
-      onTap: _timeOffsetDispatching ? null : _applyTimeOffset,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF2A2520),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: _Palette.amber.withValues(alpha: 0.4),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            busy
-                ? _buildTimeOffsetSpinner(_Palette.amber, size: 16)
-                : Icon(
-                    Icons.play_arrow_rounded,
-                    color: _Palette.amber.withValues(alpha: 0.8),
-                    size: 16,
-                  ),
-            const SizedBox(width: 6),
-            Text(
-              busy ? 'Updating Lights' : 'Preview on Lights',
-              style: TextStyle(
-                color: _Palette.amber.withValues(alpha: 0.8),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildResetTimeButton() {
-    final busy = _isTimeOffsetDispatching(_TimeOffsetDispatchAction.reset);
-    return GestureDetector(
-      onTap: _timeOffsetDispatching ? null : _resetTimeOffset,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        decoration: BoxDecoration(
-          color: _Palette.card,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: _Palette.border.withValues(alpha: 0.6),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            busy
-                ? _buildTimeOffsetSpinner(_Palette.textSecondary, size: 14)
-                : Icon(
-                    Icons.refresh_rounded,
-                    color: _Palette.textSecondary.withValues(alpha: 0.5),
-                    size: 14,
-                  ),
-            const SizedBox(width: 6),
-            Text(
-              busy ? 'Resetting Lights' : 'Reset',
-              style: TextStyle(
-                color: _Palette.textSecondary.withValues(alpha: 0.6),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAbsorbTimeButton() {
-    final busy = _isTimeOffsetDispatching(_TimeOffsetDispatchAction.absorb);
-    return GestureDetector(
-      onTap: _timeOffsetDispatching ? null : _absorbTimeOffset,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF2A2520),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: const Color(0xFFD4A54A).withValues(alpha: 0.4),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            busy
-                ? _buildTimeOffsetSpinner(const Color(0xFFD4A54A), size: 14)
-                : Icon(
-                    Icons.check_rounded,
-                    color: const Color(0xFFD4A54A).withValues(alpha: 0.8),
-                    size: 14,
-                  ),
-            const SizedBox(width: 6),
-            Text(
-              busy ? 'Updating Lights' : 'Absorb',
-              style: TextStyle(
-                color: const Color(0xFFD4A54A).withValues(alpha: 0.8),
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTimeOffsetSpinner(Color color, {required double size}) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CircularProgressIndicator(
-        strokeWidth: 2,
-        color: color.withValues(alpha: 0.8),
-      ),
     );
   }
 
@@ -3028,139 +2149,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Hero icon — color shifts to match simulated CCT
-  // ---------------------------------------------------------------------------
-
-  Widget _buildHeroIcon() {
-    if (_isSleepProfile) return _buildSleepHero();
-
-    final selectedHour = _selectedHour();
-    final previewColor =
-        _hasTimeOffset ? _previewColorAtHour(selectedHour) : _Palette.amber;
-
-    return AnimatedBuilder(
-      animation: _glowAnimation,
-      builder: (context, child) {
-        return Container(
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: previewColor.withValues(alpha: 0.08),
-            border: Border.all(
-              color: previewColor.withValues(alpha: 0.18),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color:
-                    previewColor.withValues(alpha: _glowAnimation.value * 0.15),
-                blurRadius: 32,
-                spreadRadius: 0,
-              ),
-            ],
-          ),
-          child: Icon(
-            Icons.lightbulb_rounded,
-            color: previewColor.withValues(
-              alpha: 0.6 + _glowAnimation.value * 0.4,
-            ),
-            size: 32,
-          ),
-        );
-      },
-    );
-  }
-
-  /// Sleep hero — a tiny "night window" porthole. Same 72×72 footprint as the
-  /// day hero, but a deep-dark interior with an asymmetric starfield that
-  /// breathes via the existing glow animation. Pairs with the moon medallion
-  /// in the cue section below (stars + moon, not two moons).
-  Widget _buildSleepHero() {
-    return AnimatedBuilder(
-      animation: _glowAnimation,
-      builder: (context, _) {
-        final pulse = _glowAnimation.value;
-        const accent = _Palette.amber;
-        const starColor = Color(0xFFFFF1CC);
-
-        Widget star({
-          required double size,
-          required double left,
-          required double top,
-          required double baseAlpha,
-          required double pulseAmount,
-        }) {
-          final alpha = (baseAlpha + pulse * pulseAmount).clamp(0.0, 1.0);
-          return Positioned(
-            left: left,
-            top: top,
-            child: Container(
-              width: size,
-              height: size,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: starColor.withValues(alpha: alpha),
-                boxShadow: [
-                  BoxShadow(
-                    color: starColor.withValues(alpha: alpha * 0.55),
-                    blurRadius: 5,
-                  ),
-                ],
-              ),
-            ),
-          );
-        }
-
-        return Container(
-          width: 72,
-          height: 72,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF06080C),
-            border: Border.all(
-              color: accent.withValues(alpha: 0.18),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: accent.withValues(alpha: pulse * 0.12),
-                blurRadius: 28,
-                spreadRadius: -4,
-              ),
-            ],
-          ),
-          child: Stack(
-            children: [
-              star(
-                  size: 4,
-                  left: 16,
-                  top: 22,
-                  baseAlpha: 0.45,
-                  pulseAmount: 0.30),
-              star(
-                  size: 6,
-                  left: 32,
-                  top: 30,
-                  baseAlpha: 0.65,
-                  pulseAmount: 0.35),
-              star(
-                  size: 3,
-                  left: 52,
-                  top: 17,
-                  baseAlpha: 0.30,
-                  pulseAmount: 0.25),
-              star(
-                  size: 3,
-                  left: 26,
-                  top: 50,
-                  baseAlpha: 0.25,
-                  pulseAmount: 0.20),
-            ],
-          ),
-        );
-      },
-    );
-  }
 
   // ---------------------------------------------------------------------------
   // Shared widgets
@@ -3319,9 +2307,9 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                   ),
                 ),
                 if (!expanded && !allUnlocked)
-                  _ProBadge(label: '$lockedCount locked'),
+                  ProBadge(label: '$lockedCount locked'),
                 if (!expanded && allUnlocked)
-                  _ProBadge(label: 'Pro', solid: true),
+                  ProBadge(label: 'Pro', solid: true),
                 const SizedBox(width: 6),
                 AnimatedRotation(
                   turns: expanded ? 0.5 : 0,
@@ -3344,12 +2332,12 @@ class _LightProfileScreenState extends State<LightProfileScreen>
                 ? Padding(
                     padding: const EdgeInsets.only(top: 14),
                     child: _isSleepProfile
-                        ? _ProLockWrap(
+                        ? ProLockWrap(
                             unlocked: canUseSleepPrimary,
                             entitlement: Entitlement.sleepPrimarySettings,
                             child: _buildTimingCard(),
                           )
-                        : _ProLockWrap(
+                        : ProLockWrap(
                             unlocked: canUseAdvancedDay,
                             entitlement: Entitlement.advancedDayControls,
                             child: _buildTimingCard(),
@@ -3469,7 +2457,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       }
       _curveConfigDirty = false;
     });
-    unawaited(_loadCurveData(profileId: _selectedProfileId));
   }
 
   Future<void> _saveCurveConfig() async {
@@ -3536,7 +2523,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
       _applyProfileConfig(config);
       _applyIdleFallback();
       await _syncActiveConfigModel(config);
-      await _loadCurveData(profileId: _selectedProfileId);
       if (!mounted) return;
       AnalyticsService().logLightProfileSaved(_selectedProfileId);
     } finally {
@@ -3600,362 +2586,6 @@ class _LightProfileScreenState extends State<LightProfileScreen>
   }
 }
 
-// -----------------------------------------------------------------------------
-// Curve interpolation — shared by painter and state methods
-// -----------------------------------------------------------------------------
-
-double _interpolateCurve(
-    List<double> hours, List<int> values, double targetHour) {
-  if (hours.isEmpty) return 50.0;
-  if (hours.length == 1) return values[0].toDouble();
-
-  var lowerIdx = 0;
-  var upperIdx = hours.length - 1;
-
-  for (int i = 0; i < hours.length - 1; i++) {
-    if (hours[i] <= targetHour && hours[i + 1] >= targetHour) {
-      lowerIdx = i;
-      upperIdx = i + 1;
-      break;
-    }
-  }
-
-  if (targetHour < hours.first) {
-    lowerIdx = hours.length - 1;
-    upperIdx = 0;
-  } else if (targetHour > hours.last) {
-    lowerIdx = hours.length - 1;
-    upperIdx = 0;
-  }
-
-  final lowerHour = hours[lowerIdx];
-  final upperHour = hours[upperIdx];
-  final lowerValue = values[lowerIdx];
-  final upperValue = values[upperIdx];
-
-  if (lowerHour == upperHour) return lowerValue.toDouble();
-
-  double t;
-  if (upperIdx == 0 && lowerIdx == hours.length - 1) {
-    final totalSpan = (24 - lowerHour) + upperHour;
-    final position = targetHour >= lowerHour
-        ? targetHour - lowerHour
-        : (24 - lowerHour) + targetHour;
-    t = position / totalSpan;
-  } else {
-    t = (targetHour - lowerHour) / (upperHour - lowerHour);
-  }
-
-  return lowerValue + (upperValue - lowerValue) * t;
-}
-
-// -----------------------------------------------------------------------------
-// Time Gradient Painter — compressed spectrum light bar
-// -----------------------------------------------------------------------------
-
-class _TimeGradientPainter extends CustomPainter {
-  final CurveData? curveData;
-  final List<double>? compressedPositions;
-  final double currentHour;
-  final double thumbFraction; // raw 0..1 slider position — no hour round-trip
-  final double selectedHour; // for CCT color lookup only
-  final Color? fixedColor;
-  final bool isDragging;
-  final bool hasOffset;
-  final double glowPhase;
-  final bool showTimeMarkers;
-
-  _TimeGradientPainter({
-    required this.curveData,
-    required this.compressedPositions,
-    required this.currentHour,
-    required this.thumbFraction,
-    required this.selectedHour,
-    this.fixedColor,
-    required this.isDragging,
-    required this.hasOffset,
-    required this.glowPhase,
-    this.showTimeMarkers = false,
-  });
-
-  /// Convert hour to x position using compressed mapping.
-  double _hourToX(double hour, double width) {
-    if (compressedPositions == null) return (hour / 24) * width;
-    final idx = (hour / 24 * 96).clamp(0.0, 96.0);
-    final lower = idx.floor().clamp(0, 95);
-    final upper = (lower + 1).clamp(0, 96);
-    final t = idx - lower;
-    final pos = compressedPositions![lower] +
-        t * (compressedPositions![upper] - compressedPositions![lower]);
-    return pos * width;
-  }
-
-  static const double _ribbonHeight = 56;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final ribbonSize = Size(size.width, _ribbonHeight);
-    final rect = Offset.zero & ribbonSize;
-    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(14));
-
-    // 1. Dark background.
-    canvas.drawRRect(rrect, Paint()..color = const Color(0xFF080A0E));
-
-    // 2. Compressed gradient fill.
-    canvas.save();
-    canvas.clipRRect(rrect);
-    _drawGradientFill(canvas, ribbonSize);
-    canvas.restore();
-
-    // 3. Frosted glass overlay for depth.
-    canvas.save();
-    canvas.clipRRect(rrect);
-    canvas.drawRect(
-      rect,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.white.withValues(alpha: 0.06),
-            Colors.transparent,
-            Colors.black.withValues(alpha: 0.1),
-          ],
-          stops: const [0.0, 0.4, 1.0],
-        ).createShader(rect),
-    );
-    canvas.restore();
-
-    // 4. Border.
-    canvas.drawRRect(
-      rrect,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..color = const Color(0xFF1E2530)
-        ..strokeWidth = 1,
-    );
-
-    // 5. "Now" marker.
-    _drawNowMarker(canvas, ribbonSize);
-
-    // 6. Thumb.
-    if (hasOffset || isDragging) {
-      _drawThumb(canvas, ribbonSize);
-    }
-
-    // 7. Time markers below ribbon.
-    if (showTimeMarkers) {
-      _drawTimeMarkers(canvas, size);
-    }
-  }
-
-  void _drawGradientFill(Canvas canvas, Size size) {
-    final colors = <Color>[];
-    final stops = <double>[];
-    const n = 96;
-
-    for (int i = 0; i <= n; i++) {
-      final hour = (i / n) * 24;
-      int kelvin, brightness;
-
-      if (curveData != null && curveData!.hours.isNotEmpty) {
-        kelvin = _interpolateCurve(curveData!.hours, curveData!.kelvin, hour)
-            .toInt();
-        brightness =
-            _interpolateCurve(curveData!.hours, curveData!.brightness, hour)
-                .toInt();
-      } else {
-        final t = 1 - ((hour - 12).abs() / 12);
-        kelvin = (2000 + t * 3500).toInt();
-        brightness = (5 + t * 95).toInt();
-      }
-
-      final color = fixedColor ?? ColorUtils.curveColorForCCT(kelvin);
-      final opacity = 0.08 + (brightness / 100) * 0.92;
-      colors.add(color.withValues(alpha: opacity));
-
-      // Use compressed positions for the gradient stops.
-      final stop =
-          compressedPositions != null ? compressedPositions![i] : i / n;
-      stops.add(stop);
-    }
-
-    final gradient = LinearGradient(colors: colors, stops: stops);
-    canvas.drawRect(
-      Offset.zero & size,
-      Paint()..shader = gradient.createShader(Offset.zero & size),
-    );
-  }
-
-  void _drawNowMarker(Canvas canvas, Size size) {
-    final x = _hourToX(currentHour, size.width);
-
-    canvas.drawLine(
-      Offset(x, 4),
-      Offset(x, size.height - 4),
-      Paint()
-        ..color = Colors.white.withValues(alpha: hasOffset ? 0.2 : 0.5)
-        ..strokeWidth = 1.5
-        ..strokeCap = StrokeCap.round,
-    );
-
-    final trianglePath = Path()
-      ..moveTo(x - 4, size.height + 1)
-      ..lineTo(x + 4, size.height + 1)
-      ..lineTo(x, size.height - 5)
-      ..close();
-    canvas.drawPath(
-      trianglePath,
-      Paint()..color = Colors.white.withValues(alpha: hasOffset ? 0.2 : 0.5),
-    );
-  }
-
-  void _drawThumb(Canvas canvas, Size size) {
-    final x = thumbFraction * size.width;
-
-    final cctColor = fixedColor ??
-        (() {
-          int kelvin;
-          if (curveData != null && curveData!.hours.isNotEmpty) {
-            kelvin = _interpolateCurve(
-                    curveData!.hours, curveData!.kelvin, selectedHour)
-                .toInt();
-          } else {
-            final t = 1 - ((selectedHour - 12).abs() / 12);
-            kelvin = (2000 + t * 3500).toInt();
-          }
-          return ColorUtils.curveColorForCCT(kelvin);
-        })();
-
-    // Outer glow.
-    final glowIntensity = isDragging ? 0.25 : 0.15 + glowPhase * 0.06;
-    canvas.drawLine(
-      Offset(x, 0),
-      Offset(x, size.height),
-      Paint()
-        ..color = cctColor.withValues(alpha: glowIntensity)
-        ..strokeWidth = 20
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 12),
-    );
-
-    // Inner glow.
-    canvas.drawLine(
-      Offset(x, 0),
-      Offset(x, size.height),
-      Paint()
-        ..color = Colors.white.withValues(alpha: isDragging ? 0.2 : 0.1)
-        ..strokeWidth = 8
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
-    );
-
-    // Crisp center line.
-    canvas.drawLine(
-      Offset(x, 3),
-      Offset(x, size.height - 3),
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.9)
-        ..strokeWidth = 2
-        ..strokeCap = StrokeCap.round,
-    );
-
-    // Circle handle — shadow, fill, ring.
-    canvas.drawCircle(
-      Offset(x, size.height / 2),
-      7,
-      Paint()
-        ..color = cctColor.withValues(alpha: 0.3)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
-    );
-    canvas.drawCircle(
-      Offset(x, size.height / 2),
-      5.5,
-      Paint()..color = Colors.white,
-    );
-    canvas.drawCircle(
-      Offset(x, size.height / 2),
-      5.5,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..color = cctColor.withValues(alpha: 0.5)
-        ..strokeWidth = 1.5,
-    );
-  }
-
-  void _drawTimeMarkers(Canvas canvas, Size size) {
-    final markerY = _ribbonHeight + 14;
-    const minGap = 32.0;
-
-    // Generate a candidate every hour, compute compressed x positions.
-    final all = <({double x, String label, int priority})>[];
-    for (int h = 0; h < 24; h++) {
-      final x = _hourToX(h.toDouble(), size.width);
-      final h12 = h == 0 ? 12 : (h > 12 ? h - 12 : h);
-      final suffix = h >= 12 ? 'p' : 'a';
-      final label = '$h12$suffix';
-      // Priority: 0 = 6h intervals, 1 = 3h, 2 = 2h, 3 = 1h
-      final priority = h % 6 == 0
-          ? 0
-          : h % 3 == 0
-              ? 1
-              : h % 2 == 0
-                  ? 2
-                  : 3;
-      all.add((x: x, label: label, priority: priority));
-    }
-
-    // Place by priority — important markers first, fill in rest.
-    final placed = <double>[];
-    final visible = <({double x, String label})>[];
-    for (int p = 0; p <= 3; p++) {
-      for (final e in all) {
-        if (e.priority != p) continue;
-        if (placed.any((px) => (px - e.x).abs() < minGap)) continue;
-        placed.add(e.x);
-        visible.add((x: e.x, label: e.label));
-      }
-    }
-
-    for (final e in visible) {
-      // Tick mark.
-      canvas.drawLine(
-        Offset(e.x, _ribbonHeight + 2),
-        Offset(e.x, _ribbonHeight + 6),
-        Paint()
-          ..color = Colors.white.withValues(alpha: 0.15)
-          ..strokeWidth = 1
-          ..strokeCap = StrokeCap.round,
-      );
-
-      // Label.
-      final tp = TextPainter(
-        text: TextSpan(
-          text: e.label,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.25),
-            fontSize: 9,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(e.x - tp.width / 2, markerY - tp.height / 2));
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _TimeGradientPainter old) =>
-      curveData != old.curveData ||
-      compressedPositions != old.compressedPositions ||
-      currentHour != old.currentHour ||
-      thumbFraction != old.thumbFraction ||
-      selectedHour != old.selectedHour ||
-      fixedColor != old.fixedColor ||
-      isDragging != old.isDragging ||
-      hasOffset != old.hasOffset ||
-      glowPhase != old.glowPhase ||
-      showTimeMarkers != old.showTimeMarkers;
-}
-
 class _Palette {
   static const bg = Color(0xFF0B0E13);
   static const card = Color(0xFF13171E);
@@ -4005,240 +2635,6 @@ class _AdvancedHeaderIcon extends StatelessWidget {
       ),
     );
   }
-}
-
-class _ProBadge extends StatelessWidget {
-  const _ProBadge({required this.label, this.solid = false});
-  final String label;
-  final bool solid;
-
-  @override
-  Widget build(BuildContext context) {
-    if (!FeatureFlags.entitlementsEnabled) return const SizedBox.shrink();
-    if (solid) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [_Palette.amberWarm, _Palette.amberDeep],
-          ),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Text(
-          label.toUpperCase(),
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 10,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 1.0,
-          ),
-        ),
-      );
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: _Palette.amber.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: _Palette.amber.withValues(alpha: 0.30)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: _Palette.amber.withValues(alpha: 0.92),
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.1,
-        ),
-      ),
-    );
-  }
-}
-
-/// Wraps a Pro-only card so it always renders, but blocks interaction and
-/// reveals an upsell tap target when [unlocked] is false. The visual
-/// treatment — dimmed body, amber gloss, a floating PRO chip — is meant to
-/// read as "you can see what you're missing" rather than "this is disabled".
-class _ProLockWrap extends StatelessWidget {
-  const _ProLockWrap({
-    required this.child,
-    required this.unlocked,
-    required this.entitlement,
-  });
-
-  final Widget child;
-  final bool unlocked;
-  final Entitlement entitlement;
-
-  @override
-  Widget build(BuildContext context) {
-    if (unlocked) return child;
-    return _LockedCard(entitlement: entitlement, child: child);
-  }
-}
-
-class _LockedCard extends StatefulWidget {
-  const _LockedCard({required this.child, required this.entitlement});
-
-  final Widget child;
-  final Entitlement entitlement;
-
-  @override
-  State<_LockedCard> createState() => _LockedCardState();
-}
-
-class _LockedCardState extends State<_LockedCard>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _shimmer;
-
-  @override
-  void initState() {
-    super.initState();
-    _shimmer = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 3400),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _shimmer.dispose();
-    super.dispose();
-  }
-
-  void _openUpsell() {
-    HapticFeedback.lightImpact();
-    PlanTierModal.show(context, highlightFeature: widget.entitlement);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _openUpsell,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(18),
-        child: Stack(
-          children: [
-            // 1. The real card, painted but inert.
-            IgnorePointer(
-              ignoring: true,
-              child: ColorFiltered(
-                colorFilter: const ColorFilter.matrix(<double>[
-                  // De-saturate ~55% so cool greens/teals don't fight the
-                  // warm amber lock veil.
-                  0.55, 0.35, 0.10, 0, 0,
-                  0.20, 0.65, 0.15, 0, 0,
-                  0.20, 0.35, 0.45, 0, 0,
-                  0, 0, 0, 0.55, 0,
-                ]),
-                child: child(),
-              ),
-            ),
-
-            // 2. Diagonal amber veil — top-right glow.
-            Positioned.fill(
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.bottomLeft,
-                      end: Alignment.topRight,
-                      colors: [
-                        _Palette.amberWarm.withValues(alpha: 0.02),
-                        _Palette.amberWarm.withValues(alpha: 0.08),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            // 3. Slow shimmer sweep that signals "tap me".
-            Positioned.fill(
-              child: IgnorePointer(
-                child: AnimatedBuilder(
-                  animation: _shimmer,
-                  builder: (context, _) {
-                    final t = _shimmer.value;
-                    return ShaderMask(
-                      shaderCallback: (rect) => LinearGradient(
-                        begin: const Alignment(-1.4, -1),
-                        end: const Alignment(1.4, 1),
-                        stops: [
-                          (t - 0.20).clamp(0.0, 1.0),
-                          t.clamp(0.0, 1.0),
-                          (t + 0.20).clamp(0.0, 1.0),
-                        ],
-                        colors: [
-                          Colors.white.withValues(alpha: 0.00),
-                          Colors.white.withValues(alpha: 0.04),
-                          Colors.white.withValues(alpha: 0.00),
-                        ],
-                      ).createShader(rect),
-                      blendMode: BlendMode.plus,
-                      child: const ColoredBox(color: Colors.transparent),
-                    );
-                  },
-                ),
-              ),
-            ),
-
-            // 4. Floating PRO chip in the top-right.
-            const Positioned(
-              top: 10,
-              right: 12,
-              child: _ProBadge(label: 'Pro', solid: true),
-            ),
-
-            // 5. Bottom-center upsell hint.
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 10,
-              child: Center(
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.38),
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(
-                      color: _Palette.amber.withValues(alpha: 0.35),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.lock_open_rounded,
-                        size: 12,
-                        color: _Palette.amberWarm,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        'Tap to unlock',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.95),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.2,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget child() => widget.child;
 }
 
 // ---------------------------------------------------------------------------

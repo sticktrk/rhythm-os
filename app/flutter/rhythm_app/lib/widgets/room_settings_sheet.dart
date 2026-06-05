@@ -16,6 +16,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
 import 'device_detail_sheet.dart';
+import 'info_tooltip.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -51,7 +52,8 @@ class RoomSettingsSheet extends StatefulWidget {
 enum _SheetTab { rhythm, devices, settings }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
-  _SheetTab _selectedTab = _SheetTab.devices;
+  // Opens on the "Settings" tab (internally `rhythm`).
+  _SheetTab _selectedTab = _SheetTab.rhythm;
   bool _deletingRoom = false;
   final Map<String, RhythmTimerSetting> _motionTimeoutDrafts = {};
 
@@ -236,18 +238,19 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 8),
-          child: Text(
-            title.toUpperCase(),
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.5,
+        if (title.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 8),
+            child: Text(
+              title.toUpperCase(),
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.5,
+              ),
             ),
           ),
-        ),
         Container(
           decoration: BoxDecoration(
             color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
@@ -279,11 +282,35 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     final syncProvider = context.watch<ServerSyncProvider>();
     final node = syncProvider.nodeById(room.id);
     final settings = node?.profileSettings;
+    final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
 
     return ListView(
       key: const ValueKey('rhythm'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
+        // Standby is its own room-level behavior, not a Day/Sleep override —
+        // so it sits above the per-mode profile groups as a standalone card.
+        _buildSettingsGroup('', [
+          _SettingsRow(
+            icon: Icons.bedtime_outlined,
+            label: 'Off Behavior',
+            labelInfo: const InfoTooltip(
+              eyebrow: 'OFF BEHAVIOR',
+              accentColor: Color(0xFF7C83FF),
+              iconSize: 15,
+              message:
+                  'What this room does when it switches off. Off cuts the '
+                  'lights fully. Standby keeps them in a low, ready state '
+                  'instead of going dark.',
+            ),
+            trailing: _OffBehaviorSwitch(
+              standby: standbyEnabled,
+              onChanged: (val) => _setStandbyEnabled(context, val),
+            ),
+            onTap: () => _setStandbyEnabled(context, !standbyEnabled),
+          ),
+        ]),
+        const SizedBox(height: 16),
         _buildSettingsGroup('Day Profile', [
           _buildMotionTimeoutRow(
             context,
@@ -341,6 +368,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ? Icons.nightlight_outlined
             : Icons.wb_sunny_outlined,
         title: 'Motion Timeout',
+        titleColor: CelestialColors.textPrimary,
         color: const Color(0xFF4ADE80),
         isAuto: setting == null || setting.isAuto,
         sliderValue: sliderValue,
@@ -459,7 +487,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         ? 'Hide this light'
         : 'Hide this room';
     final canDeleteRoom = _canDeleteRoom(syncProvider);
-    final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -520,15 +547,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                 },
               );
             },
-          ),
-          _SettingsRow(
-            icon: Icons.bedtime_outlined,
-            label: 'Standby',
-            trailing: _ToggleSwitch(
-              value: standbyEnabled,
-              onChanged: (val) => _setStandbyEnabled(context, val),
-            ),
-            onTap: () => _setStandbyEnabled(context, !standbyEnabled),
           ),
         ]),
         if (canDeleteRoom) ...[
@@ -794,9 +812,9 @@ class _TabSelector extends StatelessWidget {
       ),
       child: Row(
         children: [
+          _tabItem('Settings', _SheetTab.rhythm),
           _tabItem('Devices', _SheetTab.devices),
-          _tabItem('Rhythm', _SheetTab.rhythm),
-          _tabItem('Settings', _SheetTab.settings),
+          _tabItem('Info', _SheetTab.settings),
         ],
       ),
     );
@@ -849,12 +867,17 @@ class _SettingsRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final Widget trailing;
+
+  /// Optional widget rendered immediately to the right of the label (e.g. an
+  /// info affordance), kept on the left side of the row.
+  final Widget? labelInfo;
   final VoidCallback? onTap;
 
   const _SettingsRow({
     required this.icon,
     required this.label,
     required this.trailing,
+    this.labelInfo,
     this.onTap,
   });
 
@@ -874,16 +897,103 @@ class _SettingsRow extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 15,
-                ),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                  if (labelInfo != null) ...[
+                    const SizedBox(width: 4),
+                    labelInfo!,
+                  ],
+                ],
               ),
             ),
             trailing,
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A two-segment switch for a room's off behavior — both options stay visible
+/// ("Off" | "Standby") with the active one tinted. Tapping a segment selects
+/// that state.
+class _OffBehaviorSwitch extends StatelessWidget {
+  final bool standby;
+  final ValueChanged<bool> onChanged;
+
+  const _OffBehaviorSwitch({required this.standby, required this.onChanged});
+
+  static const Color _standbyColor = Color(0xFF7C83FF);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundDark.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _segment(
+            label: 'Off',
+            selected: !standby,
+            color: CelestialColors.textSecondary,
+            onTap: () => onChanged(false),
+          ),
+          _segment(
+            label: 'Standby',
+            selected: standby,
+            color: _standbyColor,
+            onTap: () => onChanged(true),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _segment({
+    required String label,
+    required bool selected,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.18) : Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected
+                ? color
+                : CelestialColors.textSecondary.withValues(alpha: 0.5),
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.2,
+          ),
         ),
       ),
     );
