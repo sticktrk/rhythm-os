@@ -12,10 +12,15 @@ DRY_RUN=false
 RELEASE_ROOTS=(
     install
     macos-arm64
+    macos-arm64-stable
     macos-x86_64
+    macos-x86_64-stable
     linux-amd64
+    linux-amd64-stable
     linux-aarch64
+    linux-aarch64-stable
     rpiz
+    rpiz-stable
 )
 
 usage() {

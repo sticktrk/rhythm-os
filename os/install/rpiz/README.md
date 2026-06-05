@@ -124,14 +124,15 @@ If you want to use a non-default Buildroot checkout in the non-Docker flow, pass
 
 ### Release modes
 
-The rpiz release flow has two modes that map to two workflows:
+The rpiz release flow has these modes across the tag-driven CI workflow and the manual image workflow:
 
 | Mode | How you trigger it | What you get | CI time |
 |------|--------------------|--------------|---------|
-| **Binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | rhythm-server rpiz tarball for OTA (tag-driven `rpiz Binary` job in `ci.yml`) | ~5 min |
+| **Beta binary release** (default) | `./scripts/release.sh` (any variant without `--with-image`) | `vX.Y.Z-beta` GitHub release plus the rolling `rpiz` OTA feed for manual updates | ~5 min |
+| **Stable binary release** | `./scripts/release.sh --promote-stable [X.Y.Z]` | Dedicated `vX.Y.Z-stable` GitHub release plus the `rpiz-stable` OTA feed consumed by overnight auto-update | ~5 min |
 | **Full image release** | `./scripts/release.sh --with-image` | Everything above *plus* sdcard.img + rootfs.ext2.gz attached to the release (`rpiz-sd-image.yml` dispatched via `gh`) | ~5 min + one full Buildroot pass |
 
-Use the binary mode for normal appliance code / Rust-level changes — your Pi Zeros update via OTA against the tarball without needing a new SD card. Use `--with-image` when you've bumped CHIP, Buildroot, the defconfig, or the kernel config (anything that forces a new rootfs). You can also dispatch `rpiz-sd-image.yml` manually at any time:
+Use beta binary releases for normal appliance code / Rust-level validation. Promote a tested beta to stable when it should be available to auto-updating appliances. Use `--with-image` when you've bumped CHIP, Buildroot, the defconfig, or the kernel config (anything that forces a new rootfs). You can also dispatch `rpiz-sd-image.yml` manually at any time:
 
 ```bash
 gh workflow run rpiz-sd-image.yml -f tag=v0.5.0   # attaches to an existing release

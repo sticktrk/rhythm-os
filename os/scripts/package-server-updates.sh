@@ -2,12 +2,12 @@
 # Package rhythm-server binaries into a static OTA feed.
 #
 # Output layout:
-#   <output>/<target>/manifest.json
-#   <output>/<target>/v<version>/rhythm-server-<target>.tar.gz
-#   <output>/<target>/v<version>/sdcard.img.gz     (optional rpiz factory image, falls back to sdcard.img)
-#   <output>/<target>/v<version>/rootfs.ext2.gz    (optional rpiz OTA image, falls back to rootfs.ext2)
-#   <output>/<target>/latest/sdcard.img.gz         (optional latest alias)
-#   <output>/<target>/latest/rootfs.ext2.gz        (optional latest alias)
+#   <output>/<target>[-stable]/manifest.json
+#   <output>/<target>[-stable]/v<version>/rhythm-server-<target>.tar.gz
+#   <output>/<target>[-stable]/v<version>/sdcard.img.gz     (optional rpiz factory image, falls back to sdcard.img)
+#   <output>/<target>[-stable]/v<version>/rootfs.ext2.gz    (optional rpiz OTA image, falls back to rootfs.ext2)
+#   <output>/<target>[-stable]/latest/sdcard.img.gz         (optional latest alias)
+#   <output>/<target>[-stable]/latest/rootfs.ext2.gz        (optional latest alias)
 
 set -euo pipefail
 
@@ -19,6 +19,7 @@ OUTPUT_DIR="$PROJECT_ROOT/out/server-updates"
 VERSION=""
 IMAGE_ROOT=""
 PREVIOUS_RPIZ_MANIFEST=""
+CHANNEL=""
 DRY_RUN=false
 
 sha256_file() {
@@ -49,6 +50,7 @@ Options:
   --artifact-root PATH  Root containing dist/bin/<target>/ (default: $ARTIFACT_ROOT)
   --output-dir PATH     Output directory for packaged feed (default: $OUTPUT_DIR)
   --version VERSION     Version to package (default: resolve workspace/server version)
+  --channel CHANNEL     OTA channel to package: beta or stable (default: infer from VERSION)
   --image-root PATH     Optional rpiz image directory to publish alongside the OTA manifest
   --previous-rpiz-manifest PATH
                        Existing rpiz manifest whose images should be carried
@@ -70,6 +72,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --version)
             VERSION="$2"
+            shift 2
+            ;;
+        --channel)
+            CHANNEL="$2"
             shift 2
             ;;
         --image-root)
@@ -103,6 +109,27 @@ if [ -z "$VERSION" ]; then
     echo "Error: Could not determine rhythm-server version"
     exit 1
 fi
+VERSION="${VERSION#v}"
+
+if [ -z "$CHANNEL" ]; then
+    case "$VERSION" in
+        *-stable*)
+            CHANNEL="stable"
+            ;;
+        *)
+            CHANNEL="beta"
+            ;;
+    esac
+fi
+
+case "$CHANNEL" in
+    beta|stable)
+        ;;
+    *)
+        echo "Error: --channel must be beta or stable (got '$CHANNEL')" >&2
+        exit 1
+        ;;
+esac
 
 if [ -n "$IMAGE_ROOT" ] && [ ! -d "$IMAGE_ROOT" ]; then
     echo "Error: --image-root does not exist: $IMAGE_ROOT"
@@ -140,9 +167,13 @@ for target in $TARGETS; do
     fi
 
     ota_name="rhythm-server-$target"
-    version_dir="$OUTPUT_DIR/$target/v$VERSION"
+    feed_target="$target"
+    if [ "$CHANNEL" = "stable" ]; then
+        feed_target="${target}-stable"
+    fi
+    version_dir="$OUTPUT_DIR/$feed_target/v$VERSION"
     archive_path="$version_dir/$ota_name.tar.gz"
-    manifest_path="$OUTPUT_DIR/$target/manifest.json"
+    manifest_path="$OUTPUT_DIR/$feed_target/manifest.json"
     image_candidates=()
     if [ "$target" = "rpiz" ] && [ -n "$IMAGE_ROOT" ]; then
         if [ -f "$IMAGE_ROOT/sdcard.img.gz" ]; then
@@ -202,7 +233,7 @@ for target in $TARGETS; do
             image_src="$IMAGE_ROOT/$image_name"
             image_dst="$version_dir/$image_name"
             cp "$image_src" "$image_dst"
-            latest_dir="$OUTPUT_DIR/$target/latest"
+            latest_dir="$OUTPUT_DIR/$feed_target/latest"
             mkdir -p "$latest_dir"
             cp "$image_src" "$latest_dir/$image_name"
             image_sha="$(sha256_file "$image_dst")"
@@ -242,6 +273,7 @@ for target in $TARGETS; do
     cat > "$manifest_path" <<EOF
 {
   "version": "$VERSION",
+  "channel": "$CHANNEL",
   "published_at": "$TIMESTAMP",
   "package": {
     "name": "$(basename "$archive_path")",

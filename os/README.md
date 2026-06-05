@@ -53,7 +53,7 @@ cargo build -p rhythm-server --release
 cargo test
 ```
 
-Workspace Rust binaries derive their build version from Git tags such as `v0.4.0`. Untagged builds use Git-derived prerelease versions. The Home Assistant addon keeps its own separate version flow.
+Workspace Rust binaries derive their build version from Git tags such as `v0.4.0-beta` or `v0.4.0-stable`. Beta tags publish the manual OTA feed; stable tags publish the auto-update feed. Untagged builds use Git-derived prerelease versions. The Home Assistant addon keeps its own separate version flow.
 
 See [install/](install/) for platform-specific setup (macOS, Linux, Raspberry Pi Zero, Home Assistant).
 

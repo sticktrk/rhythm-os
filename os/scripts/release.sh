@@ -45,8 +45,8 @@ Options:
   --patch           Bump the latest vX.Y.Z tag to the next patch version (default)
   --upload          Build/package/upload the rpiz OTA feed locally; implies --no-push
   --promote-stable [VERSION]
-                    Promote the current rpiz beta manifest, or VERSION if
-                    supplied, to the manually curated rpiz-stable feed
+                    Create and push vX.Y.Z-stable from the matching
+                    vX.Y.Z-beta tag so CI builds/publishes the stable feed
   --message TEXT    Annotated tag message (default: "Release vX.Y.Z-beta")
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
@@ -470,8 +470,17 @@ if [ "$PROMOTE_STABLE" = true ]; then
     if [ "$DRY_RUN" = true ]; then
         promote_args+=(--dry-run)
     fi
+    if [ "$PUSH" = false ]; then
+        promote_args+=(--no-push)
+    fi
+    if [ "$REMOTE" != "origin" ]; then
+        promote_args+=(--remote "$REMOTE")
+    fi
+    if [ -n "$MESSAGE" ]; then
+        promote_args+=(--message "$MESSAGE")
+    fi
     if [ -n "$promote_version" ]; then
-        promote_args+=(--version "$(normalize_release_version "$promote_version")")
+        promote_args+=(--version "$promote_version")
     fi
 
     exec "$SCRIPT_DIR/promote-stable.sh" "${promote_args[@]}"

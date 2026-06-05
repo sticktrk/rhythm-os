@@ -51,9 +51,9 @@ enum RestartStrategy {
 
 /// Which OTA feed to read from.
 ///
-/// `Beta` is the rolling feed populated by every `v*` tag on CI. `Stable` is a
-/// curated subset populated only by manual `scripts/release.sh --promote-stable`
-/// runs and is what auto-updating appliances follow overnight.
+/// `Beta` is the rolling feed populated by beta tags on CI. `Stable` is a
+/// dedicated stable-tag build published by `scripts/release.sh --promote-stable`
+/// and is what auto-updating appliances follow overnight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UpdateChannel {
     Beta,
@@ -3401,9 +3401,16 @@ mod tests {
             infer_release_version_from_url("../rpiz/v0.4.256-beta/rootfs.ext2.gz").as_deref(),
             Some("0.4.256-beta")
         );
+        assert_eq!(
+            infer_release_version_from_url("../rpiz-stable/v0.4.257-stable/rootfs.ext2.gz")
+                .as_deref(),
+            Some("0.4.257-stable")
+        );
         assert!(version_needs_update("0.4.257-beta", "0.4.256-beta"));
         assert!(version_needs_update("0.4.257", "0.4.257-beta"));
+        assert!(version_needs_update("0.4.257-stable", "0.4.257-beta"));
         assert!(!version_needs_update("0.4.257-beta", "0.4.257"));
+        assert!(!version_needs_update("0.4.257-beta", "0.4.257-stable"));
         assert!(!version_needs_update("0.4.256", "0.4.257"));
     }
 

@@ -23,6 +23,7 @@ This directory contains all build and deployment scripts for Rhythm OS.
 ./scripts/deploy-addon.sh               # Push addon to Docker Hub
 ./scripts/deploy-addon.sh --local       # Deploy to local HA for testing
 ./scripts/release.sh                    # Tag and push the next GitHub release
+./scripts/release.sh --promote-stable   # Promote latest beta tag to a stable CI build
 ./scripts/release.sh --upload           # Build + upload the rpiz OTA feed locally
 ```
 
@@ -195,8 +196,9 @@ workflows can build and publish the assets.
 There are two release modes:
 
 - **Binary release (default)** — the rpiz OTA tarball via the tag-driven
-  `rpiz Binary` job in `ci.yml`. Fast, ~5 min of CI. This is the normal
-  cadence for appliance code changes.
+  `rpiz Binary` job in `ci.yml`. Beta tags publish the rolling `rpiz` feed for
+  manual updates. Stable tags publish the `rpiz-stable` feed that appliance
+  auto-update consumes overnight.
 - **Full image release (`--with-image`)** — everything above *plus* dispatches
   `rpiz-sd-image.yml`, which re-runs Buildroot end-to-end and attaches
   `sdcard.img` + `rootfs.ext2.gz` to the release. Use this when you bumped
@@ -211,6 +213,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 ./scripts/release.sh --version 0.4.1    # Tags and pushes an explicit version
 ./scripts/release.sh --with-image       # Binary release + dispatch rpiz-sd-image.yml for full SD card
 ./scripts/release.sh --upload           # Builds and uploads only the rpiz OTA feed locally
+./scripts/release.sh --promote-stable   # vX.Y.Z-beta -> vX.Y.Z-stable, then CI publishes stable
 ./scripts/release.sh --version 0.4.101  # Explicit high patch version is valid semver
 ./scripts/release.sh --dry-run          # Preview without creating the tag
 ```
@@ -225,6 +228,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 | `--with-image` | After pushing, dispatch `rpiz-sd-image.yml` to rebuild the SD-card image and attach it to the release |
 | `--skip-builder-refresh` | Skip the builder-image hash check / refresh step (non-Linux hosts, or when you know the lock is right) |
 | `--upload` | Build/package/upload the `rpiz` OTA feed locally; implies `--no-push` |
+| `--promote-stable [version]` | Create and push `vX.Y.Z-stable` from the matching beta tag so CI publishes the stable feed |
 | `--message <text>` | Custom annotated tag message |
 | `--remote <name>` | Git remote to push to, default `origin` |
 | `--no-push` | Create the local tag without pushing |
@@ -235,7 +239,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 - Updates the workspace version in `Cargo.toml` before tagging and mechanically syncs only local workspace package versions in `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
-- The GitHub Actions CI workflow turns that tag into the GitHub release with the rpiz OTA tarball.
+- The GitHub Actions CI workflow turns that tag into a GitHub release with the rpiz OTA tarball. `*-beta` tags publish `rpiz/manifest.json`; `*-stable` tags publish `rpiz-stable/manifest.json`.
 - After a CDN publish, the server repo keeps only the latest five `v*` release directories per release root (`install/`, `rpiz/`, and the desktop target roots).
 - `--upload` is local-only for now: it loads `.env`, builds only `rpiz`, packages only the `rpiz` OTA feed, uploads it over SSH, prunes old server releases, and leaves the branch/tag unpushed.
 - `--upload` accepts either `RHYTHM_UPDATES_SSH_KEY_FILE` or `RHYTHM_UPDATES_SSH_KEY` for the SSH key material.
@@ -250,6 +254,7 @@ Rhythm OS now uses two versioning tracks:
 For workspace/server/appliance builds:
 
 - Tagged release builds resolve to the exact tag version only when the tracked worktree is clean, for example `v0.4.0` -> `0.4.0`.
+- Beta release tags are named `vX.Y.Z-beta`. Stable releases are promoted from beta with `./scripts/release.sh --promote-stable [X.Y.Z]`, which creates `vX.Y.Z-stable` and lets CI rebuild the artifact with `-stable` embedded in the binary version.
 - Dirty tagged builds append `.dirty`, for example `v0.4.0` with local edits -> `0.4.0.dirty`.
 - Untagged builds resolve to a Git-derived prerelease, for example `0.4.0-beta.dev.66.g1b40e459`.
 - Dirty untagged builds append `.dirty`, for example `0.4.0-beta.dev.66.g1b40e459.dirty`.
