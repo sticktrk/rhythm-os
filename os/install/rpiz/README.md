@@ -265,10 +265,10 @@ copied into numbered rotations, which keeps the logs bounded without requiring
 
 Default limits:
 
-- `rhythm-server.log`: 4 MiB, keep 2 rotations
-- `rhythm-matter.log`: 4 MiB, keep 3 rotations
-- `wifi.log`: 256 KiB, keep 2 rotations
-- `bluetooth.log`: 256 KiB, keep 2 rotations
+- `rhythm-server.log`: 2 MiB, keep 2 rotations
+- `rhythm-matter.log`: 2 MiB, keep 3 rotations
+- `wifi.log`: 128 KiB, keep 2 rotations
+- `bluetooth.log`: 128 KiB, keep 2 rotations
 
 Override the log directory, prune interval, or size limits in
 `/etc/default/rhythm-dev` with:
@@ -276,13 +276,13 @@ Override the log directory, prune interval, or size limits in
 ```sh
 RHYTHM_LOG_DIR=/data/log
 RHYTHM_LOG_PRUNE_INTERVAL_SECS=300
-RHYTHM_SERVER_LOG_MAX_BYTES=4194304
+RHYTHM_SERVER_LOG_MAX_BYTES=2097152
 RHYTHM_SERVER_LOG_KEEP=2
-RHYTHM_MATTER_LOG_MAX_BYTES=4194304
+RHYTHM_MATTER_LOG_MAX_BYTES=2097152
 RHYTHM_MATTER_LOG_KEEP=3
-RHYTHM_WIFI_LOG_MAX_BYTES=262144
+RHYTHM_WIFI_LOG_MAX_BYTES=131072
 RHYTHM_WIFI_LOG_KEEP=2
-RHYTHM_BLUETOOTH_LOG_MAX_BYTES=262144
+RHYTHM_BLUETOOTH_LOG_MAX_BYTES=131072
 RHYTHM_BLUETOOTH_LOG_KEEP=2
 ```
 
