@@ -149,6 +149,17 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tracks the last poll time for debouncing [fullRefresh] and [pollNow].
   DateTime _lastPollTime = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Explicit gate used when the user enters a Home/server hub from the
+  /// chooser. Unlike background reconnects, this must block cached rooms until
+  /// a fresh authoritative hello has been accepted.
+  bool _homeEntryRefreshPending = false;
+  bool _homeEntryRefreshAwaitingHello = false;
+  String? _homeEntryRefreshHomeName;
+  String? _homeEntryRefreshHubId;
+  String? _homeEntryRefreshError;
+  Completer<void>? _homeEntryRefreshHelloCompleter;
+  int _homeEntryRefreshGeneration = 0;
+
   /// Per-node cooldown for preview refreshes triggered by room detail views.
   final Map<String, DateTime> _lastPreviewRefreshTimeByNode = {};
 
@@ -235,6 +246,19 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmConnectionState get connectionState => HueServiceLocator.isDemoMode
       ? RhythmConnectionState.connected
       : _connection.connectionState;
+
+  /// Whether an explicit Home entry/login flow is waiting on fresh server data.
+  bool get isHomeEntryRefreshPending => _homeEntryRefreshPending;
+
+  /// Whether the Home tab should be gated by Home entry loading/error UI.
+  bool get hasHomeEntryRefreshGate =>
+      _homeEntryRefreshPending || _homeEntryRefreshError != null;
+
+  /// Display name for the Home currently being entered.
+  String? get homeEntryRefreshHomeName => _homeEntryRefreshHomeName;
+
+  /// Error shown when the explicit Home entry refresh fails.
+  String? get homeEntryRefreshError => _homeEntryRefreshError;
 
   /// The server entry currently selected for the active connection.
   Hub? get connectedServerHub => _serverHub;
@@ -1043,20 +1067,9 @@ class ServerSyncProvider extends ChangeNotifier {
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
       final pendingHub = serverHub;
       Future.microtask(() async {
-        _roomProvider.clearTransientState();
-        await _syncLocalServerProcessForHub(pendingHub);
-        if (_serverHub?.id != pendingHub.id) return;
-        final auth = await _prepareServerHubAuth(pendingHub);
-        if (_serverHub?.id != pendingHub.id) return;
-        _serverHub = auth.hub;
-        final endpoint =
-            await _selectConnectionEndpoint(auth.hub, auth.authToken);
-        _activeConnectionEndpoint = endpoint;
-        _connection.connect(
-          endpoint.host,
-          port: endpoint.port,
-          useSsl: endpoint.useSsl,
-          authToken: auth.authToken,
+        await _connectToServerHub(
+          pendingHub,
+          clearTransientState: true,
         );
       });
     } else if (_serverHub != null) {
@@ -1064,6 +1077,7 @@ class ServerSyncProvider extends ChangeNotifier {
       final removedHub = _serverHub;
       _serverHub = null;
       _activeConnectionEndpoint = null;
+      _hasBeenSynced = false;
       Future.microtask(() async {
         final localServer = LocalRhythmServerService.instance;
         if (removedHub != null &&
@@ -1076,6 +1090,54 @@ class ServerSyncProvider extends ChangeNotifier {
         await _roomProvider.clearAllRooms();
         _connection.disconnect();
       });
+    }
+  }
+
+  Future<void> _connectToServerHub(
+    Hub hub, {
+    required bool clearTransientState,
+  }) async {
+    if (clearTransientState) {
+      _roomProvider.clearTransientState();
+    }
+    await _syncLocalServerProcessForHub(hub);
+    if (_serverHub?.id != hub.id) return;
+
+    final auth = await _prepareServerHubAuth(hub);
+    if (_serverHub?.id != hub.id) return;
+
+    _serverHub = auth.hub;
+    final endpoint = await _selectConnectionEndpoint(auth.hub, auth.authToken);
+    if (_serverHub?.id != hub.id) return;
+
+    _activeConnectionEndpoint = endpoint;
+    await _connection.connect(
+      endpoint.host,
+      port: endpoint.port,
+      useSsl: endpoint.useSsl,
+      authToken: auth.authToken,
+    );
+    notifyListeners();
+  }
+
+  /// Retry the active server by reselecting LAN vs tunnel before reconnecting.
+  ///
+  /// This intentionally does more than `RhythmConnection.pingOrReconnect()`;
+  /// a stale LAN endpoint after app resume must be allowed to fall back to the
+  /// saved tunnel endpoint.
+  Future<void> retryActiveServerConnection({
+    bool authoritative = false,
+  }) async {
+    final hub = _homeProvider.activeServerHub ?? _serverHub;
+    if (hub == null) return;
+
+    _serverHub = hub;
+    await _connectToServerHub(
+      hub,
+      clearTransientState: false,
+    );
+    if (authoritative) {
+      await _connection.reconnect(authoritative: true);
     }
   }
 
@@ -1190,6 +1252,155 @@ class ServerSyncProvider extends ChangeNotifier {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Start gating the Home tab while a user is entering/logging into a Home.
+  ///
+  /// The paired server may still be resolving LAN vs tunnel at this point; the
+  /// authoritative refresh is kicked off separately once the HomeProvider has
+  /// switched the active hub.
+  void beginHomeEntryRefresh({required String homeName}) {
+    _homeEntryRefreshGeneration++;
+    _completeHomeEntryRefreshWaiter();
+    _homeEntryRefreshHelloCompleter = null;
+    _homeEntryRefreshPending = true;
+    _homeEntryRefreshAwaitingHello = false;
+    _homeEntryRefreshHomeName = homeName;
+    _homeEntryRefreshHubId =
+        _homeProvider.activeServerHub?.id ?? _serverHub?.id;
+    _homeEntryRefreshError = null;
+    notifyListeners();
+  }
+
+  /// Clear the Home-entry gate, optionally leaving an error for retry UI.
+  void cancelHomeEntryRefresh({String? error}) {
+    _homeEntryRefreshGeneration++;
+    _completeHomeEntryRefreshWaiter();
+    _homeEntryRefreshHelloCompleter = null;
+    _homeEntryRefreshPending = false;
+    _homeEntryRefreshAwaitingHello = false;
+    _homeEntryRefreshHubId = null;
+    _homeEntryRefreshError = error;
+    notifyListeners();
+  }
+
+  void _completeHomeEntryRefreshWaiter() {
+    final completer = _homeEntryRefreshHelloCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
+  }
+
+  /// Force a fresh authoritative hello before allowing All Rooms to render.
+  Future<bool> refreshForHomeEntry({
+    required String homeName,
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    if (HueServiceLocator.isDemoMode) {
+      beginHomeEntryRefresh(homeName: homeName);
+      try {
+        await _refreshDemoState();
+        cancelHomeEntryRefresh();
+        return true;
+      } catch (error) {
+        debugPrint('ServerSync: demo Home entry refresh failed: $error');
+        cancelHomeEntryRefresh(error: 'Could not refresh $homeName');
+        return false;
+      }
+    }
+
+    if (!_homeEntryRefreshPending) {
+      beginHomeEntryRefresh(homeName: homeName);
+    } else {
+      _homeEntryRefreshHomeName = homeName;
+      _homeEntryRefreshError = null;
+      notifyListeners();
+    }
+
+    final hub = _homeProvider.activeServerHub ?? _serverHub;
+    if (hub == null) {
+      cancelHomeEntryRefresh(error: 'No Box is saved for $homeName');
+      return false;
+    }
+
+    final generation = _homeEntryRefreshGeneration;
+    _homeEntryRefreshHubId = hub.id;
+    notifyListeners();
+
+    try {
+      await retryActiveServerConnection();
+      await _waitForHomeEntryConnection(
+        hubId: hub.id,
+        generation: generation,
+        timeout: timeout,
+      );
+      if (_homeEntryRefreshGeneration != generation) return false;
+
+      final helloCompleter = Completer<void>();
+      _homeEntryRefreshHelloCompleter = helloCompleter;
+      _homeEntryRefreshAwaitingHello = true;
+      notifyListeners();
+
+      await _connection.reconnect(authoritative: true);
+      await helloCompleter.future.timeout(timeout);
+
+      if (_homeEntryRefreshGeneration != generation) return false;
+      cancelHomeEntryRefresh();
+      return true;
+    } on TimeoutException catch (error) {
+      debugPrint('ServerSync: Home entry refresh timed out: $error');
+      if (_homeEntryRefreshGeneration == generation) {
+        cancelHomeEntryRefresh(error: 'Could not refresh $homeName');
+      }
+      return false;
+    } catch (error) {
+      debugPrint('ServerSync: Home entry refresh failed: $error');
+      if (_homeEntryRefreshGeneration == generation) {
+        cancelHomeEntryRefresh(error: 'Could not refresh $homeName');
+      }
+      return false;
+    }
+  }
+
+  Future<void> _waitForHomeEntryConnection({
+    required String hubId,
+    required int generation,
+    required Duration timeout,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+
+    while (true) {
+      if (_homeEntryRefreshGeneration != generation) return;
+
+      final activeHub = _homeProvider.activeServerHub ?? _serverHub;
+      if (activeHub != null &&
+          activeHub.id != hubId &&
+          _serverHub?.id != hubId) {
+        throw StateError('Active server hub changed while entering Home');
+      }
+
+      final connectedHub = _serverHub;
+      if ((_connection.connected ||
+              _connection.connectionState == RhythmConnectionState.connected) &&
+          connectedHub != null &&
+          connectedHub.id == hubId &&
+          _activeEndpointIsUnsetOrBelongsToHub(connectedHub)) {
+        return;
+      }
+
+      if (DateTime.now().isAfter(deadline)) {
+        throw TimeoutException('Timed out connecting to Home server', timeout);
+      }
+
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
+  bool _activeEndpointIsUnsetOrBelongsToHub(Hub hub) {
+    final activeEndpoint = _activeConnectionEndpoint;
+    if (activeEndpoint == null) return true;
+    return _sameEndpoint(activeEndpoint, hub.endpoint) ||
+        _sameEndpoint(activeEndpoint, hub.remoteEndpoint);
   }
 
   /// Trigger a full reconnect (for pull-to-refresh).
@@ -1350,6 +1561,16 @@ class ServerSyncProvider extends ChangeNotifier {
       });
     }
     _refreshTopologyNodes();
+
+    final homeEntryCompleter = _homeEntryRefreshHelloCompleter;
+    if (_homeEntryRefreshPending &&
+        _homeEntryRefreshAwaitingHello &&
+        homeEntryCompleter != null &&
+        !homeEntryCompleter.isCompleted &&
+        (_homeEntryRefreshHubId == null ||
+            _homeEntryRefreshHubId == _serverHub?.id)) {
+      homeEntryCompleter.complete();
+    }
 
     notifyListeners();
   }
@@ -1665,8 +1886,6 @@ class ServerSyncProvider extends ChangeNotifier {
 
     if (current == RhythmConnectionState.connected) {
       _hasBeenSynced = true;
-    } else if (current == RhythmConnectionState.disconnected) {
-      _hasBeenSynced = false;
     }
 
     if (current != previous &&
@@ -3064,6 +3283,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
     _demoChangeSub?.cancel();
+    _completeHomeEntryRefreshWaiter();
     super.dispose();
   }
 }

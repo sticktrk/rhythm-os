@@ -160,6 +160,7 @@ class _AllRoomsHarness {
 Future<_AllRoomsHarness> _pumpAllRooms(
   WidgetTester tester, {
   required List<RoomDto> rooms,
+  VoidCallback? onHomeChooserTap,
 }) async {
   final roomProvider = RoomProvider();
   final homeProvider = _FakeHomeProvider();
@@ -204,6 +205,7 @@ Future<_AllRoomsHarness> _pumpAllRooms(
             globalConfig: defaultCurveConfig,
             pageController: pageController,
             onPageChanged: (_) {},
+            onHomeChooserTap: onHomeChooserTap,
           ),
         ),
       ),
@@ -216,6 +218,19 @@ Future<_AllRoomsHarness> _pumpAllRooms(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('home button opens the Home chooser', (tester) async {
+    var opened = false;
+    await _pumpAllRooms(
+      tester,
+      rooms: const [_room1],
+      onHomeChooserTap: () => opened = true,
+    );
+
+    await tester.tap(find.byIcon(Icons.home_rounded));
+
+    expect(opened, isTrue);
+  });
 
   testWidgets('room cards show the default room icon', (tester) async {
     final roomProvider = RoomProvider();

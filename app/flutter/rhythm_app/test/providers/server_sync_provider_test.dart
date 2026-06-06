@@ -2126,6 +2126,46 @@ void main() {
       expect(connection.lastReconnectAuthoritative, isTrue);
     });
 
+    test('home entry refresh gates until authoritative hello arrives',
+        () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '127.0.0.1',
+            port: 54448,
+          ),
+        ]),
+      );
+      addTearDown(provider.dispose);
+
+      final refresh = provider.refreshForHomeEntry(
+        homeName: 'Kitchen',
+        timeout: const Duration(seconds: 1),
+      );
+
+      expect(provider.hasHomeEntryRefreshGate, isTrue);
+      expect(provider.isHomeEntryRefreshPending, isTrue);
+
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(helloConnection.reconnectCalls, 1);
+      expect(helloConnection.lastReconnectAuthoritative, isTrue);
+      expect(provider.hasHomeEntryRefreshGate, isTrue);
+
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+
+      expect(await refresh, isTrue);
+      expect(provider.hasHomeEntryRefreshGate, isFalse);
+      expect(provider.homeEntryRefreshError, isNull);
+    });
+
     test('fails over from LAN to remote endpoint when LAN reconnects',
         () async {
       final api = _FakeRhythmServerApi();
@@ -2171,6 +2211,45 @@ void main() {
       expect(connection.connectCalls.last.port, 443);
       expect(connection.connectCalls.last.useSsl, isTrue);
       expect(connection.connectCalls.last.authToken, 'owner-token');
+    });
+
+    test('retry reselects remote endpoint when LAN is unreachable', () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '127.0.0.1',
+            port: 54448,
+            token: 'owner-token',
+            remoteEndpoint: const HubEndpoint(
+              host: 'server.rhythm.lighting',
+              port: 443,
+              useSsl: true,
+            ),
+          ),
+        ]),
+        endpointReachability: (endpoint, authToken) async {
+          expect(authToken, 'owner-token');
+          return endpoint.host != '127.0.0.1';
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection();
+
+      expect(connection.connectCalls, hasLength(1));
+      expect(connection.connectCalls.single.host, 'server.rhythm.lighting');
+      expect(connection.connectCalls.single.port, 443);
+      expect(connection.connectCalls.single.useSsl, isTrue);
+      expect(connection.connectCalls.single.authToken, 'owner-token');
+      expect(provider.activeConnectionEndpoint?.host, 'server.rhythm.lighting');
     });
 
     test('refreshes authoritative state when preview tick is missing',

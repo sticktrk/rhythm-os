@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnection, RhythmConnectionState, RhythmMode;
+    show RhythmConnectionState, RhythmMode;
 import 'models/config_model.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
@@ -133,8 +133,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _pingServer() {
     try {
-      final conn = context.read<RhythmConnection>();
-      conn.pingOrReconnect();
+      context.read<ServerSyncProvider>().retryActiveServerConnection();
     } catch (e) {
       // Server not available, ignore
     }
@@ -619,6 +618,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         }
 
         if (serverHub != null) {
+          if (serverSync.hasHomeEntryRefreshGate) {
+            return _buildHomeEntryState(
+              serverSync: serverSync,
+              serverHub: serverHub,
+              homeName: homeProvider.currentHome?.name,
+            );
+          }
+
           if (_serverLostConnection) {
             return ServerDisconnectedScreen(serverHub: serverHub);
           }
@@ -678,7 +685,47 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   : null),
           onModeSelected: _setActiveMode,
           onActiveModeDoubleTap: _confirmReapplyActiveMode,
+          onHomeChooserTap: () => ConnectHubScreen.show(
+            context,
+            mode: ConnectHubMode.rhythmServer,
+          ),
         );
+      },
+    );
+  }
+
+  /// Explicit Home-entry/login state. This blocks cached rooms until the hub
+  /// has delivered a fresh authoritative hello for the selected Home.
+  Widget _buildHomeEntryState({
+    required ServerSyncProvider serverSync,
+    required Hub serverHub,
+    String? homeName,
+  }) {
+    final displayHome =
+        serverSync.homeEntryRefreshHomeName ?? homeName ?? 'Home';
+    final error = serverSync.homeEntryRefreshError;
+    final hasTunnel = serverHub.remoteEndpoint != null;
+    final routeText = hasTunnel
+        ? 'Selecting local network or secure tunnel'
+        : 'Connecting on your local network';
+    final description = error == null
+        ? [
+            'Connecting to ${serverHub.name}',
+            routeText,
+            'Syncing latest rooms and settings',
+          ].join('\n')
+        : 'We could not get fresh room data from ${serverHub.name}.';
+
+    return ServerDisconnectedScreen(
+      serverHub: serverHub,
+      title: error ?? 'Entering $displayHome',
+      addressLabel: serverHub.name,
+      description: description,
+      statusLabel: error == null ? 'Connecting\u2026' : 'Refresh failed',
+      statusActive: error == null,
+      retryLabel: 'Retry',
+      onRetry: () {
+        unawaited(serverSync.refreshForHomeEntry(homeName: displayHome));
       },
     );
   }
@@ -752,7 +799,6 @@ class _TabNavigator extends StatelessWidget {
     );
   }
 }
-
 
 /// Pulsing icon for the server-connecting state.
 class _PulsingIcon extends StatefulWidget {

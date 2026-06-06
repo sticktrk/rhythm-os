@@ -14,8 +14,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_core/models/hub.dart' show Hub, HubEndpoint, HubType;
 import 'package:rhythm_core/providers/hub_discovery.dart' show DiscoveredHub;
-import 'package:rhythm_core/models/hub.dart' show Hub, HubType;
 import 'solar_orbit.dart'; // For CelestialColors
 import 'success_modal.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
@@ -27,9 +27,13 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmDiagnosticsApi;
 import '../config/feature_flags.dart';
 import '../providers/home_provider.dart';
+import '../providers/server_sync_provider.dart';
+import '../screens/settings/dialogs/sign_in_modal.dart';
 import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
+import '../services/account_cloud_sync_service.dart';
 import '../services/analytics_service.dart';
+import '../services/auth_service.dart';
 import '../services/ble_provisioning_service.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/recent_servers_service.dart';
@@ -49,6 +53,271 @@ bool rhythmServerEndpointIsConnectingForTesting({
   required int port,
 }) =>
     connectingEndpoint == _rhythmServerEndpointKey(host, port);
+
+@visibleForTesting
+List<AccountHomeServerHubs> rhythmMergedHomeEntriesForTesting({
+  required Iterable<AccountHomeServerHubs> localHomes,
+  required Iterable<AccountHomeServerHubs> cloudHomes,
+}) =>
+    _mergeHomeEntries(
+      localHomes: localHomes,
+      cloudHomes: cloudHomes,
+    );
+
+@visibleForTesting
+bool rhythmRecentServerIsRepresentedByHomeForTesting({
+  required RecentServer server,
+  required Iterable<AccountHomeServerHubs> homes,
+}) =>
+    _recentServerIsRepresentedByHome(server, homes);
+
+@visibleForTesting
+bool rhythmDiscoveredServerIsRepresentedByHomeForTesting({
+  required DiscoveredHub server,
+  required Iterable<AccountHomeServerHubs> homes,
+}) =>
+    _discoveredServerIsRepresentedByHome(server, homes);
+
+@visibleForTesting
+Set<String> rhythmHomeIdsRepresentedByForTesting({
+  required AccountHomeServerHubs snapshot,
+  required Iterable<AccountHomeServerHubs> localHomes,
+  required Iterable<AccountHomeServerHubs> cloudHomes,
+}) =>
+    _homeIdsRepresentedBy(
+      snapshot: snapshot,
+      localHomes: localHomes,
+      cloudHomes: cloudHomes,
+    );
+
+List<AccountHomeServerHubs> _mergeHomeEntries({
+  required Iterable<AccountHomeServerHubs> localHomes,
+  required Iterable<AccountHomeServerHubs> cloudHomes,
+}) {
+  final entries = <AccountHomeServerHubs>[
+    for (final snapshot in localHomes) _homeEntryForHomeId(snapshot),
+  ];
+
+  for (final cloudSnapshot in cloudHomes) {
+    final matchIndex = entries.indexWhere(
+      (entry) => _homeEntriesRepresentSameHome(entry, cloudSnapshot),
+    );
+    if (matchIndex == -1) {
+      entries.add(cloudSnapshot);
+      continue;
+    }
+
+    entries[matchIndex] = _mergeHomeEntry(entries[matchIndex], cloudSnapshot);
+  }
+
+  return List.unmodifiable(entries);
+}
+
+AccountHomeServerHubs _homeEntryForHomeId(AccountHomeServerHubs snapshot) {
+  return AccountHomeServerHubs(
+    home: snapshot.home,
+    serverHubs: [
+      for (final hub in snapshot.serverHubs)
+        hub.copyWith(homeId: snapshot.home.id),
+    ],
+  );
+}
+
+AccountHomeServerHubs _mergeHomeEntry(
+  AccountHomeServerHubs base,
+  AccountHomeServerHubs incoming,
+) {
+  final homeId = base.home.id;
+  final hubs = <Hub>[
+    for (final hub in base.serverHubs) hub.copyWith(homeId: homeId),
+  ];
+
+  for (final hub in incoming.serverHubs) {
+    final normalized = hub.copyWith(homeId: homeId);
+    final matchIndex = hubs.indexWhere(
+      (existing) => _serverHubsRepresentSameBox(existing, normalized),
+    );
+    if (matchIndex == -1) {
+      hubs.add(normalized);
+    } else {
+      hubs[matchIndex] = _mergeServerHubForHome(
+        base: hubs[matchIndex],
+        incoming: normalized,
+        homeId: homeId,
+      );
+    }
+  }
+
+  return AccountHomeServerHubs(
+    home: base.home,
+    serverHubs: List.unmodifiable(hubs),
+  );
+}
+
+Hub _mergeServerHubForHome({
+  required Hub base,
+  required Hub incoming,
+  required String homeId,
+}) {
+  final baseToken = base.token?.trim();
+  final incomingToken = incoming.token?.trim();
+  final lastConnected =
+      _latestNullableDate(base.lastConnected, incoming.lastConnected);
+  final updatedAt = _latestDate(base.updatedAt, incoming.updatedAt);
+
+  return base.copyWith(
+    homeId: homeId,
+    name: base.name.trim().isNotEmpty ? base.name : incoming.name,
+    remoteEndpoint: base.remoteEndpoint ?? incoming.remoteEndpoint,
+    token: baseToken != null && baseToken.isNotEmpty
+        ? base.token
+        : incomingToken != null && incomingToken.isNotEmpty
+            ? incoming.token
+            : base.token,
+    lastConnected: lastConnected,
+    updatedAt: updatedAt,
+    enabled: base.enabled || incoming.enabled,
+  );
+}
+
+DateTime _latestDate(DateTime left, DateTime right) {
+  return left.isAfter(right) ? left : right;
+}
+
+DateTime? _latestNullableDate(DateTime? left, DateTime? right) {
+  if (left == null) return right;
+  if (right == null) return left;
+  return _latestDate(left, right);
+}
+
+bool _homeEntriesRepresentSameHome(
+  AccountHomeServerHubs left,
+  AccountHomeServerHubs right,
+) {
+  if (left.home.id == right.home.id) return true;
+
+  for (final leftHub in left.serverHubs) {
+    for (final rightHub in right.serverHubs) {
+      if (_serverHubsRepresentSameBox(leftHub, rightHub)) return true;
+    }
+  }
+
+  return false;
+}
+
+bool _serverHubsRepresentSameBox(Hub left, Hub right) {
+  if (left.id == right.id) return true;
+  if (_sameHubEndpoint(left.endpoint, right.endpoint)) return true;
+  final leftRemote = left.remoteEndpoint;
+  final rightRemote = right.remoteEndpoint;
+  return leftRemote != null &&
+      rightRemote != null &&
+      _sameHubEndpoint(leftRemote, rightRemote);
+}
+
+bool _sameHubEndpoint(HubEndpoint left, HubEndpoint right) {
+  return left.host == right.host &&
+      left.port == right.port &&
+      left.useSsl == right.useSsl;
+}
+
+Set<String> _homeIdsRepresentedBy({
+  required AccountHomeServerHubs snapshot,
+  required Iterable<AccountHomeServerHubs> localHomes,
+  required Iterable<AccountHomeServerHubs> cloudHomes,
+}) {
+  final ids = <String>{snapshot.home.id};
+  for (final entry in [...localHomes, ...cloudHomes]) {
+    if (_homeEntriesRepresentSameHome(snapshot, entry)) {
+      ids.add(entry.home.id);
+    }
+  }
+  return ids;
+}
+
+bool _recentServerIsRepresentedByHome(
+  RecentServer server,
+  Iterable<AccountHomeServerHubs> homes,
+) {
+  for (final home in homes) {
+    for (final hub in home.serverHubs) {
+      if (hub.endpoint.host == server.host &&
+          hub.endpoint.port == server.port) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool _discoveredServerIsRepresentedByHome(
+  DiscoveredHub server,
+  Iterable<AccountHomeServerHubs> homes,
+) {
+  return _homeEntryForDiscoveredServer(server: server, homes: homes) != null;
+}
+
+AccountHomeServerHubs? _homeEntryForDiscoveredServer({
+  required DiscoveredHub server,
+  required Iterable<AccountHomeServerHubs> homes,
+  String? authToken,
+}) {
+  for (final home in homes) {
+    final nextHubs = <Hub>[];
+    var matched = false;
+    for (final hub in home.serverHubs) {
+      if (_serverHubMatchesDiscoveredServer(hub, server)) {
+        matched = true;
+        nextHubs.add(_serverHubForDiscoveredServer(
+          hub: hub,
+          server: server,
+          authToken: authToken,
+        ));
+      } else {
+        nextHubs.add(hub);
+      }
+    }
+
+    if (matched) {
+      return AccountHomeServerHubs(
+        home: home.home,
+        serverHubs: List.unmodifiable(nextHubs),
+      );
+    }
+  }
+  return null;
+}
+
+bool _serverHubMatchesDiscoveredServer(Hub hub, DiscoveredHub server) {
+  return hub.type == HubType.server &&
+      hub.endpoint.host == server.address &&
+      hub.endpoint.port == server.port;
+}
+
+Hub _serverHubForDiscoveredServer({
+  required Hub hub,
+  required DiscoveredHub server,
+  required String? authToken,
+}) {
+  final token = authToken?.trim();
+  final name = _displayNameForDiscoveredServer(server);
+  return hub.copyWith(
+    name: hub.name.trim().isNotEmpty ? hub.name : name,
+    token: token != null && token.isNotEmpty ? token : hub.token,
+  );
+}
+
+String _displayNameForDiscoveredServer(DiscoveredHub server) {
+  final name = server.name?.trim();
+  if (name == null || name.isEmpty || name == 'RhythmServer') {
+    return 'Rhythm Box';
+  }
+  return name;
+}
+
+class _HomeNameCancelledException implements Exception {
+  const _HomeNameCancelledException();
+}
 
 const _mdnsProbeTimeout = Duration(milliseconds: 900);
 const _mdnsProbeSettleTimeout = Duration(seconds: 2);
@@ -168,10 +437,9 @@ class ConnectHubScreen extends StatefulWidget {
   /// Show as a full-screen modal with slide-up transition and close button.
   static Future<void> show(BuildContext context,
       {ConnectHubMode mode = ConnectHubMode.rhythmServer}) {
-    return Navigator.of(context).push(
+    return Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder(
-        opaque: false,
-        barrierColor: Colors.black54,
+        opaque: true,
         pageBuilder: (context, animation, secondaryAnimation) {
           return Scaffold(
             backgroundColor: CelestialColors.backgroundDark,
@@ -250,6 +518,16 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   String? _manualConnectError;
   bool _isStartingLocalServer = false;
   String? _localServerError;
+  bool _isAddingDevice = false;
+
+  // Account Home state (rhythmServer mode only)
+  List<AccountHomeServerHubs> _accountHomes = const [];
+  bool _isLoadingAccountHomes = false;
+  String? _accountHomesError;
+  String? _enteringHomeId;
+  String? _deletingHomeId;
+  String? _homeActionError;
+  StreamSubscription<dynamic>? _authSubscription;
 
   // RhythmServer branding
   static const _teal = Color(0xFF00BCD4);
@@ -264,14 +542,20 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       widget.mode == ConnectHubMode.hue ? _amberDeep : _tealDeep;
   IconData get _icon => widget.mode == ConnectHubMode.hue
       ? Icons.lightbulb_outline
-      : Icons.developer_board;
+      : _isAddingDevice
+          ? Icons.developer_board
+          : Icons.home_rounded;
 
   String get _title => widget.mode == ConnectHubMode.hue
       ? 'Connect Philips Hue'
-      : 'Find Your Rhythm Box';
+      : _isAddingDevice
+          ? 'Add a Device'
+          : 'Choose Your Home';
   String get _subtitle => widget.mode == ConnectHubMode.hue
       ? 'Connect your Philips Hue bridge to get\nstarted with adaptive lighting'
-      : 'We\'ll look for a Rhythm Box on\nyour local network';
+      : _isAddingDevice
+          ? 'Find hardware, then name the Home it belongs to'
+          : 'Enter a saved Home or add hardware';
   String get _buttonLabel {
     return 'Connect Philips Hue';
   }
@@ -312,11 +596,19 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     // discovery sweeps via [RecentServersService.markOnline / setOnlineIds].
     if (widget.mode == ConnectHubMode.rhythmServer) {
       RecentServersService.instance.addListener(_onRecentServersChanged);
+      _authSubscription = AuthService().authStateChanges.listen((_) {
+        if (!mounted) return;
+        unawaited(_refreshAccountHomes());
+      });
     }
 
     // Auto-start mDNS scanning in rhythmServer mode
     if (widget.mode == ConnectHubMode.rhythmServer) {
       unawaited(_scanForAllDevices());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(_refreshAccountHomes());
+      });
     }
   }
 
@@ -333,6 +625,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     if (widget.mode == ConnectHubMode.rhythmServer) {
       RecentServersService.instance.removeListener(_onRecentServersChanged);
     }
+    _authSubscription?.cancel();
     _bonsoirDiscovery?.stop();
     _bleScanSubscription?.cancel();
     _bleService.dispose();
@@ -342,6 +635,44 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     _breatheController.dispose();
     _rippleController.dispose();
     super.dispose();
+  }
+
+  bool get _canUseAccountHomes =>
+      AccountCloudSyncService.instance.canUseSignedInCloudFeatures;
+
+  Future<void> _refreshAccountHomes() async {
+    if (widget.mode != ConnectHubMode.rhythmServer) return;
+    if (!_canUseAccountHomes) {
+      if (!mounted) return;
+      setState(() {
+        _accountHomes = const [];
+        _isLoadingAccountHomes = false;
+        _accountHomesError = null;
+      });
+      return;
+    }
+    if (_isLoadingAccountHomes) return;
+
+    setState(() {
+      _isLoadingAccountHomes = true;
+      _accountHomesError = null;
+    });
+
+    try {
+      final homes = await context.read<HomeProvider>().loadAccountHomes();
+      if (!mounted) return;
+      setState(() {
+        _accountHomes = homes;
+        _isLoadingAccountHomes = false;
+      });
+    } catch (error) {
+      debugPrint('Account Homes load failed: $error');
+      if (!mounted) return;
+      setState(() {
+        _accountHomesError = 'Could not load Homes';
+        _isLoadingAccountHomes = false;
+      });
+    }
   }
 
   Future<void> _scanForAllDevices() async {
@@ -883,7 +1214,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         }
       }
 
-      final result = await _persistDiscoveredServerHub(hub, authToken);
+      final Hub? result;
+      try {
+        result = await _persistDiscoveredServerHub(hub, authToken);
+      } on _HomeNameCancelledException {
+        if (!mounted) return;
+        setState(() {
+          _isConnecting = false;
+          _connectingEndpoint = null;
+        });
+        return;
+      }
 
       if (!mounted) return;
 
@@ -908,6 +1249,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       );
 
       if (!mounted) return;
+
+      final homeName = context.read<HomeProvider>().currentHome?.name ?? 'Home';
+      final serverSync = context.read<ServerSyncProvider>();
+      serverSync.beginHomeEntryRefresh(homeName: homeName);
+      unawaited(serverSync.refreshForHomeEntry(homeName: homeName));
 
       if (!kIsWeb) HapticFeedback.heavyImpact();
       await SuccessModal.show(
@@ -940,32 +1286,133 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     String? authToken,
   ) async {
     final homeProvider = context.read<HomeProvider>();
-    for (final savedHub in homeProvider.currentHomeHubs) {
-      final matches = savedHub.type == HubType.server &&
-          savedHub.endpoint.host == discovered.address &&
-          savedHub.endpoint.port == discovered.port;
-      if (!matches) continue;
-
-      final token = authToken?.trim();
-      if (token != null &&
-          token.isNotEmpty &&
-          savedHub.token?.trim() != token) {
-        final updatedHub = savedHub.copyWith(token: token);
-        return homeProvider.activateServerHub(updatedHub);
-      }
-      return homeProvider.activateServerHub(savedHub);
+    final existingHome = _homeEntryForDiscoveredServer(
+      server: discovered,
+      homes: _visibleHomeEntries(homeProvider),
+      authToken: authToken,
+    );
+    if (existingHome != null) {
+      return homeProvider.enterHome(existingHome);
     }
 
-    final hub = await homeProvider.addServerHub(
-      name: discovered.name ?? 'RhythmServer',
+    final name = _displayNameForDiscoveredServer(discovered);
+    final homeName = await _promptForNewHomeName(defaultName: name);
+    if (homeName == null) throw const _HomeNameCancelledException();
+
+    return homeProvider.addServerHubInNewHome(
+      homeName: homeName,
+      hubName: name,
       host: discovered.address,
       port: discovered.port,
       token: authToken,
     );
-    if (hub != null) {
-      return homeProvider.activateServerHub(hub);
+  }
+
+  Future<String?> _promptForNewHomeName({required String defaultName}) async {
+    final controller = TextEditingController(text: defaultName);
+    try {
+      return showDialog<String>(
+        context: context,
+        builder: (ctx) {
+          return AlertDialog(
+            backgroundColor: CelestialColors.backgroundCard,
+            title: const Text(
+              'Name This Home',
+              style: TextStyle(color: CelestialColors.textPrimary),
+            ),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              style: const TextStyle(color: CelestialColors.textPrimary),
+              decoration: InputDecoration(
+                hintText: 'Home name',
+                hintStyle: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+                ),
+                enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.2),
+                  ),
+                ),
+                focusedBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: _teal),
+                ),
+              ),
+              onSubmitted: (value) {
+                final trimmed = value.trim();
+                if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
+              },
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: Text(
+                  'Cancel',
+                  style: TextStyle(color: CelestialColors.textSecondary),
+                ),
+              ),
+              TextButton(
+                onPressed: () {
+                  final trimmed = controller.text.trim();
+                  if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
+                },
+                child: const Text(
+                  'Save',
+                  style: TextStyle(color: _teal),
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      controller.dispose();
     }
-    return hub;
+  }
+
+  Future<void> _enterHome(AccountHomeServerHubs snapshot) async {
+    if (_enteringHomeId != null) return;
+    if (!kIsWeb) HapticFeedback.mediumImpact();
+
+    setState(() {
+      _enteringHomeId = snapshot.home.id;
+      _homeActionError = null;
+    });
+
+    final serverSync = context.read<ServerSyncProvider>();
+    if (snapshot.hasServerHub) {
+      serverSync.beginHomeEntryRefresh(homeName: snapshot.home.name);
+    }
+
+    final result = await context.read<HomeProvider>().enterHome(snapshot);
+    if (!mounted) return;
+
+    if (snapshot.hasServerHub && result == null) {
+      serverSync.cancelHomeEntryRefresh(
+        error: 'Could not enter ${snapshot.home.name}',
+      );
+      setState(() {
+        _enteringHomeId = null;
+        _homeActionError = 'Could not enter ${snapshot.home.name}';
+      });
+      return;
+    }
+
+    if (snapshot.hasServerHub) {
+      unawaited(
+        serverSync.refreshForHomeEntry(homeName: snapshot.home.name),
+      );
+    }
+
+    setState(() {
+      _enteringHomeId = null;
+      _homeActionError = null;
+    });
+
+    if (mounted && widget.isModal) {
+      Navigator.of(context).pop();
+    }
   }
 
   Future<void> _startLocalRhythmServer() async {
@@ -989,7 +1436,14 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         name: 'This Mac',
         type: HubType.server,
       );
-      final result = await _persistDiscoveredServerHub(hub, null);
+      final Hub? result;
+      try {
+        result = await _persistDiscoveredServerHub(hub, null);
+      } on _HomeNameCancelledException {
+        if (!mounted) return;
+        setState(() => _isStartingLocalServer = false);
+        return;
+      }
       if (!mounted) return;
 
       if (result == null) {
@@ -1008,6 +1462,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       );
 
       if (!mounted) return;
+      final homeName = context.read<HomeProvider>().currentHome?.name ?? 'Home';
+      final serverSync = context.read<ServerSyncProvider>();
+      serverSync.beginHomeEntryRefresh(homeName: homeName);
+      unawaited(serverSync.refreshForHomeEntry(homeName: homeName));
+
       setState(() => _isStartingLocalServer = false);
       if (!kIsWeb) HapticFeedback.heavyImpact();
       await SuccessModal.show(
@@ -1167,6 +1626,26 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     await BleProvisioningScreen.show(context, initialDevice: initialDevice);
   }
 
+  void _openAddDeviceScreen() {
+    if (!kIsWeb) HapticFeedback.selectionClick();
+    setState(() {
+      _isAddingDevice = true;
+      _homeActionError = null;
+    });
+    unawaited(_scanForAllDevices());
+  }
+
+  void _returnToHomeChooser() {
+    if (!kIsWeb) HapticFeedback.selectionClick();
+    _manualIpFocus.unfocus();
+    setState(() {
+      _isAddingDevice = false;
+      _manualConnectError = null;
+      _connectError = null;
+      _connectErrorMessage = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -1201,20 +1680,40 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     return Column(
       children: [
         if (!keyboardOpen) ...[
+          if (_isAddingDevice) _buildAddDeviceBackButton(),
           _buildHeroSection(),
           const SizedBox(height: 8),
         ],
         _buildTitleAndStatus(),
         const SizedBox(height: 10),
-        if (!keyboardOpen) ...[
+        if (!keyboardOpen && _isAddingDevice) ...[
           _buildScanButton(),
           const SizedBox(height: 10),
         ],
         Expanded(child: _buildMiddleContent()),
-        const SizedBox(height: 10),
-        _buildBottomActions(keyboardOpen),
-        const SizedBox(height: 4),
+        if (_isAddingDevice) ...[
+          const SizedBox(height: 10),
+          _buildBottomActions(keyboardOpen),
+          const SizedBox(height: 4),
+        ],
       ],
+    );
+  }
+
+  Widget _buildAddDeviceBackButton() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: IconButton(
+          tooltip: 'Back to Homes',
+          onPressed: _returnToHomeChooser,
+          icon: Icon(
+            Icons.arrow_back_rounded,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.78),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1365,15 +1864,31 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   }
 
   Widget _buildScanStatusLine() {
-    final existingCount = _discoveredDevices.length;
+    final homeProvider = context.watch<HomeProvider>();
+    final homes = _visibleHomeEntries(homeProvider);
+    final homeCount = homes.length;
+    if (!_isAddingDevice) {
+      final b = _breathe.value;
+      final label = _isLoadingAccountHomes && homeCount == 0
+          ? 'Loading your Homes\u2026'
+          : homeCount > 0
+              ? '$homeCount Home${homeCount == 1 ? '' : 's'}'
+              : _accountHomesError ?? 'No Homes yet';
+      return _buildStatusLine(
+        label: label,
+        isLive: _isLoadingAccountHomes,
+        active: homeCount > 0,
+        breathe: b,
+      );
+    }
+
+    final existingCount = _visibleDiscoveredDevices(homes).length;
     final newCount = _bleDevices.length;
     final count = existingCount + newCount;
     final b = _breathe.value;
 
     String label;
-    if ((_isScanning || _isBleScanning) && count == 0) {
-      label = 'Searching network and Bluetooth\u2026';
-    } else if (count > 0) {
+    if (count > 0) {
       final parts = <String>[
         if (existingCount > 0)
           '$existingCount existing'
@@ -1381,13 +1896,29 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           '0 existing',
         if (newCount > 0) '$newCount new',
       ];
-      label = 'Found ${parts.join(', ')} nearby';
+      label = 'Found ${parts.join(', ')}';
+    } else if ((_isScanning || _isBleScanning) && count == 0) {
+      label = 'Searching nearby hardware\u2026';
     } else {
-      label = _bleScanError ?? 'No boxes yet';
+      label = _bleScanError ?? 'No unassigned devices yet';
     }
 
     final isLive = _isScanning || _isBleScanning || count > 0;
 
+    return _buildStatusLine(
+      label: label,
+      isLive: isLive,
+      active: count > 0,
+      breathe: b,
+    );
+  }
+
+  Widget _buildStatusLine({
+    required String label,
+    required bool isLive,
+    required bool active,
+    required double breathe,
+  }) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -1399,15 +1930,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             color: (_isScanning || _isBleScanning)
-                ? _teal.withValues(alpha: 0.35 + b * 0.55)
-                : (count > 0
+                ? _teal.withValues(alpha: 0.35 + breathe * 0.55)
+                : (active
                     ? _teal.withValues(alpha: 0.85)
                     : Colors.white.withValues(alpha: 0.22)),
             boxShadow: isLive
                 ? [
                     BoxShadow(
-                      color: _teal.withValues(alpha: 0.35 + b * 0.35),
-                      blurRadius: 8 + b * 5,
+                      color: _teal.withValues(alpha: 0.35 + breathe * 0.35),
+                      blurRadius: 8 + breathe * 5,
                     ),
                   ]
                 : null,
@@ -1515,40 +2046,49 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   // ── Middle: devices list or empty state ────────────────────────────────────
 
   Widget _buildMiddleContent() {
+    final homeProvider = context.watch<HomeProvider>();
+    final homes = _visibleHomeEntries(homeProvider);
     final recents = RecentServersService.instance.servers;
-    if (recents.isNotEmpty ||
-        _discoveredDevices.isNotEmpty ||
-        _bleDevices.isNotEmpty) {
-      return _buildDiscoveredDevices(recents);
+    if (_isAddingDevice) {
+      return _buildAddDeviceContent(
+        homes: homes,
+        recents: recents,
+      );
     }
 
-    // Empty state: soft guidance
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 40),
-        child: Text(
-          _isScanning || _isBleScanning
-              ? 'Keep your Box powered on and nearby'
-              : 'Existing Boxes appear over Wi-Fi.\nNew Boxes appear over Bluetooth.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.45),
-            fontSize: 12.5,
-            height: 1.55,
-            letterSpacing: 0.15,
-          ),
-        ),
-      ),
+    return _buildHomeChooserContent(homes);
+  }
+
+  bool get _shouldShowAccountHomeState =>
+      widget.mode == ConnectHubMode.rhythmServer &&
+      (_isLoadingAccountHomes ||
+          _accountHomesError != null ||
+          (!_canUseAccountHomes && FeatureFlags.auxSignIn));
+
+  List<AccountHomeServerHubs> _localHomeEntries(HomeProvider homeProvider) {
+    return homeProvider.homeServerHubSnapshots;
+  }
+
+  List<AccountHomeServerHubs> _visibleCloudHomeEntries(
+    HomeProvider homeProvider,
+  ) {
+    final localIds = homeProvider.homes.map((home) => home.id).toSet();
+    return _accountHomes
+        .where((snapshot) => !localIds.contains(snapshot.home.id))
+        .toList(growable: false);
+  }
+
+  List<AccountHomeServerHubs> _visibleHomeEntries(HomeProvider homeProvider) {
+    return _mergeHomeEntries(
+      localHomes: _localHomeEntries(homeProvider),
+      cloudHomes: _visibleCloudHomeEntries(homeProvider),
     );
   }
 
-  Widget _buildDiscoveredDevices(List<RecentServer> recents) {
-    final recentIds = recents.map((s) => s.id).toSet();
-    // Hide any mDNS hit that's already represented in the recent list — the
-    // recent card carries the online dot from the same probe.
-    final freshlyDiscovered = _discoveredDevices
-        .where((hub) => !recentIds.contains('${hub.address}:${hub.port}'))
-        .toList(growable: false);
+  Widget _buildHomeChooserContent(List<AccountHomeServerHubs> homes) {
+    final showHomeSection = homes.isNotEmpty ||
+        _homeActionError != null ||
+        _shouldShowAccountHomeState;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -1556,20 +2096,74 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         physics: const BouncingScrollPhysics(),
         padding: EdgeInsets.zero,
         children: [
-          if (recents.isNotEmpty) ...[
+          if (showHomeSection) ...[
             _buildDiscoverySectionHeader(
-              'RECENT BOXES',
+              'HOMES',
+              'Select where this app should enter',
+            ),
+            if (_homeActionError != null) ...[
+              _buildInlineError(_homeActionError!),
+              const SizedBox(height: 8),
+            ],
+            for (final snapshot in homes) ...[
+              _buildHomeCard(snapshot),
+              const SizedBox(height: 8),
+            ],
+            if (_shouldShowAccountHomeState) ...[
+              _buildAccountHomeStateCard(),
+              const SizedBox(height: 8),
+            ],
+          ],
+          _buildAddDeviceCard(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAddDeviceContent({
+    required List<AccountHomeServerHubs> homes,
+    required List<RecentServer> recents,
+  }) {
+    final visibleRecents = _visibleRecentServers(
+      homes: homes,
+      recents: recents,
+    );
+    final recentIds = visibleRecents.map((s) => s.id).toSet();
+    // Hide any mDNS hit that's already represented in the recent list — the
+    // recent card carries the online dot from the same probe.
+    final freshlyDiscovered = _visibleDiscoveredDevices(homes)
+        .where((hub) => !recentIds.contains('${hub.address}:${hub.port}'))
+        .toList(growable: false);
+    final hasHardware = visibleRecents.isNotEmpty ||
+        freshlyDiscovered.isNotEmpty ||
+        _bleDevices.isNotEmpty;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: ListView(
+        physics: const BouncingScrollPhysics(),
+        padding: EdgeInsets.zero,
+        children: [
+          if (!hasHardware)
+            _buildInlineMutedMessage(
+              _isScanning || _isBleScanning
+                  ? 'Keep your Box powered on and nearby'
+                  : 'No unassigned devices found',
+            ),
+          if (visibleRecents.isNotEmpty) ...[
+            _buildDiscoverySectionHeader(
+              'SAVED HARDWARE',
               'Saved on this device',
             ),
-            for (final server in recents) ...[
+            for (final server in visibleRecents) ...[
               _buildRecentDeviceCard(server),
               const SizedBox(height: 8),
             ],
           ],
           if (freshlyDiscovered.isNotEmpty) ...[
-            if (recents.isNotEmpty) const SizedBox(height: 6),
+            if (visibleRecents.isNotEmpty) const SizedBox(height: 6),
             _buildDiscoverySectionHeader(
-              'ON NETWORK',
+              'NEARBY HARDWARE',
               'Found by mDNS',
             ),
             for (final hub in freshlyDiscovered) ...[
@@ -1578,10 +2172,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
             ],
           ],
           if (_bleDevices.isNotEmpty) ...[
-            if (recents.isNotEmpty || freshlyDiscovered.isNotEmpty)
+            if (visibleRecents.isNotEmpty || freshlyDiscovered.isNotEmpty)
               const SizedBox(height: 6),
             _buildDiscoverySectionHeader(
-              'NEW BOXES',
+              'NEW HARDWARE',
               'Ready for Bluetooth setup',
             ),
             for (final device in _bleDevices) ...[
@@ -1592,6 +2186,23 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         ],
       ),
     );
+  }
+
+  List<RecentServer> _visibleRecentServers({
+    required Iterable<AccountHomeServerHubs> homes,
+    required Iterable<RecentServer> recents,
+  }) {
+    return recents
+        .where((server) => !_recentServerIsRepresentedByHome(server, homes))
+        .toList(growable: false);
+  }
+
+  List<DiscoveredHub> _visibleDiscoveredDevices(
+    Iterable<AccountHomeServerHubs> homes,
+  ) {
+    return _discoveredDevices
+        .where((hub) => !_discoveredServerIsRepresentedByHome(hub, homes))
+        .toList(growable: false);
   }
 
   Widget _buildDiscoverySectionHeader(String title, String subtitle) {
@@ -1625,6 +2236,392 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildInlineError(String message) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        color: Colors.red.withValues(alpha: 0.08),
+        border: Border.all(color: Colors.red.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.error_outline_rounded,
+            color: Colors.red.withValues(alpha: 0.78),
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.red.withValues(alpha: 0.82),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInlineMutedMessage(String message) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        color: Colors.white.withValues(alpha: 0.035),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.info_outline_rounded,
+            color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.62),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAddDeviceCard() {
+    return _buildHomeActionCard(
+      icon: Icons.add_circle_outline_rounded,
+      title: 'Add a Device',
+      subtitle: 'Find unassigned hardware and create a Home',
+      onTap: _openAddDeviceScreen,
+    );
+  }
+
+  Widget _buildHomeCard(AccountHomeServerHubs snapshot) {
+    final currentHomeId = context.watch<HomeProvider>().currentHome?.id;
+    final isCurrent = currentHomeId == snapshot.home.id;
+    final isBusy = _enteringHomeId == snapshot.home.id ||
+        _deletingHomeId == snapshot.home.id;
+    final serverHub = snapshot.preferredServerHub;
+    final hasServer = serverHub != null;
+    final color = hasServer ? _teal : CelestialColors.textSecondary;
+
+    final subtitle = _homeSubtitle(
+      snapshot: snapshot,
+      isCurrent: isCurrent,
+      serverHub: serverHub,
+    );
+    final badge = isCurrent ? 'Current' : 'Home';
+
+    return GestureDetector(
+      onTap: isBusy ? null : () => _enterHome(snapshot),
+      onLongPress: isBusy ? null : () => _confirmDeleteHome(snapshot),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.white.withValues(alpha: isCurrent ? 0.06 : 0.04),
+          border: Border.all(
+            color: isCurrent
+                ? color.withValues(alpha: 0.34)
+                : Colors.white.withValues(alpha: 0.10),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: color.withValues(alpha: hasServer ? 0.14 : 0.08),
+              ),
+              child: Icon(
+                hasServer ? Icons.home_rounded : Icons.home_outlined,
+                color: color.withValues(alpha: hasServer ? 0.92 : 0.65),
+                size: 18,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          snapshot.home.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.1,
+                          ),
+                        ),
+                      ),
+                      _buildDiscoveryBadge(badge, color),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.58),
+                      fontSize: 11.5,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isBusy)
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  color: color.withValues(alpha: 0.75),
+                ),
+              )
+            else
+              Icon(
+                Icons.arrow_forward_rounded,
+                color: color.withValues(alpha: 0.65),
+                size: 18,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _homeSubtitle({
+    required AccountHomeServerHubs snapshot,
+    required bool isCurrent,
+    required Hub? serverHub,
+  }) {
+    final prefix = isCurrent ? 'Selected • ' : '';
+    if (serverHub == null) {
+      return '${prefix}No Box saved yet';
+    }
+
+    final remote = serverHub.remoteEndpoint;
+    final count = snapshot.serverHubs.length;
+    final suffix = count == 1 ? '1 Box' : '$count Boxes';
+    if (remote != null) {
+      return '$prefix$suffix • connects automatically';
+    }
+    return '$prefix$suffix saved';
+  }
+
+  Future<void> _confirmDeleteHome(AccountHomeServerHubs snapshot) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: Text(
+          'Delete ${snapshot.home.name}?',
+          style: const TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: const Text(
+          'This removes the Home and its saved Boxes from this app. If it is saved to your account, it will be removed there too.',
+          style: TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: CelestialColors.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final homeProvider = context.read<HomeProvider>();
+    final localHomeIds = homeProvider.homes.map((home) => home.id).toSet();
+    final representedHomeIds = _homeIdsRepresentedBy(
+      snapshot: snapshot,
+      localHomes: _localHomeEntries(homeProvider),
+      cloudHomes: _accountHomes,
+    );
+
+    setState(() {
+      _deletingHomeId = snapshot.home.id;
+      _homeActionError = null;
+    });
+
+    var success = true;
+    for (final homeId in representedHomeIds) {
+      if (localHomeIds.contains(homeId)) {
+        success = await homeProvider.deleteHome(homeId) && success;
+      }
+      await AccountCloudSyncService.instance.deleteHome(
+        homeId: homeId,
+        reason: 'home_deleted',
+      );
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _deletingHomeId = null;
+      _accountHomes = _accountHomes
+          .where((snapshot) => !representedHomeIds.contains(snapshot.home.id))
+          .toList(growable: false);
+      _homeActionError =
+          success ? null : 'Could not delete ${snapshot.home.name}';
+    });
+
+    if (success && _canUseAccountHomes) {
+      unawaited(_refreshAccountHomes());
+    }
+  }
+
+  Widget _buildAccountHomeStateCard() {
+    if (_isLoadingAccountHomes) {
+      return _buildHomeActionCard(
+        icon: Icons.sync_rounded,
+        title: 'Loading Homes',
+        subtitle: 'Checking your signed-in account',
+        busy: true,
+        onTap: null,
+      );
+    }
+
+    if (_accountHomesError != null) {
+      return _buildHomeActionCard(
+        icon: Icons.cloud_off_rounded,
+        title: _accountHomesError!,
+        subtitle: 'Tap to retry',
+        color: Colors.redAccent,
+        onTap: _refreshAccountHomes,
+      );
+    }
+
+    if (!_canUseAccountHomes && FeatureFlags.auxSignIn) {
+      return _buildHomeActionCard(
+        icon: Icons.account_circle_outlined,
+        title: 'Sign in for saved Homes',
+        subtitle: 'Use your account to enter a Home away from local hardware',
+        color: const Color(0xFF8AB4F8),
+        onTap: () => SignInModal.show(context),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+
+  Widget _buildHomeActionCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback? onTap,
+    Color? color,
+    bool busy = false,
+  }) {
+    final resolvedColor = color ?? _teal;
+    return GestureDetector(
+      onTap: busy ? null : onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: resolvedColor.withValues(alpha: 0.07),
+          border: Border.all(color: resolvedColor.withValues(alpha: 0.18)),
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 34,
+              height: 34,
+              child: Center(
+                child: busy
+                    ? CircularProgressIndicator(
+                        strokeWidth: 1.7,
+                        color: resolvedColor.withValues(alpha: 0.8),
+                      )
+                    : Icon(
+                        icon,
+                        color: resolvedColor.withValues(alpha: 0.86),
+                        size: 19,
+                      ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.58),
+                      fontSize: 11.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (!busy && onTap != null)
+              Icon(
+                Icons.arrow_forward_rounded,
+                color: resolvedColor.withValues(alpha: 0.7),
+                size: 18,
+              ),
+          ],
+        ),
       ),
     );
   }

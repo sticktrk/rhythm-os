@@ -7,6 +7,35 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../backend/backend.dart';
 import 'auth_service.dart';
 
+/// A Home plus the Rhythm Server hubs saved for that Home in the account.
+class AccountHomeServerHubs {
+  const AccountHomeServerHubs({
+    required this.home,
+    required this.serverHubs,
+  });
+
+  final Home home;
+  final List<Hub> serverHubs;
+
+  bool get hasServerHub => serverHubs.isNotEmpty;
+  bool get hasRemoteServerHub =>
+      serverHubs.any((hub) => hub.remoteEndpoint != null);
+
+  Hub? get preferredServerHub {
+    if (serverHubs.isEmpty) return null;
+
+    final enabled = serverHubs.where((hub) => hub.enabled).toList();
+    final candidates =
+        enabled.isNotEmpty ? enabled : List<Hub>.from(serverHubs);
+    candidates.sort((left, right) {
+      final leftRecency = left.lastConnected ?? left.updatedAt;
+      final rightRecency = right.lastConnected ?? right.updatedAt;
+      return rightRecency.compareTo(leftRecency);
+    });
+    return candidates.first;
+  }
+}
+
 /// Keeps the signed-in account's minimal cloud home/server-hub records current.
 ///
 /// Local-only and anonymous users are valid app users, but they are not cloud
@@ -24,6 +53,44 @@ class AccountCloudSyncService {
         auth.isSignedIn &&
         !auth.isAnonymous &&
         auth.currentUserId != null;
+  }
+
+  Future<List<AccountHomeServerHubs>> loadHomesAndServerHubs() async {
+    final client = _client;
+    if (!canUseSignedInCloudFeatures || client == null) {
+      return const [];
+    }
+
+    final homeRows = await client
+        .from('homes')
+        .select(
+          'id,name,owner_id,member_ids,location,sleep_schedule,curve_config,timezone,created_at,updated_at',
+        )
+        .order('updated_at', ascending: false);
+    final homes = homeRows
+        .whereType<Map>()
+        .map((row) => Home.fromSupabase(_stringKeyMap(row)))
+        .toList(growable: false);
+    if (homes.isEmpty) return const [];
+
+    final homeIds = homes.map((home) => home.id).toList(growable: false);
+    final hubRows = await client
+        .from('hubs')
+        .select(
+          'id,home_id,type,name,endpoint,enabled,remote_endpoint,last_connected,created_at,updated_at',
+        )
+        .eq('type', HubType.server.name)
+        .inFilter('home_id', homeIds)
+        .order('updated_at', ascending: false);
+    final hubs = hubRows
+        .whereType<Map>()
+        .map((row) => Hub.fromSupabase(_stringKeyMap(row)))
+        .toList(growable: false);
+
+    return accountHomeServerHubsFromRowsForTesting(
+      homes: homes,
+      serverHubs: hubs,
+    );
   }
 
   Future<void> syncHomeAndServerHubs({
@@ -45,7 +112,6 @@ class AccountCloudSyncService {
     final serverHubs = hubs
         .where((hub) => hub.type == HubType.server && hub.homeId == home.id)
         .toList(growable: false);
-    if (serverHubs.isEmpty) return;
 
     try {
       await client.from('homes').upsert(
@@ -158,4 +224,28 @@ class AccountCloudSyncService {
     if (auth is SupabaseAuthBackend) return auth.client;
     return null;
   }
+}
+
+@visibleForTesting
+List<AccountHomeServerHubs> accountHomeServerHubsFromRowsForTesting({
+  required Iterable<Home> homes,
+  required Iterable<Hub> serverHubs,
+}) {
+  final hubsByHomeId = <String, List<Hub>>{};
+  for (final hub in serverHubs) {
+    if (hub.type != HubType.server) continue;
+    hubsByHomeId.putIfAbsent(hub.homeId, () => []).add(hub);
+  }
+
+  return [
+    for (final home in homes)
+      AccountHomeServerHubs(
+        home: home,
+        serverHubs: List.unmodifiable(hubsByHomeId[home.id] ?? const []),
+      ),
+  ];
+}
+
+Map<String, dynamic> _stringKeyMap(Map<dynamic, dynamic> row) {
+  return row.map((key, value) => MapEntry(key.toString(), value));
 }

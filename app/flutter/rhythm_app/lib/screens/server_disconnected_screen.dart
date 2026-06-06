@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,7 +8,7 @@ import '../widgets/solar_orbit.dart';
 import '../providers/home_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnectionState;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 
 /// Full-screen state shown when a paired rhythm-server is unreachable.
 ///
@@ -15,10 +16,24 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnection, RhythmConnect
 /// and actions to retry or forget the server.
 class ServerDisconnectedScreen extends StatefulWidget {
   final Hub serverHub;
+  final String? title;
+  final String? description;
+  final String? addressLabel;
+  final String? statusLabel;
+  final bool? statusActive;
+  final String retryLabel;
+  final VoidCallback? onRetry;
 
   const ServerDisconnectedScreen({
     super.key,
     required this.serverHub,
+    this.title,
+    this.description,
+    this.addressLabel,
+    this.statusLabel,
+    this.statusActive,
+    this.retryLabel = 'Retry Now',
+    this.onRetry,
   });
 
   @override
@@ -65,9 +80,16 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
 
   void _retry() {
     HapticFeedback.mediumImpact();
-    try {
-      context.read<RhythmConnection>().pingOrReconnect();
-    } catch (_) {}
+    final onRetry = widget.onRetry;
+    if (onRetry != null) {
+      onRetry();
+      return;
+    }
+    unawaited(
+      context.read<ServerSyncProvider>().retryActiveServerConnection(
+            authoritative: true,
+          ),
+    );
   }
 
   Future<void> _forgetServer() async {
@@ -107,7 +129,9 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
     if (confirmed == true && mounted) {
       await context.read<RoomProvider>().clearAllRooms();
       if (!mounted) return;
-      context.read<ServerSyncProvider>().connection.disconnect();
+      final serverSync = context.read<ServerSyncProvider>();
+      serverSync.cancelHomeEntryRefresh();
+      serverSync.connection.disconnect();
       await context.read<HomeProvider>().deleteHub(widget.serverHub.id);
     }
   }
@@ -119,6 +143,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
     final isActivelyReconnecting =
         state == RhythmConnectionState.reconnecting ||
             state == RhythmConnectionState.connecting;
+    final statusActive = widget.statusActive ?? isActivelyReconnecting;
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -167,7 +192,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
                       const SizedBox(height: 8),
                       _buildServerAddress(),
                       const SizedBox(height: 24),
-                      _buildReconnectStatus(isActivelyReconnecting),
+                      _buildReconnectStatus(statusActive),
                       const SizedBox(height: 36),
                       _buildRetryButton(),
                       const SizedBox(height: 16),
@@ -233,7 +258,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
 
   Widget _buildTitle() {
     return Text(
-      'Server Unreachable',
+      widget.title ?? 'Server Unreachable',
       style: TextStyle(
         color: CelestialColors.textPrimary,
         fontSize: 22,
@@ -244,40 +269,40 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
   }
 
   Widget _buildServerAddress() {
-    final ep = widget.serverHub.endpoint;
-    final address = '${ep.host}:${ep.port}';
+    final activeEndpoint =
+        context.watch<ServerSyncProvider>().activeConnectionEndpoint;
+    final ep = activeEndpoint ?? widget.serverHub.endpoint;
+    final address = widget.addressLabel ?? '${ep.host}:${ep.port}';
 
-    return Text(
-      address,
-      style: TextStyle(
-        color: CelestialColors.textSecondary.withValues(alpha: 0.45),
-        fontSize: 14,
-        fontFamily: 'monospace',
-        letterSpacing: 0.5,
-      ),
+    return Column(
+      children: [
+        Text(
+          address,
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+            fontSize: 14,
+            fontFamily: widget.addressLabel == null ? 'monospace' : null,
+            letterSpacing: widget.addressLabel == null ? 0.5 : 0.1,
+          ),
+        ),
+        if (widget.description != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            widget.description!,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.62),
+              fontSize: 14,
+              height: 1.45,
+            ),
+          ),
+        ],
+      ],
     );
   }
 
-  Widget _buildReconnectStatus(bool isReconnecting) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (isReconnecting) ...[
-          const _ReconnectDot(),
-          const SizedBox(width: 8),
-        ],
-        Text(
-          isReconnecting ? 'Reconnecting\u2026' : 'Disconnected',
-          style: TextStyle(
-            color: isReconnecting
-                ? Colors.amber.withValues(alpha: 0.6)
-                : CelestialColors.textSecondary.withValues(alpha: 0.45),
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
-    );
+  String _retryLabel() {
+    return widget.retryLabel;
   }
 
   Widget _buildRetryButton() {
@@ -300,7 +325,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
                 color: Colors.amber.withValues(alpha: 0.8), size: 18),
             const SizedBox(width: 10),
             Text(
-              'Retry Now',
+              _retryLabel(),
               style: TextStyle(
                 color: Colors.amber.withValues(alpha: 0.9),
                 fontSize: 15,
@@ -310,6 +335,30 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildReconnectStatus(bool isReconnecting) {
+    final label = widget.statusLabel ??
+        (isReconnecting ? 'Reconnecting\u2026' : 'Disconnected');
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (isReconnecting) ...[
+          const _ReconnectDot(),
+          const SizedBox(width: 8),
+        ],
+        Text(
+          label,
+          style: TextStyle(
+            color: isReconnecting
+                ? Colors.amber.withValues(alpha: 0.6)
+                : CelestialColors.textSecondary.withValues(alpha: 0.45),
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
     );
   }
 

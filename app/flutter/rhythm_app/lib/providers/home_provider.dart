@@ -121,6 +121,21 @@ class HomeProvider extends ChangeNotifier {
   List<Hub> get currentHomeHubs => _currentHomeHubs;
   List<Hub> get currentHomeServerHubs => getHubsByType(HubType.server);
   Hub? get activeServerHub => _preferredServerHub(currentHomeHubs);
+  List<AccountHomeServerHubs> get homeServerHubSnapshots {
+    if (_isLoading) return const [];
+
+    return [
+      for (final home in _homes)
+        AccountHomeServerHubs(
+          home: home,
+          serverHubs: _repository
+              .getHubsForHome(home.id)
+              .where((hub) => hub.type == HubType.server)
+              .toList(growable: false),
+        ),
+    ];
+  }
+
   bool get isLoading => _isLoading;
   String? get error => _error;
   HomeRepository get repository => _repository;
@@ -407,6 +422,39 @@ class HomeProvider extends ChangeNotifier {
     }
   }
 
+  Future<List<AccountHomeServerHubs>> loadAccountHomes() {
+    return AccountCloudSyncService.instance.loadHomesAndServerHubs();
+  }
+
+  Future<Hub?> enterHome(AccountHomeServerHubs snapshot) async {
+    try {
+      await _repository.updateHome(snapshot.home);
+
+      final existingHubs = _repository.getHubsForHome(snapshot.home.id);
+      for (final hub in snapshot.serverHubs) {
+        final merged = mergeCloudServerHubForLocalStorageForTesting(
+          cloudHub: hub,
+          existingHubs: existingHubs,
+        );
+        await _repository.updateHub(merged);
+      }
+
+      _loadHomes();
+      _setCurrentHome(_repository.getHome(snapshot.home.id));
+      notifyListeners();
+
+      final selectedHub = _preferredServerHub(
+        _repository.getHubsForHome(snapshot.home.id),
+      );
+      if (selectedHub == null) return null;
+      return activateServerHub(selectedHub);
+    } catch (e) {
+      _error = 'Failed to enter home: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
   /// Update location for the current home.
   Future<bool> updateCurrentHomeLocation(HomeLocation location) async {
     if (_currentHome == null) return false;
@@ -622,6 +670,65 @@ class HomeProvider extends ChangeNotifier {
       notifyListeners();
       return hub;
     } catch (e) {
+      _error = 'Failed to add server hub: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Add a server hub into a brand-new Home and make that Home current.
+  Future<Hub?> addServerHubInNewHome({
+    required String homeName,
+    required String hubName,
+    required String host,
+    int port = 54448,
+    String? token,
+  }) async {
+    final userId = currentUserId;
+    if (userId == null) {
+      _error = 'User not signed in';
+      notifyListeners();
+      return null;
+    }
+
+    Home? home;
+    try {
+      home = await _repository.createHome(
+        name: homeName,
+        ownerId: userId,
+      );
+      _loadHomes();
+      _setCurrentHome(home);
+
+      final hub = await _repository.createServerHub(
+        homeId: home.id,
+        name: hubName,
+        host: host,
+        port: port,
+        token: token,
+      );
+      final activatedHub = await activateServerHub(hub);
+      final savedHub = activatedHub ?? hub;
+      unawaited(
+        AccountCloudSyncService.instance.syncHomeAndServerHubs(
+          home: home,
+          hubs: [savedHub],
+          reason: 'server_hub_added',
+        ),
+      );
+      return savedHub;
+    } catch (e) {
+      if (home != null) {
+        try {
+          await _repository.deleteHome(home.id);
+          _loadHomes();
+          _setCurrentHome(_homes.isNotEmpty ? _homes.first : null);
+        } catch (cleanupError) {
+          debugPrint(
+            'HomeProvider: failed to clean up Home ${home.id}: $cleanupError',
+          );
+        }
+      }
       _error = 'Failed to add server hub: $e';
       notifyListeners();
       return null;
@@ -884,4 +991,35 @@ class HomeProvider extends ChangeNotifier {
     _accountCloudSyncDebounce?.cancel();
     super.dispose();
   }
+}
+
+@visibleForTesting
+Hub mergeCloudServerHubForLocalStorageForTesting({
+  required Hub cloudHub,
+  required Iterable<Hub> existingHubs,
+}) {
+  Hub? existing;
+  for (final hub in existingHubs) {
+    if (hub.id == cloudHub.id) {
+      existing = hub;
+      break;
+    }
+  }
+  existing ??= existingHubs.cast<Hub?>().firstWhere(
+        (hub) =>
+            hub?.type == cloudHub.type &&
+            hub?.endpoint.host == cloudHub.endpoint.host &&
+            hub?.endpoint.port == cloudHub.endpoint.port,
+        orElse: () => null,
+      );
+  if (existing == null) return cloudHub;
+
+  final existingToken = existing.token?.trim();
+  return cloudHub.copyWith(
+    token: existingToken != null && existingToken.isNotEmpty
+        ? existingToken
+        : cloudHub.token,
+    lastConnected: cloudHub.lastConnected ?? existing.lastConnected,
+    remoteEndpoint: cloudHub.remoteEndpoint ?? existing.remoteEndpoint,
+  );
 }

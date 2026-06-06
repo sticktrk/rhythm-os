@@ -11,6 +11,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmAuthApi, RhythmDiagnosticsApi;
 
 import '../../providers/home_provider.dart';
+import '../../services/account_cloud_sync_service.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
 import '../../services/recent_servers_service.dart';
@@ -24,6 +25,10 @@ enum _ProvisioningPhase {
   provisioning,
   success,
   error,
+}
+
+class _HomeNameCancelledException implements Exception {
+  const _HomeNameCancelledException();
 }
 
 class BleProvisioningScreen extends StatefulWidget {
@@ -94,6 +99,14 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   String get _selectedDeviceName =>
       _selectedDevice?.name ?? _deviceInfo?.name ?? 'Rhythm Box';
+
+  String get _provisionedBoxName {
+    final name = _deviceInfo?.name.trim();
+    if (name == null || name.isEmpty || name == 'RhythmServer') {
+      return 'Rhythm Box';
+    }
+    return name;
+  }
 
   @override
   void initState() {
@@ -483,6 +496,13 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       AnalyticsService().logEvent('ble_provisioning_failed', {
         'stage': 'runtime',
       });
+      if (error is _HomeNameCancelledException) {
+        setState(() {
+          _phase = _ProvisioningPhase.error;
+          _errorMessage = 'Name the Home to finish setup.';
+        });
+        return;
+      }
       if (_bleService.isConnected) {
         _passwordController.clear();
         setState(() {
@@ -541,44 +561,133 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   Future<void> _persistServerHub(String ip, String? ownerToken) async {
     final homeProvider = context.read<HomeProvider>();
-    final displayName = _deviceInfo?.name ?? 'RhythmServer';
-    for (final hub in homeProvider.currentHomeHubs) {
-      final matches = hub.type == HubType.server &&
-          hub.endpoint.host == ip &&
-          hub.endpoint.port == 54448;
-      if (!matches) continue;
-
-      final token = ownerToken?.trim();
-      final hasSavedToken = hub.token?.trim().isNotEmpty == true;
-      var selectedHub = hub;
-      if (token != null && token.isNotEmpty && !hasSavedToken) {
-        selectedHub = hub.copyWith(token: token);
-      }
-      await homeProvider.activateServerHub(selectedHub);
+    final displayName = _provisionedBoxName;
+    final existingHome = _homeEntryForServerEndpoint(
+      homeProvider: homeProvider,
+      ip: ip,
+      ownerToken: ownerToken,
+    );
+    if (existingHome != null) {
+      final hub = await homeProvider.enterHome(existingHome);
       await RecentServersService.instance.record(
-        name: hub.name,
+        name: hub?.name ?? displayName,
         host: ip,
         port: 54448,
-        token: token != null && token.isNotEmpty ? token : hub.token,
+        token: ownerToken ?? hub?.token,
       );
       return;
     }
 
-    final hub = await homeProvider.addServerHub(
-      name: displayName,
+    final homeName = await _promptForNewHomeName(defaultName: displayName);
+    if (homeName == null) throw const _HomeNameCancelledException();
+
+    final hub = await homeProvider.addServerHubInNewHome(
+      homeName: homeName,
+      hubName: displayName,
       host: ip,
       port: 54448,
       token: ownerToken,
     );
-    if (hub != null) {
-      await homeProvider.activateServerHub(hub);
-    }
     await RecentServersService.instance.record(
-      name: displayName,
+      name: hub?.name ?? displayName,
       host: ip,
       port: 54448,
-      token: ownerToken,
+      token: ownerToken ?? hub?.token,
     );
+  }
+
+  AccountHomeServerHubs? _homeEntryForServerEndpoint({
+    required HomeProvider homeProvider,
+    required String ip,
+    required String? ownerToken,
+  }) {
+    for (final snapshot in homeProvider.homeServerHubSnapshots) {
+      final nextHubs = <Hub>[];
+      var matched = false;
+      for (final hub in snapshot.serverHubs) {
+        final matches = hub.type == HubType.server &&
+            hub.endpoint.host == ip &&
+            hub.endpoint.port == 54448;
+        if (!matches) {
+          nextHubs.add(hub);
+          continue;
+        }
+
+        matched = true;
+        final token = ownerToken?.trim();
+        final hasSavedToken = hub.token?.trim().isNotEmpty == true;
+        nextHubs.add(
+          token != null && token.isNotEmpty && !hasSavedToken
+              ? hub.copyWith(token: token)
+              : hub,
+        );
+      }
+
+      if (matched) {
+        return AccountHomeServerHubs(
+          home: snapshot.home,
+          serverHubs: List.unmodifiable(nextHubs),
+        );
+      }
+    }
+    return null;
+  }
+
+  Future<String?> _promptForNewHomeName({required String defaultName}) async {
+    final controller = TextEditingController(text: defaultName);
+    try {
+      return showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) {
+          return AlertDialog(
+            backgroundColor: CelestialColors.backgroundCard,
+            title: const Text(
+              'Name This Home',
+              style: TextStyle(color: CelestialColors.textPrimary),
+            ),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              style: const TextStyle(color: CelestialColors.textPrimary),
+              decoration: InputDecoration(
+                hintText: 'Home name',
+                hintStyle: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
+                ),
+                enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.2),
+                  ),
+                ),
+                focusedBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: _teal),
+                ),
+              ),
+              onSubmitted: (value) {
+                final trimmed = value.trim();
+                if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
+              },
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  final trimmed = controller.text.trim();
+                  if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
+                },
+                child: const Text(
+                  'Save',
+                  style: TextStyle(color: _teal),
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      controller.dispose();
+    }
   }
 
   Future<void> _startOver() async {

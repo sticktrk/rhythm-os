@@ -55,6 +55,41 @@ void main() {
       expect(switchedB.lastConnected, now);
       expect(preferredServerHubForTesting(next)?.id, 'rpiz-b');
     });
+
+    test('cloud server hub import preserves local owner token', () {
+      final local = _serverHub(
+        id: 'rpiz-a',
+        host: '192.168.5.10',
+        token: 'local-owner-token',
+        enabled: true,
+        updatedAt: DateTime.utc(2026, 6, 1),
+      );
+      final cloud = Hub(
+        id: 'rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Remote Server',
+        endpoint: const HubEndpoint(host: '192.168.5.10', port: 54448),
+        remoteEndpoint: const HubEndpoint(
+          host: 'rpiz-a.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+        enabled: true,
+        requiresCredentials: false,
+        createdAt: DateTime.utc(2026, 6, 2),
+        updatedAt: DateTime.utc(2026, 6, 2),
+      );
+
+      final merged = mergeCloudServerHubForLocalStorageForTesting(
+        cloudHub: cloud,
+        existingHubs: [local],
+      );
+
+      expect(merged.name, 'Remote Server');
+      expect(merged.token, 'local-owner-token');
+      expect(merged.remoteEndpoint?.host, 'rpiz-a.rhythm.lighting');
+    });
   });
 }
 

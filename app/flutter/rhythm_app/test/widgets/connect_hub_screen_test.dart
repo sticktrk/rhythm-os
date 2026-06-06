@@ -1,6 +1,9 @@
 import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rhythm_app/services/account_cloud_sync_service.dart';
+import 'package:rhythm_app/services/recent_servers_service.dart';
 import 'package:rhythm_app/widgets/connect_hub_screen.dart';
+import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
   group('Rhythm mDNS discovery helpers', () {
@@ -136,6 +139,160 @@ void main() {
       expect(candidates, contains('10.0.3.1'));
       expect(candidates, isNot(contains('192.168.5.42')));
       expect(candidates, isNot(contains('8.8.8.1')));
+    });
+
+    test('merges local and cloud Home entries for the same Box', () {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final cloudHome = Home.create(
+        id: 'cloud-home',
+        name: 'Kitchen',
+        ownerId: 'cloud-user',
+      );
+      final localHub = Hub.server(
+        id: 'server-1',
+        homeId: localHome.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+        token: 'local-owner-token',
+      );
+      final cloudHub = Hub.server(
+        id: 'server-1',
+        homeId: cloudHome.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+        remoteEndpoint: const HubEndpoint(
+          host: 'server-1.devices.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+
+      final homes = rhythmMergedHomeEntriesForTesting(
+        localHomes: [
+          AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+        ],
+        cloudHomes: [
+          AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+        ],
+      );
+
+      expect(homes, hasLength(1));
+      expect(homes.single.home.id, localHome.id);
+      expect(homes.single.serverHubs.single.homeId, localHome.id);
+      expect(homes.single.serverHubs.single.token, 'local-owner-token');
+      expect(
+        homes.single.serverHubs.single.remoteEndpoint?.host,
+        'server-1.devices.rhythm.lighting',
+      );
+
+      expect(
+        rhythmHomeIdsRepresentedByForTesting(
+          snapshot: homes.single,
+          localHomes: [
+            AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+          ],
+          cloudHomes: [
+            AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+          ],
+        ),
+        {localHome.id, cloudHome.id},
+      );
+    });
+
+    test('hides recent hardware already represented by a Home', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+      );
+      final matchingRecent = RecentServer(
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+        port: rhythmServerDefaultPort,
+        lastConnected: DateTime.utc(2026, 6, 6),
+      );
+      final otherRecent = RecentServer(
+        name: 'Garage Box',
+        host: '192.168.5.11',
+        port: rhythmServerDefaultPort,
+        lastConnected: DateTime.utc(2026, 6, 6),
+      );
+
+      final homes = [
+        AccountHomeServerHubs(home: home, serverHubs: [hub]),
+      ];
+
+      expect(
+        rhythmRecentServerIsRepresentedByHomeForTesting(
+          server: matchingRecent,
+          homes: homes,
+        ),
+        isTrue,
+      );
+      expect(
+        rhythmRecentServerIsRepresentedByHomeForTesting(
+          server: otherRecent,
+          homes: homes,
+        ),
+        isFalse,
+      );
+    });
+
+    test('hides discovered hardware already represented by a Home', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+      );
+      final matchingDiscovered = DiscoveredHub(
+        host: '192.168.5.10',
+        address: '192.168.5.10',
+        port: rhythmServerDefaultPort,
+        name: 'Kitchen Box',
+        type: HubType.server,
+      );
+      final otherDiscovered = DiscoveredHub(
+        host: '192.168.5.11',
+        address: '192.168.5.11',
+        port: rhythmServerDefaultPort,
+        name: 'Garage Box',
+        type: HubType.server,
+      );
+
+      final homes = [
+        AccountHomeServerHubs(home: home, serverHubs: [hub]),
+      ];
+
+      expect(
+        rhythmDiscoveredServerIsRepresentedByHomeForTesting(
+          server: matchingDiscovered,
+          homes: homes,
+        ),
+        isTrue,
+      );
+      expect(
+        rhythmDiscoveredServerIsRepresentedByHomeForTesting(
+          server: otherDiscovered,
+          homes: homes,
+        ),
+        isFalse,
+      );
     });
   });
 }
