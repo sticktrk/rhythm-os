@@ -108,7 +108,7 @@ class AutomationsScreen extends StatelessWidget {
     return SettingsRow(
       icon: Icons.access_time_rounded,
       iconColor: const Color(0xFF58A6FF),
-      label: 'Automatic',
+      label: 'Time Schedule',
       showChevron: false,
       trailing: _StatusPill(enabled: enabled),
       onTap: () => _pushDetail(

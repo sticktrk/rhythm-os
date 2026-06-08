@@ -17,6 +17,7 @@ import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/screens/all_rooms_screen.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/widgets/main_bottom_nav.dart';
+import 'package:rhythm_app/widgets/solar_orbit.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -489,7 +490,11 @@ void main() {
       serverSync: serverSync,
     );
 
+    await tester.pump(const Duration(seconds: 5));
+
     expect(find.text('Server Unreachable'), findsOneWidget);
+    final retryIcon = tester.widget<Icon>(find.byIcon(Icons.refresh_rounded));
+    expect(retryIcon.color, CelestialColors.accentBlue.withValues(alpha: 0.8));
 
     connection.setConnectionState(RhythmConnectionState.connecting);
     await tester.pump(const Duration(milliseconds: 10));

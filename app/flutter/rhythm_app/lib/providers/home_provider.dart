@@ -957,9 +957,14 @@ class HomeProvider extends ChangeNotifier {
   /// Called when user signs out.
   Future<void> onUserSignOut() async {
     await ensureInitialized();
+    _accountCloudSyncDebounce?.cancel();
+    await _localDataSource.clearHomesAndHubs();
+    await _hubsSubscription?.cancel();
+    _hubsSubscription = null;
     _homes = [];
     _currentHome = null;
     _currentHomeHubs = [];
+    _error = null;
     notifyListeners();
   }
 

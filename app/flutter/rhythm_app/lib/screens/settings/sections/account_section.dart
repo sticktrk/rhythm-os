@@ -9,8 +9,6 @@ import '../../../widgets/settings_row.dart';
 import '../../../backend/auth/auth_user.dart';
 import '../dialogs/sign_in_modal.dart';
 
-// Note: Sign out is handled via "Reset Setup" in AboutSection
-
 /// Account section showing sign-in card or profile info.
 class AccountSection extends StatelessWidget {
   final AuthUser? user;
@@ -66,7 +64,8 @@ class AccountSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SettingsSectionHeader(
-          title: FeatureFlags.entitlementsEnabled ? 'Account & Plan' : 'Account',
+          title:
+              FeatureFlags.entitlementsEnabled ? 'Account & Plan' : 'Account',
         ),
         SettingsGroup(children: rows),
       ],

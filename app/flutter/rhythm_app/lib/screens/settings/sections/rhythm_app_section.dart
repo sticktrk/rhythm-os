@@ -11,10 +11,9 @@ import '../../../providers/home_provider.dart';
 import '../../../providers/hub_connection_provider.dart';
 import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
+import '../../../services/account_session_service.dart';
 import '../../../services/auth_service.dart';
 import '../../../services/cloud_backup_service.dart';
-import '../../../services/settings_service.dart';
-import '../../../services/hue_sse_storage.dart';
 import '../dialogs/feedback_dialog.dart';
 import '../../location_settings_screen.dart';
 import 'backup_restore_screen.dart';
@@ -58,20 +57,23 @@ class RhythmAppDetailScreen extends StatelessWidget {
                           RhythmConnectionState.connected;
                       final canUseCloudBackups =
                           CloudBackupService.instance.canUseCloudBackups;
+                      final currentUser = AuthService().currentUser;
+                      final hasAccountSession =
+                          caps.hasAccounts && currentUser != null;
+                      final hasPermanentAccount =
+                          currentUser != null && !currentUser.isAnonymous;
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           const SizedBox(height: 8),
-                          if (AuthService().currentUser != null &&
-                              !AuthService().currentUser!.isAnonymous) ...[
+                          if (hasPermanentAccount) ...[
                             SettingsGroup(
                               children: [
                                 SettingsRow(
                                   icon: Icons.person_outline,
                                   iconColor: CelestialColors.accentBlue,
                                   label: 'Profile',
-                                  value: AuthService().currentUser?.email ??
-                                      'Signed in',
+                                  value: currentUser.email ?? 'Signed in',
                                   showChevron: false,
                                 ),
                               ],
@@ -130,17 +132,26 @@ class RhythmAppDetailScreen extends StatelessWidget {
                             ],
                           ),
                           const SizedBox(height: 12),
-                          SettingsGroup(
-                            children: [
-                              SettingsRow(
-                                icon: Icons.delete_forever_rounded,
-                                iconColor: Colors.red,
-                                label: 'Delete Account',
-                                showChevron: false,
-                                onTap: () => _deleteAccount(context),
-                              ),
-                            ],
-                          ),
+                          if (hasAccountSession)
+                            SettingsGroup(
+                              children: [
+                                SettingsRow(
+                                  icon: Icons.logout_rounded,
+                                  iconColor: const Color(0xFFFFC857),
+                                  label: 'Log Out',
+                                  showChevron: false,
+                                  onTap: () => _logOut(context),
+                                ),
+                                if (hasPermanentAccount)
+                                  SettingsRow(
+                                    icon: Icons.delete_forever_rounded,
+                                    iconColor: Colors.red,
+                                    label: 'Delete Account',
+                                    showChevron: false,
+                                    onTap: () => _deleteAccount(context),
+                                  ),
+                              ],
+                            ),
                           const SizedBox(height: 40),
                         ],
                       );
@@ -201,6 +212,62 @@ class RhythmAppDetailScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _logOut(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Log Out',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: const Text(
+          'This will remove this device\'s local setup and return to onboarding. Your account and cloud data will not be deleted.',
+          style: TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: CelestialColors.textSecondary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text(
+              'Log Out',
+              style: TextStyle(color: Color(0xFFFFC857)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+
+    try {
+      await AccountSessionService.instance.logOutAndReset(
+        serverSyncProvider: context.read<ServerSyncProvider>(),
+        homeProvider: context.read<HomeProvider>(),
+        hubProvider: context.read<HubConnectionProvider>(),
+        roomProvider: context.read<RoomProvider>(),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Log Out: Failed: $error');
+      debugPrint('$stackTrace');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not log out: $error')),
+        );
+      }
+      return;
+    }
+
+    if (!context.mounted) return;
+    _returnToOnboarding(context);
+  }
+
   Future<void> _deleteAccount(BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -235,8 +302,6 @@ class RhythmAppDetailScreen extends StatelessWidget {
 
     if (confirmed == true && context.mounted) {
       final homeProvider = context.read<HomeProvider>();
-      final hubProvider = context.read<HubConnectionProvider>();
-      final roomProvider = context.read<RoomProvider>();
       debugPrint('Delete Account: Starting account deletion...');
 
       final authService = AuthService();
@@ -251,9 +316,9 @@ class RhythmAppDetailScreen extends StatelessWidget {
             for (final home in homeProvider.homes) {
               await homeProvider.repository.deleteHome(home.id);
             }
-            debugPrint('Delete Account: Homes deleted via PostgREST fallback');
+            debugPrint('Delete Account: Homes deleted via local fallback');
           } catch (e2) {
-            debugPrint('Delete Account: PostgREST fallback also failed: $e2');
+            debugPrint('Delete Account: Local fallback also failed: $e2');
           }
           await authService.signOut();
         }
@@ -261,38 +326,13 @@ class RhythmAppDetailScreen extends StatelessWidget {
 
       if (!context.mounted) return;
 
-      try {
-        hubProvider.disconnect();
-        debugPrint('Delete Account: Hub connections disconnected');
-      } catch (e) {
-        debugPrint(
-            'Delete Account: Hub disconnect error (may not be provided): $e');
-      }
-
-      try {
-        await roomProvider.clearAllRooms();
-        debugPrint('Delete Account: Room provider cleared');
-      } catch (e) {
-        debugPrint('Delete Account: Room clear error: $e');
-      }
-
-      try {
-        await HueSseStorage.clearAll();
-        debugPrint('Delete Account: SSE storage cleared');
-      } catch (e) {
-        debugPrint('Delete Account: SSE storage clear error: $e');
-      }
-
-      await SettingsService.instance.clearAll();
-      debugPrint('Delete Account: Settings service cleared');
-
-      try {
-        await homeProvider.onUserSignOut();
-        debugPrint(
-            'Delete Account: Home provider signed out (all local data cleared)');
-      } catch (e) {
-        debugPrint('Delete Account: Home provider error: $e');
-      }
+      await AccountSessionService.instance.resetLocalSessionState(
+        serverSyncProvider: context.read<ServerSyncProvider>(),
+        homeProvider: homeProvider,
+        hubProvider: context.read<HubConnectionProvider>(),
+        roomProvider: context.read<RoomProvider>(),
+        debugLabel: 'Delete Account',
+      );
 
       AnalyticsService().logAccountDeleted();
       AnalyticsService().logSignOut();
@@ -300,13 +340,17 @@ class RhythmAppDetailScreen extends StatelessWidget {
 
       debugPrint('Delete Account: Complete! Returning to onboarding...');
 
-      if (context.mounted) {
-        Navigator.of(context, rootNavigator: true)
-            .popUntil((route) => route.isFirst);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          AuthGate.resetToOnboarding();
-        });
-      }
+      if (!context.mounted) return;
+      _returnToOnboarding(context);
     }
+  }
+
+  void _returnToOnboarding(BuildContext context) {
+    if (!context.mounted) return;
+    Navigator.of(context, rootNavigator: true)
+        .popUntil((route) => route.isFirst);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      AuthGate.resetToOnboarding();
+    });
   }
 }

@@ -432,6 +432,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         !hasRooms &&
         !HueServiceLocator.isDemoMode;
 
+    // The "Entering Home…" handshake takes over the full Home-tab body. Like
+    // the hardware gate, it's a blocking full-screen state — drop the bottom
+    // nav so the server connection screen reads as one surface.
+    final enteringHome = _currentTab == MainNavTab.home &&
+        hasServerHub &&
+        context.select<ServerSyncProvider, bool>(
+          (s) => s.hasHomeEntryRefreshGate,
+        );
+    final hideChrome = showingHardwareGate || enteringHome;
+
     // `hasBeenSynced` is the sticky flag (true once a hello has completed,
     // false only on full hub unpair). Reading the non-sticky `synced` here
     // would dip false during transient SSE/poll reconnects — including the
@@ -496,7 +506,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
-                if (!showingHardwareGate)
+                if (!hideChrome)
                   Positioned(
                     right: 14,
                     bottom: 14,
@@ -506,7 +516,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   ),
               ],
             ),
-            bottomNavigationBar: showingHardwareGate
+            bottomNavigationBar: hideChrome
                 ? null
                 : _buildBottomNav(
                     visibleTabs: visibleTabs,
@@ -723,9 +733,18 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       description: description,
       statusLabel: error == null ? 'Connecting\u2026' : 'Refresh failed',
       statusActive: error == null,
+      showRecoveryActions: error != null,
       retryLabel: 'Retry',
-      onRetry: () {
-        unawaited(serverSync.refreshForHomeEntry(homeName: displayHome));
+      onRetry: error == null
+          ? null
+          : () {
+              unawaited(serverSync.refreshForHomeEntry(homeName: displayHome));
+            },
+      // Escape hatch so a hung handshake never traps the user: drop the gate
+      // and open the Home chooser.
+      onChooseHome: () {
+        serverSync.cancelHomeEntryRefresh();
+        ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);
       },
     );
   }

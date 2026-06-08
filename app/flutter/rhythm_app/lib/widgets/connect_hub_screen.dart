@@ -1829,12 +1829,22 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Widget _buildTitleAndStatus() {
     final isServer = widget.mode == ConnectHubMode.rhythmServer;
 
+    // When there are no Homes yet, "Choose Your Home" is misleading — there is
+    // nothing to choose. Lead with a welcome so the screen reads as setup.
+    var title = _title;
+    if (isServer && !_isAddingDevice) {
+      final homes = _visibleHomeEntries(context.watch<HomeProvider>());
+      if (homes.isEmpty && !_isLoadingAccountHomes) {
+        title = 'Welcome to Rhythm';
+      }
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Column(
         children: [
           Text(
-            _title,
+            title,
             textAlign: TextAlign.center,
             style: TextStyle(
               color: CelestialColors.textPrimary,
@@ -2096,25 +2106,64 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         physics: const BouncingScrollPhysics(),
         padding: EdgeInsets.zero,
         children: [
+          const SizedBox(height: 4),
           if (showHomeSection) ...[
-            _buildDiscoverySectionHeader(
-              'HOMES',
-              'Select where this app should enter',
-            ),
+            // ── Path A: enter an existing Home (solid cards) ──────────────
+            _buildDiscoverySectionHeader('YOUR HOMES', 'Tap to enter'),
+            const SizedBox(height: 4),
             if (_homeActionError != null) ...[
               _buildInlineError(_homeActionError!),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
             ],
             for (final snapshot in homes) ...[
               _buildHomeCard(snapshot),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
             ],
             if (_shouldShowAccountHomeState) ...[
               _buildAccountHomeStateCard(),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
             ],
+            // ── Path B: create something new (dashed CTA) ─────────────────
+            const SizedBox(height: 20),
+            _buildDiscoverySectionHeader('ADD HARDWARE'),
+            const SizedBox(height: 4),
+          ] else ...[
+            _buildNoHomesIntro(),
           ],
           _buildAddDeviceCard(),
+        ],
+      ),
+    );
+  }
+
+  /// Friendly first-run lead-in shown when no Homes exist yet, so the single
+  /// available action ("Add a Device") reads as a deliberate first step rather
+  /// than a lonely, ambiguous card.
+  Widget _buildNoHomesIntro() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        children: [
+          Text(
+            "Let's set up your first Home",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: CelestialColors.textPrimary.withValues(alpha: 0.92),
+              fontSize: 15.5,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+            ),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            'Add a Rhythm Box to create your first Home and\nstart adaptive lighting.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.62),
+              fontSize: 12.5,
+              height: 1.45,
+            ),
+          ),
         ],
       ),
     );
@@ -2205,7 +2254,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         .toList(growable: false);
   }
 
-  Widget _buildDiscoverySectionHeader(String title, String subtitle) {
+  Widget _buildDiscoverySectionHeader(String title, [String? subtitle]) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, top: 2),
       child: Row(
@@ -2226,15 +2275,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
               color: CelestialColors.textSecondary.withValues(alpha: 0.12),
             ),
           ),
-          const SizedBox(width: 8),
-          Text(
-            subtitle,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.42),
-              fontSize: 10.5,
-              fontWeight: FontWeight.w500,
+          if (subtitle != null) ...[
+            const SizedBox(width: 8),
+            Text(
+              subtitle,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.42),
+                fontSize: 10.5,
+                fontWeight: FontWeight.w500,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -2306,12 +2357,85 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 
+  /// The "create new" action. Deliberately drawn in a different visual idiom
+  /// from the solid Home cards — a glowing dashed-outline CTA — so adding
+  /// hardware never reads as just another Home to enter.
   Widget _buildAddDeviceCard() {
-    return _buildHomeActionCard(
-      icon: Icons.add_circle_outline_rounded,
-      title: 'Add a Device',
-      subtitle: 'Find unassigned hardware and create a Home',
+    final b = _breathe.value;
+    return GestureDetector(
       onTap: _openAddDeviceScreen,
+      behavior: HitTestBehavior.opaque,
+      child: CustomPaint(
+        painter: _DashedRRectPainter(
+          color: _teal.withValues(alpha: 0.28 + b * 0.10),
+          radius: 14,
+          dashWidth: 6,
+          dashGap: 5,
+          strokeWidth: 1.2,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          child: Row(
+            children: [
+              // Outlined "+" — a lighter, secondary affordance that signals
+              // "create new" without competing with the Home cards above.
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _teal.withValues(alpha: 0.12),
+                  border: Border.all(
+                    color: _teal.withValues(alpha: 0.30),
+                    width: 1,
+                  ),
+                ),
+                child: Icon(
+                  Icons.add_rounded,
+                  color: _teal.withValues(alpha: 0.90),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Add a Device',
+                      style: TextStyle(
+                        color: CelestialColors.textPrimary.withValues(alpha: 0.90),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Find a Rhythm Box nearby and set up a Home',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color:
+                            CelestialColors.textSecondary.withValues(alpha: 0.55),
+                        fontSize: 11.5,
+                        height: 1.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                Icons.arrow_forward_rounded,
+                color: _teal.withValues(alpha: 0.60),
+                size: 18,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -2335,34 +2459,65 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       onTap: isBusy ? null : () => _enterHome(snapshot),
       onLongPress: isBusy ? null : () => _confirmDeleteHome(snapshot),
       behavior: HitTestBehavior.opaque,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          color: Colors.white.withValues(alpha: isCurrent ? 0.06 : 0.04),
+          borderRadius: BorderRadius.circular(16),
+          // The current Home reads as the headline: gradient fill, brighter
+          // border and a soft outer glow lift it clearly above its siblings.
+          gradient: isCurrent
+              ? LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    color.withValues(alpha: 0.20),
+                    color.withValues(alpha: 0.07),
+                  ],
+                )
+              : null,
+          color: isCurrent ? null : Colors.white.withValues(alpha: 0.05),
           border: Border.all(
             color: isCurrent
-                ? color.withValues(alpha: 0.34)
+                ? color.withValues(alpha: 0.55)
                 : Colors.white.withValues(alpha: 0.10),
-            width: 1,
+            width: isCurrent ? 1.5 : 1,
           ),
+          boxShadow: isCurrent
+              ? [
+                  BoxShadow(
+                    color: color.withValues(alpha: 0.22),
+                    blurRadius: 22,
+                    spreadRadius: -4,
+                    offset: const Offset(0, 6),
+                  ),
+                ]
+              : null,
         ),
         child: Row(
           children: [
             Container(
-              width: 34,
-              height: 34,
+              width: 46,
+              height: 46,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: color.withValues(alpha: hasServer ? 0.14 : 0.08),
+                color: color.withValues(
+                  alpha: hasServer ? (isCurrent ? 0.24 : 0.14) : 0.08,
+                ),
+                border: isCurrent
+                    ? Border.all(
+                        color: color.withValues(alpha: 0.40),
+                        width: 1,
+                      )
+                    : null,
               ),
               child: Icon(
                 hasServer ? Icons.home_rounded : Icons.home_outlined,
-                color: color.withValues(alpha: hasServer ? 0.92 : 0.65),
-                size: 18,
+                color: color.withValues(alpha: hasServer ? 0.95 : 0.65),
+                size: 24,
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 14),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -2370,51 +2525,64 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 children: [
                   Row(
                     children: [
-                      Expanded(
+                      Flexible(
                         child: Text(
                           snapshot.home.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: CelestialColors.textPrimary,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
+                            fontSize: 17,
+                            fontWeight:
+                                isCurrent ? FontWeight.w700 : FontWeight.w600,
                             letterSpacing: 0.1,
                           ),
                         ),
                       ),
+                      const SizedBox(width: 8),
                       _buildDiscoveryBadge(badge, color),
                     ],
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 4),
                   Text(
                     subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.58),
-                      fontSize: 11.5,
+                          CelestialColors.textSecondary.withValues(alpha: 0.62),
+                      fontSize: 12.5,
                       letterSpacing: 0.2,
                     ),
                   ),
                 ],
               ),
             ),
+            const SizedBox(width: 10),
             if (isBusy)
               SizedBox(
-                width: 16,
-                height: 16,
+                width: 18,
+                height: 18,
                 child: CircularProgressIndicator(
-                  strokeWidth: 1.6,
-                  color: color.withValues(alpha: 0.75),
+                  strokeWidth: 1.8,
+                  color: color.withValues(alpha: 0.8),
                 ),
               )
             else
-              Icon(
-                Icons.arrow_forward_rounded,
-                color: color.withValues(alpha: 0.65),
-                size: 18,
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isCurrent
+                      ? color.withValues(alpha: 0.20)
+                      : Colors.white.withValues(alpha: 0.05),
+                ),
+                child: Icon(
+                  Icons.arrow_forward_rounded,
+                  color: color.withValues(alpha: isCurrent ? 0.95 : 0.70),
+                  size: 18,
+                ),
               ),
           ],
         ),
@@ -3303,4 +3471,57 @@ class _AuthTokenRequiredException implements Exception {
   final String message;
 
   const _AuthTokenRequiredException(this.message);
+}
+
+/// Paints a dashed rounded-rectangle outline. Used to give the "Add a Device"
+/// action a distinct "create new" affordance versus the solid Home cards.
+class _DashedRRectPainter extends CustomPainter {
+  _DashedRRectPainter({
+    required this.color,
+    required this.radius,
+    this.dashWidth = 6,
+    this.dashGap = 5,
+    this.strokeWidth = 1.4,
+  });
+
+  final Color color;
+  final double radius;
+  final double dashWidth;
+  final double dashGap;
+  final double strokeWidth;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(
+          Offset.zero & size,
+          Radius.circular(radius),
+        ),
+      );
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth;
+
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final next = distance + dashWidth;
+        canvas.drawPath(
+          metric.extractPath(distance, next.clamp(0.0, metric.length)),
+          paint,
+        );
+        distance = next + dashGap;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedRRectPainter old) =>
+      old.color != color ||
+      old.radius != radius ||
+      old.dashWidth != dashWidth ||
+      old.dashGap != dashGap ||
+      old.strokeWidth != strokeWidth;
 }

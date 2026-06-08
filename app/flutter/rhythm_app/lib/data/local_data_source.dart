@@ -234,6 +234,14 @@ class LocalDataSource {
     await _settingsBox!.clear();
   }
 
+  /// Clear account-scoped homes and hubs while leaving device settings alone.
+  Future<void> clearHomesAndHubs() async {
+    _ensureInitialized();
+    await _homesBox!.clear();
+    await _hubsBox!.clear();
+    debugPrint('LocalDataSource: Homes and hubs cleared');
+  }
+
   // ============================================================
   // Utility Methods
   // ============================================================

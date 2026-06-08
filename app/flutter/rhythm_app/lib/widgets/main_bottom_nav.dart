@@ -65,7 +65,7 @@ class MainBottomNav extends StatelessWidget {
       MainNavTab.automations => NavigationDestination(
           icon: const Icon(Icons.bolt_outlined),
           selectedIcon: const Icon(Icons.bolt),
-          label: 'Automations',
+          label: 'Schedules',
           enabled: enabled,
         ),
       MainNavTab.devices => NavigationDestination(
