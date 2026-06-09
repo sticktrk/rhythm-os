@@ -1097,18 +1097,25 @@ class ServerSyncProvider extends ChangeNotifier {
     Hub hub, {
     required bool clearTransientState,
   }) async {
+    var targetHub = hub;
+    if (FeatureFlags.remoteAccessTunnel) {
+      targetHub = await _homeProvider.refreshServerHubEndpoints(hub);
+      if (_serverHub?.id != hub.id) return;
+      _serverHub = targetHub;
+    }
+
     if (clearTransientState) {
       _roomProvider.clearTransientState();
     }
-    await _syncLocalServerProcessForHub(hub);
-    if (_serverHub?.id != hub.id) return;
+    await _syncLocalServerProcessForHub(targetHub);
+    if (_serverHub?.id != targetHub.id) return;
 
-    final auth = await _prepareServerHubAuth(hub);
-    if (_serverHub?.id != hub.id) return;
+    final auth = await _prepareServerHubAuth(targetHub);
+    if (_serverHub?.id != targetHub.id) return;
 
     _serverHub = auth.hub;
     final endpoint = await _selectConnectionEndpoint(auth.hub, auth.authToken);
-    if (_serverHub?.id != hub.id) return;
+    if (_serverHub?.id != targetHub.id) return;
 
     _activeConnectionEndpoint = endpoint;
     await _connection.connect(
@@ -1928,19 +1935,8 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     final hub = _serverHub;
-    final remote = hub?.remoteEndpoint;
     final activeEndpoint = _activeConnectionEndpoint;
-    if (hub == null ||
-        remote == null ||
-        !_sameEndpoint(activeEndpoint, hub.endpoint)) {
-      return;
-    }
-
-    final token = hub.token?.trim();
-    if (token == null || token.isEmpty) {
-      debugPrint(
-        'ServerSync: LAN endpoint lost but remote access has no saved owner token',
-      );
+    if (hub == null || !_sameEndpoint(activeEndpoint, hub.endpoint)) {
       return;
     }
 
@@ -1953,9 +1949,21 @@ class ServerSyncProvider extends ChangeNotifier {
 
     Future.microtask(() async {
       try {
+        final failoverHub = await _homeProvider.refreshServerHubEndpoints(hub);
         final currentHub = _serverHub;
         if (currentHub?.id != hub.id ||
             !_sameEndpoint(_activeConnectionEndpoint, hub.endpoint)) {
+          return;
+        }
+
+        final remote = failoverHub.remoteEndpoint;
+        if (remote == null) return;
+
+        final token = failoverHub.token?.trim();
+        if (token == null || token.isEmpty) {
+          debugPrint(
+            'ServerSync: LAN endpoint lost but remote access has no saved owner token',
+          );
           return;
         }
 
@@ -1963,6 +1971,7 @@ class ServerSyncProvider extends ChangeNotifier {
           'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
           'lost, reconnecting through ${remote.host}:${remote.port}',
         );
+        _serverHub = failoverHub;
         _activeConnectionEndpoint = remote;
         await _connection.connect(
           remote.host,

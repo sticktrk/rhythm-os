@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
@@ -16,10 +17,16 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class _TestHomeProvider extends HomeProvider {
-  _TestHomeProvider(this._hubs, {Home? currentHome})
-      : _currentHome = currentHome;
+  _TestHomeProvider(
+    List<Hub> hubs, {
+    Home? currentHome,
+    List<AccountHomeServerHubs> accountHomes = const [],
+  })  : _hubs = List<Hub>.of(hubs),
+        _currentHome = currentHome,
+        _accountHomes = accountHomes;
 
   final List<Hub> _hubs;
+  final List<AccountHomeServerHubs> _accountHomes;
   Home? _currentHome;
 
   @override
@@ -39,6 +46,23 @@ class _TestHomeProvider extends HomeProvider {
   @override
   Future<bool> updateCurrentHome(Home home) async {
     _currentHome = home;
+    notifyListeners();
+    return true;
+  }
+
+  @override
+  Future<List<AccountHomeServerHubs>> loadAccountHomes() async {
+    return _accountHomes;
+  }
+
+  @override
+  Future<bool> updateHub(Hub hub) async {
+    final index = _hubs.indexWhere((saved) => saved.id == hub.id);
+    if (index == -1) {
+      _hubs.add(hub);
+    } else {
+      _hubs[index] = hub;
+    }
     notifyListeners();
     return true;
   }
@@ -2252,6 +2276,227 @@ void main() {
       expect(provider.activeConnectionEndpoint?.host, 'server.rhythm.lighting');
     });
 
+    test('retry refreshes changed tunnel endpoint before reconnecting',
+        () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final localHub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Server',
+        host: '127.0.0.1',
+        port: 54448,
+        token: 'owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'old-server.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+      final homeProvider = _TestHomeProvider(
+        [localHub],
+        currentHome: home,
+        accountHomes: [
+          AccountHomeServerHubs(
+            home: home,
+            serverHubs: [
+              Hub.server(
+                id: localHub.id,
+                homeId: home.id,
+                name: localHub.name,
+                host: localHub.endpoint.host,
+                port: localHub.endpoint.port,
+                remoteEndpoint: const HubEndpoint(
+                  host: 'new-server.rhythm.lighting',
+                  port: 443,
+                  useSsl: true,
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+        endpointReachability: (endpoint, authToken) async {
+          expect(authToken, 'owner-token');
+          return endpoint.host != '127.0.0.1';
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection();
+
+      expect(connection.connectCalls, hasLength(1));
+      expect(connection.connectCalls.single.host, 'new-server.rhythm.lighting');
+      expect(connection.connectCalls.single.port, 443);
+      expect(connection.connectCalls.single.useSsl, isTrue);
+      expect(connection.connectCalls.single.authToken, 'owner-token');
+      expect(homeProvider.currentHomeHubs.single.remoteEndpoint?.host,
+          'new-server.rhythm.lighting');
+      expect(provider.activeConnectionEndpoint?.host,
+          'new-server.rhythm.lighting');
+    });
+
+    test('retry refreshes tunnel endpoint from the selected Home', () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      final otherHome = Home.create(
+        id: 'home-a',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final selectedHome = Home.create(
+        id: 'home-b',
+        name: 'Cabin',
+        ownerId: 'user-1',
+      );
+      final localHub = Hub.server(
+        id: 'server-1',
+        homeId: selectedHome.id,
+        name: 'Cabin Server',
+        host: '127.0.0.1',
+        port: 54448,
+        token: 'owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'old-cabin.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+      final homeProvider = _TestHomeProvider(
+        [localHub],
+        currentHome: selectedHome,
+        accountHomes: [
+          AccountHomeServerHubs(
+            home: otherHome,
+            serverHubs: [
+              Hub.server(
+                id: localHub.id,
+                homeId: otherHome.id,
+                name: 'Kitchen Server',
+                host: '192.168.5.10',
+                remoteEndpoint: const HubEndpoint(
+                  host: 'stale-kitchen.rhythm.lighting',
+                  port: 443,
+                  useSsl: true,
+                ),
+              ),
+            ],
+          ),
+          AccountHomeServerHubs(
+            home: selectedHome,
+            serverHubs: [
+              Hub.server(
+                id: localHub.id,
+                homeId: selectedHome.id,
+                name: localHub.name,
+                host: localHub.endpoint.host,
+                port: localHub.endpoint.port,
+                remoteEndpoint: const HubEndpoint(
+                  host: 'fresh-cabin.rhythm.lighting',
+                  port: 443,
+                  useSsl: true,
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+        endpointReachability: (endpoint, authToken) async {
+          expect(authToken, 'owner-token');
+          return endpoint.host != '127.0.0.1';
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection();
+
+      expect(connection.connectCalls, hasLength(1));
+      expect(
+          connection.connectCalls.single.host, 'fresh-cabin.rhythm.lighting');
+      expect(homeProvider.currentHomeHubs.single.remoteEndpoint?.host,
+          'fresh-cabin.rhythm.lighting');
+      expect(provider.activeConnectionEndpoint?.host,
+          'fresh-cabin.rhythm.lighting');
+    });
+
+    test('retry refreshes changed local endpoint before reconnecting',
+        () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final localHub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Server',
+        host: '100.64.0.12',
+        port: 54448,
+        token: 'owner-token',
+      ).copyWith(
+        updatedAt: DateTime.utc(2026, 6, 1),
+        pendingSync: false,
+      );
+      final homeProvider = _TestHomeProvider(
+        [localHub],
+        currentHome: home,
+        accountHomes: [
+          AccountHomeServerHubs(
+            home: home,
+            serverHubs: [
+              Hub.server(
+                id: localHub.id,
+                homeId: home.id,
+                name: localHub.name,
+                host: '192.168.5.123',
+                port: localHub.endpoint.port,
+              ).copyWith(updatedAt: DateTime.utc(2026, 6, 2)),
+            ],
+          ),
+        ],
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+        endpointReachability: (endpoint, authToken) async {
+          expect(authToken, 'owner-token');
+          return endpoint.host == '192.168.5.123';
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection();
+
+      expect(connection.connectCalls, hasLength(1));
+      expect(connection.connectCalls.single.host, '192.168.5.123');
+      expect(connection.connectCalls.single.port, 54448);
+      expect(connection.connectCalls.single.authToken, 'owner-token');
+      expect(
+        homeProvider.currentHomeHubs.single.endpoint.host,
+        '192.168.5.123',
+      );
+      expect(provider.activeConnectionEndpoint?.host, '192.168.5.123');
+    });
+
     test('refreshes authoritative state when preview tick is missing',
         () async {
       final provider = ServerSyncProvider(
@@ -3334,7 +3579,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Rhythm');
+    await _selectRoomSettingsTab(tester, 'Settings');
     expect(find.text('Motion Timeout'), findsNWidgets(2));
 
     await tester.tap(find.text('10m').first);
@@ -3476,7 +3721,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Settings');
+    await _selectRoomSettingsTab(tester, 'Info');
 
     expect(find.text('Delete Room'), findsOneWidget);
 

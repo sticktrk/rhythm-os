@@ -637,7 +637,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           }
 
           if (_serverLostConnection) {
-            return ServerDisconnectedScreen(serverHub: serverHub);
+            return ServerDisconnectedScreen(
+              serverHub: serverHub,
+              onChooseHome: () => ConnectHubScreen.show(
+                context,
+                mode: ConnectHubMode.rhythmServer,
+              ),
+            );
           }
 
           if (state == RhythmConnectionState.connected) {
@@ -714,31 +720,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final displayHome =
         serverSync.homeEntryRefreshHomeName ?? homeName ?? 'Home';
     final error = serverSync.homeEntryRefreshError;
-    final hasTunnel = serverHub.remoteEndpoint != null;
-    final routeText = hasTunnel
-        ? 'Selecting local network or secure tunnel'
-        : 'Connecting on your local network';
-    final description = error == null
-        ? [
-            'Connecting to ${serverHub.name}',
-            routeText,
-            'Syncing latest rooms and settings',
-          ].join('\n')
-        : 'We could not get fresh room data from ${serverHub.name}.';
 
     return ServerDisconnectedScreen(
       serverHub: serverHub,
-      title: error ?? 'Entering $displayHome',
-      addressLabel: serverHub.name,
-      description: description,
-      statusLabel: error == null ? 'Connecting\u2026' : 'Refresh failed',
-      statusActive: error == null,
-      showRecoveryActions: error != null,
-      retryLabel: 'Retry',
+      title: error == null ? displayHome : 'Server Unreachable',
       onRetry: error == null
           ? null
-          : () {
-              unawaited(serverSync.refreshForHomeEntry(homeName: displayHome));
+          : () async {
+              await serverSync.refreshForHomeEntry(homeName: displayHome);
             },
       // Escape hatch so a hung handshake never traps the user: drop the gate
       // and open the Home chooser.

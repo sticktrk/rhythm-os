@@ -203,6 +203,59 @@ void main() {
       );
     });
 
+    test('keeps different Homes separate even when they share a Box', () {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final cloudHome = Home.create(
+        id: 'cloud-home',
+        name: 'Cabin',
+        ownerId: 'cloud-user',
+      );
+      final localHub = Hub.server(
+        id: 'server-1',
+        homeId: localHome.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+      );
+      final cloudHub = Hub.server(
+        id: 'server-1',
+        homeId: cloudHome.id,
+        name: 'Cabin Box',
+        host: '192.168.5.10',
+      );
+
+      final homes = rhythmMergedHomeEntriesForTesting(
+        localHomes: [
+          AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+        ],
+        cloudHomes: [
+          AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+        ],
+      );
+
+      expect(homes, hasLength(2));
+      expect(homes.map((entry) => entry.home.id), [
+        localHome.id,
+        cloudHome.id,
+      ]);
+
+      expect(
+        rhythmHomeIdsRepresentedByForTesting(
+          snapshot: homes.first,
+          localHomes: [
+            AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+          ],
+          cloudHomes: [
+            AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+          ],
+        ),
+        {localHome.id},
+      );
+    });
+
     test('hides recent hardware already represented by a Home', () {
       final home = Home.create(
         id: 'home-1',
@@ -293,6 +346,44 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('updates existing Home entry when discovered server IP changed', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '100.64.0.12',
+        token: 'owner-token',
+      );
+      final discovered = DiscoveredHub(
+        host: '192.168.5.123',
+        address: '192.168.5.123',
+        port: rhythmServerDefaultPort,
+        name: 'Kitchen Box',
+        type: HubType.server,
+      );
+
+      final entry = rhythmHomeEntryForDiscoveredServerForTesting(
+        server: discovered,
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        authToken: 'owner-token',
+      );
+
+      expect(entry, isNotNull);
+      final updatedHub = entry!.serverHubs.single;
+      expect(updatedHub.id, hub.id);
+      expect(updatedHub.endpoint.host, '192.168.5.123');
+      expect(updatedHub.endpoint.port, rhythmServerDefaultPort);
+      expect(updatedHub.token, 'owner-token');
+      expect(updatedHub.pendingSync, isTrue);
     });
   });
 }

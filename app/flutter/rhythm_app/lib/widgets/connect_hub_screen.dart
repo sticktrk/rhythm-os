@@ -75,8 +75,25 @@ bool rhythmRecentServerIsRepresentedByHomeForTesting({
 bool rhythmDiscoveredServerIsRepresentedByHomeForTesting({
   required DiscoveredHub server,
   required Iterable<AccountHomeServerHubs> homes,
+  String? authToken,
 }) =>
-    _discoveredServerIsRepresentedByHome(server, homes);
+    _discoveredServerIsRepresentedByHome(
+      server,
+      homes,
+      authToken: authToken,
+    );
+
+@visibleForTesting
+AccountHomeServerHubs? rhythmHomeEntryForDiscoveredServerForTesting({
+  required DiscoveredHub server,
+  required Iterable<AccountHomeServerHubs> homes,
+  String? authToken,
+}) =>
+    _homeEntryForDiscoveredServer(
+      server: server,
+      homes: homes,
+      authToken: authToken,
+    );
 
 @visibleForTesting
 Set<String> rhythmHomeIdsRepresentedByForTesting({
@@ -195,6 +212,10 @@ bool _homeEntriesRepresentSameHome(
   AccountHomeServerHubs right,
 ) {
   if (left.home.id == right.home.id) return true;
+  if (_normalizedHomeName(left.home.name) !=
+      _normalizedHomeName(right.home.name)) {
+    return false;
+  }
 
   for (final leftHub in left.serverHubs) {
     for (final rightHub in right.serverHubs) {
@@ -204,6 +225,8 @@ bool _homeEntriesRepresentSameHome(
 
   return false;
 }
+
+String _normalizedHomeName(String name) => name.trim().toLowerCase();
 
 bool _serverHubsRepresentSameBox(Hub left, Hub right) {
   if (left.id == right.id) return true;
@@ -252,9 +275,15 @@ bool _recentServerIsRepresentedByHome(
 
 bool _discoveredServerIsRepresentedByHome(
   DiscoveredHub server,
-  Iterable<AccountHomeServerHubs> homes,
-) {
-  return _homeEntryForDiscoveredServer(server: server, homes: homes) != null;
+  Iterable<AccountHomeServerHubs> homes, {
+  String? authToken,
+}) {
+  return _homeEntryForDiscoveredServer(
+        server: server,
+        homes: homes,
+        authToken: authToken,
+      ) !=
+      null;
 }
 
 AccountHomeServerHubs? _homeEntryForDiscoveredServer({
@@ -266,7 +295,11 @@ AccountHomeServerHubs? _homeEntryForDiscoveredServer({
     final nextHubs = <Hub>[];
     var matched = false;
     for (final hub in home.serverHubs) {
-      if (_serverHubMatchesDiscoveredServer(hub, server)) {
+      if (_serverHubMatchesDiscoveredServer(
+        hub,
+        server,
+        authToken: authToken,
+      )) {
         matched = true;
         nextHubs.add(_serverHubForDiscoveredServer(
           hub: hub,
@@ -288,10 +321,23 @@ AccountHomeServerHubs? _homeEntryForDiscoveredServer({
   return null;
 }
 
-bool _serverHubMatchesDiscoveredServer(Hub hub, DiscoveredHub server) {
-  return hub.type == HubType.server &&
-      hub.endpoint.host == server.address &&
-      hub.endpoint.port == server.port;
+bool _serverHubMatchesDiscoveredServer(
+  Hub hub,
+  DiscoveredHub server, {
+  String? authToken,
+}) {
+  if (hub.type != HubType.server) return false;
+  if (hub.endpoint.host == server.address && hub.endpoint.port == server.port) {
+    return true;
+  }
+
+  final cleanAuthToken = authToken?.trim();
+  final hubToken = hub.token?.trim();
+  return cleanAuthToken != null &&
+      cleanAuthToken.isNotEmpty &&
+      hubToken != null &&
+      hubToken.isNotEmpty &&
+      cleanAuthToken == hubToken;
 }
 
 Hub _serverHubForDiscoveredServer({
@@ -303,7 +349,14 @@ Hub _serverHubForDiscoveredServer({
   final name = _displayNameForDiscoveredServer(server);
   return hub.copyWith(
     name: hub.name.trim().isNotEmpty ? hub.name : name,
+    endpoint: HubEndpoint(
+      host: server.address,
+      port: server.port,
+      useSsl: false,
+    ),
     token: token != null && token.isNotEmpty ? token : hub.token,
+    updatedAt: DateTime.now(),
+    pendingSync: true,
   );
 }
 
@@ -1496,19 +1549,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         (status.requiresAuth || FeatureFlags.remoteAccessTunnel);
     if (status?.requiresAuth != true && !shouldClaimToken) return null;
 
-    final storedToken = _storedServerTokenFor(hub);
+    final storedToken = await _storedServerTokenFor(hub, baseUrl: baseUrl);
     if (storedToken != null) {
-      try {
-        await RhythmConfigApi(
-          baseUrl: '$baseUrl/',
-          authToken: storedToken,
-        ).getState().timeout(const Duration(seconds: 4));
-        return storedToken;
-      } on RhythmApiException catch (error) {
-        if (error.statusCode != HttpStatus.unauthorized) {
-          rethrow;
-        }
-      }
+      return storedToken;
     }
 
     if (shouldClaimToken) {
@@ -1532,23 +1575,61 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
   }
 
-  String? _storedServerTokenFor(DiscoveredHub hub) {
-    for (final savedHub in context.read<HomeProvider>().currentHomeHubs) {
-      if (savedHub.type != HubType.server) continue;
-      if (savedHub.endpoint.host != hub.address ||
-          savedHub.endpoint.port != hub.port) {
-        continue;
+  Future<String?> _storedServerTokenFor(
+    DiscoveredHub hub, {
+    required String baseUrl,
+  }) async {
+    final exactTokens = <String>[];
+    final fallbackTokens = <String>[];
+
+    void addToken(String? token, {required bool exact}) {
+      final clean = token?.trim();
+      if (clean == null || clean.isEmpty) return;
+      final target = exact ? exactTokens : fallbackTokens;
+      if (!exactTokens.contains(clean) && !fallbackTokens.contains(clean)) {
+        target.add(clean);
       }
-      final token = savedHub.token?.trim();
-      if (token != null && token.isNotEmpty) return token;
     }
-    // Fall back to a token cached in the local recents list — lets the user
-    // reconnect to a previously-paired box without re-running BLE auth.
+
+    final homeProvider = context.read<HomeProvider>();
+    final localServerHubs = <Hub>[
+      for (final snapshot in homeProvider.homeServerHubSnapshots)
+        ...snapshot.serverHubs,
+      ...homeProvider.currentHomeHubs
+          .where((hub) => hub.type == HubType.server),
+    ];
+    for (final savedHub in localServerHubs) {
+      if (savedHub.type != HubType.server) continue;
+      addToken(
+        savedHub.token,
+        exact: savedHub.endpoint.host == hub.address &&
+            savedHub.endpoint.port == hub.port,
+      );
+    }
+
     for (final recent in RecentServersService.instance.servers) {
-      if (recent.host != hub.address || recent.port != hub.port) continue;
-      final token = recent.token?.trim();
-      if (token != null && token.isNotEmpty) return token;
+      addToken(
+        recent.token,
+        exact: recent.host == hub.address && recent.port == hub.port,
+      );
     }
+
+    for (final token in [...exactTokens, ...fallbackTokens]) {
+      try {
+        await RhythmConfigApi(
+          baseUrl: '$baseUrl/',
+          authToken: token,
+        ).getState().timeout(const Duration(seconds: 4));
+        return token;
+      } on RhythmApiException catch (error) {
+        if (error.statusCode != HttpStatus.unauthorized) {
+          debugPrint('Stored token probe failed for ${hub.address}: $error');
+        }
+      } catch (error) {
+        debugPrint('Stored token probe failed for ${hub.address}: $error');
+      }
+    }
+
     return null;
   }
 
@@ -2405,7 +2486,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                     Text(
                       'Add a Device',
                       style: TextStyle(
-                        color: CelestialColors.textPrimary.withValues(alpha: 0.90),
+                        color:
+                            CelestialColors.textPrimary.withValues(alpha: 0.90),
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                         letterSpacing: 0.2,
@@ -2417,8 +2499,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color:
-                            CelestialColors.textSecondary.withValues(alpha: 0.55),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.55),
                         fontSize: 11.5,
                         height: 1.3,
                       ),

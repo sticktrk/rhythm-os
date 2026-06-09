@@ -90,6 +90,47 @@ void main() {
       expect(merged.token, 'local-owner-token');
       expect(merged.remoteEndpoint?.host, 'rpiz-a.rhythm.lighting');
     });
+
+    test(
+        'cloud server hub import is scoped when the id belongs to another Home',
+        () {
+      final otherHomeHub = Hub.server(
+        id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
+        homeId: 'home-a',
+        name: 'Kitchen Server',
+        host: '192.168.5.10',
+      );
+      final cloudHub = Hub.server(
+        id: otherHomeHub.id,
+        homeId: 'home-b',
+        name: 'Cabin Server',
+        host: '192.168.8.10',
+      );
+
+      final scoped = accountHomeServerHubForLocalStorageForTesting(
+        cloudHub: cloudHub,
+        homeId: 'home-b',
+        existingHubs: [otherHomeHub],
+      );
+
+      expect(scoped.homeId, 'home-b');
+      expect(scoped.id, isNot(cloudHub.id));
+      expect(
+        scoped.id,
+        matches(
+          RegExp(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+          ),
+        ),
+      );
+
+      final scopedAgain = accountHomeServerHubForLocalStorageForTesting(
+        cloudHub: cloudHub,
+        homeId: 'home-b',
+        existingHubs: [otherHomeHub, scoped],
+      );
+      expect(scopedAgain.id, scoped.id);
+    });
   });
 }
 

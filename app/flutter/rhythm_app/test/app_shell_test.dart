@@ -15,9 +15,9 @@ import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/screens/all_rooms_screen.dart';
+import 'package:rhythm_app/screens/server_disconnected_screen.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/widgets/main_bottom_nav.dart';
-import 'package:rhythm_app/widgets/solar_orbit.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -25,9 +25,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'mocks/mock_rhythm_api.dart';
 
 class _FakeHomeProvider extends HomeProvider {
-  _FakeHomeProvider(List<Hub> hubs) : _hubs = List<Hub>.from(hubs);
+  _FakeHomeProvider(List<Hub> hubs, {Home? currentHome})
+      : _hubs = List<Hub>.from(hubs),
+        _currentHome = currentHome;
 
   final List<Hub> _hubs;
+  final Home? _currentHome;
+
+  @override
+  Home? get currentHome => _currentHome;
 
   @override
   List<Hub> get currentHomeHubs => List<Hub>.unmodifiable(_hubs);
@@ -244,6 +250,15 @@ class _TestRhythmConnection extends RhythmConnection {
   Future<void> pingOrReconnect() async {}
 
   @override
+  Future<void> connect(
+    String host, {
+    int port = 80,
+    bool useSsl = false,
+    String? webBaseUrl,
+    String? authToken,
+  }) async {}
+
+  @override
   Future<void> reconnect({bool authoritative = false}) async {}
 
   @override
@@ -285,12 +300,16 @@ class _MemoryRoomPageLayoutStore implements RoomPageLayoutStore {
   }
 }
 
-Hub _serverHub() => Hub.create(
+Hub _serverHub({bool remote = false}) => Hub.create(
       id: 'server-1',
       homeId: 'home-1',
       type: HubType.server,
       name: 'RhythmServer',
       endpoint: const HubEndpoint(host: '127.0.0.1', port: 54448),
+      remoteEndpoint: remote
+          ? const HubEndpoint(
+              host: 'remote.rhythm.test', port: 443, useSsl: true)
+          : null,
     );
 
 Future<void> _seedRoom(RoomProvider roomProvider) {
@@ -465,11 +484,44 @@ void main() {
     expect(find.text('Setting up...'), findsNothing);
   });
 
+  testWidgets('uses the Home name during home entry refresh', (tester) async {
+    final roomProvider = RoomProvider();
+    final home = Home.create(
+      id: 'home-1',
+      name: 'Kitchen',
+      ownerId: 'user-1',
+    );
+    final homeProvider =
+        _FakeHomeProvider([_serverHub(remote: true)], currentHome: home);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.reconnecting,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    )..beginHomeEntryRefresh(homeName: home.name);
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.text('Connecting to Home'), findsNothing);
+  });
+
   testWidgets(
       'keeps the disconnected screen visible across reconnect attempts until connected',
       (tester) async {
     final roomProvider = RoomProvider();
-    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final homeProvider = _FakeHomeProvider([_serverHub(remote: true)]);
     final connection = _TestRhythmConnection(
       initialState: RhythmConnectionState.reconnecting,
     );
@@ -493,8 +545,12 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
 
     expect(find.text('Server Unreachable'), findsOneWidget);
-    final retryIcon = tester.widget<Icon>(find.byIcon(Icons.refresh_rounded));
-    expect(retryIcon.color, CelestialColors.accentBlue.withValues(alpha: 0.8));
+    expect(find.text('Waiting to Retry...'), findsOneWidget);
+    expect(find.text('Trying local'), findsNothing);
+    expect(find.text('Trying remote'), findsNothing);
+    expect(find.text('Retry Now'), findsNothing);
+    expect(find.text('Forget Server'), findsNothing);
+    expect(find.text('Choose a different Home'), findsOneWidget);
 
     connection.setConnectionState(RhythmConnectionState.connecting);
     await tester.pump(const Duration(milliseconds: 10));
@@ -504,6 +560,33 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Server Unreachable'), findsNothing);
     expect(find.text('Add Hubs'), findsOneWidget);
+  });
+
+  testWidgets('server unreachable screen indicates connecting then waiting',
+      (tester) async {
+    final retryCompleter = Completer<void>();
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ServerDisconnectedScreen(
+          serverHub: _serverHub(remote: true),
+          retryInterval: const Duration(minutes: 1),
+          onRetry: () => retryCompleter.future,
+          onChooseHome: () {},
+        ),
+      ),
+    );
+
+    await tester.pump();
+    expect(find.text('Connecting...'), findsOneWidget);
+    expect(find.text('Trying local'), findsNothing);
+    expect(find.text('Trying remote'), findsNothing);
+
+    retryCompleter.complete();
+    await tester.pump();
+    expect(find.text('Waiting to Retry...'), findsOneWidget);
   });
 
   testWidgets('pops pushed routes when the paired server hub is removed',
@@ -695,15 +778,15 @@ void main() {
 
     expect(api.getModeCallCount, 0);
     expect(api.getProfilesCallCount, 0);
-    expect(find.text('DAY'), findsNothing);
+    expect(find.text('Day'), findsNothing);
 
     // The Automations list reads already-synced provider data, so opening it
     // must not trigger the profile-loading server API.
-    await tester.tap(find.text('Automations'));
+    await tester.tap(find.text('Schedules'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(find.text('Day/Sleep Automatic'), findsOneWidget);
+    expect(find.text('Time Schedule'), findsOneWidget);
     expect(api.getModeCallCount, 0);
     expect(api.getProfilesCallCount, 0);
 
@@ -713,8 +796,8 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(find.text('DAY'), findsOneWidget);
-    expect(find.text('SLEEP'), findsOneWidget);
+    expect(find.text('Day'), findsOneWidget);
+    expect(find.text('Sleep'), findsOneWidget);
     expect(api.getModeCallCount, 2);
     expect(api.getProfilesCallCount, 2);
   });

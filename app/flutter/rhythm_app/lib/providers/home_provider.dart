@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
+import 'package:uuid/uuid.dart';
 import '../data/local_data_source.dart';
 import '../repositories/home_repository.dart';
 import '../services/account_cloud_sync_service.dart';
@@ -86,6 +87,58 @@ List<Hub> activateServerHubSnapshotForTesting({
   }
 
   return nextHubs;
+}
+
+String _homeScopedServerHubId({
+  required String homeId,
+  required String cloudHubId,
+}) {
+  return const Uuid().v5(
+    Namespace.url.value,
+    'rhythm:home-server-hub:$homeId:$cloudHubId',
+  );
+}
+
+bool _cloudServerHubMatchesLocalHubForHome({
+  required Hub localHub,
+  required Hub cloudHub,
+  required String homeId,
+}) {
+  return localHub.id == cloudHub.id ||
+      localHub.id ==
+          _homeScopedServerHubId(
+            homeId: homeId,
+            cloudHubId: cloudHub.id,
+          );
+}
+
+@visibleForTesting
+Hub accountHomeServerHubForLocalStorageForTesting({
+  required Hub cloudHub,
+  required String homeId,
+  required Iterable<Hub> existingHubs,
+}) {
+  final normalized = cloudHub.copyWith(homeId: homeId);
+  if (cloudHub.type != HubType.server) return normalized;
+
+  final scopedId = _homeScopedServerHubId(
+    homeId: homeId,
+    cloudHubId: cloudHub.id,
+  );
+
+  for (final hub in existingHubs) {
+    if (hub.id == scopedId && hub.homeId == homeId) {
+      return normalized.copyWith(id: scopedId);
+    }
+  }
+
+  for (final hub in existingHubs) {
+    if (hub.id == cloudHub.id && hub.homeId != homeId) {
+      return normalized.copyWith(id: scopedId);
+    }
+  }
+
+  return normalized;
 }
 
 /// Provider for Home and Hub state management.
@@ -426,14 +479,82 @@ class HomeProvider extends ChangeNotifier {
     return AccountCloudSyncService.instance.loadHomesAndServerHubs();
   }
 
+  /// Refresh the locally saved server endpoints from the signed-in account.
+  ///
+  /// The server owner token is local-only, so this intentionally updates just
+  /// the connection endpoints and preserves the rest of the local hub record.
+  Future<Hub> refreshServerHubEndpoints(Hub serverHub) async {
+    if (serverHub.type != HubType.server) return serverHub;
+
+    try {
+      final snapshots = await loadAccountHomes();
+      Hub? cloudHub;
+      for (final snapshot in snapshots) {
+        if (snapshot.home.id != serverHub.homeId) continue;
+        for (final hub in snapshot.serverHubs) {
+          if (_cloudServerHubMatchesLocalHubForHome(
+            localHub: serverHub,
+            cloudHub: hub,
+            homeId: snapshot.home.id,
+          )) {
+            cloudHub = hub;
+            break;
+          }
+        }
+        if (cloudHub != null) break;
+      }
+
+      if (cloudHub == null) {
+        return serverHub;
+      }
+
+      var updated = serverHub;
+
+      if (!serverHub.pendingSync &&
+          cloudHub.updatedAt.isAfter(serverHub.updatedAt) &&
+          cloudHub.endpoint != serverHub.endpoint) {
+        updated = updated.copyWith(endpoint: cloudHub.endpoint);
+      }
+
+      final latestRemote = cloudHub.remoteEndpoint;
+      if (latestRemote != null && latestRemote != serverHub.remoteEndpoint) {
+        updated = updated.copyWith(remoteEndpoint: latestRemote);
+      }
+
+      if (updated.endpoint == serverHub.endpoint &&
+          updated.remoteEndpoint == serverHub.remoteEndpoint) {
+        return serverHub;
+      }
+
+      final saved = await updateHub(updated);
+      if (!saved) return serverHub;
+      debugPrint(
+        'HomeProvider: refreshed server endpoints for ${serverHub.id}',
+      );
+      return updated;
+    } catch (error) {
+      debugPrint(
+        'HomeProvider: unable to refresh server endpoints for '
+        '${serverHub.id}: $error',
+      );
+      return serverHub;
+    }
+  }
+
   Future<Hub?> enterHome(AccountHomeServerHubs snapshot) async {
     try {
       await _repository.updateHome(snapshot.home);
 
+      final allExistingHubs = _repository.getAllHubs();
       final existingHubs = _repository.getHubsForHome(snapshot.home.id);
       for (final hub in snapshot.serverHubs) {
-        final merged = mergeCloudServerHubForLocalStorageForTesting(
+        final localHub = accountHomeServerHubForLocalStorageForTesting(
           cloudHub: hub,
+          homeId: snapshot.home.id,
+          existingHubs: allExistingHubs,
+        );
+        final merged = mergeCloudServerHubForLocalStorageForTesting(
+          cloudHub: localHub,
           existingHubs: existingHubs,
         );
         await _repository.updateHub(merged);
