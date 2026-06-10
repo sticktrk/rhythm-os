@@ -79,6 +79,28 @@ pub fn connect_with_credentials(creds: &WifiCredentials, timeout: Duration) -> R
     wait_for_ip(timeout)
 }
 
+pub fn connect_with_credentials_or_restore(
+    creds: &WifiCredentials,
+    timeout: Duration,
+) -> Result<String> {
+    let previous_credentials = load_configured_credentials()?;
+
+    match connect_with_credentials(creds, timeout) {
+        Ok(ip) => Ok(ip),
+        Err(error) => {
+            match previous_credentials {
+                Some(previous) => {
+                    let _ = connect_with_credentials(&previous, timeout);
+                }
+                None => {
+                    let _ = clear_credentials_and_restart();
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
 pub fn clear_credentials_and_restart() -> Result<()> {
     clear_wifi_credentials()?;
     restart_wifi()

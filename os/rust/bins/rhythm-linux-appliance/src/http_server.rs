@@ -3,14 +3,22 @@
 //! Wraps the standard server router with platform-specific Wi-Fi recovery
 //! endpoints for Linux appliances.
 
+use std::thread;
+use std::time::Duration;
+
 use axum::middleware;
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
+use log::{info, warn};
 use rhythm_os::handlers::ApiResponse;
+use rhythm_os::provisioning::WifiCredentials;
 use rhythm_os::state::SharedState;
 
 use crate::ble_provision::ProvisioningManager;
 use crate::wifi;
+
+const WIFI_CHANGE_APPLY_DELAY: Duration = Duration::from_secs(1);
+const WIFI_CHANGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> Router {
     let router_state = state.clone();
@@ -25,6 +33,13 @@ pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> R
                 let provisioning = provisioning.clone();
                 let state = state.clone();
                 move || async move { handle_delete_wifi(&state, &provisioning) }
+            })
+            .put({
+                let state = state.clone();
+                move |Json(creds): Json<WifiCredentials>| {
+                    let state = state.clone();
+                    async move { handle_put_wifi(state, creds) }
+                }
             }),
         )
         .layer(middleware::from_fn_with_state(
@@ -48,6 +63,46 @@ fn handle_get_wifi(provisioning: &ProvisioningManager) -> ApiResponse {
     ApiResponse::json_ok(body.to_string())
 }
 
+fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
+    if creds.ssid.trim().is_empty() {
+        return ApiResponse::bad_request("Missing ssid");
+    }
+
+    let ssid = creds.ssid.clone();
+    match thread::Builder::new()
+        .name("wifi-change".to_string())
+        .spawn(move || {
+            thread::sleep(WIFI_CHANGE_APPLY_DELAY);
+            match wifi::connect_with_credentials_or_restore(&creds, WIFI_CHANGE_CONNECT_TIMEOUT) {
+                Ok(ip) => {
+                    persist_commissioning_wifi_credentials(&state, &creds);
+                    info!(
+                        target: "sys",
+                        "Changed appliance Wi-Fi credentials for SSID '{}' (ip={})",
+                        creds.ssid,
+                        ip
+                    );
+                }
+                Err(error) => warn!(
+                    target: "sys",
+                    "Failed to change appliance Wi-Fi credentials for SSID '{}'; restored previous Wi-Fi config when available: {:#}",
+                    creds.ssid,
+                    error
+                ),
+            }
+        }) {
+        Ok(_) => {
+            let body = serde_json::json!({
+                "status": "accepted",
+                "message": "Wi-Fi change scheduled",
+                "ssid": ssid,
+            });
+            ApiResponse::json_ok(body.to_string())
+        }
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
 fn handle_delete_wifi(state: &SharedState, provisioning: &ProvisioningManager) -> ApiResponse {
     match wifi::clear_credentials_and_restart() {
         Ok(()) => {
@@ -67,6 +122,28 @@ fn handle_delete_wifi(state: &SharedState, provisioning: &ProvisioningManager) -
             ApiResponse::json_ok(body.to_string())
         }
         Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCredentials) {
+    let result = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))
+        .and_then(|state| {
+            let storage = state
+                .storage
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+            storage.save_commissioning_wifi_credentials(creds)
+        });
+
+    if let Err(error) = result {
+        warn!(
+            target: "sys",
+            "Failed to persist changed appliance Wi-Fi credentials for SSID '{}': {:#}",
+            creds.ssid,
+            error
+        );
     }
 }
 
