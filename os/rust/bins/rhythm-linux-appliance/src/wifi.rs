@@ -110,7 +110,32 @@ pub fn clear_credentials() -> Result<()> {
     clear_wifi_credentials()
 }
 
+/// Maximum SSID length per 802.11 (bytes, not chars).
+const MAX_SSID_BYTES: usize = 32;
+
+/// Reject credentials that cannot be represented safely in a quoted
+/// `wpa_supplicant.conf` value. A newline (or any other control character)
+/// inside `ssid="..."`/`psk="..."` breaks out of the quoted value and
+/// invalidates the entire config file, taking Wi-Fi down until the appliance
+/// is re-provisioned over BLE.
+pub fn validate_credentials(creds: &WifiCredentials) -> Result<()> {
+    if creds.ssid.trim().is_empty() {
+        bail!("SSID must not be empty");
+    }
+    if creds.ssid.len() > MAX_SSID_BYTES {
+        bail!("SSID exceeds {} bytes", MAX_SSID_BYTES);
+    }
+    if creds.ssid.chars().any(char::is_control) {
+        bail!("SSID contains control characters");
+    }
+    if creds.password.chars().any(char::is_control) {
+        bail!("Wi-Fi password contains control characters");
+    }
+    Ok(())
+}
+
 fn write_wifi_credentials(creds: &WifiCredentials) -> Result<()> {
+    validate_credentials(creds)?;
     let country = existing_country().unwrap_or_else(|| DEFAULT_COUNTRY.to_string());
     let body = render_wpa_conf(creds, &country);
     write_wpa_conf(&body)
@@ -143,16 +168,58 @@ fn clear_wifi_credentials() -> Result<()> {
 }
 
 fn write_wpa_conf(body: &str) -> Result<()> {
-    if let Some(parent) = Path::new(WPA_CONF).parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(WPA_CONF, body).with_context(|| format!("writing {}", WPA_CONF))?;
+    write_atomic_0600(Path::new(WPA_CONF), body)
+}
 
-    #[cfg(unix)]
+/// Durably replace `path` with `body`: write a mode-0600 temp sibling, fsync
+/// it, atomically rename into place, then fsync the parent directory. A power
+/// loss mid-write can no longer truncate the only network config the
+/// appliance has.
+fn write_atomic_0600(path: &Path, body: &str) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+    fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
+
+    let mut tmp_name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = parent.join(tmp_name);
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
+
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(WPA_CONF, perms).with_context(|| format!("chmod 600 {}", WPA_CONF))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", tmp.display()))?;
+    }
+
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error)
+            .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
+    }
+
+    if let Ok(dir) = fs::File::open(&parent) {
+        let _ = dir.sync_all();
     }
 
     Ok(())
@@ -471,6 +538,125 @@ network={
                 password: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             })
         );
+    }
+
+    #[test]
+    fn validate_credentials_accepts_typical_networks() {
+        for (ssid, password) in [
+            ("Home", "s3cret"),
+            ("My Wi-Fi", "correct horse battery staple"),
+            ("café 2.4GHz", "pa\"ss\\word"),
+            ("x", ""),
+        ] {
+            let creds = WifiCredentials {
+                ssid: ssid.into(),
+                password: password.into(),
+            };
+            assert!(
+                validate_credentials(&creds).is_ok(),
+                "ssid={ssid:?} password={password:?} should validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_credentials_rejects_control_characters() {
+        // A newline inside a quoted wpa value breaks the whole config file;
+        // wpa_supplicant then refuses to start and Wi-Fi stays down.
+        for (ssid, password) in [
+            ("evil\nssid", "pass"),
+            ("ssid", "pass\nword"),
+            ("ssid\r", "pass"),
+            ("ssid", "pass\tword"),
+            ("ssid\0", "pass"),
+        ] {
+            let creds = WifiCredentials {
+                ssid: ssid.into(),
+                password: password.into(),
+            };
+            assert!(
+                validate_credentials(&creds).is_err(),
+                "ssid={ssid:?} password={password:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_credentials_rejects_empty_and_oversized_ssid() {
+        let empty = WifiCredentials {
+            ssid: "   ".into(),
+            password: "pass".into(),
+        };
+        assert!(validate_credentials(&empty).is_err());
+
+        let oversized = WifiCredentials {
+            ssid: "x".repeat(MAX_SSID_BYTES + 1),
+            password: "pass".into(),
+        };
+        assert!(validate_credentials(&oversized).is_err());
+
+        let max = WifiCredentials {
+            ssid: "x".repeat(MAX_SSID_BYTES),
+            password: "pass".into(),
+        };
+        assert!(validate_credentials(&max).is_ok());
+    }
+
+    #[test]
+    fn write_atomic_0600_replaces_content_without_leaving_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "rhythm-wifi-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("wpa_supplicant.conf");
+
+        write_atomic_0600(&conf, "first\n").unwrap();
+        assert_eq!(fs::read_to_string(&conf).unwrap(), "first\n");
+
+        write_atomic_0600(&conf, "second\n").unwrap();
+        assert_eq!(fs::read_to_string(&conf).unwrap(), "second\n");
+
+        assert!(
+            !dir.join("wpa_supplicant.conf.tmp").exists(),
+            "temp sibling must not survive a successful write"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&conf).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "credentials file must stay private");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_0600_recovers_from_stale_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "rhythm-wifi-stale-tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("wpa_supplicant.conf");
+        // Simulate a crash mid-write from a prior run.
+        fs::write(dir.join("wpa_supplicant.conf.tmp"), "partial garbage").unwrap();
+
+        write_atomic_0600(&conf, "clean\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&conf).unwrap(), "clean\n");
+        assert!(!dir.join("wpa_supplicant.conf.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

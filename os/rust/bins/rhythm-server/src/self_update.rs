@@ -218,6 +218,8 @@ pub struct OtaStatus {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_rollback: Option<LastRollback>,
 }
 
 #[allow(dead_code)]
@@ -247,6 +249,7 @@ impl OtaStatusHandle {
                 image_assets: Vec::new(),
                 message: None,
                 last_error: None,
+                last_rollback: None,
             })),
         }
     }
@@ -278,7 +281,8 @@ impl OtaStatusHandle {
     }
 
     pub fn snapshot(&self) -> OtaStatus {
-        self.inner
+        let mut snapshot = self
+            .inner
             .lock()
             .map(|status| status.clone())
             .unwrap_or_else(|_| OtaStatus {
@@ -298,7 +302,12 @@ impl OtaStatusHandle {
                 image_assets: Vec::new(),
                 message: Some("OTA state lock poisoned".to_string()),
                 last_error: Some("OTA state lock poisoned".to_string()),
-            })
+                last_rollback: None,
+            });
+        // Read fresh on every snapshot: rollbacks are recorded by the boot
+        // path (S41bootstate, startup health check), not by this process.
+        snapshot.last_rollback = last_rollback();
+        snapshot
     }
 
     pub fn mark_checking(&self) {
@@ -504,6 +513,12 @@ impl UpdateInfo {
     where
         F: Fn(UpdateProgress) + Send + Sync,
     {
+        if self.update_reason == Some(UpdateReason::ComponentDrift) {
+            // Recorded before the install so a crash mid-apply still counts
+            // against the repair budget for this release.
+            record_drift_repair_attempt(&self.latest_version);
+        }
+
         if restart_strategy() == RestartStrategy::ApplianceReboot {
             if let Some(image_asset) = self.preferred_appliance_image_asset() {
                 let package_plan = self.package_install_plan()?;
@@ -531,6 +546,10 @@ impl UpdateInfo {
             asset_name,
             self.expected_sha256.as_deref(),
             &self.resolved_install_targets,
+            LiveInstallVersions {
+                previous: &self.current_version,
+                target: &self.latest_version,
+            },
             &progress,
         )
     }
@@ -756,9 +775,8 @@ fn check_manifest_blocking(
         ));
     }
 
-    let component_drift = !package_update
-        && !package_downgrade
-        && !appliance_rootfs_update
+    let drift_check_applies = !package_update && !package_downgrade && !appliance_rootfs_update;
+    let drift_detected = drift_check_applies
         && package
             .as_ref()
             .map(|package| {
@@ -769,6 +787,27 @@ fn check_manifest_blocking(
                 )
             })
             .unwrap_or(false);
+    let drift_state_path = drift_repair_state_path(&install_root);
+    let component_drift = if drift_detected {
+        if drift_repair_exhausted_at(&drift_state_path, &latest_package_version) {
+            log::warn!(
+                target: "sys",
+                "Component drift persists after {} repair attempts for v{}; suppressing further automatic repairs",
+                MAX_DRIFT_REPAIR_ATTEMPTS,
+                latest_package_version
+            );
+            false
+        } else {
+            true
+        }
+    } else {
+        if drift_check_applies && package.is_some() {
+            // The bundle is fully consistent at this version: future drift
+            // (e.g. after the next release) starts with a fresh budget.
+            clear_drift_repair_state_at(&drift_state_path);
+        }
+        false
+    };
 
     let update_reason = if package_update {
         Some(UpdateReason::VersionMismatch)
@@ -1521,7 +1560,7 @@ fn customize_inactive_rootfs(
     ));
     let mount_path = mount_appliance_rootfs_slot(target_slot)?;
     let customize_result = (|| {
-        write_appliance_image_version_marker(&mount_path, image_asset.version.as_deref())?;
+        write_appliance_image_version_marker(&mount_path, image_asset)?;
 
         let Some(package_plan) = package_plan else {
             return Ok((None, Vec::new()));
@@ -1536,6 +1575,9 @@ fn customize_inactive_rootfs(
             package_plan.expected_sha256,
             &remapped_targets,
             &package_download_path,
+            // Overlay into the inactive rootfs: the A/B bootstate machinery
+            // owns rollback there, so backups inside that root are just trash.
+            None,
             progress,
         )?;
         let installed_targets = package_result
@@ -1560,19 +1602,56 @@ fn customize_inactive_rootfs(
 
 fn write_appliance_image_version_marker(
     root: &Path,
-    image_version: Option<&str>,
+    image_asset: &UpdateImageAsset,
 ) -> Result<(), String> {
-    let Some(image_version) = image_version.and_then(normalize_version_candidate) else {
-        return Ok(());
-    };
+    let marker_value = appliance_image_marker_value(image_asset);
     let marker_path = root.join(APPLIANCE_IMAGE_VERSION_PATH.trim_start_matches('/'));
     if let Some(parent) = marker_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to prepare {}: {}", parent.display(), e))?;
     }
-    fs::write(&marker_path, format!("{}\n", image_version))
+    fs::write(&marker_path, format!("{}\n", marker_value))
         .map_err(|e| format!("Failed to write {}: {}", marker_path.display(), e))?;
     Ok(())
+}
+
+/// The identity to record for a freshly flashed rootfs image. Prefers the
+/// release version, then the artifact checksum, then the asset name. The
+/// marker must never be skipped: a slot without one reads as "unknown image"
+/// and gets re-flashed by every later check — a nightly reflash loop that
+/// burns out the SD card.
+fn appliance_image_marker_value(asset: &UpdateImageAsset) -> String {
+    if let Some(version) = asset.version.as_deref().and_then(normalize_version_candidate) {
+        return version;
+    }
+    if let Some(sha256) = asset
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())
+    {
+        let prefix: String = sha256.chars().take(16).collect();
+        return format!("sha256-{}", sanitize_marker_token(&prefix));
+    }
+    sanitize_marker_token(&asset.name)
+}
+
+fn sanitize_marker_token(token: &str) -> String {
+    let sanitized: String = token
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unversioned".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn remap_install_targets_to_root(
@@ -1735,9 +1814,22 @@ fn appliance_image_base_version() -> Option<String> {
 }
 
 fn read_version_marker(path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| normalize_version_candidate(raw.trim()))
+    let raw = fs::read_to_string(path).ok()?;
+    let value = raw.lines().next()?.trim();
+    // Accept the fallback identities (`sha256-…`, asset names) written when a
+    // release version is unavailable — rejecting them would read as "unknown
+    // image" and re-trigger a flash on every check. Still refuse junk so a
+    // corrupted marker can't masquerade as an identity.
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    Some(normalize_version_candidate(value).unwrap_or_else(|| value.to_string()))
 }
 
 fn infer_release_version_from_url(asset_url: &str) -> Option<String> {
@@ -1752,7 +1844,25 @@ fn version_needs_update(candidate: &str, current: &str) -> bool {
     match compare_release_versions(candidate, current) {
         Some(std::cmp::Ordering::Greater) => true,
         Some(_) => false,
-        None => normalize_version_candidate(candidate) != normalize_version_candidate(current),
+        None => {
+            // Semver comparison failed. If the candidate is a well-formed
+            // release, allow recovery from a garbled local version. If the
+            // candidate itself doesn't parse, refuse: treating a malformed
+            // feed version as forever-newer makes the device reinstall the
+            // same artifact on every check — a nightly reflash loop on the
+            // appliance.
+            if parse_release_version(candidate).is_some() {
+                normalize_version_candidate(candidate) != normalize_version_candidate(current)
+            } else {
+                log::warn!(
+                    target: "sys",
+                    "Ignoring unparseable update version candidate '{}' (current '{}')",
+                    candidate,
+                    current
+                );
+                false
+            }
+        }
     }
 }
 
@@ -1817,6 +1927,7 @@ fn apply_payload_blocking(
     asset_name: &str,
     expected_sha256: Option<&str>,
     install_targets: &[InstallTarget],
+    versions: LiveInstallVersions<'_>,
     progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
     let install_root = install_target_executable()?;
@@ -1833,6 +1944,9 @@ fn apply_payload_blocking(
         expected_sha256,
         &resolved_targets,
         &download_path,
+        // Installing over the running system: keep backups and arm the
+        // pending-update marker so a crash-looping build rolls back.
+        Some(versions),
         progress,
     )
 }
@@ -1843,6 +1957,7 @@ fn apply_payload_blocking_with_download_path(
     expected_sha256: Option<&str>,
     resolved_targets: &[InstallTarget],
     download_path: &Path,
+    live_install: Option<LiveInstallVersions<'_>>,
     progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
     let client = reqwest::blocking::Client::builder()
@@ -1898,10 +2013,25 @@ fn apply_payload_blocking_with_download_path(
         OtaUpdateStage::Installing,
         "Installing update bundle",
     ));
-    let installed_targets = commit_staged_targets(&staged_targets).inspect_err(|_error| {
+    let outcome = commit_staged_targets(&staged_targets).inspect_err(|_error| {
         cleanup_staged_files(&staged_targets);
         remove_if_exists(download_path);
     })?;
+
+    if let Some(versions) = live_install {
+        if let Err(error) = write_pending_update_marker(&outcome.applied, versions) {
+            // Without a marker nothing would ever clean the .old backups up,
+            // so fall back to the historical no-rollback cleanup.
+            log::warn!(
+                target: "sys",
+                "Failed to arm pending-update rollback marker: {}; removing backups",
+                error
+            );
+            cleanup_backup_files(&outcome.applied);
+        }
+    } else {
+        cleanup_backup_files(&outcome.applied);
+    }
 
     progress(UpdateProgress::stage(
         OtaUpdateStage::Finalizing,
@@ -1911,7 +2041,7 @@ fn apply_payload_blocking_with_download_path(
 
     Ok(ApplyResult {
         checksum_verified,
-        installed_targets,
+        installed_targets: outcome.installed_targets,
     })
 }
 
@@ -2674,7 +2804,15 @@ fn available_bytes_for_path(path: &Path) -> Result<u64, String> {
     Ok((stats.f_bavail as u64).saturating_mul(fragment_size as u64))
 }
 
-fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<String>, String> {
+/// Result of committing staged targets: display names for status reporting
+/// plus the applied records (with backup paths) the caller needs to either
+/// arm a pending-update marker or clean the backups up.
+struct CommitOutcome {
+    installed_targets: Vec<String>,
+    applied: Vec<AppliedInstallTarget>,
+}
+
+fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<CommitOutcome, String> {
     let mut applied = Vec::<AppliedInstallTarget>::new();
     let mut installed_targets = Vec::new();
 
@@ -2735,9 +2873,10 @@ fn commit_staged_targets(staged_targets: &[StagedInstallTarget]) -> Result<Vec<S
         );
     }
 
-    cleanup_backup_files(&applied);
-
-    Ok(installed_targets)
+    Ok(CommitOutcome {
+        installed_targets,
+        applied,
+    })
 }
 
 fn rollback_applied_targets(applied: &[AppliedInstallTarget]) {
@@ -2756,6 +2895,471 @@ fn cleanup_backup_files(applied: &[AppliedInstallTarget]) {
         if target.previously_existed {
             remove_if_exists(&target.backup_path);
         }
+    }
+}
+
+/// Marker recording a freshly installed bundle whose first healthy startup
+/// hasn't happened yet. Lives next to the install root so the updater and the
+/// next process generation agree on its location without sharing state.
+const PENDING_UPDATE_MARKER_FILE: &str = ".rhythm-update-pending.json";
+
+/// How many process starts the new build gets before the previous binaries
+/// are restored. Crash-looping builds typically die in milliseconds, so three
+/// attempts is enough to ride out one-off flukes without leaving a supervisor
+/// restart-looping a dead server forever.
+const MAX_PENDING_START_ATTEMPTS: u32 = 3;
+
+/// How long after the HTTP listener binds the new build must stay alive
+/// before its rollback backups are discarded.
+const STARTUP_VERIFY_GRACE_SECS: u64 = 30;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PendingUpdateTargetRecord {
+    destination: PathBuf,
+    backup: PathBuf,
+    previously_existed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PendingUpdateMarker {
+    start_attempts: u32,
+    targets: Vec<PendingUpdateTargetRecord>,
+    #[serde(default)]
+    previous_version: Option<String>,
+    #[serde(default)]
+    target_version: Option<String>,
+}
+
+/// Version context for a live bundle install, recorded in the pending-update
+/// marker so a later rollback can report which release was rolled back.
+#[derive(Clone, Copy, Debug)]
+struct LiveInstallVersions<'a> {
+    previous: &'a str,
+    target: &'a str,
+}
+
+/// Outcome of [`startup_update_health_check`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartupUpdateDisposition {
+    /// No update is awaiting verification.
+    NoPendingUpdate,
+    /// A freshly installed update is on probation; this is start attempt
+    /// `attempt` of [`MAX_PENDING_START_ATTEMPTS`].
+    PendingVerification { attempt: u32 },
+    /// The new build failed to start too many times; the previous binaries
+    /// were restored. The caller should exit so the supervisor restarts into
+    /// the restored build.
+    RolledBack { restored: Vec<PathBuf> },
+}
+
+fn pending_update_marker_path(install_root: &Path) -> PathBuf {
+    install_root
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(PENDING_UPDATE_MARKER_FILE)
+}
+
+fn write_pending_update_marker(
+    applied: &[AppliedInstallTarget],
+    versions: LiveInstallVersions<'_>,
+) -> Result<(), String> {
+    let install_root = install_target_executable()?;
+    write_pending_update_marker_at(
+        &pending_update_marker_path(&install_root),
+        applied,
+        Some(versions),
+    )
+}
+
+fn write_pending_update_marker_at(
+    marker_path: &Path,
+    applied: &[AppliedInstallTarget],
+    versions: Option<LiveInstallVersions<'_>>,
+) -> Result<(), String> {
+    let marker = PendingUpdateMarker {
+        start_attempts: 0,
+        targets: applied
+            .iter()
+            .map(|target| PendingUpdateTargetRecord {
+                destination: target.destination.clone(),
+                backup: target.backup_path.clone(),
+                previously_existed: target.previously_existed,
+            })
+            .collect(),
+        previous_version: versions.map(|versions| versions.previous.to_string()),
+        target_version: versions.map(|versions| versions.target.to_string()),
+    };
+    write_pending_marker_file(marker_path, &marker)
+}
+
+fn write_pending_marker_file(
+    marker_path: &Path,
+    marker: &PendingUpdateMarker,
+) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(marker)
+        .map_err(|e| format!("Failed to encode pending-update marker: {}", e))?;
+    let tmp = bootstate::tmp_sibling_path(marker_path);
+    remove_if_exists(&tmp);
+    fs::write(&tmp, &body).map_err(|e| format!("Failed to write {}: {}", tmp.display(), e))?;
+    fs::rename(&tmp, marker_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!(
+            "Failed to promote {} -> {}: {}",
+            tmp.display(),
+            marker_path.display(),
+            e
+        )
+    })
+}
+
+/// Startup gate for the bundle self-update flow.
+///
+/// Call once early in `main`. Counts process starts while an update awaits
+/// verification; after [`MAX_PENDING_START_ATTEMPTS`] failed starts, restores
+/// the `.old` backups so the supervisor's next restart runs the previous
+/// build instead of crash-looping a broken one forever.
+pub fn startup_update_health_check() -> StartupUpdateDisposition {
+    let Ok(install_root) = install_target_executable() else {
+        return StartupUpdateDisposition::NoPendingUpdate;
+    };
+    startup_update_health_check_at(&pending_update_marker_path(&install_root))
+}
+
+fn startup_update_health_check_at(marker_path: &Path) -> StartupUpdateDisposition {
+    let raw = match fs::read_to_string(marker_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StartupUpdateDisposition::NoPendingUpdate;
+        }
+        Err(error) => {
+            log::warn!(
+                target: "sys",
+                "Failed to read pending-update marker {}: {}; discarding it",
+                marker_path.display(),
+                error
+            );
+            remove_if_exists(marker_path);
+            return StartupUpdateDisposition::NoPendingUpdate;
+        }
+    };
+
+    let mut marker: PendingUpdateMarker = match serde_json::from_str(&raw) {
+        Ok(marker) => marker,
+        Err(error) => {
+            log::warn!(
+                target: "sys",
+                "Pending-update marker {} is corrupt: {}; discarding it",
+                marker_path.display(),
+                error
+            );
+            remove_if_exists(marker_path);
+            return StartupUpdateDisposition::NoPendingUpdate;
+        }
+    };
+
+    marker.start_attempts = marker.start_attempts.saturating_add(1);
+    if marker.start_attempts > MAX_PENDING_START_ATTEMPTS {
+        let restored = roll_back_pending_update(&marker);
+        record_bundle_rollback_at(
+            &bundle_rollback_record_path_for_marker(marker_path),
+            &marker,
+        );
+        remove_if_exists(marker_path);
+        return StartupUpdateDisposition::RolledBack { restored };
+    }
+
+    if let Err(error) = write_pending_marker_file(marker_path, &marker) {
+        log::warn!(
+            target: "sys",
+            "Failed to record pending-update start attempt: {}",
+            error
+        );
+    }
+    StartupUpdateDisposition::PendingVerification {
+        attempt: marker.start_attempts,
+    }
+}
+
+fn roll_back_pending_update(marker: &PendingUpdateMarker) -> Vec<PathBuf> {
+    let mut restored = Vec::new();
+    for target in marker.targets.iter().rev() {
+        if target.previously_existed {
+            if !target.backup.exists() {
+                log::warn!(
+                    target: "sys",
+                    "Pending-update rollback: backup {} is missing; leaving {} in place",
+                    target.backup.display(),
+                    target.destination.display()
+                );
+                continue;
+            }
+            let _ = fs::remove_file(&target.destination);
+            match fs::rename(&target.backup, &target.destination) {
+                Ok(()) => restored.push(target.destination.clone()),
+                Err(error) => log::warn!(
+                    target: "sys",
+                    "Pending-update rollback: failed to restore {}: {}",
+                    target.destination.display(),
+                    error
+                ),
+            }
+        } else {
+            // The update introduced this file; restoring means removing it.
+            let _ = fs::remove_file(&target.destination);
+            restored.push(target.destination.clone());
+        }
+    }
+    restored
+}
+
+/// Discard the pending-update marker and its rollback backups after the new
+/// build proved healthy.
+pub fn mark_update_verified() {
+    let Ok(install_root) = install_target_executable() else {
+        return;
+    };
+    if mark_update_verified_at(&pending_update_marker_path(&install_root)) {
+        log::info!(
+            target: "sys",
+            "Update verified after healthy startup; cleared rollback backups"
+        );
+    }
+}
+
+fn mark_update_verified_at(marker_path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(marker_path) else {
+        return false;
+    };
+    if let Ok(marker) = serde_json::from_str::<PendingUpdateMarker>(&raw) {
+        for target in &marker.targets {
+            if target.previously_existed {
+                remove_if_exists(&target.backup);
+            }
+        }
+    }
+    remove_if_exists(marker_path);
+    // A newer update survived verification; an older rollback is stale news.
+    remove_if_exists(&bundle_rollback_record_path_for_marker(marker_path));
+    true
+}
+
+/// Sidecar file recording the most recent bundle (component) rollback so it
+/// can be reported through `/api/ota/status` after the previous build is back
+/// up. The appliance's A/B image rollbacks are recorded separately by
+/// S41bootstate in the bootstate mirror.
+const BUNDLE_ROLLBACK_RECORD_FILE: &str = ".rhythm-last-rollback.json";
+
+/// How a rolled-back update had been installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackKind {
+    /// A/B rootfs slot switch reverted by the appliance boot machinery.
+    ImageSlot,
+    /// Live binary bundle restored from `.old` backups after failed starts.
+    ComponentBundle,
+}
+
+/// The most recent rolled-back update, for surfacing in OTA status.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct LastRollback {
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_epoch_ms: Option<i64>,
+    pub kind: RollbackKind,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct BundleRollbackRecord {
+    #[serde(default)]
+    previous_version: Option<String>,
+    #[serde(default)]
+    target_version: Option<String>,
+    #[serde(default)]
+    at_epoch_ms: Option<i64>,
+}
+
+fn bundle_rollback_record_path_for_marker(marker_path: &Path) -> PathBuf {
+    marker_path.with_file_name(BUNDLE_ROLLBACK_RECORD_FILE)
+}
+
+fn bundle_rollback_record_path() -> Option<PathBuf> {
+    let install_root = install_target_executable().ok()?;
+    Some(
+        pending_update_marker_path(&install_root)
+            .with_file_name(BUNDLE_ROLLBACK_RECORD_FILE),
+    )
+}
+
+fn record_bundle_rollback_at(record_path: &Path, marker: &PendingUpdateMarker) {
+    let record = BundleRollbackRecord {
+        previous_version: marker.previous_version.clone(),
+        target_version: marker.target_version.clone(),
+        at_epoch_ms: Some(now_ms()),
+    };
+    match serde_json::to_vec_pretty(&record) {
+        Ok(body) => {
+            if let Err(error) = fs::write(record_path, body) {
+                log::warn!(
+                    target: "sys",
+                    "Failed to record bundle rollback at {}: {}",
+                    record_path.display(),
+                    error
+                );
+            }
+        }
+        Err(error) => log::warn!(
+            target: "sys",
+            "Failed to encode bundle rollback record: {}",
+            error
+        ),
+    }
+}
+
+fn load_bundle_rollback_at(record_path: &Path) -> Option<LastRollback> {
+    let raw = fs::read_to_string(record_path).ok()?;
+    let record: BundleRollbackRecord = serde_json::from_str(&raw).ok()?;
+    Some(LastRollback {
+        version: record.target_version.filter(|v| !v.is_empty())?,
+        from_version: record.previous_version.filter(|v| !v.is_empty()),
+        at_epoch_ms: record.at_epoch_ms,
+        kind: RollbackKind::ComponentBundle,
+    })
+}
+
+fn appliance_image_rollback() -> Option<LastRollback> {
+    let raw = fs::read_to_string(APPLIANCE_BOOT_STATE_MIRROR_PATH).ok()?;
+    let body = bootstate_body_from_text(&raw)?;
+    appliance_rollback_from_bootstate_body(&body)
+}
+
+fn appliance_rollback_from_bootstate_body(body: &str) -> Option<LastRollback> {
+    let version = last_appliance_rollback_version_from_body(body)?;
+    let at_epoch_ms = bootstate_value(body, "RHYTHM_LAST_ROLLBACK_EPOCH_MS")
+        .and_then(|value| value.parse::<i64>().ok());
+    Some(LastRollback {
+        version,
+        from_version: bootstate_value(body, "RHYTHM_ACTIVE_VERSION")
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        at_epoch_ms,
+        kind: RollbackKind::ImageSlot,
+    })
+}
+
+/// The most recent rollback across both rollback mechanisms, for OTA status
+/// reporting. `None` when this install has never rolled an update back (or
+/// the records have been cleared by a later verified update).
+pub fn last_rollback() -> Option<LastRollback> {
+    let bundle = bundle_rollback_record_path()
+        .as_deref()
+        .and_then(load_bundle_rollback_at);
+    merge_rollbacks(bundle, appliance_image_rollback())
+}
+
+fn merge_rollbacks(
+    left: Option<LastRollback>,
+    right: Option<LastRollback>,
+) -> Option<LastRollback> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            if right.at_epoch_ms.unwrap_or(0) > left.at_epoch_ms.unwrap_or(0) {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+        (left, right) => left.or(right),
+    }
+}
+
+/// Sidecar file tracking how often a component-drift repair was attempted for
+/// a given release. Without a cap, a component whose `--version` can never
+/// match (missing shared library, foreign build) re-triggers a repair install
+/// and restart on every nightly check, forever.
+const DRIFT_REPAIR_STATE_FILE: &str = ".rhythm-drift-repair.json";
+const MAX_DRIFT_REPAIR_ATTEMPTS: u32 = 3;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DriftRepairState {
+    target_version: String,
+    attempts: u32,
+}
+
+fn drift_repair_state_path(install_root: &Path) -> PathBuf {
+    install_root
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(DRIFT_REPAIR_STATE_FILE)
+}
+
+fn load_drift_repair_state(path: &Path) -> DriftRepairState {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn drift_repair_exhausted_at(path: &Path, target_version: &str) -> bool {
+    let state = load_drift_repair_state(path);
+    state.target_version == target_version && state.attempts >= MAX_DRIFT_REPAIR_ATTEMPTS
+}
+
+fn record_drift_repair_attempt_at(path: &Path, target_version: &str) {
+    let mut state = load_drift_repair_state(path);
+    if state.target_version != target_version {
+        state = DriftRepairState {
+            target_version: target_version.to_string(),
+            attempts: 0,
+        };
+    }
+    state.attempts = state.attempts.saturating_add(1);
+    match serde_json::to_vec_pretty(&state) {
+        Ok(body) => {
+            if let Err(error) = fs::write(path, body) {
+                log::warn!(
+                    target: "sys",
+                    "Failed to record drift repair attempt at {}: {}",
+                    path.display(),
+                    error
+                );
+            }
+        }
+        Err(error) => log::warn!(
+            target: "sys",
+            "Failed to encode drift repair state: {}",
+            error
+        ),
+    }
+}
+
+fn record_drift_repair_attempt(target_version: &str) {
+    if let Ok(install_root) = install_target_executable() {
+        record_drift_repair_attempt_at(&drift_repair_state_path(&install_root), target_version);
+    }
+}
+
+fn clear_drift_repair_state_at(path: &Path) {
+    remove_if_exists(path);
+}
+
+/// Spawn the post-startup verification thread. Call after the HTTP listener
+/// has bound; once [`STARTUP_VERIFY_GRACE_SECS`] pass with the process still
+/// alive, the pending update is considered good and its backups are removed.
+pub fn spawn_update_verification_marker() {
+    let spawn_result = std::thread::Builder::new()
+        .name("update-verify".to_string())
+        .spawn(|| {
+            std::thread::sleep(Duration::from_secs(STARTUP_VERIFY_GRACE_SECS));
+            mark_update_verified();
+        });
+    if let Err(error) = spawn_result {
+        log::warn!(
+            target: "sys",
+            "Failed to spawn update verification thread: {}",
+            error
+        );
     }
 }
 
@@ -3415,6 +4019,161 @@ mod tests {
     }
 
     #[test]
+    fn version_needs_update_fails_closed_on_unparseable_candidates() {
+        // A malformed feed version must not read as forever-newer: that turns
+        // every nightly check into a reinstall of the same artifact.
+        assert!(!version_needs_update("latest", "0.4.257"));
+        assert!(!version_needs_update("", "0.4.257"));
+        assert!(!version_needs_update("2024.06.10.1", "0.4.257"));
+        assert!(!version_needs_update("latest", "latest"));
+
+        // But a well-formed candidate still recovers a garbled local version.
+        assert!(version_needs_update("0.4.258", "unknown"));
+        assert!(version_needs_update("0.4.258", ""));
+    }
+
+    #[test]
+    fn appliance_image_marker_value_prefers_version_then_checksum_then_name() {
+        let mut asset = UpdateImageAsset {
+            name: "rootfs.ext2.gz".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+            version: Some("v0.4.257".to_string()),
+            sha256: Some("ABCDEF0123456789abcdef0123456789".to_string()),
+            size: None,
+            compression: Some("gzip".to_string()),
+        };
+        assert_eq!(appliance_image_marker_value(&asset), "0.4.257");
+
+        asset.version = None;
+        assert_eq!(
+            appliance_image_marker_value(&asset),
+            "sha256-ABCDEF0123456789"
+        );
+
+        asset.sha256 = None;
+        assert_eq!(appliance_image_marker_value(&asset), "rootfs.ext2.gz");
+
+        asset.name = "weird name!?.gz".to_string();
+        assert_eq!(appliance_image_marker_value(&asset), "weird_name__.gz");
+    }
+
+    #[test]
+    fn image_version_marker_is_written_even_without_a_release_version() {
+        // Regression guard for the nightly reflash loop: skipping the marker
+        // leaves the slot reading as "unknown image", so every later check
+        // re-flashes it.
+        let root = unique_test_dir("image-marker-fallback");
+        let asset = UpdateImageAsset {
+            name: "rootfs.ext2.gz".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+            version: Some("not-a-version".to_string()),
+            sha256: None,
+            size: None,
+            compression: Some("gzip".to_string()),
+        };
+
+        write_appliance_image_version_marker(&root, &asset).unwrap();
+
+        let marker_path = root.join(APPLIANCE_IMAGE_VERSION_PATH.trim_start_matches('/'));
+        let marker = read_version_marker(&marker_path);
+        assert_eq!(marker.as_deref(), Some("rootfs.ext2.gz"));
+        assert!(
+            !image_asset_requires_apply(
+                &UpdateImageAsset {
+                    version: None,
+                    ..asset.clone()
+                },
+                marker.as_deref()
+            ),
+            "an unversioned image must not require re-apply once its marker exists"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_version_marker_accepts_fallback_identities_and_rejects_junk() {
+        let dir = unique_test_dir("version-marker-read");
+        let marker = dir.join("marker");
+
+        fs::write(&marker, "v0.4.257-beta\n").unwrap();
+        assert_eq!(read_version_marker(&marker).as_deref(), Some("0.4.257-beta"));
+
+        fs::write(&marker, "sha256-abcdef0123456789\n").unwrap();
+        assert_eq!(
+            read_version_marker(&marker).as_deref(),
+            Some("sha256-abcdef0123456789")
+        );
+
+        fs::write(&marker, "rootfs.ext2.gz\n").unwrap();
+        assert_eq!(read_version_marker(&marker).as_deref(), Some("rootfs.ext2.gz"));
+
+        fs::write(&marker, "\n").unwrap();
+        assert_eq!(read_version_marker(&marker), None);
+
+        fs::write(&marker, "garbage with spaces\n").unwrap();
+        assert_eq!(read_version_marker(&marker), None);
+
+        fs::write(&marker, format!("{}\n", "x".repeat(200))).unwrap();
+        assert_eq!(read_version_marker(&marker), None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn drift_repair_attempts_are_capped_per_version_and_reset_on_new_versions() {
+        let dir = unique_test_dir("drift-cap");
+        let state_path = dir.join(DRIFT_REPAIR_STATE_FILE);
+
+        assert!(!drift_repair_exhausted_at(&state_path, "1.0.0"));
+
+        for _ in 0..MAX_DRIFT_REPAIR_ATTEMPTS {
+            record_drift_repair_attempt_at(&state_path, "1.0.0");
+        }
+        assert!(
+            drift_repair_exhausted_at(&state_path, "1.0.0"),
+            "repairs for the same release must stop after {} attempts",
+            MAX_DRIFT_REPAIR_ATTEMPTS
+        );
+
+        // A new release gets a fresh budget.
+        assert!(!drift_repair_exhausted_at(&state_path, "1.0.1"));
+        record_drift_repair_attempt_at(&state_path, "1.0.1");
+        assert!(!drift_repair_exhausted_at(&state_path, "1.0.1"));
+        assert!(
+            !drift_repair_exhausted_at(&state_path, "1.0.0"),
+            "recording a newer version resets the counter entirely"
+        );
+
+        // Clearing the state restores the full budget.
+        for _ in 0..MAX_DRIFT_REPAIR_ATTEMPTS {
+            record_drift_repair_attempt_at(&state_path, "1.0.1");
+        }
+        assert!(drift_repair_exhausted_at(&state_path, "1.0.1"));
+        clear_drift_repair_state_at(&state_path);
+        assert!(!drift_repair_exhausted_at(&state_path, "1.0.1"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn drift_repair_state_tolerates_corrupt_file() {
+        let dir = unique_test_dir("drift-corrupt");
+        let state_path = dir.join(DRIFT_REPAIR_STATE_FILE);
+        fs::write(&state_path, b"{not json").unwrap();
+
+        assert!(!drift_repair_exhausted_at(&state_path, "1.0.0"));
+        record_drift_repair_attempt_at(&state_path, "1.0.0");
+        let state = load_drift_repair_state(&state_path);
+        assert_eq!(state.target_version, "1.0.0");
+        assert_eq!(state.attempts, 1);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn remap_install_targets_keeps_package_inside_inactive_rootfs() {
         let root = PathBuf::from("/data/ota/inactive-rootfs");
         let targets = vec![
@@ -3456,19 +4215,23 @@ mod tests {
     #[test]
     fn write_appliance_image_version_marker_writes_normalized_version() {
         let dir = unique_test_dir("ota-image-version-write");
-        write_appliance_image_version_marker(&dir, Some("v2.0.0-beta")).unwrap();
+        let asset = UpdateImageAsset {
+            name: "rootfs.ext2.gz".to_string(),
+            kind: ReleaseArtifactKind::RootfsImage,
+            url: "https://example.invalid/rootfs.ext2.gz".to_string(),
+            version: Some("v2.0.0-beta".to_string()),
+            sha256: None,
+            size: None,
+            compression: Some("gzip".to_string()),
+        };
+        write_appliance_image_version_marker(&dir, &asset).unwrap();
 
         assert_eq!(
             fs::read_to_string(dir.join("etc/rhythm-image-version")).unwrap(),
             "2.0.0-beta\n"
         );
 
-        let invalid_dir = unique_test_dir("ota-image-version-invalid");
-        write_appliance_image_version_marker(&invalid_dir, Some("not-a-version")).unwrap();
-        assert!(!invalid_dir.join("etc/rhythm-image-version").exists());
-
         let _ = fs::remove_dir_all(dir);
-        let _ = fs::remove_dir_all(invalid_dir);
     }
 
     #[test]
@@ -4197,7 +4960,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_staged_targets_removes_backup_files_after_success() {
+    fn commit_staged_targets_keeps_backups_for_caller_to_resolve() {
         let dir = unique_test_dir("commit-cleanup");
         let destination = dir.join("rhythm-server");
         let stage_path = dir.join("rhythm-server.new");
@@ -4206,7 +4969,7 @@ mod tests {
         fs::write(&destination, b"old-server").unwrap();
         fs::write(&stage_path, b"new-server").unwrap();
 
-        let installed = commit_staged_targets(&[StagedInstallTarget {
+        let outcome = commit_staged_targets(&[StagedInstallTarget {
             spec: InstallTarget {
                 archive_path: "rhythm-server".to_string(),
                 destination: destination.clone(),
@@ -4217,10 +4980,20 @@ mod tests {
         }])
         .unwrap();
 
-        assert_eq!(installed, vec!["rhythm-server".to_string()]);
+        assert_eq!(outcome.installed_targets, vec!["rhythm-server".to_string()]);
         assert_eq!(fs::read(&destination).unwrap(), b"new-server");
         assert!(!stage_path.exists(), "stage file should be promoted");
-        assert!(!backup_path.exists(), "backup file should be cleaned up");
+        assert!(
+            backup_path.exists(),
+            "backup must survive commit so a failed startup can roll back"
+        );
+        assert_eq!(fs::read(&backup_path).unwrap(), b"old-server");
+
+        cleanup_backup_files(&outcome.applied);
+        assert!(
+            !backup_path.exists(),
+            "explicit cleanup removes the backup once the caller decides to"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -4233,7 +5006,7 @@ mod tests {
         let stage_path = destination.with_extension("new");
         fs::write(&stage_path, b"new-server").unwrap();
 
-        let installed = commit_staged_targets(&[
+        let outcome = commit_staged_targets(&[
             StagedInstallTarget {
                 spec: InstallTarget {
                     archive_path: "missing".to_string(),
@@ -4255,9 +5028,374 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(installed, vec!["rhythm-server".to_string()]);
+        assert_eq!(outcome.installed_targets, vec!["rhythm-server".to_string()]);
         assert_eq!(fs::read(&destination).unwrap(), b"new-server");
         assert!(!destination.with_extension("old").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_update_marker_rolls_back_after_repeated_failed_starts() {
+        let dir = unique_test_dir("pending-rollback");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        let destination = dir.join("rhythm-server");
+        let backup_path = dir.join("rhythm-server.old");
+        let added_file = dir.join("rhythm-cli");
+        fs::write(&destination, b"new-server").unwrap();
+        fs::write(&backup_path, b"old-server").unwrap();
+        fs::write(&added_file, b"new-cli").unwrap();
+
+        write_pending_update_marker_at(
+            &marker_path,
+            &[
+                AppliedInstallTarget {
+                    destination: destination.clone(),
+                    backup_path: backup_path.clone(),
+                    previously_existed: true,
+                },
+                AppliedInstallTarget {
+                    destination: added_file.clone(),
+                    backup_path: added_file.with_extension("old"),
+                    previously_existed: false,
+                },
+            ],
+            Some(LiveInstallVersions {
+                previous: "0.4.263-beta",
+                target: "0.4.264-beta",
+            }),
+        )
+        .unwrap();
+
+        // The new build gets MAX_PENDING_START_ATTEMPTS starts on probation.
+        for attempt in 1..=MAX_PENDING_START_ATTEMPTS {
+            assert_eq!(
+                startup_update_health_check_at(&marker_path),
+                StartupUpdateDisposition::PendingVerification { attempt }
+            );
+            assert_eq!(fs::read(&destination).unwrap(), b"new-server");
+        }
+
+        // One more failed start restores the previous build.
+        let disposition = startup_update_health_check_at(&marker_path);
+        let StartupUpdateDisposition::RolledBack { restored } = disposition else {
+            panic!("expected rollback, got {:?}", disposition);
+        };
+        assert_eq!(restored.len(), 2);
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"old-server",
+            "previous binary must be restored"
+        );
+        assert!(!backup_path.exists(), "backup is consumed by the restore");
+        assert!(
+            !added_file.exists(),
+            "files the update introduced are removed on rollback"
+        );
+        assert!(!marker_path.exists(), "marker is cleared after rollback");
+
+        assert_eq!(
+            startup_update_health_check_at(&marker_path),
+            StartupUpdateDisposition::NoPendingUpdate,
+            "the restored build must boot without a pending marker"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mark_update_verified_clears_marker_and_backups() {
+        let dir = unique_test_dir("pending-verified");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        let destination = dir.join("rhythm-server");
+        let backup_path = dir.join("rhythm-server.old");
+        fs::write(&destination, b"new-server").unwrap();
+        fs::write(&backup_path, b"old-server").unwrap();
+
+        write_pending_update_marker_at(
+            &marker_path,
+            &[AppliedInstallTarget {
+                destination: destination.clone(),
+                backup_path: backup_path.clone(),
+                previously_existed: true,
+            }],
+            Some(LiveInstallVersions {
+                previous: "0.4.263-beta",
+                target: "0.4.264-beta",
+            }),
+        )
+        .unwrap();
+
+        // One probationary start, then the build proves healthy.
+        assert_eq!(
+            startup_update_health_check_at(&marker_path),
+            StartupUpdateDisposition::PendingVerification { attempt: 1 }
+        );
+        assert!(mark_update_verified_at(&marker_path));
+
+        assert!(!marker_path.exists());
+        assert!(!backup_path.exists(), "backups are discarded once verified");
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"new-server",
+            "the verified build stays installed"
+        );
+        assert!(
+            !mark_update_verified_at(&marker_path),
+            "verification is idempotent once the marker is gone"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bundle_rollback_is_recorded_and_reported_after_failed_verification() {
+        let dir = unique_test_dir("rollback-record");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        let record_path = bundle_rollback_record_path_for_marker(&marker_path);
+        let destination = dir.join("rhythm-server");
+        let backup_path = dir.join("rhythm-server.old");
+        fs::write(&destination, b"new-server").unwrap();
+        fs::write(&backup_path, b"old-server").unwrap();
+
+        write_pending_update_marker_at(
+            &marker_path,
+            &[AppliedInstallTarget {
+                destination: destination.clone(),
+                backup_path: backup_path.clone(),
+                previously_existed: true,
+            }],
+            Some(LiveInstallVersions {
+                previous: "0.4.263-beta",
+                target: "0.4.264-beta",
+            }),
+        )
+        .unwrap();
+
+        for _ in 0..=MAX_PENDING_START_ATTEMPTS {
+            let _ = startup_update_health_check_at(&marker_path);
+        }
+
+        let rollback = load_bundle_rollback_at(&record_path).expect("rollback recorded");
+        assert_eq!(rollback.version, "0.4.264-beta");
+        assert_eq!(rollback.from_version.as_deref(), Some("0.4.263-beta"));
+        assert_eq!(rollback.kind, RollbackKind::ComponentBundle);
+        assert!(rollback.at_epoch_ms.is_some());
+
+        // A later update that verifies clears the stale rollback record.
+        fs::write(&backup_path, b"old-server").unwrap();
+        write_pending_update_marker_at(
+            &marker_path,
+            &[AppliedInstallTarget {
+                destination,
+                backup_path,
+                previously_existed: true,
+            }],
+            Some(LiveInstallVersions {
+                previous: "0.4.263-beta",
+                target: "0.4.265-beta",
+            }),
+        )
+        .unwrap();
+        assert!(mark_update_verified_at(&marker_path));
+        assert!(
+            load_bundle_rollback_at(&record_path).is_none(),
+            "a verified later update clears the rollback record"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bundle_rollback_record_without_target_version_is_not_reported() {
+        let dir = unique_test_dir("rollback-record-anon");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        let record_path = bundle_rollback_record_path_for_marker(&marker_path);
+        let destination = dir.join("rhythm-server");
+        fs::write(&destination, b"new-server").unwrap();
+
+        // Marker written without version context (e.g. by an older build).
+        write_pending_update_marker_at(
+            &marker_path,
+            &[AppliedInstallTarget {
+                destination,
+                backup_path: dir.join("rhythm-server.old"),
+                previously_existed: false,
+            }],
+            None,
+        )
+        .unwrap();
+        for _ in 0..=MAX_PENDING_START_ATTEMPTS {
+            let _ = startup_update_health_check_at(&marker_path);
+        }
+
+        assert!(
+            load_bundle_rollback_at(&record_path).is_none(),
+            "an anonymous rollback can't be attributed to a version"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_update_marker_without_version_fields_still_parses() {
+        // Markers written by builds predating the version fields must load.
+        let raw = r#"{
+            "start_attempts": 1,
+            "targets": [{
+                "destination": "/usr/bin/rhythm-server",
+                "backup": "/usr/bin/rhythm-server.old",
+                "previously_existed": true
+            }]
+        }"#;
+        let marker: PendingUpdateMarker = serde_json::from_str(raw).unwrap();
+        assert_eq!(marker.start_attempts, 1);
+        assert_eq!(marker.previous_version, None);
+        assert_eq!(marker.target_version, None);
+    }
+
+    #[test]
+    fn appliance_rollback_parses_version_epoch_and_source_from_bootstate_body() {
+        let body = concat!(
+            "RHYTHM_ACTIVE_SLOT=a\n",
+            "RHYTHM_LAST_GOOD_SLOT=a\n",
+            "RHYTHM_PENDING_SLOT=\n",
+            "RHYTHM_PENDING_VERSION=\n",
+            "RHYTHM_ACTIVE_VERSION=0.4.263-beta\n",
+            "RHYTHM_BOOT_STATUS=idle\n",
+            "RHYTHM_LAST_UPDATE_EPOCH_MS=1770000000000\n",
+            "RHYTHM_LAST_ROLLBACK_SLOT=b\n",
+            "RHYTHM_LAST_ROLLBACK_VERSION=0.4.264-beta\n",
+            "RHYTHM_LAST_ROLLBACK_EPOCH_MS=1770000123456\n",
+        );
+
+        let rollback = appliance_rollback_from_bootstate_body(body).unwrap();
+        assert_eq!(rollback.version, "0.4.264-beta");
+        assert_eq!(rollback.from_version.as_deref(), Some("0.4.263-beta"));
+        assert_eq!(rollback.at_epoch_ms, Some(1_770_000_123_456));
+        assert_eq!(rollback.kind, RollbackKind::ImageSlot);
+
+        let idle_body = concat!(
+            "RHYTHM_ACTIVE_SLOT=a\n",
+            "RHYTHM_LAST_ROLLBACK_VERSION=\n",
+            "RHYTHM_LAST_ROLLBACK_EPOCH_MS=\n",
+        );
+        assert!(appliance_rollback_from_bootstate_body(idle_body).is_none());
+    }
+
+    #[test]
+    fn merge_rollbacks_prefers_the_most_recent_record() {
+        let bundle = LastRollback {
+            version: "0.4.264-beta".to_string(),
+            from_version: None,
+            at_epoch_ms: Some(200),
+            kind: RollbackKind::ComponentBundle,
+        };
+        let image = LastRollback {
+            version: "0.4.262-beta".to_string(),
+            from_version: None,
+            at_epoch_ms: Some(100),
+            kind: RollbackKind::ImageSlot,
+        };
+
+        assert_eq!(
+            merge_rollbacks(Some(bundle.clone()), Some(image.clone())),
+            Some(bundle.clone())
+        );
+        assert_eq!(
+            merge_rollbacks(Some(image.clone()), Some(bundle.clone())),
+            Some(bundle.clone())
+        );
+        assert_eq!(merge_rollbacks(None, Some(image.clone())), Some(image));
+        assert_eq!(merge_rollbacks(Some(bundle.clone()), None), Some(bundle));
+        assert_eq!(merge_rollbacks(None, None), None);
+    }
+
+    #[test]
+    fn last_rollback_serializes_snake_case_for_the_api() {
+        let rollback = LastRollback {
+            version: "0.4.264-beta".to_string(),
+            from_version: Some("0.4.263-beta".to_string()),
+            at_epoch_ms: Some(1_770_000_123_456),
+            kind: RollbackKind::ComponentBundle,
+        };
+        let json = serde_json::to_value(&rollback).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "version": "0.4.264-beta",
+                "from_version": "0.4.263-beta",
+                "at_epoch_ms": 1_770_000_123_456_i64,
+                "kind": "component_bundle",
+            })
+        );
+    }
+
+    #[test]
+    fn startup_update_health_check_discards_corrupt_marker() {
+        let dir = unique_test_dir("pending-corrupt");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        fs::write(&marker_path, b"{not json").unwrap();
+
+        assert_eq!(
+            startup_update_health_check_at(&marker_path),
+            StartupUpdateDisposition::NoPendingUpdate
+        );
+        assert!(
+            !marker_path.exists(),
+            "a corrupt marker must not wedge startup forever"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn startup_update_health_check_without_marker_is_noop() {
+        let dir = unique_test_dir("pending-absent");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+
+        assert_eq!(
+            startup_update_health_check_at(&marker_path),
+            StartupUpdateDisposition::NoPendingUpdate
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_update_rollback_survives_missing_backup() {
+        let dir = unique_test_dir("pending-missing-backup");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        let destination = dir.join("rhythm-server");
+        fs::write(&destination, b"new-server").unwrap();
+
+        // Backup never written (e.g. deleted out-of-band).
+        write_pending_update_marker_at(
+            &marker_path,
+            &[AppliedInstallTarget {
+                destination: destination.clone(),
+                backup_path: dir.join("rhythm-server.old"),
+                previously_existed: true,
+            }],
+            None,
+        )
+        .unwrap();
+
+        for _ in 0..MAX_PENDING_START_ATTEMPTS {
+            let _ = startup_update_health_check_at(&marker_path);
+        }
+        let disposition = startup_update_health_check_at(&marker_path);
+        let StartupUpdateDisposition::RolledBack { restored } = disposition else {
+            panic!("expected rollback, got {:?}", disposition);
+        };
+
+        assert!(restored.is_empty(), "nothing restorable without a backup");
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"new-server",
+            "without a backup the installed binary must be left alone"
+        );
+        assert!(!marker_path.exists());
+
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -5,11 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use log::{debug, warn};
 use serde::Serialize;
 
 use crate::hub_state::MatterHubData;
 use crate::lifecycle::format_device_id;
 use crate::transport::CommissionedDevice;
+
+/// Maximum number of capture files retained in the captures directory.
+/// Older captures are pruned after each successful write.
+const MATTER_CAPTURE_RETAIN: usize = 20;
 
 #[derive(Debug, Serialize)]
 struct MatterDeviceCapture {
@@ -87,7 +92,70 @@ pub fn persist_device_capture(
         )
     })?;
 
+    prune_matter_captures(Path::new(capture_dir), MATTER_CAPTURE_RETAIN);
+
     Ok(Some(final_path))
+}
+
+/// Returns `true` if `file_name` matches the capture filename pattern used by
+/// `persist_device_capture` (`matter-<node>[-<endpoint>].json`).
+fn is_capture_file_name(file_name: &str) -> bool {
+    file_name.starts_with("matter-") && file_name.ends_with(".json")
+}
+
+/// Keep only the newest `retain` capture files in `dir`, deleting older ones.
+///
+/// Ordering is by modification time (newest first), falling back to filename
+/// ordering when mtimes are equal or unavailable. Files that don't match the
+/// capture filename pattern are left alone. Individual delete errors are
+/// logged and otherwise ignored.
+pub fn prune_matter_captures(dir: &Path, retain: usize) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            debug!(
+                "Matter capture prune: cannot read {}: {}",
+                dir.display(),
+                error
+            );
+            return;
+        }
+    };
+
+    let mut captures = Vec::<(SystemTime, PathBuf)>::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !path.is_file() || !is_capture_file_name(file_name) {
+            continue;
+        }
+        // Unreadable mtimes collapse to UNIX_EPOCH (oldest), so the filename
+        // tie-break below decides their order deterministically.
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        captures.push((modified, path));
+    }
+
+    if captures.len() <= retain {
+        return;
+    }
+
+    // Newest first by mtime, then by filename (descending) on ties.
+    captures.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+
+    for (_, path) in captures.into_iter().skip(retain) {
+        if let Err(error) = fs::remove_file(&path) {
+            warn!(
+                "Matter capture prune: failed to delete {}: {}",
+                path.display(),
+                error
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +253,141 @@ mod tests {
         assert_eq!(json["derived_capabilities"]["light_type"], "extended_color");
         assert!(json["derived_quirks"].is_array());
         assert!(json["captured_at_unix_ms"].as_u64().is_some());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Write a file and pin its mtime to a fixed epoch plus `mtime_offset_secs`,
+    /// so prune ordering is deterministic regardless of write timing.
+    fn write_file_with_mtime(dir: &Path, name: &str, mtime_offset_secs: u64) {
+        let path = dir.join(name);
+        fs::write(&path, b"{}").unwrap();
+        let mtime =
+            UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + mtime_offset_secs);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    fn remaining_file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn prune_matter_captures_keeps_all_files_under_retain() {
+        let dir = unique_test_dir("prune-under");
+        for i in 0..3 {
+            write_file_with_mtime(&dir, &format!("matter-{}.json", i), i);
+        }
+
+        prune_matter_captures(&dir, 5);
+
+        assert_eq!(
+            remaining_file_names(&dir),
+            vec!["matter-0.json", "matter-1.json", "matter-2.json"]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_matter_captures_keeps_only_newest_by_mtime() {
+        let dir = unique_test_dir("prune-newest");
+        // Mtime order deliberately disagrees with filename order: the two
+        // newest files by mtime are matter-3 and matter-1.
+        write_file_with_mtime(&dir, "matter-1.json", 40);
+        write_file_with_mtime(&dir, "matter-2.json", 10);
+        write_file_with_mtime(&dir, "matter-3.json", 50);
+        write_file_with_mtime(&dir, "matter-4.json", 20);
+        write_file_with_mtime(&dir, "matter-5.json", 30);
+
+        prune_matter_captures(&dir, 2);
+
+        assert_eq!(
+            remaining_file_names(&dir),
+            vec!["matter-1.json", "matter-3.json"]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_matter_captures_falls_back_to_filename_order_on_equal_mtimes() {
+        let dir = unique_test_dir("prune-tiebreak");
+        for i in 1..=4 {
+            // Identical mtimes: filename ordering (descending) breaks the tie.
+            write_file_with_mtime(&dir, &format!("matter-{}.json", i), 0);
+        }
+
+        prune_matter_captures(&dir, 2);
+
+        assert_eq!(
+            remaining_file_names(&dir),
+            vec!["matter-3.json", "matter-4.json"]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prune_matter_captures_leaves_non_capture_files_alone() {
+        let dir = unique_test_dir("prune-other");
+        for i in 0..4 {
+            write_file_with_mtime(&dir, &format!("matter-{}.json", i), i);
+        }
+        // Files that don't match the writer's `matter-*.json` pattern.
+        write_file_with_mtime(&dir, "notes.txt", 0);
+        write_file_with_mtime(&dir, "other.json", 0);
+        write_file_with_mtime(&dir, "matter-9.json.tmp", 0);
+
+        prune_matter_captures(&dir, 2);
+
+        assert_eq!(
+            remaining_file_names(&dir),
+            vec![
+                "matter-2.json",
+                "matter-3.json",
+                "matter-9.json.tmp",
+                "notes.txt",
+                "other.json"
+            ]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persist_device_capture_prunes_old_captures_after_write() {
+        let dir = unique_test_dir("prune-on-write");
+        // Pre-seed more stale captures than the retain limit, all older than
+        // the file the writer is about to create.
+        for i in 0..(MATTER_CAPTURE_RETAIN + 5) {
+            write_file_with_mtime(&dir, &format!("matter-{}.json", 1000 + i), i as u64);
+        }
+
+        let hub_data = hub_data();
+        hub_data
+            .capture_dir
+            .set(dir.display().to_string())
+            .expect("capture dir should be unset");
+        persist_device_capture(&hub_data, &commissioned_device(), "pairing")
+            .unwrap()
+            .expect("capture path");
+
+        let remaining = remaining_file_names(&dir);
+        assert_eq!(remaining.len(), MATTER_CAPTURE_RETAIN);
+        assert!(
+            remaining.contains(&"matter-42.json".to_string()),
+            "freshly written capture must survive the prune"
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

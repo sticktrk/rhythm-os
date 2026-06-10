@@ -18,6 +18,11 @@ const BUTTON_STALENESS_SECS: u64 = 5;
 /// because motion state transitions are still useful for a while.
 const MOTION_STALENESS_SECS: u64 = 30;
 
+/// Cap on the button-dedup map. The parse state lives for the life of the
+/// process (reused across reconnects), so without a bound it grows by one
+/// entry per unique button id forever.
+const MAX_BUTTON_DEDUP_ENTRIES: usize = 1024;
+
 /// Stateful context for SSE parsing, used to deduplicate button events.
 ///
 /// The Hue bridge batches SSE events: when light state changes, it can
@@ -31,6 +36,27 @@ pub struct SseParseState {
 impl SseParseState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record the latest `button_report.updated` timestamp for a button.
+    ///
+    /// Returns `false` when the timestamp matches the last recorded one for
+    /// this button (duplicate event, caller should skip it). To keep the map
+    /// bounded, it is cleared once it reaches `MAX_BUTTON_DEDUP_ENTRIES`;
+    /// worst case that lets one duplicate event per button slip through
+    /// right after the flush, which is acceptable.
+    fn record_button_updated(&mut self, id: &str, updated: &str) -> bool {
+        if let Some(prev) = self.last_button_updated.get(id) {
+            if prev == updated {
+                return false;
+            }
+        }
+        if self.last_button_updated.len() >= MAX_BUTTON_DEDUP_ENTRIES {
+            self.last_button_updated.clear();
+        }
+        self.last_button_updated
+            .insert(id.to_string(), updated.to_string());
+        true
     }
 }
 
@@ -351,14 +377,9 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
                     // The bridge can re-send button_report with the same updated
                     // timestamp in a subsequent batched SSE message.
                     if let Some(updated) = &report.updated {
-                        if let Some(prev) = state.last_button_updated.get(&id) {
-                            if prev == updated {
-                                continue;
-                            }
+                        if !state.record_button_updated(&id, updated) {
+                            continue;
                         }
-                        state
-                            .last_button_updated
-                            .insert(id.clone(), updated.clone());
                     }
 
                     debug!(target: "sse",
@@ -857,6 +878,53 @@ mod tests {
             rx.try_recv().is_ok(),
             "after reconnect (new SseParseState), the same event must dispatch"
         );
+    }
+
+    // ========================================================================
+    // Button-dedup map bound tests
+    // ========================================================================
+
+    #[test]
+    fn record_button_updated_under_cap_retains_entries_and_dedups() {
+        let mut state = SseParseState::new();
+
+        for i in 0..100 {
+            assert!(
+                state.record_button_updated(&format!("btn{}", i), "t1"),
+                "first sighting of a button must pass"
+            );
+        }
+        assert_eq!(state.last_button_updated.len(), 100);
+
+        // Same (id, updated) pair is a duplicate; entries are retained.
+        assert!(!state.record_button_updated("btn0", "t1"));
+        assert!(!state.record_button_updated("btn99", "t1"));
+        assert_eq!(state.last_button_updated.len(), 100);
+
+        // A new timestamp for a known button passes and updates in place.
+        assert!(state.record_button_updated("btn0", "t2"));
+        assert!(!state.record_button_updated("btn0", "t2"));
+        assert_eq!(state.last_button_updated.len(), 100);
+    }
+
+    #[test]
+    fn record_button_updated_exceeding_cap_resets_map_and_keeps_deduping() {
+        let mut state = SseParseState::new();
+
+        for i in 0..MAX_BUTTON_DEDUP_ENTRIES {
+            state.record_button_updated(&format!("btn{}", i), "t1");
+        }
+        assert_eq!(state.last_button_updated.len(), MAX_BUTTON_DEDUP_ENTRIES);
+
+        // The insert that would exceed the cap flushes the map first.
+        assert!(state.record_button_updated("overflow", "t1"));
+        assert_eq!(state.last_button_updated.len(), 1);
+
+        // Dedup still functions after the flush.
+        assert!(!state.record_button_updated("overflow", "t1"));
+        assert!(state.record_button_updated("btn0", "t1"));
+        assert!(!state.record_button_updated("btn0", "t1"));
+        assert!(state.last_button_updated.len() <= MAX_BUTTON_DEDUP_ENTRIES);
     }
 
     #[test]

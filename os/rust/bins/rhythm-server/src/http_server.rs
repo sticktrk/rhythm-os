@@ -284,6 +284,7 @@ async fn check_update(
                 "update_reason": info.update_reason,
                 "install_targets": info.install_targets,
                 "image_assets": info.image_assets,
+                "last_rollback": crate::self_update::last_rollback(),
             });
             json_ok(json.to_string())
         }

@@ -193,7 +193,7 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
     let server = http_server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .unwrap_or_else(|e| panic!("Failed to bind to {} — {}", addr, e));
+        .map_err(|e| anyhow::anyhow!("Failed to bind to {} — {}", addr, e))?;
     info!(target: "sys", "Rhythm Addon listening on http://{}", addr);
 
     // Register mDNS service for auto-discovery by clients

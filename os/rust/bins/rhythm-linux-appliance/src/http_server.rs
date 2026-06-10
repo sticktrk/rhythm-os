@@ -64,8 +64,8 @@ fn handle_get_wifi(provisioning: &ProvisioningManager) -> ApiResponse {
 }
 
 fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
-    if creds.ssid.trim().is_empty() {
-        return ApiResponse::bad_request("Missing ssid");
+    if let Err(error) = wifi::validate_credentials(&creds) {
+        return ApiResponse::bad_request(&format!("{:#}", error));
     }
 
     let ssid = creds.ssid.clone();

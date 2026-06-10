@@ -45,6 +45,29 @@ fn main() -> Result<()> {
 
     info!(target: "sys", "Rhythm Server v{} starting...", VERSION);
 
+    // If a self-update was just installed, count this start attempt and roll
+    // back to the previous binaries once a crash-looping build exhausts its
+    // probation. Must run before anything that could crash the process.
+    match rhythm_server::self_update::startup_update_health_check() {
+        rhythm_server::self_update::StartupUpdateDisposition::NoPendingUpdate => {}
+        rhythm_server::self_update::StartupUpdateDisposition::PendingVerification { attempt } => {
+            info!(
+                target: "sys",
+                "Self-update awaiting verification (start attempt {})",
+                attempt
+            );
+        }
+        rhythm_server::self_update::StartupUpdateDisposition::RolledBack { restored } => {
+            log::error!(
+                target: "sys",
+                "Self-update failed verification after repeated start attempts; restored {} previous binar{} — exiting so the supervisor restarts the previous build",
+                restored.len(),
+                if restored.len() == 1 { "y" } else { "ies" }
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Expand ~ in data dir
     let data_dir = shellexpand(&args.data_dir);
     std::fs::create_dir_all(&data_dir)?;
@@ -202,15 +225,18 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
     let server = http_server::create_router(state.clone());
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "Failed to bind to {} — is another process using this port? {}",
-                addr, e
-            )
-        });
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to bind to {} — is another process using this port? {}",
+            addr,
+            e
+        )
+    })?;
     info!(target: "sys", "Rhythm Server listening on http://{}", addr);
+
+    // The listener is up: give the (possibly freshly updated) build its
+    // post-startup grace period, then discard self-update rollback backups.
+    rhythm_server::self_update::spawn_update_verification_marker();
 
     // Register mDNS service for auto-discovery by clients
     let _mdns = rhythm_os::mdns::register_mdns_service(port, "server", VERSION, "rhythm-server");

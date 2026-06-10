@@ -13,7 +13,7 @@ mod wifi;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use log::{info, warn};
 use rhythm_os::logging;
@@ -115,6 +115,30 @@ fn main() -> Result<()> {
     }
 
     std::fs::create_dir_all(&args.data_dir)?;
+
+    // Appliance bundle-only updates (drift repair, bundle releases without a
+    // rootfs image) install over the running rootfs without an A/B slot
+    // switch. Count this start attempt and restore the previous binaries if a
+    // crash-looping build exhausts its probation; BusyBox init respawns us.
+    match rhythm_server::self_update::startup_update_health_check() {
+        rhythm_server::self_update::StartupUpdateDisposition::NoPendingUpdate => {}
+        rhythm_server::self_update::StartupUpdateDisposition::PendingVerification { attempt } => {
+            info!(
+                target: "sys",
+                "Self-update awaiting verification (start attempt {})",
+                attempt
+            );
+        }
+        rhythm_server::self_update::StartupUpdateDisposition::RolledBack { restored } => {
+            log::error!(
+                target: "sys",
+                "Self-update failed verification after repeated start attempts; restored {} previous binar{} — exiting so init restarts the previous build",
+                restored.len(),
+                if restored.len() == 1 { "y" } else { "ies" }
+            );
+            std::process::exit(1);
+        }
+    }
 
     // Sweep partial OTA artefacts left behind by a crashed prior run before
     // anything else touches the OTA staging directory. Safe to call even when
@@ -232,12 +256,14 @@ fn main() -> Result<()> {
             .expect("Failed to spawn event loop thread");
     }
 
+    let periodic_gate_heartbeat = PeriodicGateHeartbeat::default();
     {
         let periodic_state = state.clone();
+        let gate_heartbeat = periodic_gate_heartbeat.clone();
         std::thread::Builder::new()
             .name("periodic".to_string())
             .spawn(move || {
-                run_periodic_when_clock_ready(periodic_state);
+                run_periodic_when_clock_ready(periodic_state, gate_heartbeat);
             })
             .expect("Failed to spawn periodic thread");
     }
@@ -257,7 +283,12 @@ fn main() -> Result<()> {
         .enable_all()
         .thread_name("rhythm-main-rt")
         .build()?
-        .block_on(run_server(state, args.port, provisioning))
+        .block_on(run_server(
+            state,
+            args.port,
+            provisioning,
+            periodic_gate_heartbeat,
+        ))
 }
 
 fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
@@ -314,6 +345,38 @@ enum PeriodicStartupAction {
     WaitForClockSync,
 }
 
+/// Liveness signal from the periodic startup gate.
+///
+/// The periodic loop is intentionally gated on Wi-Fi and clock sync, both of
+/// which are environment conditions rather than image health. The gate thread
+/// beats this heartbeat on every poll so the boot-success marker can tell
+/// "periodic loop alive but waiting on the environment" apart from "periodic
+/// thread died".
+#[derive(Clone, Default)]
+struct PeriodicGateHeartbeat(Arc<Mutex<Option<Instant>>>);
+
+impl PeriodicGateHeartbeat {
+    fn beat(&self) {
+        if let Ok(mut last) = self.0.lock() {
+            *last = Some(Instant::now());
+        }
+    }
+
+    fn is_recent(&self, within: Duration) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|last| *last)
+            .map(|at| at.elapsed() <= within)
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn set_beat_at(&self, at: Instant) {
+        *self.0.lock().unwrap() = Some(at);
+    }
+}
+
 fn startup_wifi_restore_action(
     has_stored_credentials: bool,
     has_system_config_credentials: bool,
@@ -345,11 +408,12 @@ fn periodic_startup_action(
     }
 }
 
-fn run_periodic_when_clock_ready(state: SharedState) {
+fn run_periodic_when_clock_ready(state: SharedState, gate_heartbeat: PeriodicGateHeartbeat) {
     let mut last_action = None;
     let mut next_sync_retry_at = Instant::now();
 
     loop {
+        gate_heartbeat.beat();
         let action = periodic_startup_action(
             wifi::has_active_connection(),
             time_sync::system_clock_is_sane(),
@@ -397,6 +461,7 @@ fn run_periodic_when_clock_ready(state: SharedState) {
         }
     }
 
+    gate_heartbeat.beat();
     rhythm_os::periodic::run_periodic_loop(state, None::<fn()>);
 }
 
@@ -544,20 +609,23 @@ async fn run_server(
     state: SharedState,
     port: u16,
     provisioning: ble_provision::ProvisioningManager,
+    periodic_gate_heartbeat: PeriodicGateHeartbeat,
 ) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
     let server = http_server::create_router(state.clone(), provisioning);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "Failed to bind to {} — is another process using this port? {}",
-                addr, e
-            )
-        });
+    let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| {
+        format!(
+            "Failed to bind to {} — is another process using this port?",
+            addr
+        )
+    })?;
     info!(target: "sys", "Rhythm Linux Appliance listening on http://{}", addr);
+
+    // The listener is up: give the (possibly freshly updated) build its
+    // post-startup grace period, then discard self-update rollback backups.
+    rhythm_server::self_update::spawn_update_verification_marker();
 
     // Keep the existing server-style mDNS identity but tack on the rpiz serial
     // number so two units on the same LAN never collide on the IP-derived
@@ -572,7 +640,7 @@ async fn run_server(
     );
 
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
-    spawn_boot_success_marker(state.clone());
+    spawn_boot_success_marker(state.clone(), periodic_gate_heartbeat);
     spawn_remote_access_startup_reconcile(state.clone());
 
     axum::serve(
@@ -610,37 +678,41 @@ enum BootSuccessHealth {
     Waiting(&'static str),
 }
 
-fn boot_success_health(state: &SharedState) -> BootSuccessHealth {
+/// How recently the periodic startup gate must have beaten its heartbeat for
+/// the periodic thread to count as alive. The gate polls every 5s, so 60s of
+/// silence means the thread is gone, not just slow.
+const PERIODIC_GATE_STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// Boot success means *device* success, not environment success.
+///
+/// A freshly flashed OTA slot is healthy when the process is serving (the
+/// marker thread only exists after the HTTP listener bound) and the periodic
+/// machinery is alive — either actually ticking, or deliberately gated on
+/// Wi-Fi/clock sync. Hub reachability and Wi-Fi state are environment
+/// conditions: rolling back a good image because the user's bridge or router
+/// is offline strands the appliance on old firmware and burns a full rootfs
+/// flash per release.
+fn boot_success_health(
+    state: &SharedState,
+    gate_heartbeat: &PeriodicGateHeartbeat,
+) -> BootSuccessHealth {
     let Ok(s) = state.lock() else {
         return BootSuccessHealth::Waiting("state_lock_poisoned");
     };
 
-    if s.last_check_instant.is_none() {
-        return BootSuccessHealth::Waiting("periodic_not_ready");
+    if s.last_check_instant.is_some() {
+        return BootSuccessHealth::Ready;
     }
-    if s.hub_bootstrap_worker_running {
-        return BootSuccessHealth::Waiting("hub_bootstrap_running");
-    }
-    if !s.hub_sync_in_progress.is_empty() {
-        return BootSuccessHealth::Waiting("hub_sync_in_progress");
+    drop(s);
+
+    if gate_heartbeat.is_recent(PERIODIC_GATE_STALE_AFTER) {
+        return BootSuccessHealth::Ready;
     }
 
-    for (key, credentials) in &s.hub_credentials {
-        if !credentials.can_connect() {
-            continue;
-        }
-        if !s.hubs.contains_key(key) {
-            return BootSuccessHealth::Waiting("hub_not_active");
-        }
-        if !s.hub_is_connected(key) {
-            return BootSuccessHealth::Waiting("hub_not_connected");
-        }
-    }
-
-    BootSuccessHealth::Ready
+    BootSuccessHealth::Waiting("periodic_not_ready")
 }
 
-fn spawn_boot_success_marker(state: SharedState) {
+fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHeartbeat) {
     const BOOTSTATE_SCRIPT: &str = "/etc/init.d/S41bootstate";
     const GRACE_SECS: u64 = 30;
     const POLL_SECS: u64 = 5;
@@ -665,7 +737,7 @@ fn spawn_boot_success_marker(state: SharedState) {
             let started = Instant::now();
             let mut last_reason: Option<&'static str> = None;
             loop {
-                match boot_success_health(&state) {
+                match boot_success_health(&state, &gate_heartbeat) {
                     BootSuccessHealth::Ready => {
                         run_bootstate_script_action(BOOTSTATE_SCRIPT, "success");
                         return;
@@ -762,7 +834,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1048,69 +1120,63 @@ mod tests {
         assert!(state.lock().unwrap().storage.is_none());
     }
 
+    fn idle_heartbeat() -> super::PeriodicGateHeartbeat {
+        super::PeriodicGateHeartbeat::default()
+    }
+
     #[test]
-    fn boot_success_health_waits_for_periodic_loop() {
+    fn boot_success_health_waits_when_periodic_never_started() {
         let state = test_state();
 
         assert_eq!(
-            boot_success_health(&state),
+            boot_success_health(&state, &idle_heartbeat()),
             BootSuccessHealth::Waiting("periodic_not_ready")
         );
     }
 
     #[test]
-    fn boot_success_health_ready_without_connectable_hubs_after_periodic() {
+    fn boot_success_health_ready_once_periodic_loop_ticks() {
         let state = test_state();
         mark_periodic_ready(&state);
-
-        assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
-    }
-
-    #[test]
-    fn boot_success_health_waits_for_hub_bootstrap_worker() {
-        let state = test_state();
-        mark_periodic_ready(&state);
-        state.lock().unwrap().begin_hub_bootstrap_worker();
 
         assert_eq!(
-            boot_success_health(&state),
-            BootSuccessHealth::Waiting("hub_bootstrap_running")
+            boot_success_health(&state, &idle_heartbeat()),
+            BootSuccessHealth::Ready
         );
     }
 
     #[test]
-    fn boot_success_health_waits_for_hub_sync_to_finish() {
+    fn boot_success_health_ready_while_periodic_gate_waits_on_environment() {
+        // The periodic loop is gated on Wi-Fi/clock sync. A live gate thread
+        // means the image is healthy even though nothing has ticked yet.
         let state = test_state();
-        mark_periodic_ready(&state);
-        let key = HubKey::new(HubType::new("hue"), "192.0.2.11");
-        state.lock().unwrap().begin_hub_sync(&key);
+        let heartbeat = idle_heartbeat();
+        heartbeat.beat();
 
         assert_eq!(
-            boot_success_health(&state),
-            BootSuccessHealth::Waiting("hub_sync_in_progress")
+            boot_success_health(&state, &heartbeat),
+            BootSuccessHealth::Ready
         );
     }
 
     #[test]
-    fn boot_success_health_waits_for_configured_hub_to_activate() {
+    fn boot_success_health_waits_when_gate_heartbeat_is_stale() {
         let state = test_state();
-        mark_periodic_ready(&state);
-        let credentials = HubCredentials::new("hue", "192.0.2.10", serde_json::json!({}));
-        let key = credentials.hub_key().unwrap();
-        state
-            .lock()
-            .unwrap()
-            .hub_credentials
-            .insert(key, credentials);
+        let heartbeat = idle_heartbeat();
+        heartbeat
+            .set_beat_at(Instant::now() - super::PERIODIC_GATE_STALE_AFTER - Duration::from_secs(1));
 
         assert_eq!(
-            boot_success_health(&state),
-            BootSuccessHealth::Waiting("hub_not_active")
+            boot_success_health(&state, &heartbeat),
+            BootSuccessHealth::Waiting("periodic_not_ready")
         );
     }
 
     #[test]
-    fn boot_success_health_waits_for_active_hub_connection() {
+    fn boot_success_health_ignores_hub_connectivity() {
+        // Boot success is device success: a configured-but-unreachable hub
+        // (offline bridge, retired hardware) must not roll back a healthy
+        // image. Regression guard for the rollback-per-release failure mode.
         let state = test_state();
         mark_periodic_ready(&state);
         let hub_type = HubType::new("hue");
@@ -1129,31 +1195,28 @@ mod tests {
             let mut s = state.lock().unwrap();
             s.hub_credentials.insert(key.clone(), credentials);
             s.hubs.insert(key.clone(), hub);
+            s.begin_hub_bootstrap_worker();
+            s.begin_hub_sync(&key);
+            // Hub explicitly disconnected, bootstrap and sync still running.
+            s.set_hub_connected(&key, false);
         }
 
         assert_eq!(
-            boot_success_health(&state),
-            BootSuccessHealth::Waiting("hub_not_connected")
+            boot_success_health(&state, &idle_heartbeat()),
+            BootSuccessHealth::Ready
         );
-
-        state.lock().unwrap().set_hub_connected(&key, true);
-        assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
     }
 
     #[test]
-    fn boot_success_health_ignores_redacted_hub_credentials() {
-        let state = test_state();
-        mark_periodic_ready(&state);
-        let mut credentials = HubCredentials::new("hue", "192.0.2.12", serde_json::json!({}));
-        credentials.secrets_redacted = true;
-        let key = credentials.hub_key().unwrap();
-        state
-            .lock()
-            .unwrap()
-            .hub_credentials
-            .insert(key, credentials);
+    fn periodic_gate_heartbeat_recency() {
+        let heartbeat = idle_heartbeat();
+        assert!(!heartbeat.is_recent(Duration::from_secs(60)));
 
-        assert_eq!(boot_success_health(&state), BootSuccessHealth::Ready);
+        heartbeat.beat();
+        assert!(heartbeat.is_recent(Duration::from_secs(60)));
+
+        heartbeat.set_beat_at(Instant::now() - Duration::from_secs(120));
+        assert!(!heartbeat.is_recent(Duration::from_secs(60)));
     }
 
     #[test]

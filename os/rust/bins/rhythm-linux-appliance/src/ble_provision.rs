@@ -69,45 +69,33 @@ impl ProvisioningManager {
         *running = true;
         let manager = self.clone();
         let reason = reason.to_string();
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("ble-provision".to_string())
             .spawn(move || {
+                // BLE provisioning is the recovery path for an appliance with
+                // no Wi-Fi; the flag must reset on every exit, including an
+                // unwind, or the sidecar can never be restarted this session.
+                let _running_guard = RunningFlagGuard {
+                    inner: manager.inner.clone(),
+                };
                 info!(
                     target: "sys",
                     "Starting BLE provisioning sidecar (reason={})",
                     reason
                 );
 
-                loop {
-                    let result = run_service(&manager.inner.version, manager.inner.state.clone());
-                    match result {
-                        Ok(creds) => {
-                            persist_commissioning_wifi_credentials(&manager.inner.state, &creds);
-                            info!(
-                                target: "sys",
-                                "BLE provisioning completed for SSID '{}'",
-                                creds.ssid
-                            );
-                        }
-                        Err(e) => warn!(target: "sys", "BLE provisioning stopped: {:#}", e),
-                    }
+                provision_loop(
+                    || run_service(&manager.inner.version, manager.inner.state.clone()),
+                    || manager.should_run_for_current_state(),
+                    |creds| persist_commissioning_wifi_credentials(&manager.inner.state, creds),
+                    PROVISION_RETRY_DELAY,
+                );
+            });
 
-                    if !manager.should_run_for_current_state() {
-                        break;
-                    }
-
-                    thread::sleep(Duration::from_secs(2));
-                    info!(
-                        target: "sys",
-                        "Restarting BLE provisioning sidecar because local provisioning remains available"
-                    );
-                }
-
-                if let Ok(mut running) = manager.inner.running.lock() {
-                    *running = false;
-                }
-            })
-            .context("spawning BLE provisioning thread")?;
+        if let Err(error) = spawned {
+            *running = false;
+            return Err(error).context("spawning BLE provisioning thread");
+        }
 
         Ok(true)
     }
@@ -141,6 +129,79 @@ impl ProvisioningManager {
             .map(|state| state.require_api_auth)
             .unwrap_or(true)
     }
+}
+
+const PROVISION_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Resets the manager's `running` flag when the provisioning thread exits —
+/// by return or by panic — so `ensure_running` can always start a fresh
+/// sidecar.
+struct RunningFlagGuard {
+    inner: Arc<ProvisioningManagerInner>,
+}
+
+impl Drop for RunningFlagGuard {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.inner.running.lock() {
+            *running = false;
+        }
+    }
+}
+
+/// Run provisioning sessions until provisioning is no longer needed.
+///
+/// A panic inside a session (BlueZ/D-Bus interop) is contained and treated
+/// like a failed session: logged, then retried after `retry_delay` while
+/// `should_continue` holds. Injectable closures keep this testable without a
+/// Bluetooth stack.
+fn provision_loop<S, C, P>(
+    mut run_service_once: S,
+    mut should_continue: C,
+    mut on_credentials: P,
+    retry_delay: Duration,
+) where
+    S: FnMut() -> Result<WifiCredentials>,
+    C: FnMut() -> bool,
+    P: FnMut(&WifiCredentials),
+{
+    loop {
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut run_service_once));
+        match outcome {
+            Ok(Ok(creds)) => {
+                on_credentials(&creds);
+                info!(
+                    target: "sys",
+                    "BLE provisioning completed for SSID '{}'",
+                    creds.ssid
+                );
+            }
+            Ok(Err(e)) => warn!(target: "sys", "BLE provisioning stopped: {:#}", e),
+            Err(panic) => warn!(
+                target: "sys",
+                "BLE provisioning session panicked: {}",
+                panic_message(panic.as_ref())
+            ),
+        }
+
+        if !should_continue() {
+            break;
+        }
+
+        thread::sleep(retry_delay);
+        info!(
+            target: "sys",
+            "Restarting BLE provisioning sidecar because local provisioning remains available"
+        );
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCredentials) {
@@ -356,6 +417,10 @@ mod bluez {
         Sender as StdSender, PROVISIONING_AUTH_CMD_UUID, PROVISIONING_DEVICE_INFO_UUID,
         PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
     };
+    /// How often an idle status-notify task probes its subscriber. Bounds the
+    /// lifetime of tasks whose BLE client disconnected between status changes.
+    const NOTIFY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+
     pub(super) struct BluezFrontend {
         runtime: Runtime,
         event_tx: StdSender<ProvisioningEvent>,
@@ -572,10 +637,21 @@ mod bluez {
                                                     first = false;
                                                     status_rx.borrow().clone()
                                                 } else {
-                                                    if status_rx.changed().await.is_err() {
-                                                        break;
+                                                    // Status changes can be far apart; without a
+                                                    // periodic probe, tasks for disconnected
+                                                    // subscribers linger until the next change.
+                                                    // The keepalive notify fails fast for dead
+                                                    // sessions and ends the task.
+                                                    match tokio::time::timeout(
+                                                        NOTIFY_KEEPALIVE_INTERVAL,
+                                                        status_rx.changed(),
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(Ok(())) => status_rx.borrow().clone(),
+                                                        Ok(Err(_)) => break,
+                                                        Err(_elapsed) => status_rx.borrow().clone(),
                                                     }
-                                                    status_rx.borrow().clone()
                                                 };
 
                                                 if let Err(e) = notifier.notify(payload).await {
@@ -837,6 +913,88 @@ mod tests {
         assert!(identity.name.starts_with("rhythm-rpiz-"));
         assert_eq!(identity.version, "9.8.7-test");
         assert!(identity.mac.is_none());
+    }
+
+    #[test]
+    fn provision_loop_survives_a_panicking_session_and_retries() {
+        let calls = std::cell::Cell::new(0u32);
+        let continues = std::cell::Cell::new(0u32);
+
+        provision_loop(
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    panic!("simulated BlueZ panic");
+                }
+                Err(anyhow!("simulated session error"))
+            },
+            || {
+                continues.set(continues.get() + 1);
+                // Allow exactly one retry after the panic, then stop.
+                continues.get() < 2
+            },
+            |_| {},
+            Duration::ZERO,
+        );
+
+        assert_eq!(
+            calls.get(),
+            2,
+            "the loop must retry after a panicking session"
+        );
+    }
+
+    #[test]
+    fn provision_loop_reports_credentials_on_success() {
+        let received = std::cell::RefCell::new(Vec::new());
+
+        provision_loop(
+            || Ok(wifi_credentials()),
+            || false,
+            |creds| received.borrow_mut().push(creds.clone()),
+            Duration::ZERO,
+        );
+
+        assert_eq!(received.borrow().as_slice(), &[wifi_credentials()]);
+    }
+
+    #[test]
+    fn running_flag_resets_when_provisioning_thread_panics() {
+        let manager = ProvisioningManager::new("1.2.3", state());
+        *manager.inner.running.lock().unwrap() = true;
+        assert!(manager.is_running());
+
+        let inner = manager.inner.clone();
+        let handle = thread::spawn(move || {
+            let _guard = RunningFlagGuard { inner };
+            panic!("simulated provisioning thread panic");
+        });
+        assert!(handle.join().is_err());
+
+        assert!(
+            !manager.is_running(),
+            "a panicking sidecar must not leave the manager wedged as running"
+        );
+    }
+
+    #[test]
+    fn panic_message_extracts_str_and_string_payloads() {
+        let static_payload =
+            std::panic::catch_unwind(|| panic!("static payload")).unwrap_err();
+        assert_eq!(panic_message(static_payload.as_ref()), "static payload");
+
+        let string_payload = std::panic::catch_unwind(|| {
+            std::panic::panic_any(format!("formatted {}", 42))
+        })
+        .unwrap_err();
+        assert_eq!(panic_message(string_payload.as_ref()), "formatted 42");
+
+        let opaque_payload =
+            std::panic::catch_unwind(|| std::panic::panic_any(7_u64)).unwrap_err();
+        assert_eq!(
+            panic_message(opaque_payload.as_ref()),
+            "non-string panic payload"
+        );
     }
 
     #[test]
