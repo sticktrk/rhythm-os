@@ -4,7 +4,7 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 
 ## What the target does
 
-- Cross-builds `rhythm-server` for `arm-unknown-linux-musleabihf`
+- Cross-builds the `rhythm-linux-appliance` crate for `arm-unknown-linux-musleabihf` (installed in the image as `/usr/bin/rhythm-server`)
 - Boots a minimal Buildroot image instead of Raspberry Pi OS
 - Lays out the SD card as `boot + rootfs_a + rootfs_b + data` so future OTA can write the inactive rootfs slot instead of patching live files
 - Starts Rhythm automatically at boot under BusyBox `init` with `RHYTHM_PLATFORM_TYPE=appliance` and `RHYTHM_PLATFORM_CONTEXT=rpiz`
@@ -12,7 +12,7 @@ This target is for a Pi Zero / Zero W without Raspberry Pi OS. The Rust applianc
 - Mounts `/boot` from the FAT partition and `/data` from the dedicated persistent partition
 - Writes the main appliance log to `/data/log/rhythm-server.log` and raw Matter `rhythm-chipd` output to `/data/log/rhythm-matter.log`
 - Prunes appliance logs in place on a background loop so the long-running append-only file descriptors stay bounded
-- Brings up `usb0` at `192.168.7.2/24` for first-boot API testing over the Pi Zero OTG port
+- Compiles USB Ethernet gadget support into the kernel (`dwc2` + `g_ether`); userspace bring-up is not wired yet — see "USB gadget status" below
 - Optionally embeds Wi-Fi credentials for Pi Zero W / Zero 2 W images
 - Bundles `cloudflared` and the BusyBox init service used by app-controlled remote access tunnels
 
@@ -193,21 +193,9 @@ The `rpiz` appliance now treats image OTA as an A/B rootfs switch:
 
 This is still userspace rollback, not a bootloader-managed A/B system. The next slot is selected by rewriting `/boot/cmdline.txt`, and rollback still requires the candidate image to boot far enough to reach init / `rhythm-launch`. The published `sdcard.img` remains the factory/master image for fresh cards and hard recovery.
 
-## USB-first smoke test
+## USB gadget status
 
-On first boot the image loads the USB Ethernet gadget and assigns:
-
-- Host side: configure `192.168.7.1/24`
-- Pi side: `192.168.7.2/24`
-- Rhythm API: `http://192.168.7.2:54448/api/state`
-
-Minimal smoke test:
-
-```bash
-curl http://192.168.7.2:54448/api/state
-```
-
-Once that works, you can decide whether to keep the device USB-managed, add Wi-Fi, or extend the image further.
+USB Ethernet gadget access over the Pi Zero OTG port is **not functional in the current image**. The kernel ships the drivers (`CONFIG_USB_DWC2`, `CONFIG_USB_ETH` in `board/rhythm/rpiz/linux.fragment`), but the rest is not wired up: `config.txt` does not enable the `dwc2` overlay, the `S40usb-gadget` init script is a placeholder, and no address is assigned to `usb0`. Until that lands, use BLE Wi-Fi provisioning (below) or baked-in Wi-Fi credentials for first-boot access, then talk to the API at `http://<appliance-ip>:54448/api/state`.
 
 If your board is the original Pi Zero without onboard Wi-Fi, the Wi-Fi flags above will not connect anything unless you attach a supported USB Wi-Fi adapter.
 
@@ -218,6 +206,7 @@ the shared Rhythm provisioning GATT contract.
 
 - On boot, BLE provisioning starts automatically when the Pi does not have an active Wi-Fi IP
 - `GET /api/wifi` returns the current Wi-Fi/provisioning status
+- `PUT /api/wifi` sets new Wi-Fi credentials and reconnects
 - `DELETE /api/wifi` clears `/etc/wpa_supplicant.conf`, restarts Wi-Fi, and re-enables BLE provisioning
 
 For test sessions on a Pi that is already connected to Wi-Fi, force the
@@ -308,7 +297,7 @@ Example:
 
 ```bash
 curl -X POST \
-  http://192.168.7.2:54448/api/diag/debug-bundle \
+  http://<appliance-ip>:54448/api/diag/debug-bundle \
   --output rhythm-debug-bundle.tar.gz
 ```
 

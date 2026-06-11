@@ -2,18 +2,14 @@
 
 ## Settings
 
-Most lighting curve behaviour is configured via the REST API. The add-on exposes one runtime setting in Home Assistant:
+Most lighting behaviour is configured via the REST API, typically through the Rhythm app. The add-on exposes one option in Home Assistant:
 
 - **Log Level** - Controls how verbose the add-on logs are. Use `debug` when troubleshooting, otherwise keep the default `info`.
 
-Use the **Color Output** setting in the API to choose how commands are sent to your lights:
-
-- `kelvin` (default) – Sends color temperature values (most compatible across bulbs).
-- `rgb` – Sends RGB color values.
-- `xy` – Sends CIE xy coordinates.
-
-The API also exposes brightness and color-temperature range sliders along with the
-morning/evening curve parameters.
+Curve shape, brightness and color-temperature ranges, light profiles, and mode
+transitions are all managed through the REST API (`/api/config`,
+`/api/profiles`, `/api/profile-bundle`, `/api/settings`) rather than through
+Home Assistant add-on options.
 
 ## How It Works
 

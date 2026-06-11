@@ -24,7 +24,7 @@ Adaptive lighting that follows the sun. Rhythm OS automatically adjusts your lig
 
 ### Event Flow
 
-1. Switch press triggers a Home Assistant automation
+1. A switch press or motion event arrives in Home Assistant (e.g. via ZHA)
 2. The addon receives events via WebSocket subscription
 3. The Rust engine calculates optimal lighting values for the current sun position
 4. Light commands are sent to all lights in the target area
@@ -56,4 +56,4 @@ For issues or feature requests: https://github.com/sticktrk/rhythm-os/issues
 
 ## License
 
-MIT License - See LICENSE.md for details
+Apache License 2.0 - See LICENSE.md for details

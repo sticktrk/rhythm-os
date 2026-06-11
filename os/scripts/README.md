@@ -31,6 +31,21 @@ Anything under `scripts/build/` deals with producing the prebuilt Docker
 *builder* image (`dtconcepts/rhythm-rpiz-builder`) that the rpiz flow and its
 CI workflow share. See [`scripts/build/README.md`](build/README.md).
 
+## Helper scripts
+
+Mostly invoked by the main flows above, but usable standalone:
+
+| Script | Purpose |
+|--------|---------|
+| `check-rpiz-image-mode.sh` | Validate that rpiz Buildroot output matches the requested security posture (dev vs prod) |
+| `package-server-release.sh` | Package a rhythm-server desktop release tarball for CDN publishing |
+| `package-server-updates.sh` | Package rhythm-server binaries into a static OTA feed |
+| `promote-stable.sh` | Promote a tested beta release to stable by creating the matching `-stable` tag |
+| `prune-server-releases.sh` | Prune old versioned release directories from the dl.rhythm.lighting server repo |
+| `push-rpiz-dev.sh` | Fast dev loop: cross-compile the appliance binary, scp it to a device, respawn init |
+| `resolve-version.sh` | Resolve the current version for a shipped Rhythm artifact from Git tags |
+| `triage.sh` / `triage-bug.sh` | Compatibility entrypoints for bug-report triage (the real script lives at the workspace root) |
+
 ---
 
 ## Development

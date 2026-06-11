@@ -26,7 +26,7 @@ How Rhythm OS supports multiple lighting product ecosystems (Hue, LIFX, IKEA, WL
 |  rhythm-os (state, commands, event loop)          |
 +---------------------------------------------------+
 |  Integrations (product-specific logic)            |
-|  rhythm-hue   rhythm-lifx   rhythm-ikea   ...    |
+|  rhythm-hue   rhythm-ha   rhythm-matter   ...    |
 +---------------------------------------------------+
 |  Protocols (shared transport abstraction)          |
 |  rhythm-zigbee   rhythm-ble   rhythm-thread       |
@@ -40,19 +40,21 @@ How Rhythm OS supports multiple lighting product ecosystems (Hue, LIFX, IKEA, WL
 ### Dependency Flow
 
 ```
-rhythm-core (base, no rhythm-* deps)
+rhythm-core (base, no rhythm-* deps beyond rhythm-profile)
     |
+rhythm-os ---> rhythm-core + rhythm-devices
+    |
+rhythm-hue    ---> rhythm-core + rhythm-os + rhythm-devices
+rhythm-ha     ---> rhythm-core + rhythm-os + rhythm-devices
+rhythm-matter ---> rhythm-core + rhythm-os + rhythm-devices
+    |
+rhythm-server          ---> rhythm-os + rhythm-hue + rhythm-ha + rhythm-matter
+rhythm-addon           ---> rhythm-os + rhythm-hue + rhythm-ha + rhythm-matter
+rhythm-linux-appliance ---> rhythm-server + rhythm-os
+
+Future protocol crates:
 rhythm-zigbee ---> rhythm-core (ZCL abstractions, coordinator trait)
 rhythm-ble    ---> rhythm-core (BLE characteristics, peripheral trait)
-    |
-rhythm-hue  ---> rhythm-core + rhythm-zigbee[optional]
-rhythm-lifx ---> rhythm-core
-rhythm-ikea ---> rhythm-core + rhythm-zigbee
-    |
-rhythm-os ---> rhythm-core (+ integration crates via features)
-    |
-rhythm-server         ---> rhythm-os + rhythm-hue + ...
-rhythm-linux-appliance ---> rhythm-server + rhythm-os + ...
 ```
 
 ## Integration Contract
@@ -98,7 +100,7 @@ Zigbee IAS Zone       -> rhythm-zigbee normalizes -> integration translates -> H
 
 The `event_loop.rs` in rhythm-os processes `HubEvent` generically.
 
-**Reference:** `rhythm-hue/src/hue_lifecycle.rs` -- `translate_sse_event()`
+**Reference:** `rhythm-hue/src/events.rs` -- `translate_sse_event()`
 
 ### Optional
 
@@ -145,8 +147,9 @@ rhythm-hue/
     hue_lifecycle.rs    -- connect/disconnect + ensure_runtime (generic over transport)
     hub_state.rs        -- HueHubData stored in ActiveHub::hub_data
     sse.rs              -- HueSseEvent parsing
-    buttons.rs          -- Hue button events -> ButtonAction mapping
+    events.rs           -- SSE events -> HubEvent translation (translate_sse_event)
     behavior.rs         -- HueBehaviorTracker for multi-button sequences
+    discovery.rs        -- HubDiscovery impl (room/device/sensor discovery)
     api_types.rs        -- Hue V2 API type definitions
     device_types.rs     -- HueRoom, HueButton, HueSwitchDevice
     reqwest_lifecycle.rs   -- Server/add-on/appliance lifecycle
@@ -205,8 +208,7 @@ rhythm-{name}/
     transport.rs        -- communication trait (platform-abstracted)
     provider.rs         -- configure_{name}_hub() shared validation + init
     lifecycle.rs        -- generic lifecycle helpers shared across platforms
-    events.rs           -- native events -> HubEvent translation
-    buttons.rs          -- native buttons -> ButtonAction mapping (if applicable)
+    events.rs           -- native events -> HubEvent translation (incl. button -> ButtonAction mapping)
     hub_state.rs        -- integration data stored in ActiveHub::hub_data
     desktop_lifecycle.rs    -- optional first-party server-class wrapper
 ```
@@ -346,8 +348,8 @@ pub enum HubEvent {
 ### Phase 2: First Protocol Crate
 When Zigbee work starts: create `rhythm-zigbee` with coordinator trait + ZCL basics.
 
-### Phase 3: Second Integration
-Build next integration (IKEA? LIFX?) using the template. Validates the contract works for non-Hue. This is where Hue-specific names (like `grouped_light_id`) get generalized.
+### Phase 3: Third Integration — shipped as `rhythm-matter`
+`rhythm-matter` validates the contract for non-Hue products. It is a protocol + integration hybrid: Matter standardizes light control across brands, so one crate covers every Matter light. The server acts as commissioner via the native `rhythm-chipd` daemon. Remaining Hue-specific names (like `grouped_light_id`) still get generalized as future integrations need it.
 
 ### Phase 4: Multi-Integration Orchestration
 Refine the existing multi-hub model only if a future platform needs additional orchestration layers beyond today's `AppState.hubs` + `CompositeController`.

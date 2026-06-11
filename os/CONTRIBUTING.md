@@ -37,7 +37,7 @@ Current GitHub CI runs `cargo check` and `cargo test`. `fmt` and `clippy` are st
 
 ## Making changes
 
-1. Fork the repository and create a branch from `main`
+1. Fork the repository and create a branch from `master`
 2. Make your changes
 3. Add tests if applicable
 4. Ensure your change builds cleanly and run the relevant local checks for the area you touched
@@ -54,7 +54,7 @@ Current GitHub CI runs `cargo check` and `cargo test`. `fmt` and `clippy` are st
 The codebase is a Cargo workspace with layered crates:
 
 - **`rust/core/`** — Foundation libraries (algorithms, traits, business logic)
-- **`rust/integrations/`** — Lighting platform integrations (Hue, Home Assistant)
+- **`rust/integrations/`** — Lighting platform integrations (Hue, Home Assistant, Matter)
 - **`rust/bins/`** — Deployable binaries (server, appliance, addon)
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.

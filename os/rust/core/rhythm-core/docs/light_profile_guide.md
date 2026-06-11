@@ -105,7 +105,9 @@ impl LightProfileModule for FixedLightModule {
             self.color_temp,
             self.brightness,
             ctx.solar_time(),
-            0.0,
+            0.0,  // sun_position
+            500,  // transition_ms
+            600,  // motion_timeout_secs
         )
     }
 
@@ -135,17 +137,27 @@ impl LightProfileModule for FixedLightModule {
 }
 ```
 
-### Registering Your Module
+### Registering a Profile
+
+The registry is **config-driven**: it stores `LightProfileConfig` values as the
+source of truth and materializes runtime profile modules from them on demand.
+You register a config (with a curve shape and output ranges), not a trait
+object — implementing `LightProfileModule` directly (as above) is for
+engine-level or embedded use of the trait contract itself.
 
 ```rust
-use rhythm_core::light_profile::LightProfileRegistry;
+use rhythm_core::{LightProfileConfig, LightProfileRegistry, TimerSetting};
 
 fn main() {
     let mut registry = LightProfileRegistry::new();
 
-    // Create and register the module
-    let fixed_module = Arc::new(FixedLightModule::new(75, 4000));
-    registry.register(fixed_module);
+    // Start from an existing config and customize it
+    let mut fixed = registry.profile_config_cloned("rhythm").unwrap();
+    fixed.id = "fixed".into();
+    fixed.name = "Fixed Light".into();
+    fixed.min_brightness = 75;
+    fixed.max_brightness = 75;
+    registry.register_config(fixed);
 
     // Set as active
     registry.set_active_profile("fixed");
@@ -210,6 +222,15 @@ pub trait LightProfileModule: Send + Sync {
     // Step operations
     fn calculate_step(&self, ctx: &CurveContext, action: StepAction) -> StepResult;
 
+    // Curve position lookup (has default implementation: samples the profile
+    // across a wrapped day at one-minute granularity)
+    fn find_curve_position(
+        &self,
+        ctx: &CurveContext,
+        target: LightCurveTarget,
+        preferred_offset_minutes: f32,
+    ) -> Option<LightCurvePosition>;
+
     // Boundary detection
     fn is_at_maximum(&self, ctx: &CurveContext) -> bool;
     fn is_at_minimum(&self, ctx: &CurveContext) -> bool;
@@ -219,6 +240,11 @@ pub trait LightProfileModule: Send + Sync {
     fn max_brightness(&self) -> u8;
     fn min_color_temp(&self) -> u16;
     fn max_color_temp(&self) -> u16;
+
+    // Adaptive tick pacing (has default implementation returning None).
+    // Return Some(secs) to make the periodic loop tick faster during
+    // transitions and slower during plateaus.
+    fn suggested_tick_interval(&self, ctx: &CurveContext) -> Option<u16>;
 }
 ```
 
@@ -270,6 +296,8 @@ fn calculate(&self, ctx: &CurveContext) -> LightingValues {
         brightness,
         ctx.solar_time(),
         self.calculate_sun_position(ctx), // If applicable
+        self.fade_ms(ctx),                // transition_ms
+        self.motion_timeout_secs(ctx),    // motion_timeout_secs
     )
 }
 ```
@@ -541,12 +569,16 @@ The primary output type for lighting calculations:
 ```rust
 #[derive(Debug, Clone, PartialEq)]
 pub struct LightingValues {
-    pub kelvin: u16,        // Color temperature (500-6500K typical)
-    pub brightness: u8,     // Brightness percentage (1-100)
-    pub rgb: Rgb,           // Derived RGB color
-    pub xy: XyColor,        // Derived CIE xy coordinates
-    pub solar_time: f32,    // Solar time when calculated
-    pub sun_position: f32,  // Sun position (-1 to +1)
+    pub kelvin: u16,            // Color temperature (500-6500K typical)
+    pub brightness: u8,         // Brightness percentage (1-100)
+    pub rgb: Rgb,               // Derived RGB color
+    pub xy: XyColor,            // Derived CIE xy coordinates
+    pub solar_time: f32,        // Solar time when calculated
+    pub sun_position: f32,      // Sun position (-1 to +1)
+    pub is_direct_color: bool,  // When true, rgb/xy are authoritative (not derived from kelvin)
+    pub transition_ms: u32,     // Fade duration for this lighting state
+    pub motion_timeout_secs: u16,                 // Default motion timeout for this state
+    pub suggested_tick_interval_secs: Option<u16>, // Adaptive tick pacing hint
 }
 ```
 
@@ -554,11 +586,18 @@ pub struct LightingValues {
 
 ```rust
 impl LightingValues {
-    pub fn new(kelvin: u16, brightness: u8, solar_time: f32, sun_position: f32) -> Self
+    pub fn new(
+        kelvin: u16,
+        brightness: u8,
+        solar_time: f32,
+        sun_position: f32,
+        transition_ms: u32,
+        motion_timeout_secs: u16,
+    ) -> Self
 }
 ```
 
-The constructor automatically derives `rgb` and `xy` from the Kelvin temperature, so you only need to provide the core values.
+The constructor automatically derives `rgb` and `xy` from the Kelvin temperature, so you only need to provide the core values. `is_direct_color` defaults to `false` and `suggested_tick_interval_secs` to `None`.
 
 #### Fields
 
@@ -570,6 +609,10 @@ The constructor automatically derives `rgb` and `xy` from the Kelvin temperature
 | `xy` | `XyColor` | CIE 1931 xy chromaticity coordinates for Hue-compatible systems |
 | `solar_time` | `f32` | The solar time at which these values were calculated |
 | `sun_position` | `f32` | Normalized sun position: -1 (midnight), 0 (horizon), +1 (noon) |
+| `is_direct_color` | `bool` | When `true`, rgb/xy carry arbitrary colors outside the CCT spectrum |
+| `transition_ms` | `u32` | How fast lights fade to these values, set by the active profile |
+| `motion_timeout_secs` | `u16` | Default motion timeout; per-room overrides take precedence |
+| `suggested_tick_interval_secs` | `Option<u16>` | Tick pacing hint; `None` uses the configured default |
 
 ### StepResult
 
@@ -886,7 +929,7 @@ The registry no longer uses a `LightProfileModuleConfig` enum. It stores full
 profiles directly from those stored configs:
 
 ```rust
-use rhythm_core::{LightProfileConfig, LightProfileRegistry};
+use rhythm_core::{LightProfileConfig, LightProfileRegistry, TimerSetting};
 
 let mut registry = LightProfileRegistry::new();
 
@@ -899,41 +942,44 @@ let custom = LightProfileConfig {
     min_color_temp: 2200,
     max_color_temp: 5500,
     max_dim_steps: 8,
-    fade_ms: None,
-    motion_timeout_secs: None,
-    rhythm_interval_secs: None,
+    fade_ms: TimerSetting::Auto,
+    motion_timeout_secs: TimerSetting::Auto,
+    rhythm_interval_secs: TimerSetting::Auto,
 };
 
 registry.register_config(custom);
 ```
 
+The timer fields are `TimerSetting` values (`Auto`, a fixed value, or per-hour
+breakpoints), not plain `Option`s.
+
 ---
 
 ## 8. Integration with Registry
 
-### Registering Your Module
+### Registering Profiles
 
-The `LightProfileRegistry` manages all available light profiles:
+The `LightProfileRegistry` manages all available light profiles. It is
+config-driven: profiles are registered as `LightProfileConfig` values and
+runtime modules are materialized from those configs on demand. `new()` seeds
+the registry with the built-in `rhythm`, `sleep`, `day_idle`, and `sleep_idle`
+profiles:
 
 ```rust
-use std::sync::Arc;
-use rhythm_core::light_profile::{LightProfileRegistry, LightProfileModule};
+use rhythm_core::{LightProfileConfig, LightProfileRegistry};
 
 fn setup_registry() -> LightProfileRegistry {
     let mut registry = LightProfileRegistry::new();
 
-    // Register custom modules
-    let linear = Arc::new(linearModule::new(linearConfig::default()));
-    registry.register(linear);
-
-    let manual = Arc::new(ManualModule::new(50, 3000));
-    registry.register(manual);
+    // Register custom profile configs
+    registry.register_config(linear_profile_config());
+    registry.register_config(manual_profile_config());
 
     registry
 }
 ```
 
-### Setting the Active Module
+### Setting the Active Profile
 
 ```rust
 // Set by ID
@@ -951,17 +997,18 @@ println!("Using: {} ({})", active.name(), active.id());
 registry.reset_to_default();
 ```
 
-### Listing Available Modules
+### Listing Available Profiles
 
 ```rust
-// Get all registered modules
+// Get all registered profiles
 for (id, name) in registry.available_profiles() {
     println!("  {}: {}", id, name);
 }
-// Output:
-//   rhythm: Rhythm Profile
-//   linear: linear Rhythm
-//   manual: Manual Control
+// Output (a fresh registry):
+//   day_idle: Day Idle
+//   rhythm: Day
+//   sleep: Sleep
+//   sleep_idle: Sleep Idle
 ```
 
 ### Registry Constraints
@@ -970,7 +1017,7 @@ The registry enforces these rules:
 
 1. **Cannot remove the active profile**: Attempting to unregister the currently active profile returns `false`
 
-2. **Cannot remove the default module**: The default module (rhythm) is protected from removal
+2. **Cannot remove the default or built-in state profiles**: The default profile (`rhythm`) and the built-in state profiles (`sleep`, `day_idle`, `sleep_idle`) are protected from removal
 
 3. **Active profile always exists**: If you call `active_profile()` and it doesn't exist, the code panics (invariant violation)
 
@@ -984,7 +1031,7 @@ registry.unregister("linear");  // false: is active
 
 // This works
 registry.set_active_profile("rhythm");
-registry.unregister("linear");  // true: not active, not default
+registry.unregister("linear");  // true: not active, not default, not built-in
 ```
 
 ---
@@ -1051,7 +1098,7 @@ impl LightProfileModule for MyModule {
             "Calculated lighting values"
         );
 
-        LightingValues::new(color_temp, brightness, ctx.solar_time(), 0.0)
+        LightingValues::new(color_temp, brightness, ctx.solar_time(), 0.0, 500, 600)
     }
 
     fn calculate_step(&self, ctx: &CurveContext, action: StepAction) -> StepResult {
@@ -1124,15 +1171,14 @@ proptest! {
 
 ```rust
 #[test]
-fn test_module_works_with_registry() {
+fn test_profile_works_with_registry() {
     let mut registry = LightProfileRegistry::new();
-    let module = Arc::new(MyModule::default());
 
-    registry.register(module);
-    assert!(registry.set_active_profile("my_module"));
+    registry.register_config(my_profile_config());  // LightProfileConfig with id "my_profile"
+    assert!(registry.set_active_profile("my_profile"));
 
     let active = registry.active_profile();
-    assert_eq!(active.id(), "my_module");
+    assert_eq!(active.id(), "my_profile");
 
     let ctx = CurveContext::default();
     let values = active.calculate(&ctx);
@@ -1416,6 +1462,8 @@ impl LightProfileModule for SimpleProfile {
             brightness,
             ctx.solar_time(),
             sun_position,
+            500,  // transition_ms
+            600,  // motion_timeout_secs
         )
     }
 
@@ -1689,14 +1737,13 @@ use rhythm_core::light_profile::{CurveContext, LightProfileRegistry};
 use rhythm_core::solar::SolarTime;
 
 fn main() {
-    // Create registry with default Rhythm module
+    // Create registry with the built-in profiles
     let mut registry = LightProfileRegistry::new();
 
-    // Create and register our simple module
-    let simple = Arc::new(SimpleProfile::with_defaults());
-    registry.register(simple);
+    // Register a config for our simple profile
+    registry.register_config(simple_profile_config());  // LightProfileConfig with id "simple"
 
-    // List available modules
+    // List available profiles
     println!("Available modules:");
     for (id, name) in registry.available_profiles() {
         println!("  - {}: {}", id, name);
@@ -1751,8 +1798,11 @@ fn main() {
 
 ```
 Available modules:
-  - rhythm: Rhythm Profile
+  - day_idle: Day Idle
+  - rhythm: Day
   - simple: Simple Linear Curve
+  - sleep: Sleep
+  - sleep_idle: Sleep Idle
 
 Active profile: Simple Linear Curve
 
@@ -1783,11 +1833,11 @@ Step dimming from 7 AM:
 
 Creating a custom `LightProfileModule` involves:
 
-1. **Implementing the trait**: Provide all 11 required methods plus use the default `calculate_with_offset()`
+1. **Implementing the trait**: Provide the 12 required methods; `calculate_with_offset()`, `find_curve_position()`, and `suggested_tick_interval()` have default implementations
 2. **Defining your algorithm**: How brightness and color temperature change over time
 3. **Supporting step operations**: Enable manual dimming along your curve
 4. **Creating configuration**: Define adjustable parameters with serde support
-5. **Registering with the system**: Add to the registry and set as active when needed
+5. **Registering with the system**: Register a `LightProfileConfig` with the registry and set it active when needed
 
 The `LightProfile` provides a sophisticated reference implementation using logistic curves, while the `SimpleProfile` example shows a straightforward linear approach.
 

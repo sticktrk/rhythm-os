@@ -33,7 +33,7 @@ Rhythm OS manages your lights through **curves** — continuous functions that d
 | Target | Crate | Notes |
 |--------|-------|-------|
 | macOS / Linux | `rhythm-server` | CLI server with HTTP API and mDNS discovery. |
-| Raspberry Pi Zero | `rhythm-server` (`rpiz` build from `rhythm-linux-appliance`) | Buildroot appliance image with USB gadget first-boot access. |
+| Raspberry Pi Zero | `rhythm-linux-appliance` (`rpiz` target) | Buildroot appliance image with BLE Wi-Fi provisioning, built on the native server stack. |
 | Home Assistant | `rhythm-addon` | Add-on with ingress support. Auto-configures from HA Supervisor. |
 
 ## Quick start
@@ -68,7 +68,7 @@ Rhythm OS exposes a complete REST API for managing lights, rooms, and curves. Al
 | **Profile Bundle** | `GET /api/profile-bundle`, `PUT /api/profile-bundle`, `GET /api/profile-bundle/factory-default`, `POST /api/profile-bundle/reset` | Export/import the current portable profile bundle: profiles, transitions, and power-save |
 | **Backup** | `GET /api/backup`, `PUT /api/backup` | Full installation backup/restore including topology and installation metadata |
 | **Factory Reset** | `POST /api/factory-reset` | Clear installation state and restore shipped defaults |
-| **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/curve`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences` | Control live nodes, curve modifiers, and room/device preferences |
+| **Nodes** | `PUT /api/nodes/action`, `PUT /api/nodes/curve`, `PUT /api/nodes/color`, `PUT /api/nodes/brightness`, `PUT /api/nodes/offset`, `PUT /api/nodes/preferences` | Control live nodes, curve modifiers, and room/device preferences |
 | **Topology** | `GET/POST /api/topology/rooms`, `PUT /api/topology/rooms/:id`, `PUT /api/topology/rooms/:id/merge`, `PUT /api/topology/rooms/:id/devices/move` | Manage user-facing room/device graph |
 | **Canonical & Triage** | `GET /api/devices/canonical`, `PUT /api/devices/canonical/:id/room`, `PUT /api/devices/canonical/:id/parent`, `GET /api/triage` | Review normalized devices and resolve merge/binding decisions |
 | **Config** | `GET /api/config`, `PUT /api/config`, `PUT /api/location` | Read/write curve config and location |
@@ -90,7 +90,7 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 │  rhythm-os                                          │
 ├─────────────────────────────────────────────────────┤
 │  Integrations (product-specific crates)             │
-│  rhythm-hue  ·  rhythm-ha  ·  ...                   │
+│  rhythm-hue  ·  rhythm-ha  ·  rhythm-matter  ·  ... │
 ├─────────────────────────────────────────────────────┤
 │  Core (pure algorithms, no I/O)                     │
 │  rhythm-core                                        │
@@ -102,28 +102,33 @@ Rhythm is built as a layered crate architecture. Each layer has a single respons
 | Crate | Purpose |
 |-------|---------|
 | **rhythm-profile** | Pluggable lighting profile contract. Defines the `LightProfileModule` trait and shared profile types. |
-| **rhythm-core** | Solar calculations, curve engine, color science, runtime orchestration. Pure algorithms with zero I/O — runs on any platform. Feature-gated for `tokio` (async) or `blocking` runtimes. |
+| **rhythm-devices** | Device capability database: known light models with color modes, kelvin ranges, gamuts, and protocol quirks. |
+| **rhythm-core** | Solar calculations, curve engine, color science, runtime orchestration. Pure algorithms with zero I/O — runs on any platform. |
 | **rhythm-os** | Hub-agnostic business logic: room management, event loop, command handling, persistence. Knows nothing about Hue — dispatches through traits. |
 | **rhythm-hue** | Philips Hue V2 integration. Implements `LightController`, `HubRegistry`, and `HubProvider`. Platform-abstracted via `HueTransport` trait — same logic across server, appliance, and add-on builds. |
 | **rhythm-ha** | Home Assistant integration. Implements `LightController`, `HubRegistry`, and `HubProvider` for HA's WebSocket API and ZHA events. |
-| **rhythm-server** | macOS/Linux CLI server. HTTP API + mDNS discovery. Runs the full engine as a native process. |
+| **rhythm-matter** | Matter integration. The server acts as a Matter commissioner for WiFi/Thread lights — the Matter fabric is the "hub". |
+| **rhythm-server** | macOS/Linux CLI server. HTTP API + mDNS discovery. Runs the full engine as a native process. Also builds the `rhythm-cli` helper binary. |
+| **rhythm-chipd** | Native Matter controller daemon wrapping the CHIP stack; rhythm-matter talks to it over RPC. |
 | **rhythm-linux-appliance** | Linux appliance runtime for the `rpiz` target. Adds appliance provisioning and recovery behavior on top of the native server stack. |
 | **rhythm-addon** | Home Assistant add-on binary. Connects to HA via WebSocket, serves HTTP API with ingress support. |
 
 ### Dependency graph
 
 ```
-rhythm-profile ← base, no rhythm-* deps
+rhythm-profile, rhythm-devices ← base, no rhythm-* deps
     ↑
 rhythm-core  ──→ rhythm-profile
     ↑
-rhythm-os    ──→ rhythm-core + rhythm-profile
-rhythm-hue   ──→ rhythm-core + rhythm-os
-rhythm-ha    ──→ rhythm-core + rhythm-os
+rhythm-os    ──→ rhythm-core + rhythm-devices
+rhythm-hue   ──→ rhythm-core + rhythm-os + rhythm-devices
+rhythm-ha    ──→ rhythm-core + rhythm-os + rhythm-devices
+rhythm-matter ──→ rhythm-core + rhythm-os + rhythm-devices
     ↑
-rhythm-server         ──→ rhythm-os + rhythm-hue + rhythm-ha
+rhythm-server         ──→ rhythm-os + rhythm-hue + rhythm-ha + rhythm-matter
 rhythm-linux-appliance ──→ rhythm-server + rhythm-os
-rhythm-addon          ──→ rhythm-os + rhythm-hue + rhythm-ha
+rhythm-addon          ──→ rhythm-os + rhythm-hue + rhythm-ha + rhythm-matter
+rhythm-chipd          ← standalone Matter daemon, used by rhythm-matter at runtime
 ```
 
 ## Extending: Add a new integration
@@ -147,7 +152,7 @@ match hub_type.as_str() {
 
 No changes to rhythm-core or rhythm-os required. See [INTEGRATIONS.md](INTEGRATIONS.md) for the full contract and a crate template.
 
-**Current integrations:** Philips Hue (V2 API, SSE events, button/motion sensors), Home Assistant (WebSocket API, ZHA events)
+**Current integrations:** Philips Hue (V2 API, SSE events, button/motion sensors), Home Assistant (WebSocket API, ZHA events), Matter (WiFi/Thread lights via native commissioner)
 
 ## Contributing
 
