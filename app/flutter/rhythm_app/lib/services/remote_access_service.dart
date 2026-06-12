@@ -374,6 +374,7 @@ class RemoteAccessService {
     required Hub serverHub,
     Home? home,
     String? serverInstanceId,
+    bool clearRemoteEndpoint = false,
   }) {
     final normalizedServerInstanceId = serverInstanceId?.trim();
     return {
@@ -383,8 +384,10 @@ class RemoteAccessService {
         'server_instance_id': normalizedServerInstanceId,
       if (home != null) ...{
         'home': AccountCloudSyncService.homeSnapshotPayload(home),
-        'server_hub':
-            AccountCloudSyncService.serverHubSnapshotPayload(serverHub),
+        'server_hub': AccountCloudSyncService.serverHubSnapshotPayload(
+          serverHub,
+          clearRemoteEndpoint: clearRemoteEndpoint,
+        ),
       },
     };
   }
@@ -399,6 +402,7 @@ class RemoteAccessService {
         serverHub: serverHub,
         home: home,
         serverInstanceId: serverInstanceId,
+        clearRemoteEndpoint: true,
       ),
       'action': 'disable',
     };

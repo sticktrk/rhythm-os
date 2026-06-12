@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:app_links/app_links.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,7 +15,7 @@ import 'app_shell.dart';
 import 'backend/backend.dart';
 import 'models/config_model.dart';
 import 'api/hybrid_client.dart';
-import 'onboarding/onboarding_flow.dart';
+import 'onboarding/screens/password_recovery_screen.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
 import 'services/app_log_service.dart';
@@ -233,7 +236,7 @@ class RhythmApp extends StatelessWidget {
   }
 }
 
-/// Auth gate that checks auth state and onboarding completion.
+/// Auth gate that checks auth state before entering the app shell.
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
 
@@ -244,13 +247,15 @@ class AuthGate extends StatefulWidget {
   /// Stream controller for reset events
   static final _resetController = ValueNotifier<int>(0);
 
-  /// Reset the app and show onboarding again.
+  /// Reset the app back to the pre-home hardware gate.
+  ///
+  /// The name is retained for existing logout/delete/factory-reset callers.
   static void resetToOnboarding() {
     debugPrint('AuthGate.resetToOnboarding called');
     final state = globalKey.currentState;
     if (state case _AuthGateState authGateState) {
       debugPrint('Using GlobalKey to reset');
-      authGateState._resetToOnboarding();
+      unawaited(authGateState._resetToOnboarding());
     } else {
       debugPrint('GlobalKey.currentState is null, using ValueNotifier');
       // Fallback: increment the notifier to trigger listeners
@@ -264,49 +269,180 @@ class AuthGate extends StatefulWidget {
 
 class _AuthGateState extends State<AuthGate> {
   bool _isLoading = true;
-  bool _showOnboarding = true;
-  int _onboardingKey = 0; // Used to force OnboardingFlow to recreate
+  bool _showPasswordRecovery = false;
+  StreamSubscription<AuthEvent>? _authEventSubscription;
+  StreamSubscription<Uri>? _passwordRecoveryLinkSubscription;
+  DateTime? _acceptPasswordRecoveryAuthEventUntil;
 
   @override
   void initState() {
     super.initState();
     _checkAuthState();
+    _authEventSubscription = AuthService().authEvents.listen(_onAuthEvent);
+    _listenForPasswordRecoveryLinks();
     // Listen to reset events from static method
     AuthGate._resetController.addListener(_onResetRequested);
-    // Listen for Virtual Experience entry/exit so we can route directly
-    // into AppShell (no sign-in, no onboarding persistence) and bounce
-    // back to the welcome page on exit.
+    // Listen for Virtual Experience entry so demo state can be seeded whether
+    // entry starts from the hardware gate or elsewhere in the app shell.
     VirtualExperienceService.instance.addListener(_onVirtualExperienceChanged);
   }
 
   @override
   void dispose() {
+    _authEventSubscription?.cancel();
+    _passwordRecoveryLinkSubscription?.cancel();
     AuthGate._resetController.removeListener(_onResetRequested);
     VirtualExperienceService.instance
         .removeListener(_onVirtualExperienceChanged);
     super.dispose();
   }
 
+  void _onAuthEvent(AuthEvent event) {
+    if (event != AuthEvent.passwordRecovery || !mounted) return;
+    final acceptUntil = _acceptPasswordRecoveryAuthEventUntil;
+    if (acceptUntil == null || DateTime.now().isAfter(acceptUntil)) {
+      debugPrint('AuthGate: Ignoring stale password recovery auth event');
+      return;
+    }
+
+    _showPasswordRecoveryScreen(source: 'auth_event');
+  }
+
+  void _listenForPasswordRecoveryLinks() {
+    if (kIsWeb) return;
+
+    final appLinks = AppLinks();
+    _passwordRecoveryLinkSubscription = appLinks.uriLinkStream.listen(
+      (uri) => unawaited(_handleIncomingLink(uri)),
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('AuthGate: Password recovery link error: $error');
+        debugPrint('$stackTrace');
+      },
+    );
+
+    unawaited(_handleInitialLink(appLinks));
+  }
+
+  Future<void> _handleInitialLink(AppLinks appLinks) async {
+    try {
+      final uri = await appLinks.getInitialLink();
+      if (uri != null) {
+        await _handleIncomingLink(uri);
+      }
+    } on PlatformException catch (error, stackTrace) {
+      debugPrint('AuthGate: Could not read initial app link: ${error.message}');
+      debugPrint('$stackTrace');
+    } catch (error, stackTrace) {
+      debugPrint('AuthGate: Could not read initial app link: $error');
+      debugPrint('$stackTrace');
+    }
+  }
+
+  Future<void> _handleIncomingLink(Uri uri) async {
+    if (!_isPasswordRecoveryLink(uri)) return;
+    final fingerprint = _passwordRecoveryLinkFingerprint(uri);
+    if (await SettingsService.instance
+        .hasHandledPasswordRecoveryLink(fingerprint)) {
+      debugPrint('AuthGate: Skipping already handled password recovery link');
+      return;
+    }
+    await SettingsService.instance.markPasswordRecoveryLinkHandled(fingerprint);
+
+    debugPrint('AuthGate: Password recovery link received: $uri');
+    if (!_passwordRecoveryLinkHasSessionMaterial(uri)) {
+      debugPrint('AuthGate: Ignoring password recovery link without session');
+      return;
+    }
+
+    _acceptPasswordRecoveryAuthEventUntil =
+        DateTime.now().add(const Duration(seconds: 10));
+    final exchanged = await _exchangePasswordRecoveryLink(uri);
+    if (!exchanged) {
+      debugPrint('AuthGate: Password recovery link did not create a session');
+      return;
+    }
+    _showPasswordRecoveryScreen(source: 'deep_link');
+  }
+
+  bool _passwordRecoveryLinkHasSessionMaterial(Uri uri) {
+    return (uri.queryParameters['token_hash']?.isNotEmpty ?? false) ||
+        (uri.queryParameters['tokenHash']?.isNotEmpty ?? false) ||
+        (uri.queryParameters['code']?.isNotEmpty ?? false) ||
+        uri.fragment.isNotEmpty;
+  }
+
+  String _passwordRecoveryLinkFingerprint(Uri uri) {
+    final tokenHash =
+        uri.queryParameters['token_hash'] ?? uri.queryParameters['tokenHash'];
+    final code = uri.queryParameters['code'];
+    final material = tokenHash != null && tokenHash.isNotEmpty
+        ? 'token_hash:$tokenHash'
+        : code != null && code.isNotEmpty
+            ? 'code:$code'
+            : uri.toString();
+    return crypto.sha256.convert(utf8.encode(material)).toString();
+  }
+
+  bool _isPasswordRecoveryLink(Uri uri) {
+    final host = uri.host.toLowerCase();
+    final path = uri.path.toLowerCase();
+    return (uri.scheme == 'rhythmapp' || uri.scheme == 'lighting.rhythm.app') &&
+        (host == 'password-reset' || path == '/password-reset');
+  }
+
+  Future<bool> _exchangePasswordRecoveryLink(Uri uri) async {
+    if (!BackendProvider.isInitialized) return false;
+
+    final tokenHash =
+        uri.queryParameters['token_hash'] ?? uri.queryParameters['tokenHash'];
+    if (tokenHash != null && tokenHash.isNotEmpty) {
+      try {
+        await AuthService().verifyPasswordRecoveryTokenHash(tokenHash);
+        debugPrint('AuthGate: Password recovery token verified');
+        return true;
+      } catch (error, stackTrace) {
+        debugPrint(
+            'AuthGate: Password recovery token verification failed: $error');
+        debugPrint('$stackTrace');
+        return false;
+      }
+    }
+
+    final auth = BackendProvider.instance.auth;
+    if (auth is! SupabaseAuthBackend) return false;
+
+    try {
+      await auth.client.auth.getSessionFromUrl(uri);
+      debugPrint('AuthGate: Password recovery session exchanged');
+      return true;
+    } catch (error, stackTrace) {
+      debugPrint('AuthGate: Password recovery session exchange failed: $error');
+      debugPrint('$stackTrace');
+      return false;
+    }
+  }
+
+  void _showPasswordRecoveryScreen({required String source}) {
+    if (!mounted || _showPasswordRecovery) return;
+
+    debugPrint('AuthGate: Showing password recovery screen from $source');
+    unawaited(AnalyticsService().logScreenView('password_recovery'));
+    setState(() {
+      _showPasswordRecovery = true;
+      _isLoading = false;
+    });
+  }
+
   void _onVirtualExperienceChanged() {
     final active = VirtualExperienceService.instance.isActive;
     if (active) {
-      // Entry can happen from either the welcome screen (onboarding) or
-      // the hardware-gate "LightBox" screen (already inside AppShell).
-      // Always run the sync so demo rooms populate; flip to AppShell only
-      // if we were still showing onboarding.
       unawaited(_enterVirtualExperience());
-    } else if (!_showOnboarding &&
-        !SettingsService.instance.onboardingComplete) {
-      // VE-only sessions never persisted onboarding — exit drops the user
-      // back to the welcome screen. A real user who completed onboarding
-      // before stays in AppShell.
-      _resetToOnboarding();
     }
   }
 
   void _onResetRequested() {
     debugPrint('_onResetRequested triggered');
-    _resetToOnboarding();
+    unawaited(_resetToOnboarding());
   }
 
   void _refreshAppStateInBackground() {
@@ -325,164 +461,123 @@ class _AuthGateState extends State<AuthGate> {
   }
 
   Future<void> _checkAuthState() async {
-    // Web platform: skip to designer (no onboarding/auth)
+    // Web platform: skip auth bootstrap and show the app shell.
     if (kIsWeb) {
+      await SettingsService.instance.setOnboardingComplete(true);
+      if (!mounted) return;
       setState(() {
-        _showOnboarding = false;
         _isLoading = false;
       });
       return;
     }
-
-    // Check if onboarding was explicitly completed (from SettingsService/Hive)
-    final onboardingComplete = SettingsService.instance.onboardingComplete;
 
     if (!BackendProvider.isInitialized) {
-      // If Backend isn't initialized, just check local prefs
+      await SettingsService.instance.setOnboardingComplete(true);
+      if (!mounted) return;
       setState(() {
-        _showOnboarding = !onboardingComplete;
-        _isLoading = false;
-      });
-      if (onboardingComplete) {
-        _refreshAppStateInBackground();
-      }
-      return;
-    }
-
-    // If onboarding is complete, show the app
-    if (onboardingComplete) {
-      final authService = AuthService();
-      if (authService.currentUserId != null) {
-        AnalyticsService().identifyUser(authService.currentUserId!);
-      }
-
-      setState(() {
-        _showOnboarding = false;
         _isLoading = false;
       });
       _refreshAppStateInBackground();
       return;
     }
 
-    // Check if user exists in Keychain (persists across reinstalls/updates)
     final authService = AuthService();
     if (authService.currentUser != null) {
-      // User exists - trust the Keychain session, they completed onboarding before
       debugPrint(
           'Recovering session from Keychain: ${authService.currentUserId}');
 
-      // Identify user for analytics
       if (authService.currentUserId != null) {
         AnalyticsService().identifyUser(authService.currentUserId!);
       }
 
-      // Track this recovery event
       AnalyticsService().logEvent('session_recovered', {
         'user_id': authService.currentUserId ?? 'unknown',
         'is_anonymous': authService.isAnonymous ? 1 : 0,
       });
-
-      // Restore onboarding flag
-      await SettingsService.instance.setOnboardingComplete(true);
-
-      setState(() {
-        _showOnboarding = false;
-        _isLoading = false;
-      });
-      _refreshAppStateInBackground();
-      return;
-    }
-
-    // No existing user - this is truly a fresh install
-    // Create anonymous user for onboarding
-    try {
-      await authService.signInAnonymously();
-      debugPrint('Created anonymous user: ${authService.currentUserId}');
-      if (authService.currentUserId != null) {
-        AnalyticsService().identifyUser(authService.currentUserId!);
+    } else {
+      try {
+        await authService.signInAnonymously();
+        debugPrint('Created anonymous user: ${authService.currentUserId}');
+        if (authService.currentUserId != null) {
+          AnalyticsService().identifyUser(authService.currentUserId!);
+        }
+      } catch (e, stackTrace) {
+        debugPrint('Anonymous auth failed: $e');
+        debugPrint('  stackTrace: $stackTrace');
       }
-    } catch (e, stackTrace) {
-      debugPrint('Anonymous auth failed: $e');
-      debugPrint('  stackTrace: $stackTrace');
     }
 
+    await SettingsService.instance.setOnboardingComplete(true);
+    if (!mounted) return;
     setState(() {
-      _showOnboarding = true;
       _isLoading = false;
     });
+    _refreshAppStateInBackground();
   }
 
   /// Drop the user into [AppShell] in Virtual Experience mode.
-  ///
-  /// Differs from [_completeOnboarding] in two important ways: it does NOT
-  /// persist `onboardingComplete` (so quitting back to the welcome screen
-  /// truly resets), and it does NOT create an anonymous auth user (Virtual
-  /// Experience is a throwaway preview that shouldn't pollute analytics or
-  /// the backend with one-off accounts).
   Future<void> _enterVirtualExperience() async {
     AnalyticsService().logEvent('virtual_experience_entered');
     if (!mounted) return;
-    // Seed the demo rooms. Safe whether we were on the welcome screen or
-    // already inside AppShell (e.g. on the hardware gate).
+    // Seed the demo rooms. Safe whether we were already inside AppShell or
+    // the request arrived while AuthGate was still bootstrapping.
     await AppStateRefresh.sync(context);
-    if (!mounted) return;
-    if (_showOnboarding) {
-      setState(() {
-        _showOnboarding = false;
-      });
-    }
   }
 
-  Future<void> _completeOnboarding() async {
-    // Mark onboarding as complete in Hive
+  Future<void> _completePasswordRecovery() async {
     await SettingsService.instance.setOnboardingComplete(true);
 
-    // Track onboarding completion
-    AnalyticsService().logOnboardingCompleted();
-
-    // Ensure we have a user (create anonymous if needed)
     final authService = AuthService();
-    var user = authService.currentUser;
-    if (user == null) {
-      debugPrint(
-          'No user at onboarding completion, creating anonymous user...');
-      try {
-        user = await authService.signInAnonymously();
-        debugPrint('Created anonymous user: ${user?.id}');
-      } catch (e) {
-        debugPrint('Failed to create anonymous user: $e');
-      }
-    }
-
-    // Identify user for analytics and set initial account status
-    if (user != null) {
-      AnalyticsService().identifyUser(user.id);
+    final userId = authService.currentUserId;
+    if (userId != null) {
+      AnalyticsService().identifyUser(userId);
       AnalyticsService()
-          .setAccountStatus(user.isAnonymous ? 'anonymous' : 'email');
+          .setAccountStatus(authService.isAnonymous ? 'anonymous' : 'email');
     }
 
-    // Initialize app state after onboarding
     if (!mounted) return;
-    await AppStateRefresh.sync(context);
-    if (!mounted) return;
-
     setState(() {
-      _showOnboarding = false;
+      _showPasswordRecovery = false;
+      _isLoading = false;
     });
+    _refreshAppStateInBackground();
   }
 
-  /// Reset to onboarding flow (called from settings).
-  void _resetToOnboarding() {
-    debugPrint(
-        '_resetToOnboarding: setting _showOnboarding=true, key=${_onboardingKey + 1}');
+  /// Reset to the clean pre-home hardware gate (called from settings).
+  Future<void> _resetToOnboarding() async {
+    debugPrint('_resetToOnboarding: resetting to clean hardware gate');
+    try {
+      if (BackendProvider.isInitialized) {
+        final authService = AuthService();
+        if (authService.currentUser == null) {
+          final user = await authService.signInAnonymously();
+          debugPrint('Created anonymous user after reset: ${user?.id}');
+          final userId = user?.id;
+          if (userId != null) {
+            AnalyticsService().identifyUser(userId);
+          }
+        }
+      }
+      await SettingsService.instance.setOnboardingComplete(true);
+    } catch (error, stackTrace) {
+      debugPrint('AuthGate reset failed: $error');
+      debugPrint('$stackTrace');
+    }
+
+    if (!mounted) return;
     setState(() {
-      _showOnboarding = true;
-      _onboardingKey++; // Force OnboardingFlow to recreate with fresh state
+      _showPasswordRecovery = false;
+      _isLoading = false;
     });
+    _refreshAppStateInBackground();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_showPasswordRecovery) {
+      return PasswordRecoveryScreen(onComplete: _completePasswordRecovery);
+    }
+
     if (_isLoading) {
       return const Scaffold(
         backgroundColor: Color(0xFF0D1117),
@@ -491,13 +586,6 @@ class _AuthGateState extends State<AuthGate> {
             valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF9A825)),
           ),
         ),
-      );
-    }
-
-    if (_showOnboarding) {
-      return OnboardingFlow(
-        key: ValueKey(_onboardingKey),
-        onComplete: _completeOnboarding,
       );
     }
 

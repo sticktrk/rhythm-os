@@ -8,6 +8,7 @@ import '../../../onboarding/providers/auth_provider.dart' as onboarding;
 import '../../../onboarding/widgets/onboarding_orbit.dart';
 import '../../../services/app_state_refresh.dart';
 import '../../../services/analytics_service.dart';
+import '../../../widgets/connect_hub_screen.dart';
 
 /// Full-screen sign-in modal.
 class SignInModal {
@@ -16,8 +17,9 @@ class SignInModal {
     // Guard: don't show modal when auxiliary sign-in is disabled
     if (!FeatureFlags.auxSignIn) return;
     AnalyticsService().logScreenView('sign_in');
+    final hostContext = context;
 
-    Navigator.of(context).push(
+    Navigator.of(hostContext).push(
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black54,
@@ -83,16 +85,10 @@ class SignInModal {
                         // Account screen content
                         Expanded(
                           child: AccountScreen(
-                            onComplete: () async {
-                              if (context.mounted) {
-                                await AppStateRefresh.sync(context);
-
-                                if (context.mounted) {
-                                  Navigator.of(context)
-                                      .popUntil((route) => route.isFirst);
-                                }
-                              }
-                            },
+                            onComplete: () => _finishSignIn(hostContext,
+                                openHomeChooser: false),
+                            onSignedInComplete: () => _finishSignIn(hostContext,
+                                openHomeChooser: true),
                           ),
                         ),
                       ],
@@ -121,5 +117,23 @@ class SignInModal {
         reverseTransitionDuration: const Duration(milliseconds: 300),
       ),
     );
+  }
+
+  static Future<void> _finishSignIn(
+    BuildContext context, {
+    required bool openHomeChooser,
+  }) async {
+    if (!context.mounted) return;
+
+    await AppStateRefresh.sync(context);
+    if (!context.mounted) return;
+
+    Navigator.of(context).popUntil((route) => route.isFirst);
+
+    if (!openHomeChooser) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!context.mounted) return;
+      ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);
+    });
   }
 }

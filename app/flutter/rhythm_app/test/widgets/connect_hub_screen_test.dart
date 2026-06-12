@@ -203,6 +203,53 @@ void main() {
       );
     });
 
+    test('merges same-named local and tunneled Box entries', () {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final cloudHome = Home.create(
+        id: 'cloud-home',
+        name: 'Kitchen',
+        ownerId: 'cloud-user',
+      );
+      final localHub = Hub.server(
+        id: 'server-local',
+        homeId: localHome.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.123',
+        token: 'local-owner-token',
+      );
+      final cloudHub = Hub.server(
+        id: 'server-cloud',
+        homeId: cloudHome.id,
+        name: 'Kitchen Box',
+        host: '100.64.0.12',
+        remoteEndpoint: const HubEndpoint(
+          host: 'kitchen.devices.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+
+      final homes = rhythmMergedHomeEntriesForTesting(
+        localHomes: [
+          AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+        ],
+        cloudHomes: [
+          AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+        ],
+      );
+
+      expect(homes, hasLength(1));
+      expect(homes.single.serverHubs, hasLength(1));
+      final hub = homes.single.serverHubs.single;
+      expect(hub.id, 'server-local');
+      expect(hub.token, 'local-owner-token');
+      expect(hub.remoteEndpoint?.host, 'kitchen.devices.rhythm.lighting');
+    });
+
     test('keeps different Homes separate even when they share a Box', () {
       final localHome = Home.create(
         id: 'local-home',

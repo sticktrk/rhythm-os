@@ -16,6 +16,7 @@ import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
 import '../../services/recent_servers_service.dart';
 import '../../widgets/solar_orbit.dart';
+import 'add_home_flow.dart';
 
 enum _ProvisioningPhase {
   scanning,
@@ -578,15 +579,18 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       return;
     }
 
-    final homeName = await _promptForNewHomeName(defaultName: displayName);
-    if (homeName == null) throw const _HomeNameCancelledException();
+    if (!mounted) throw const _HomeNameCancelledException();
+    final home = await AddHomeFlow.show(context, defaultName: displayName);
+    if (home == null) throw const _HomeNameCancelledException();
 
     final hub = await homeProvider.addServerHubInNewHome(
-      homeName: homeName,
+      homeName: home.name,
       hubName: displayName,
       host: ip,
       port: 54448,
       token: ownerToken,
+      location: home.location,
+      timezone: home.timezone,
     );
     await RecentServersService.instance.record(
       name: hub?.name ?? displayName,
@@ -631,63 +635,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       }
     }
     return null;
-  }
-
-  Future<String?> _promptForNewHomeName({required String defaultName}) async {
-    final controller = TextEditingController(text: defaultName);
-    try {
-      return showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) {
-          return AlertDialog(
-            backgroundColor: CelestialColors.backgroundCard,
-            title: const Text(
-              'Name This Home',
-              style: TextStyle(color: CelestialColors.textPrimary),
-            ),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              textCapitalization: TextCapitalization.words,
-              style: const TextStyle(color: CelestialColors.textPrimary),
-              decoration: InputDecoration(
-                hintText: 'Home name',
-                hintStyle: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
-                ),
-                enabledBorder: UnderlineInputBorder(
-                  borderSide: BorderSide(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.2),
-                  ),
-                ),
-                focusedBorder: const UnderlineInputBorder(
-                  borderSide: BorderSide(color: _teal),
-                ),
-              ),
-              onSubmitted: (value) {
-                final trimmed = value.trim();
-                if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
-              },
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  final trimmed = controller.text.trim();
-                  if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
-                },
-                child: const Text(
-                  'Save',
-                  style: TextStyle(color: _teal),
-                ),
-              ),
-            ],
-          );
-        },
-      );
-    } finally {
-      controller.dispose();
-    }
   }
 
   Future<void> _startOver() async {

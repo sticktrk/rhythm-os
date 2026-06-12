@@ -43,6 +43,7 @@
 			<string>lighting.rhythm.app</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>rhythmapp</string>
 				<string>lighting.rhythm.app</string>
 			</array>
 		</dict>

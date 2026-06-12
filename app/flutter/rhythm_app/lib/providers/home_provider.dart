@@ -7,7 +7,6 @@ import '../data/local_data_source.dart';
 import '../repositories/home_repository.dart';
 import '../services/account_cloud_sync_service.dart';
 import '../services/auth_service.dart';
-import '../services/settings_service.dart';
 import '../services/hue/hue_service_locator.dart';
 
 /// Resolved location with source indicator for debugging.
@@ -480,9 +479,6 @@ class HomeProvider extends ChangeNotifier {
   }
 
   /// Refresh the locally saved server endpoints from the signed-in account.
-  ///
-  /// The server owner token is local-only, so this intentionally updates just
-  /// the connection endpoints and preserves the rest of the local hub record.
   Future<Hub> refreshServerHubEndpoints(Hub serverHub) async {
     if (serverHub.type != HubType.server) return serverHub;
 
@@ -726,6 +722,7 @@ class HomeProvider extends ChangeNotifier {
       );
 
       _loadCurrentHomeHubs();
+      _scheduleAccountCloudSync('server_hub_added');
       notifyListeners();
       return hub;
     } catch (e) {
@@ -804,6 +801,8 @@ class HomeProvider extends ChangeNotifier {
     required String host,
     int port = 54448,
     String? token,
+    HomeLocation? location,
+    String? timezone,
   }) async {
     final userId = currentUserId;
     if (userId == null) {
@@ -817,6 +816,8 @@ class HomeProvider extends ChangeNotifier {
       home = await _repository.createHome(
         name: homeName,
         ownerId: userId,
+        location: location,
+        timezone: timezone,
       );
       _loadHomes();
       _setCurrentHome(home);
@@ -861,6 +862,9 @@ class HomeProvider extends ChangeNotifier {
     try {
       await _repository.updateHub(hub);
       _loadCurrentHomeHubs();
+      if (hub.type == HubType.server) {
+        _scheduleAccountCloudSync('server_hub_updated');
+      }
       notifyListeners();
       return true;
     } catch (e) {
@@ -895,16 +899,20 @@ class HomeProvider extends ChangeNotifier {
 
   /// Mark a hub as connected.
   Future<void> markHubConnected(String hubId) async {
+    final hub = _repository.getHub(hubId);
     await _repository.markHubConnected(hubId);
     _loadCurrentHomeHubs();
+    if (hub?.type == HubType.server) {
+      _scheduleAccountCloudSync('server_hub_connected');
+    }
     notifyListeners();
   }
 
   /// Make one Rhythm Server hub active without deleting other saved servers.
   ///
-  /// Server owner tokens are local-only secrets. Keeping inactive server hub
-  /// records preserves those tokens so switching back to another box does not
-  /// strand the app behind a server-side hashed owner token.
+  /// Keeping inactive server hub records preserves their owner tokens so
+  /// switching back to another box does not strand the app behind a server-side
+  /// hashed owner token.
   Future<Hub?> activateServerHub(Hub selectedHub) async {
     if (selectedHub.type != HubType.server) return null;
 
@@ -927,6 +935,7 @@ class HomeProvider extends ChangeNotifier {
       final activatedHub =
           activatedMatches.isEmpty ? null : activatedMatches.first;
       _loadCurrentHomeHubs();
+      _scheduleAccountCloudSync('server_hub_activated');
       notifyListeners();
       return activatedHub;
     } catch (e) {
@@ -1015,14 +1024,13 @@ class HomeProvider extends ChangeNotifier {
     _loadHomes();
     debugPrint('HomeProvider.onUserSignIn: Loaded ${_homes.length} homes');
 
-    // Create home if none exist
+    // Restore any cloud home that already has a paired server hub. A fresh
+    // user with nothing to restore is intentionally left with no current Home:
+    // a Home is now created when they pair a device (see `addServerHubInNewHome`
+    // / AddHomeFlow, which also captures the location), so we no longer
+    // fabricate an empty "My Home" placeholder here.
     if (_homes.isEmpty && currentUserId != null) {
-      debugPrint(
-          'HomeProvider.onUserSignIn: No homes, creating from onboarding prefs...');
-      final prefs = SettingsService.instance.consumeOnboardingPreferences();
-      await _createHomeFromPreferences(prefs);
-    } else if (_homes.isNotEmpty) {
-      SettingsService.instance.consumeOnboardingPreferences();
+      await _restoreAccountHomeIfAvailable();
     }
 
     debugPrint(
@@ -1031,48 +1039,26 @@ class HomeProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Create a home from onboarding preferences.
-  Future<void> _createHomeFromPreferences(
-      OnboardingPreferencesData? prefs) async {
-    // Location
-    HomeLocation? location;
-    if (prefs?.latitude != null && prefs?.longitude != null) {
-      location = HomeLocation(
-        latitude: prefs!.latitude!,
-        longitude: prefs.longitude!,
-        cityName: prefs.cityName,
+  Future<bool> _restoreAccountHomeIfAvailable() async {
+    try {
+      final snapshots = await loadAccountHomes();
+      final restorableSnapshots =
+          snapshots.where((entry) => entry.hasServerHub).toList();
+      if (restorableSnapshots.isEmpty) return false;
+
+      final snapshot = restorableSnapshots.first;
+      await enterHome(snapshot);
+      debugPrint(
+        'HomeProvider.onUserSignIn: Restored account home '
+        '${snapshot.home.id}',
       );
+      return true;
+    } catch (error) {
+      debugPrint(
+        'HomeProvider.onUserSignIn: Account home restore skipped: $error',
+      );
+      return false;
     }
-
-    // Sleep schedule (use defaults if no prefs)
-    final bedtimeHour = prefs?.bedtimeHour ?? 22;
-    final bedtimeMinute = prefs?.bedtimeMinute ?? 30;
-    final wakeTimeHour = prefs?.wakeTimeHour ?? 6;
-    final wakeTimeMinute = prefs?.wakeTimeMinute ?? 30;
-
-    // Convert to decimal hours for SleepSchedule
-    final bedtime = bedtimeHour + (bedtimeMinute / 60.0);
-    final wakeTime = wakeTimeHour + (wakeTimeMinute / 60.0);
-
-    final sleepSchedule = SleepSchedule(
-      bedtime: bedtime,
-      wakeTime: wakeTime,
-      enabled: true,
-    );
-
-    // Timezone and city name
-    final timezone = prefs?.timezone;
-    final cityName = prefs?.cityName;
-
-    // Create home with collected preferences
-    final home = await createHome(
-      name: cityName != null ? 'Home in $cityName' : 'My Home',
-      location: location,
-      sleepSchedule: sleepSchedule,
-      timezone: timezone,
-    );
-    debugPrint(
-        'HomeProvider._createHomeFromPreferences: Created home: ${home?.id}');
   }
 
   /// Called when user signs out.

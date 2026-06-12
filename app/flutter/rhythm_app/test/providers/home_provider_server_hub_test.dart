@@ -91,6 +91,28 @@ void main() {
       expect(merged.remoteEndpoint?.host, 'rpiz-a.rhythm.lighting');
     });
 
+    test('cloud server hub import uses decrypted cloud owner token', () {
+      final cloud = Hub(
+        id: 'rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Remote Server',
+        endpoint: const HubEndpoint(host: '192.168.5.10', port: 54448),
+        enabled: true,
+        requiresCredentials: false,
+        token: 'cloud-owner-token',
+        createdAt: DateTime.utc(2026, 6, 2),
+        updatedAt: DateTime.utc(2026, 6, 2),
+      );
+
+      final merged = mergeCloudServerHubForLocalStorageForTesting(
+        cloudHub: cloud,
+        existingHubs: const [],
+      );
+
+      expect(merged.token, 'cloud-owner-token');
+    });
+
     test(
         'cloud server hub import is scoped when the id belongs to another Home',
         () {

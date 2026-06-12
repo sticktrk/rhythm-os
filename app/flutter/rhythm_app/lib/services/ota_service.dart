@@ -338,6 +338,52 @@ class OtaCapabilities {
       payloads.contains('archive_bundle') || payloads.contains('rootfs_image');
 }
 
+/// A previously rolled-back server update, as reported by the server's OTA
+/// status/check responses (`last_rollback`). The server records both A/B
+/// image-slot rollbacks and component-bundle rollbacks (binaries restored
+/// after a crash-looping install).
+class OtaLastRollback {
+  /// The release that was rolled back.
+  final String version;
+
+  /// The release the device reverted to, when known.
+  final String? fromVersion;
+
+  /// When the rollback happened (epoch milliseconds), when known.
+  final int? atEpochMs;
+
+  /// `image_slot` or `component_bundle`.
+  final String kind;
+
+  const OtaLastRollback({
+    required this.version,
+    this.fromVersion,
+    this.atEpochMs,
+    required this.kind,
+  });
+
+  static OtaLastRollback? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final json = value.map((key, v) => MapEntry(key.toString(), v));
+    final version = json['version']?.toString().trim();
+    if (version == null || version.isEmpty) return null;
+    final fromVersion = json['from_version']?.toString().trim();
+    return OtaLastRollback(
+      version: version,
+      fromVersion:
+          (fromVersion == null || fromVersion.isEmpty) ? null : fromVersion,
+      atEpochMs: _tryParseInt(json['at_epoch_ms']),
+      kind: json['kind']?.toString() ?? 'unknown',
+    );
+  }
+}
+
+int? _tryParseInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
+}
+
 class _OtaStatusPayload {
   final String state;
   final String currentVersion;
@@ -356,6 +402,7 @@ class _OtaStatusPayload {
   final List<OtaBundleEntry>? imageAssets;
   final List<OtaBundleEntry>? installedTargets;
   final bool? checksumVerified;
+  final OtaLastRollback? lastRollback;
 
   const _OtaStatusPayload({
     required this.state,
@@ -375,6 +422,7 @@ class _OtaStatusPayload {
     required this.imageAssets,
     required this.installedTargets,
     required this.checksumVerified,
+    required this.lastRollback,
   });
 
   factory _OtaStatusPayload.fromJson(Map<String, dynamic> json) {
@@ -425,6 +473,7 @@ class _OtaStatusPayload {
       checksumVerified: json.containsKey('checksum_verified')
           ? _tryParseBool(json['checksum_verified'])
           : null,
+      lastRollback: OtaLastRollback.tryParse(json['last_rollback']),
     );
   }
 }
@@ -470,6 +519,7 @@ class OtaService extends ChangeNotifier {
   List<OtaBundleEntry> _imageAssets = const [];
   List<OtaBundleEntry> _installedTargets = const [];
   bool? _checksumVerified;
+  OtaLastRollback? _lastRollback;
   bool _isLoadingSupport = false;
 
   StreamSubscription<sdk.RhythmOtaProgress>? _updateSub;
@@ -496,6 +546,22 @@ class OtaService extends ChangeNotifier {
   List<OtaBundleEntry> get installedTargets =>
       List<OtaBundleEntry>.unmodifiable(_installedTargets);
   bool? get checksumVerified => _checksumVerified;
+
+  /// The most recent update this device rolled back after a failed install,
+  /// as reported by the server. Cleared server-side once a later update
+  /// verifies.
+  OtaLastRollback? get lastRollback => _lastRollback;
+
+  /// True when the release currently offered for install is one this device
+  /// already rolled back — the user is about to retry a previously failed
+  /// update and deserves a heads-up.
+  bool get availableUpdateWasRolledBack {
+    final rollback = _lastRollback;
+    final latest = _latestVersion;
+    if (rollback == null || latest == null) return false;
+    return _normalizeVersion(rollback.version) == _normalizeVersion(latest);
+  }
+
   bool get isLoadingSupport => _isLoadingSupport;
   bool get showUpdateUi =>
       _strategy == _OtaStrategy.legacyUpload ||
@@ -922,6 +988,9 @@ class OtaService extends ChangeNotifier {
     if (status.checksumVerified != null) {
       _checksumVerified = status.checksumVerified;
     }
+    // The server omits `last_rollback` when there is none, so a missing value
+    // genuinely means "no rollback on record" — assign rather than merge.
+    _lastRollback = status.lastRollback;
     _availableRelease = status.updateAvailable
         ? _buildSelfPullRelease(_latestVersion ?? _currentVersion)
         : null;
@@ -1051,6 +1120,9 @@ class OtaService extends ChangeNotifier {
     }
     if (json.containsKey('checksum_verified')) {
       _checksumVerified = _tryParseBool(json['checksum_verified']);
+    }
+    if (json.containsKey('last_rollback')) {
+      _lastRollback = OtaLastRollback.tryParse(json['last_rollback']);
     }
   }
 

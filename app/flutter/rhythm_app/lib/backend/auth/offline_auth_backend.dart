@@ -9,6 +9,7 @@ import 'auth_user.dart';
 class OfflineAuthBackend implements AuthBackend {
   AuthUser? _currentUser;
   final _authController = StreamController<AuthUser?>.broadcast();
+  final _authEventController = StreamController<AuthEvent>.broadcast();
 
   @override
   Future<void> initialize() async {
@@ -25,6 +26,7 @@ class OfflineAuthBackend implements AuthBackend {
   @override
   void dispose() {
     _authController.close();
+    _authEventController.close();
   }
 
   // This backend is always ready after construction.
@@ -44,6 +46,9 @@ class OfflineAuthBackend implements AuthBackend {
 
   @override
   Stream<AuthUser?> get authStateChanges => _authController.stream;
+
+  @override
+  Stream<AuthEvent> get authEvents => _authEventController.stream;
 
   @override
   Future<AuthUser?> signInAnonymously() async {
@@ -87,6 +92,21 @@ class OfflineAuthBackend implements AuthBackend {
   }
 
   @override
+  Future<void> sendPasswordResetEmail(String email) async {
+    throw UnsupportedError('Password reset requires an online connection');
+  }
+
+  @override
+  Future<AuthUser?> verifyPasswordRecoveryTokenHash(String tokenHash) async {
+    throw UnsupportedError('Password recovery requires an online connection');
+  }
+
+  @override
+  Future<AuthUser?> updatePassword(String password) async {
+    throw UnsupportedError('Password update requires an online connection');
+  }
+
+  @override
   Future<void> signOut() async {
     // Keep the offline user - just reset to anonymous state
     _currentUser = const AuthUser(
@@ -96,6 +116,7 @@ class OfflineAuthBackend implements AuthBackend {
       isAnonymous: true,
     );
     _authController.add(_currentUser);
+    _authEventController.add(AuthEvent.signedOut);
   }
 
   @override

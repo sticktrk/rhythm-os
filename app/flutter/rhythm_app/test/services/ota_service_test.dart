@@ -5,6 +5,63 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/ota_service.dart';
 
 void main() {
+  group('OtaLastRollback.tryParse', () {
+    test('parses a full server payload', () {
+      final rollback = OtaLastRollback.tryParse(<String, Object?>{
+        'version': '0.4.264-beta',
+        'from_version': '0.4.263-beta',
+        'at_epoch_ms': 1770000123456,
+        'kind': 'image_slot',
+      });
+
+      expect(rollback, isNotNull);
+      expect(rollback!.version, '0.4.264-beta');
+      expect(rollback.fromVersion, '0.4.263-beta');
+      expect(rollback.atEpochMs, 1770000123456);
+      expect(rollback.kind, 'image_slot');
+    });
+
+    test('tolerates missing optional fields', () {
+      final rollback = OtaLastRollback.tryParse(<String, Object?>{
+        'version': '0.4.264-beta',
+        'kind': 'component_bundle',
+      });
+
+      expect(rollback, isNotNull);
+      expect(rollback!.fromVersion, isNull);
+      expect(rollback.atEpochMs, isNull);
+    });
+
+    test('rejects null, non-map, and version-less payloads', () {
+      expect(OtaLastRollback.tryParse(null), isNull);
+      expect(OtaLastRollback.tryParse('rolled back'), isNull);
+      expect(OtaLastRollback.tryParse(<String, Object?>{'kind': 'x'}), isNull);
+      expect(
+        OtaLastRollback.tryParse(<String, Object?>{'version': '  '}),
+        isNull,
+      );
+    });
+
+    test('parses epoch sent as string or double', () {
+      expect(
+        OtaLastRollback.tryParse(<String, Object?>{
+          'version': '1.0.0',
+          'at_epoch_ms': '1770000123456',
+          'kind': 'component_bundle',
+        })?.atEpochMs,
+        1770000123456,
+      );
+      expect(
+        OtaLastRollback.tryParse(<String, Object?>{
+          'version': '1.0.0',
+          'at_epoch_ms': 1770000123456.0,
+          'kind': 'component_bundle',
+        })?.atEpochMs,
+        1770000123456,
+      );
+    });
+  });
+
   group('OtaService self-pull updates', () {
     _FakeOtaServer? server;
     OtaService? service;
@@ -44,6 +101,102 @@ void main() {
 
       expect(service!.currentVersion, '1.1.0');
       expect(service!.statusMessage, 'Updated to v1.1.0');
+    });
+
+    test('reports last rollback and flags retry of a rolled-back version',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        lastRollback: <String, Object?>{
+          'version': '1.1.0',
+          'from_version': '1.0.0',
+          'at_epoch_ms': 1770000123456,
+          'kind': 'component_bundle',
+        },
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.state, OtaState.available);
+      final rollback = service!.lastRollback;
+      expect(rollback, isNotNull);
+      expect(rollback!.version, '1.1.0');
+      expect(rollback.fromVersion, '1.0.0');
+      expect(rollback.atEpochMs, 1770000123456);
+      expect(rollback.kind, 'component_bundle');
+      expect(
+        service!.availableUpdateWasRolledBack,
+        isTrue,
+        reason: 'the offered release is the one that was rolled back',
+      );
+    });
+
+    test('does not flag rollback when the offered version differs', () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.2.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        lastRollback: <String, Object?>{
+          'version': '1.1.0',
+          'kind': 'image_slot',
+        },
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      expect(service!.lastRollback, isNotNull);
+      expect(
+        service!.availableUpdateWasRolledBack,
+        isFalse,
+        reason: 'a newer release than the rolled-back one is on offer',
+      );
+    });
+
+    test('clears rollback state when the server stops reporting it', () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        lastRollback: <String, Object?>{
+          'version': '1.1.0',
+          'kind': 'component_bundle',
+        },
+      );
+      service = OtaService();
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+      expect(service!.lastRollback, isNotNull);
+
+      // After an update completes, the server clears the rollback record;
+      // post-update status payloads omit `last_rollback` entirely.
+      server!.lastRollbackCleared = true;
+      await service!.startUpdate(
+        InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+      await _waitFor(
+        () => service!.state == OtaState.complete,
+        description: 'self-pull update to complete after restart',
+      );
+
+      expect(
+        service!.lastRollback,
+        isNull,
+        reason: 'a status payload without last_rollback means none on record',
+      );
     });
 
     test('falls back to version mismatch when update_available is false',
@@ -449,9 +602,14 @@ class _FakeOtaServer {
   final List<String> capabilityPayloads;
   final bool? supportsRootfsImage;
   final bool statusHasPreviousCheck;
+  final Map<String, Object?>? lastRollback;
 
   bool _updateStarted = false;
   int _statusCallsAfterUpdate = 0;
+
+  /// Simulates the server clearing its rollback record (e.g. after a later
+  /// update verifies): subsequent payloads omit `last_rollback` entirely.
+  bool lastRollbackCleared = false;
 
   _FakeOtaServer._({
     required HttpServer server,
@@ -474,6 +632,7 @@ class _FakeOtaServer {
     required this.capabilityPayloads,
     required this.supportsRootfsImage,
     required this.statusHasPreviousCheck,
+    required this.lastRollback,
   }) : _server = server;
 
   int get port => _server.port;
@@ -498,6 +657,7 @@ class _FakeOtaServer {
     List<String>? capabilityPayloads,
     bool? supportsRootfsImage,
     bool statusHasPreviousCheck = true,
+    Map<String, Object?>? lastRollback,
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeOtaServer._(
@@ -522,6 +682,7 @@ class _FakeOtaServer {
           capabilityPayloads ?? _defaultCapabilityPayloadsForScope(otaScope),
       supportsRootfsImage: supportsRootfsImage,
       statusHasPreviousCheck: statusHasPreviousCheck,
+      lastRollback: lastRollback,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -698,6 +859,8 @@ class _FakeOtaServer {
       if (installTargets.isNotEmpty) 'install_targets': installTargets,
       if (imageAssets.isNotEmpty) 'image_assets': imageAssets,
       if (checksumVerified != null) 'checksum_verified': checksumVerified,
+      if (lastRollback != null && !lastRollbackCleared)
+        'last_rollback': lastRollback,
     };
   }
 

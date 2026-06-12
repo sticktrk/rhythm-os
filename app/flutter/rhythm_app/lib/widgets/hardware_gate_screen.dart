@@ -10,8 +10,8 @@ import '../services/virtual_experience_service.dart';
 import 'connect_hub_screen.dart';
 import 'solar_orbit.dart';
 
-/// Three-step "do you have hardware yet?" funnel that gates onboarding for
-/// users who land in the app without a LightBox or RhythmOS server.
+/// "Do you have hardware yet?" funnel for users who land in the app without a
+/// LightBox or RhythmOS server.
 ///
 /// Step 1 — `_GateStep.gate`     The Yes/No question.
 /// Step 2 — `_GateStep.upsell`   Sales-style explainer for users without one.
@@ -22,9 +22,16 @@ import 'solar_orbit.dart';
 class HardwareOnboardingGate extends StatefulWidget {
   final ConnectHubMode mode;
 
+  /// Optional account (Sign in / Log out) control, anchored into the gate's
+  /// own header so it sits inside this screen's composition instead of
+  /// floating over it from the app shell. Shown only on the gate/upsell
+  /// steps — the connect step has its own header and sign-in affordance.
+  final Widget? accountControl;
+
   const HardwareOnboardingGate({
     super.key,
     this.mode = ConnectHubMode.rhythmServer,
+    this.accountControl,
   });
 
   @override
@@ -114,6 +121,20 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
             left: 8,
             child: _BackChevron(onTap: _backToGate),
           ),
+        // Account control lives inside the gate's own SafeArea header so it
+        // can never overlap a sub-screen's title. Hidden on the connect step,
+        // which carries its own header and "Sign in for saved Homes" entry.
+        if (widget.accountControl != null && _step != _GateStep.connect)
+          Positioned(
+            top: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4, right: 10),
+                child: widget.accountControl,
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -149,7 +170,7 @@ class _BackChevron extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Step 1 — Hardware gate question
+// Hardware gate question
 // ═══════════════════════════════════════════════════════════════════════════
 
 class _HardwareGateScreen extends StatefulWidget {
@@ -229,7 +250,7 @@ class _HardwareGateScreenState extends State<_HardwareGateScreen>
                               controller: _reveal,
                               start: 0.0,
                               child: const _Eyebrow(
-                                text: 'STEP 01  ·  HARDWARE',
+                                text: 'GET STARTED',
                               ),
                             ),
                             const Spacer(flex: 4),

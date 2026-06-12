@@ -17,6 +17,9 @@ import '../data/local_data_source.dart';
 /// device-local settings.
 class SettingsService {
   static const String roomPageLayoutScopePrefix = 'room_page_layout::';
+  static const String _handledPasswordRecoveryLinksKey =
+      'handled_password_recovery_links_v1';
+  static const int _maxHandledPasswordRecoveryLinks = 20;
 
   static SettingsService? _instance;
   static SettingsService get instance => _instance ??= SettingsService._();
@@ -144,6 +147,34 @@ class SettingsService {
   Future<void> setNotificationsEnabled(bool value) async {
     _settings = _settings.copyWith(notificationsEnabled: value);
     await _save();
+  }
+
+  Future<bool> hasHandledPasswordRecoveryLink(String fingerprint) async {
+    if (fingerprint.isEmpty) return false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final handled =
+          prefs.getStringList(_handledPasswordRecoveryLinksKey) ?? const [];
+      return handled.contains(fingerprint);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> markPasswordRecoveryLinkHandled(String fingerprint) async {
+    if (fingerprint.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final handled = List<String>.from(
+        prefs.getStringList(_handledPasswordRecoveryLinksKey) ??
+            const <String>[],
+      )..remove(fingerprint);
+      handled.add(fingerprint);
+      final trimmed = handled.length > _maxHandledPasswordRecoveryLinks
+          ? handled.sublist(handled.length - _maxHandledPasswordRecoveryLinks)
+          : handled;
+      await prefs.setStringList(_handledPasswordRecoveryLinksKey, trimmed);
+    } catch (_) {}
   }
 
   /// Whether Hue SSE is enabled.
@@ -505,50 +536,6 @@ class SettingsService {
       await prefs.clear();
     } catch (_) {}
     _settings = AppSettings.defaults();
-    _onboardingPreferences = null;
     _initialized = false;
   }
-
-  // ============================================================
-  // Temporary Onboarding Preferences Storage
-  // ============================================================
-
-  /// Temporary storage for onboarding preferences.
-  /// These are passed from onboarding to HomeProvider.onUserSignIn().
-  OnboardingPreferencesData? _onboardingPreferences;
-
-  /// Set onboarding preferences (called from auth_provider).
-  void setOnboardingPreferences(OnboardingPreferencesData prefs) {
-    _onboardingPreferences = prefs;
-  }
-
-  /// Get and clear onboarding preferences (called from home_provider).
-  OnboardingPreferencesData? consumeOnboardingPreferences() {
-    final prefs = _onboardingPreferences;
-    _onboardingPreferences = null;
-    return prefs;
-  }
-}
-
-/// Temporary data structure for passing onboarding preferences.
-class OnboardingPreferencesData {
-  final double? latitude;
-  final double? longitude;
-  final String? cityName;
-  final String? timezone;
-  final int bedtimeHour;
-  final int bedtimeMinute;
-  final int wakeTimeHour;
-  final int wakeTimeMinute;
-
-  const OnboardingPreferencesData({
-    this.latitude,
-    this.longitude,
-    this.cityName,
-    this.timezone,
-    this.bedtimeHour = 22,
-    this.bedtimeMinute = 30,
-    this.wakeTimeHour = 6,
-    this.wakeTimeMinute = 30,
-  });
 }

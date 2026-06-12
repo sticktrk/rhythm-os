@@ -37,6 +37,7 @@ dependencies:
 
   # Supabase (auth, database, realtime)
   supabase_flutter: ^2.12.0
+  app_links: ^6.4.1
 
   # Google Sign In (native flow)
   google_sign_in: ^7.2.0
@@ -44,6 +45,7 @@ dependencies:
   # Apple Sign In (native flow)
   sign_in_with_apple: ^6.0.0
   crypto: ^3.0.0  # For Apple Sign-In nonce hashing
+  cryptography: ^2.7.0
 
   # Location
   geolocator: ^14.0.2

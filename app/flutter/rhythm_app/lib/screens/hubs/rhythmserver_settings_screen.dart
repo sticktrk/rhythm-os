@@ -109,7 +109,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   final OtaService _otaService = OtaService();
 
   bool _isOnline = false;
-  bool _isResetting = false;
+  bool _isRemovingFromHome = false;
   bool _isRebooting = false;
   bool _isFactoryResetting = false;
   bool _isRefreshing = false;
@@ -271,17 +271,17 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
   }
 
-  Future<void> _handleReset() async {
+  Future<void> _handleRemoveFromHome() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
         title: Text(
-          'Disconnect $_headerTitle',
+          'Remove $_headerTitle from Home',
           style: const TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          'This will disconnect and remove the $_headerTitle from the app. You can pair it again from Settings.',
+          'This removes the $_headerTitle from this Home and account restore. It does not factory reset the device. You can pair it again from Settings.',
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -295,7 +295,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text(
-              'Disconnect',
+              'Remove from Home',
               style: TextStyle(color: Colors.red),
             ),
           ),
@@ -306,7 +306,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (confirmed != true || !mounted) return;
 
     AnalyticsService().logRhythmServerReset(wasOnline: _isOnline);
-    setState(() => _isResetting = true);
+    setState(() => _isRemovingFromHome = true);
 
     // Clear all rooms first (server was source of truth)
     if (mounted) {
@@ -402,7 +402,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         _buildRebootButton(),
                         const SizedBox(height: 12),
                       ],
-                      _buildResetButton(),
+                      _buildRemoveFromHomeButton(),
                       const SizedBox(height: 12),
                       _buildFactoryResetButton(),
                       const SizedBox(height: 40),
@@ -851,8 +851,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   Future<void> _handleChangeWifi() async {
     if (_isChangingWifi) return;
 
+    FocusManager.instance.primaryFocus?.unfocus();
     final credentials = await _showWifiCredentialsDialog();
-    if (credentials == null || !mounted) return;
+    if (!mounted) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (credentials == null) {
+      if (_isChangingWifi) setState(() => _isChangingWifi = false);
+      return;
+    }
 
     setState(() => _isChangingWifi = true);
     try {
@@ -869,6 +875,15 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       } else {
         _showSnackBar(result.error ?? 'Could not change Wi-Fi.',
             backgroundColor: Colors.red.shade400);
+      }
+    } catch (error, stackTrace) {
+      debugPrint('RhythmServerSettings: Wi-Fi change failed: $error');
+      debugPrint('$stackTrace');
+      if (mounted) {
+        _showSnackBar(
+          'Could not change Wi-Fi.',
+          backgroundColor: Colors.red.shade400,
+        );
       }
     } finally {
       if (mounted) {
@@ -915,7 +930,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     textInputAction: TextInputAction.done,
                     onSubmitted: (_) {
                       if (!canSubmit) return;
-                      Navigator.of(ctx).pop((
+                      Navigator.of(
+                        ctx,
+                        rootNavigator: true,
+                      ).pop((
                         ssid: ssidController.text.trim(),
                         password: passwordController.text,
                       ));
@@ -930,7 +948,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
+                  onPressed: () => Navigator.of(
+                    ctx,
+                    rootNavigator: true,
+                  ).pop(),
                   child: Text(
                     'Cancel',
                     style: TextStyle(color: CelestialColors.textSecondary),
@@ -938,7 +959,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
                 TextButton(
                   onPressed: canSubmit
-                      ? () => Navigator.of(ctx).pop((
+                      ? () => Navigator.of(
+                            ctx,
+                            rootNavigator: true,
+                          ).pop((
                             ssid: ssidController.text.trim(),
                             password: passwordController.text,
                           ))
@@ -1028,6 +1052,34 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                   ],
                 ),
               ),
+
+              if (_otaService.lastRollback != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.history_rounded,
+                        color:
+                            CelestialColors.textSecondary.withValues(alpha: 0.5),
+                        size: 14,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Update to ${_formatOtaVersion(_otaService.lastRollback!.version)} '
+                          'was rolled back after a failed install.',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.6),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
 
               if (showAutoUpdateToggle) _buildAutoUpdateRow(autoUpdateEnabled),
 
@@ -1294,6 +1346,31 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     fontSize: 13,
                   ),
                 ),
+                if (_otaService.availableUpdateWasRolledBack) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(
+                        Icons.history_rounded,
+                        color: Colors.amber,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'This version was rolled back after a failed '
+                          'install on this device. Installing it again may '
+                          'fail the same way.',
+                          style: TextStyle(
+                            color: Colors.amber.withValues(alpha: 0.9),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 10),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1809,11 +1886,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Widget _buildResetButton() {
+  Widget _buildRemoveFromHomeButton() {
     final buttonColor = Colors.red.shade400;
 
     return GestureDetector(
-      onTap: _isResetting ? null : _handleReset,
+      onTap: _isRemovingFromHome ? null : _handleRemoveFromHome,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 16),
         decoration: BoxDecoration(
@@ -1826,7 +1903,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (_isResetting)
+            if (_isRemovingFromHome)
               SizedBox(
                 width: 20,
                 height: 20,
@@ -1843,7 +1920,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ),
             const SizedBox(width: 10),
             Text(
-              _isResetting ? 'Disconnecting...' : 'Disconnect $_headerTitle',
+              _isRemovingFromHome ? 'Removing...' : 'Remove from Home',
               style: TextStyle(
                 color: buttonColor,
                 fontSize: 15,
@@ -2124,7 +2201,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Widget _buildFactoryResetButton() {
-    final disabled = _isFactoryResetting || _isResetting || _isRebooting;
+    final disabled = _isFactoryResetting || _isRemovingFromHome || _isRebooting;
     final color = Colors.red.shade400;
 
     return GestureDetector(

@@ -29,6 +29,7 @@ import '../config/feature_flags.dart';
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/settings/dialogs/sign_in_modal.dart';
+import '../screens/hubs/add_home_flow.dart';
 import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../services/account_cloud_sync_service.dart';
@@ -233,9 +234,16 @@ bool _serverHubsRepresentSameBox(Hub left, Hub right) {
   if (_sameHubEndpoint(left.endpoint, right.endpoint)) return true;
   final leftRemote = left.remoteEndpoint;
   final rightRemote = right.remoteEndpoint;
-  return leftRemote != null &&
+  if (leftRemote != null &&
       rightRemote != null &&
-      _sameHubEndpoint(leftRemote, rightRemote);
+      _sameHubEndpoint(leftRemote, rightRemote)) {
+    return true;
+  }
+
+  return left.type == HubType.server &&
+      right.type == HubType.server &&
+      _normalizedHomeName(left.name) == _normalizedHomeName(right.name) &&
+      (leftRemote != null || rightRemote != null);
 }
 
 bool _sameHubEndpoint(HubEndpoint left, HubEndpoint right) {
@@ -1349,79 +1357,19 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     final name = _displayNameForDiscoveredServer(discovered);
-    final homeName = await _promptForNewHomeName(defaultName: name);
-    if (homeName == null) throw const _HomeNameCancelledException();
+    if (!mounted) throw const _HomeNameCancelledException();
+    final home = await AddHomeFlow.show(context, defaultName: name);
+    if (home == null) throw const _HomeNameCancelledException();
 
     return homeProvider.addServerHubInNewHome(
-      homeName: homeName,
+      homeName: home.name,
       hubName: name,
       host: discovered.address,
       port: discovered.port,
       token: authToken,
+      location: home.location,
+      timezone: home.timezone,
     );
-  }
-
-  Future<String?> _promptForNewHomeName({required String defaultName}) async {
-    final controller = TextEditingController(text: defaultName);
-    try {
-      return showDialog<String>(
-        context: context,
-        builder: (ctx) {
-          return AlertDialog(
-            backgroundColor: CelestialColors.backgroundCard,
-            title: const Text(
-              'Name This Home',
-              style: TextStyle(color: CelestialColors.textPrimary),
-            ),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              textCapitalization: TextCapitalization.words,
-              style: const TextStyle(color: CelestialColors.textPrimary),
-              decoration: InputDecoration(
-                hintText: 'Home name',
-                hintStyle: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.55),
-                ),
-                enabledBorder: UnderlineInputBorder(
-                  borderSide: BorderSide(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.2),
-                  ),
-                ),
-                focusedBorder: const UnderlineInputBorder(
-                  borderSide: BorderSide(color: _teal),
-                ),
-              ),
-              onSubmitted: (value) {
-                final trimmed = value.trim();
-                if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
-              },
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: Text(
-                  'Cancel',
-                  style: TextStyle(color: CelestialColors.textSecondary),
-                ),
-              ),
-              TextButton(
-                onPressed: () {
-                  final trimmed = controller.text.trim();
-                  if (trimmed.isNotEmpty) Navigator.of(ctx).pop(trimmed);
-                },
-                child: const Text(
-                  'Save',
-                  style: TextStyle(color: _teal),
-                ),
-              ),
-            ],
-          );
-        },
-      );
-    } finally {
-      controller.dispose();
-    }
   }
 
   Future<void> _enterHome(AccountHomeServerHubs snapshot) async {
@@ -2165,7 +2113,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   ) {
     final localIds = homeProvider.homes.map((home) => home.id).toSet();
     return _accountHomes
-        .where((snapshot) => !localIds.contains(snapshot.home.id))
+        .where(
+          (snapshot) =>
+              snapshot.hasServerHub && !localIds.contains(snapshot.home.id),
+        )
         .toList(growable: false);
   }
 

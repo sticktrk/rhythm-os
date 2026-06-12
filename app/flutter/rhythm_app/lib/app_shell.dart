@@ -7,19 +7,27 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmConnectionState, RhythmMode;
 import 'models/config_model.dart';
+import 'backend/auth/auth_user.dart';
 import 'providers/room_provider.dart';
 import 'providers/home_provider.dart';
+import 'providers/hub_connection_provider.dart';
 import 'providers/room_page_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'screens/all_rooms_screen.dart';
 import 'screens/server_disconnected_screen.dart';
 import 'screens/settings/automations_screen.dart';
+import 'screens/settings/dialogs/sign_in_modal.dart';
 import 'screens/settings/light_screen.dart';
 import 'screens/settings/sections/lights_devices_section.dart';
 import 'screens/settings/settings_screen.dart';
 import 'screens/sun_position_screen.dart';
+import 'config/feature_flags.dart';
+import 'config/platform_capabilities.dart';
+import 'main.dart';
+import 'services/account_session_service.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
+import 'services/auth_service.dart';
 import 'services/hue/hue_service_locator.dart';
 import 'services/virtual_experience_service.dart';
 import 'utils/room_visibility.dart';
@@ -71,6 +79,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Timer? _pendingModeActionClearTimer;
   RoomProvider? _pendingModeActionRoomProvider;
   VoidCallback? _pendingModeActionRoomListener;
+  bool _accountActionInProgress = false;
 
   /// Sticky flag governing the [ServerDisconnectedScreen]. Set true only when
   /// we've been unable to reach the server *and* have never completed a hello
@@ -241,6 +250,70 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         _serverLostConnection = false;
       });
       _serverRemovalCleanupPending = false;
+    });
+  }
+
+  void _showPreHomeSignIn() {
+    SignInModal.show(context);
+  }
+
+  Future<void> _logOutFromPreHome() async {
+    if (_accountActionInProgress) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text('Log out?'),
+        content: const Text(
+          'This clears local app state on this device. You can sign back in later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text(
+              'Log Out',
+              style: TextStyle(color: Color(0xFFFFC857)),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _accountActionInProgress = true);
+    try {
+      await AccountSessionService.instance.logOutAndReset(
+        serverSyncProvider: context.read<ServerSyncProvider>(),
+        homeProvider: context.read<HomeProvider>(),
+        hubProvider: context.read<HubConnectionProvider>(),
+        roomProvider: context.read<RoomProvider>(),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Pre-home Log Out: Failed: $error');
+      debugPrint('$stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text('Could not log out: $error')),
+        );
+      }
+      return;
+    } finally {
+      if (mounted) {
+        setState(() => _accountActionInProgress = false);
+      }
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true)
+        .popUntil((route) => route.isFirst);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      AuthGate.resetToOnboarding();
     });
   }
 
@@ -441,6 +514,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           (s) => s.hasHomeEntryRefreshGate,
         );
     final hideChrome = showingHardwareGate || enteringHome;
+    final hasCurrentHome = context.select<HomeProvider, bool>(
+      (homeProvider) => homeProvider.currentHome != null,
+    );
+    // The hardware gate renders its own account control inside its header
+    // (see `_buildNoRoomsLayout`), so exclude that case here to avoid both a
+    // duplicate and the floating overlay clashing with sub-screen titles.
+    final accountControlCandidate = !showingHardwareGate &&
+        (hideChrome || (!hasCurrentHome && !hasServerHub));
 
     // `hasBeenSynced` is the sticky flag (true once a hello has completed,
     // false only on full hub unpair). Reading the non-sticky `synced` here
@@ -478,6 +559,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         listenable: VirtualExperienceService.instance,
         builder: (context, _) {
           final isVirtual = VirtualExperienceService.instance.isActive;
+          final showPreHomeAccountControl =
+              !isVirtual && accountControlCandidate;
           return Scaffold(
             backgroundColor: CelestialColors.backgroundDark,
             body: Stack(
@@ -512,6 +595,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     bottom: 14,
                     child: _FloatingSunButton(
                       onTap: () => SunPositionScreen.show(context),
+                    ),
+                  ),
+                if (showPreHomeAccountControl)
+                  Positioned(
+                    top: MediaQuery.of(context).padding.top + 8,
+                    right: 18,
+                    child: _PreHomeAccountButton(
+                      isBusy: _accountActionInProgress,
+                      onSignIn: _showPreHomeSignIn,
+                      onLogOut: _logOutFromPreHome,
                     ),
                   ),
               ],
@@ -782,7 +875,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Widget _buildNoRoomsLayout(ConnectHubMode mode) {
     return SafeArea(
       bottom: false,
-      child: HardwareOnboardingGate(mode: mode),
+      child: HardwareOnboardingGate(
+        mode: mode,
+        // Anchored into the gate's own header rather than floated from the
+        // shell, so it never overlaps a sub-screen's title.
+        accountControl: _PreHomeAccountButton(
+          isBusy: _accountActionInProgress,
+          onSignIn: _showPreHomeSignIn,
+          onLogOut: _logOutFromPreHome,
+        ),
+      ),
     );
   }
 }
@@ -804,6 +906,173 @@ class _TabNavigator extends StatelessWidget {
       key: navigatorKey,
       onGenerateRoute: (settings) =>
           MaterialPageRoute(builder: builder, settings: settings),
+    );
+  }
+}
+
+class _PreHomeAccountButton extends StatelessWidget {
+  final bool isBusy;
+  final VoidCallback onSignIn;
+  final VoidCallback onLogOut;
+
+  const _PreHomeAccountButton({
+    required this.isBusy,
+    required this.onSignIn,
+    required this.onLogOut,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final caps = context.read<PlatformCapabilities>();
+    if (!caps.hasAccounts || !FeatureFlags.auxSignIn) {
+      return const SizedBox.shrink();
+    }
+
+    return StreamBuilder<AuthUser?>(
+      stream: AuthService().authStateChanges,
+      initialData: AuthService().currentUser,
+      builder: (context, snapshot) {
+        final user = snapshot.data;
+        final signedIn = user != null && !user.isAnonymous;
+        final label = signedIn ? 'Log out' : 'Sign in';
+        // Amber for the signed-in "Log out", celestial blue for "Sign in" —
+        // matching the warm/cool accent split used across the gate.
+        final accent =
+            signedIn ? const Color(0xFFFFC857) : CelestialColors.accentBlue;
+        final onTap = isBusy ? null : (signedIn ? onLogOut : onSignIn);
+
+        if (!signedIn) {
+          const foreground = Color(0xFF06131F);
+          return Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              boxShadow: [
+                BoxShadow(
+                  color: accent.withValues(alpha: isBusy ? 0.14 : 0.32),
+                  blurRadius: 18,
+                  spreadRadius: -2,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Material(
+              color: accent.withValues(alpha: isBusy ? 0.58 : 1.0),
+              borderRadius: BorderRadius.circular(999),
+              child: InkWell(
+                onTap: onTap,
+                borderRadius: BorderRadius.circular(999),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isBusy)
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.8,
+                            valueColor:
+                                AlwaysStoppedAnimation<Color>(foreground),
+                          ),
+                        )
+                      else
+                        const Icon(
+                          Icons.login_rounded,
+                          size: 16,
+                          color: foreground,
+                        ),
+                      const SizedBox(width: 8),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          color: foreground.withValues(
+                            alpha: isBusy ? 0.64 : 0.96,
+                          ),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+
+        // A quiet ghost action, not a floating chip: a small glowing dot +
+        // label + trailing glyph, echoing the secondary-link language already
+        // used on this screen (`_VirtualExperienceLink`, `_AlreadyHaveOneLink`)
+        // so it reads as part of the celestial composition rather than a
+        // UI panel pasted on top of it.
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isBusy)
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.6,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          accent.withValues(alpha: 0.7),
+                        ),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: accent,
+                        boxShadow: [
+                          BoxShadow(
+                            color: accent.withValues(alpha: 0.55),
+                            blurRadius: 6,
+                            spreadRadius: 0.5,
+                          ),
+                        ],
+                      ),
+                    ),
+                  const SizedBox(width: 9),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary.withValues(
+                        alpha: isBusy ? 0.5 : 0.9,
+                      ),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Icon(
+                    signedIn
+                        ? Icons.logout_rounded
+                        : Icons.arrow_forward_rounded,
+                    size: 14,
+                    color: CelestialColors.textPrimary.withValues(
+                      alpha: isBusy ? 0.4 : 0.6,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

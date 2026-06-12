@@ -1,23 +1,12 @@
 import 'package:flutter/foundation.dart';
 import '../../config/feature_flags.dart';
 
-/// Simple location data for storing coordinates.
-class LocationData {
-  final double latitude;
-  final double longitude;
-
-  const LocationData(this.latitude, this.longitude);
-}
-
 /// User preferences collected during onboarding.
 class OnboardingPreferences {
   final int bedtimeHour;
   final int bedtimeMinute;
   final int wakeTimeHour;
   final int wakeTimeMinute;
-  final LocationData? location;
-  final String? locationName;
-  final String? timezone;
   final bool notificationsEnabled;
 
   const OnboardingPreferences({
@@ -25,9 +14,6 @@ class OnboardingPreferences {
     this.bedtimeMinute = 30,
     this.wakeTimeHour = 6,
     this.wakeTimeMinute = 30,
-    this.location,
-    this.locationName,
-    this.timezone,
     this.notificationsEnabled = false,
   });
 
@@ -36,9 +22,6 @@ class OnboardingPreferences {
     int? bedtimeMinute,
     int? wakeTimeHour,
     int? wakeTimeMinute,
-    LocationData? location,
-    String? locationName,
-    String? timezone,
     bool? notificationsEnabled,
   }) {
     return OnboardingPreferences(
@@ -46,9 +29,6 @@ class OnboardingPreferences {
       bedtimeMinute: bedtimeMinute ?? this.bedtimeMinute,
       wakeTimeHour: wakeTimeHour ?? this.wakeTimeHour,
       wakeTimeMinute: wakeTimeMinute ?? this.wakeTimeMinute,
-      location: location ?? this.location,
-      locationName: locationName ?? this.locationName,
-      timezone: timezone ?? this.timezone,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
     );
   }
@@ -65,8 +45,9 @@ class OnboardingProvider extends ChangeNotifier {
   bool get isSignInMode => _isSignInMode;
 
   /// Total number of screens in the onboarding flow.
-  /// 2 pages when sign-in disabled (Welcome, Location), 3 when enabled (+ Account).
-  int get totalPages => FeatureFlags.onboardingSignIn ? 3 : 2;
+  /// 1 page when sign-in disabled (Welcome), 2 when enabled (+ Account).
+  /// Location is collected later, during Home creation.
+  int get totalPages => FeatureFlags.onboardingSignIn ? 2 : 1;
 
   /// Navigate to next page.
   void nextPage() {
@@ -97,7 +78,7 @@ class OnboardingProvider extends ChangeNotifier {
   void enableSignInMode() {
     if (!FeatureFlags.onboardingSignIn) return;
     _isSignInMode = true;
-    _currentPage = 2; // Account screen
+    _currentPage = 1; // Account screen
     notifyListeners();
   }
 
@@ -115,16 +96,6 @@ class OnboardingProvider extends ChangeNotifier {
     _preferences = _preferences.copyWith(
       wakeTimeHour: hour,
       wakeTimeMinute: minute,
-    );
-    notifyListeners();
-  }
-
-  /// Update location.
-  void setLocation(double latitude, double longitude, String? timezone, [String? locationName]) {
-    _preferences = _preferences.copyWith(
-      location: LocationData(latitude, longitude),
-      locationName: locationName,
-      timezone: timezone,
     );
     notifyListeners();
   }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -9,9 +11,14 @@ import '../../services/analytics_service.dart';
 
 /// Account screen with Google Sign In as primary and email/password as secondary.
 class AccountScreen extends StatefulWidget {
-  final VoidCallback? onComplete;
+  final FutureOr<void> Function()? onComplete;
+  final FutureOr<void> Function()? onSignedInComplete;
 
-  const AccountScreen({super.key, this.onComplete});
+  const AccountScreen({
+    super.key,
+    this.onComplete,
+    this.onSignedInComplete,
+  });
 
   @override
   State<AccountScreen> createState() => _AccountScreenState();
@@ -27,8 +34,12 @@ class _AccountScreenState extends State<AccountScreen>
   late Animation<double> _pulseAnimation;
   String? _emailError;
   String? _passwordError;
-  bool _showEmailForm = false; // false = show social buttons, true = show email form
-  bool _isSignInMode = false; // false = create account, true = sign in
+  String? _passwordResetMessage;
+  String? _passwordResetError;
+  bool _showEmailForm = false;
+  bool _isSendingPasswordReset = false;
+  Timer? _passwordResetCooldownTimer;
+  DateTime? _passwordResetCooldownUntil;
   bool _obscurePassword = true;
 
   @override
@@ -51,6 +62,7 @@ class _AccountScreenState extends State<AccountScreen>
     _emailFocusNode.dispose();
     _passwordFocusNode.dispose();
     _pulseController.dispose();
+    _passwordResetCooldownTimer?.cancel();
     super.dispose();
   }
 
@@ -75,7 +87,8 @@ class _AccountScreenState extends State<AccountScreen>
 
       // Save preferences locally
       await authProvider.savePreferences(onboardingProvider.preferences);
-      widget.onComplete?.call();
+      if (!mounted) return;
+      await _completeSignedIn();
     }
   }
 
@@ -96,7 +109,8 @@ class _AccountScreenState extends State<AccountScreen>
 
       // Save preferences locally
       await authProvider.savePreferences(onboardingProvider.preferences);
-      widget.onComplete?.call();
+      if (!mounted) return;
+      await _completeSignedIn();
     }
   }
 
@@ -127,36 +141,39 @@ class _AccountScreenState extends State<AccountScreen>
     setState(() {
       _emailError = null;
       _passwordError = null;
+      _passwordResetMessage = null;
+      _passwordResetError = null;
     });
     _emailFocusNode.unfocus();
     _passwordFocusNode.unfocus();
 
     final authProvider = context.read<AuthProvider>();
     final onboardingProvider = context.read<OnboardingProvider>();
-    bool success;
 
-    if (_isSignInMode) {
-      success = await authProvider.signIn(email, password);
-    } else {
-      success = await authProvider.createAccount(email, password);
-    }
+    final success = await authProvider.continueWithEmailPassword(
+      email,
+      password,
+    );
 
     if (success && mounted) {
+      final emailResult = authProvider.lastEmailAuthResult;
+      final method = emailResult == EmailAuthResult.created
+          ? 'email_create'
+          : 'email_signin';
+
       // Identify user and track account choice
       final userId = authProvider.user?.id;
       if (userId != null) {
         AnalyticsService().identifyUser(userId);
       }
-      AnalyticsService().logOnboardingAccountChoice(
-        _isSignInMode ? 'signin' : 'create',
-      );
-      AnalyticsService().logSignIn(_isSignInMode ? 'email_signin' : 'email_create');
+      AnalyticsService().logOnboardingAccountChoice(method);
+      AnalyticsService().logSignIn(method);
 
-      // Save preferences locally (for new accounts, not sign-in mode)
-      if (!_isSignInMode) {
-        await authProvider.savePreferences(onboardingProvider.preferences);
-      }
-      widget.onComplete?.call();
+      // Save preferences locally for this device before app-state refresh
+      // restores or creates the Home.
+      await authProvider.savePreferences(onboardingProvider.preferences);
+      if (!mounted) return;
+      await _completeSignedIn();
     }
   }
 
@@ -169,19 +186,81 @@ class _AccountScreenState extends State<AccountScreen>
     });
   }
 
-  void _toggleMode() {
+  Future<void> _sendPasswordResetEmail() async {
+    final email = _emailController.text.trim();
+    if (_isPasswordResetCoolingDown) {
+      setState(() {
+        _passwordResetMessage =
+            'Use the newest reset email. You can request another link shortly.';
+        _passwordResetError = null;
+      });
+      return;
+    }
+
+    if (email.isEmpty) {
+      setState(() {
+        _emailError = 'Enter your email to reset your password';
+        _passwordResetMessage = null;
+        _passwordResetError = null;
+      });
+      _emailFocusNode.requestFocus();
+      return;
+    }
+    if (!_isValidEmail(email)) {
+      setState(() {
+        _emailError = 'Please enter a valid email address';
+        _passwordResetMessage = null;
+        _passwordResetError = null;
+      });
+      _emailFocusNode.requestFocus();
+      return;
+    }
+
     setState(() {
-      _isSignInMode = !_isSignInMode;
       _emailError = null;
-      _passwordError = null;
+      _passwordResetMessage = null;
+      _passwordResetError = null;
+      _isSendingPasswordReset = true;
     });
-    context.read<AuthProvider>().resetState();
+
+    final success =
+        await context.read<AuthProvider>().sendPasswordResetEmail(email);
+    if (!mounted) return;
+
+    final authProvider = context.read<AuthProvider>();
+    setState(() {
+      _isSendingPasswordReset = false;
+      if (success) {
+        _startPasswordResetCooldown();
+        _passwordResetMessage = 'Check your newest email for a reset link.';
+      } else {
+        _passwordResetError =
+            authProvider.errorMessage ?? 'Could not send reset email.';
+      }
+    });
+  }
+
+  bool get _isPasswordResetCoolingDown {
+    final cooldownUntil = _passwordResetCooldownUntil;
+    return cooldownUntil != null && DateTime.now().isBefore(cooldownUntil);
+  }
+
+  void _startPasswordResetCooldown() {
+    _passwordResetCooldownTimer?.cancel();
+    _passwordResetCooldownUntil = DateTime.now().add(
+      const Duration(seconds: 30),
+    );
+    _passwordResetCooldownTimer = Timer(const Duration(seconds: 30), () {
+      if (!mounted) return;
+      setState(() {
+        _passwordResetCooldownUntil = null;
+      });
+    });
   }
 
   void _showEmailSignIn() {
     setState(() {
       _showEmailForm = true;
-      _isSignInMode = false;
     });
   }
 
@@ -190,7 +269,12 @@ class _AccountScreenState extends State<AccountScreen>
       _showEmailForm = false;
       _emailError = null;
       _passwordError = null;
+      _passwordResetMessage = null;
+      _passwordResetError = null;
+      _isSendingPasswordReset = false;
+      _passwordResetCooldownUntil = null;
     });
+    _passwordResetCooldownTimer?.cancel();
     context.read<AuthProvider>().resetState();
   }
 
@@ -201,10 +285,21 @@ class _AccountScreenState extends State<AccountScreen>
     AnalyticsService().logOnboardingAccountChoice('local');
 
     // Save preferences locally (keep the anonymous user!)
-    await context.read<AuthProvider>().savePreferences(onboardingProvider.preferences);
+    await context
+        .read<AuthProvider>()
+        .savePreferences(onboardingProvider.preferences);
 
     // Mark onboarding complete - anonymous user is preserved
-    widget.onComplete?.call();
+    await _complete();
+  }
+
+  Future<void> _completeSignedIn() async {
+    final callback = widget.onSignedInComplete ?? widget.onComplete;
+    await Future<void>.sync(() => callback?.call());
+  }
+
+  Future<void> _complete() async {
+    await Future<void>.sync(() => widget.onComplete?.call());
   }
 
   @override
@@ -257,8 +352,10 @@ class _AccountScreenState extends State<AccountScreen>
                   shape: BoxShape.circle,
                   gradient: RadialGradient(
                     colors: [
-                      OnboardingColors.sunWarm.withValues(alpha: _pulseAnimation.value),
-                      OnboardingColors.sunWarm.withValues(alpha: _pulseAnimation.value * 0.3),
+                      OnboardingColors.sunWarm
+                          .withValues(alpha: _pulseAnimation.value),
+                      OnboardingColors.sunWarm
+                          .withValues(alpha: _pulseAnimation.value * 0.3),
                       Colors.transparent,
                     ],
                   ),
@@ -346,14 +443,17 @@ class _AccountScreenState extends State<AccountScreen>
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               GestureDetector(
-                onTap: () => launchUrl(Uri.parse('https://rhythm.lighting/terms')),
+                onTap: () =>
+                    launchUrl(Uri.parse('https://rhythm.lighting/terms')),
                 child: Text(
                   'Terms',
                   style: TextStyle(
-                    color: OnboardingColors.textSecondary.withValues(alpha: 0.6),
+                    color:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.6),
                     fontSize: 13,
                     decoration: TextDecoration.underline,
-                    decorationColor: OnboardingColors.textSecondary.withValues(alpha: 0.4),
+                    decorationColor:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.4),
                   ),
                 ),
               ),
@@ -362,20 +462,24 @@ class _AccountScreenState extends State<AccountScreen>
                 child: Text(
                   '·',
                   style: TextStyle(
-                    color: OnboardingColors.textSecondary.withValues(alpha: 0.4),
+                    color:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.4),
                     fontSize: 13,
                   ),
                 ),
               ),
               GestureDetector(
-                onTap: () => launchUrl(Uri.parse('https://rhythm.lighting/privacy')),
+                onTap: () =>
+                    launchUrl(Uri.parse('https://rhythm.lighting/privacy')),
                 child: Text(
                   'Privacy',
                   style: TextStyle(
-                    color: OnboardingColors.textSecondary.withValues(alpha: 0.6),
+                    color:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.6),
                     fontSize: 13,
                     decoration: TextDecoration.underline,
-                    decorationColor: OnboardingColors.textSecondary.withValues(alpha: 0.4),
+                    decorationColor:
+                        OnboardingColors.textSecondary.withValues(alpha: 0.4),
                   ),
                 ),
               ),
@@ -416,9 +520,9 @@ class _AccountScreenState extends State<AccountScreen>
           ),
           const SizedBox(height: 16),
           // Header
-          Text(
-            _isSignInMode ? 'Welcome Back' : 'Create Account',
-            style: const TextStyle(
+          const Text(
+            'Continue with Email',
+            style: TextStyle(
               color: OnboardingColors.textPrimary,
               fontSize: 28,
               fontWeight: FontWeight.bold,
@@ -426,12 +530,10 @@ class _AccountScreenState extends State<AccountScreen>
             ),
           ),
           const SizedBox(height: 8),
-          Text(
-            _isSignInMode
-                ? 'Sign in with your email and password'
-                : 'Enter your email and create a password',
+          const Text(
+            'We\'ll sign you in or create an account if you\'re new',
             textAlign: TextAlign.center,
-            style: const TextStyle(
+            style: TextStyle(
               color: OnboardingColors.textSecondary,
               fontSize: 16,
               height: 1.5,
@@ -475,8 +577,16 @@ class _AccountScreenState extends State<AccountScreen>
                 contentPadding: const EdgeInsets.all(16),
               ),
               onChanged: (_) {
-                if (_emailError != null) {
-                  setState(() => _emailError = null);
+                if (_emailError != null ||
+                    _passwordResetMessage != null ||
+                    _passwordResetError != null) {
+                  _passwordResetCooldownTimer?.cancel();
+                  setState(() {
+                    _emailError = null;
+                    _passwordResetMessage = null;
+                    _passwordResetError = null;
+                    _passwordResetCooldownUntil = null;
+                  });
                 }
               },
               onSubmitted: (_) => _passwordFocusNode.requestFocus(),
@@ -565,23 +675,64 @@ class _AccountScreenState extends State<AccountScreen>
               ),
             ),
 
+          const SizedBox(height: 12),
+
+          Align(
+            alignment: Alignment.centerRight,
+            child: _isSendingPasswordReset
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        OnboardingColors.sunWarm,
+                      ),
+                    ),
+                  )
+                : GestureDetector(
+                    onTap: isLoading || _isPasswordResetCoolingDown
+                        ? null
+                        : _sendPasswordResetEmail,
+                    child: Text(
+                      _isPasswordResetCoolingDown
+                          ? 'Reset email sent'
+                          : 'Forgot password?',
+                      style: TextStyle(
+                        color: OnboardingColors.sunWarm.withValues(
+                          alpha: _isPasswordResetCoolingDown ? 0.5 : 0.9,
+                        ),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+          ),
+
+          if (_passwordResetMessage != null || _passwordResetError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _passwordResetMessage ?? _passwordResetError!,
+                  style: TextStyle(
+                    color: _passwordResetMessage != null
+                        ? OnboardingColors.textSecondary
+                        : Colors.red.shade300,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ),
+
           const SizedBox(height: 32),
 
           // Submit button
           SunGlowButton(
-            text: _isSignInMode ? 'Sign In' : 'Create Account',
+            text: 'Continue',
             isLoading: isLoading,
             onPressed: _submitEmailForm,
-          ),
-
-          const SizedBox(height: 16),
-
-          // Toggle mode link
-          TextLinkButton(
-            text: _isSignInMode
-                ? 'Don\'t have an account? Create one'
-                : 'Already have an account? Sign in',
-            onPressed: _toggleMode,
           ),
 
           const SizedBox(height: 80),

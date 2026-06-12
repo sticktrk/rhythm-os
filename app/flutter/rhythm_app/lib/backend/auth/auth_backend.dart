@@ -1,5 +1,14 @@
 import 'auth_user.dart';
 
+/// High-level authentication events surfaced by backend implementations.
+enum AuthEvent {
+  passwordRecovery,
+  signedIn,
+  signedOut,
+  tokenRefreshed,
+  userUpdated,
+}
+
 /// Result of a Google sign-in operation.
 class GoogleSignInResult {
   final AuthUser? user;
@@ -42,6 +51,9 @@ abstract class AuthBackend {
   /// Stream of auth state changes.
   Stream<AuthUser?> get authStateChanges;
 
+  /// Stream of high-level auth events.
+  Stream<AuthEvent> get authEvents;
+
   /// Sign in anonymously (creates guest user).
   ///
   /// Returns the created user, or null if failed.
@@ -70,12 +82,22 @@ abstract class AuthBackend {
   ///
   /// If user is currently anonymous, links credentials to preserve UID.
   /// Returns the user on success, throws on error.
-  Future<AuthUser?> createAccountWithEmailPassword(String email, String password);
+  Future<AuthUser?> createAccountWithEmailPassword(
+      String email, String password);
 
   /// Link email/password credentials to current anonymous user.
   ///
   /// Throws if user is not signed in or email already exists.
   Future<AuthUser?> linkWithEmailPassword(String email, String password);
+
+  /// Send a password reset email.
+  Future<void> sendPasswordResetEmail(String email);
+
+  /// Verify a password recovery email token hash and create a recovery session.
+  Future<AuthUser?> verifyPasswordRecoveryTokenHash(String tokenHash);
+
+  /// Update the current user's password.
+  Future<AuthUser?> updatePassword(String password);
 
   /// Sign out the current user.
   Future<void> signOut();

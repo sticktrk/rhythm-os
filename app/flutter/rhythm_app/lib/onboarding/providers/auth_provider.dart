@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
 import '../../backend/backend.dart';
+import '../../services/account_data_encryption_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/settings_service.dart';
@@ -15,6 +16,11 @@ enum AuthState {
   error,
 }
 
+enum EmailAuthResult {
+  signedIn,
+  created,
+}
+
 /// Manages authentication state.
 ///
 /// Delegates all authentication operations to [AuthService] while managing
@@ -26,17 +32,20 @@ class AuthProvider extends ChangeNotifier {
   String? _email;
   String? _errorMessage;
   AuthUser? _user;
+  EmailAuthResult? _lastEmailAuthResult;
   StreamSubscription<AuthUser?>? _authSubscription;
 
   AuthState get state => _state;
   String? get email => _email;
   String? get errorMessage => _errorMessage;
   AuthUser? get user => _user;
+  EmailAuthResult? get lastEmailAuthResult => _lastEmailAuthResult;
   bool get isAuthenticated => _user != null;
   bool get isAnonymous => _user?.isAnonymous ?? false;
 
   AuthProvider() {
-    _authSubscription = _authService.authStateChanges.listen(_onAuthStateChanged);
+    _authSubscription =
+        _authService.authStateChanges.listen(_onAuthStateChanged);
   }
 
   @override
@@ -95,12 +104,54 @@ class AuthProvider extends ChangeNotifier {
     );
   }
 
+  /// Continue with email/password, creating a new account when the email does
+  /// not exist and signing in when it does.
+  Future<bool> continueWithEmailPassword(String email, String password) async {
+    _email = email;
+    _lastEmailAuthResult = null;
+
+    // Demo mode check for App Store review
+    debugPrint(
+        'Demo check: "${email.toLowerCase()}" == "${DemoCredentials.email}" ? ${email.toLowerCase() == DemoCredentials.email}');
+    if (email.toLowerCase() == DemoCredentials.email.toLowerCase()) {
+      if (password == DemoCredentials.password) {
+        HueServiceLocator.setDemoMode(true);
+        _user = const AuthUser(
+          id: 'demo-user',
+          email: DemoCredentials.email,
+          displayName: 'Demo User',
+          isAnonymous: false,
+        );
+        _lastEmailAuthResult = EmailAuthResult.signedIn;
+        _state = AuthState.authenticated;
+        notifyListeners();
+        return true;
+      }
+      _state = AuthState.error;
+      _errorMessage = 'Invalid demo credentials';
+      notifyListeners();
+      return false;
+    }
+
+    final success = await _runAuthOperation(
+      operationName: 'Email account',
+      operation: () => _createOrSignInWithEmailPassword(email, password),
+    );
+    _rememberEmailPasswordKeyMaterialIfAuthenticated(
+      email: email,
+      password: password,
+      success: success,
+    );
+    return success;
+  }
+
   /// Sign in with email and password.
   Future<bool> signIn(String email, String password) async {
     _email = email;
 
     // Demo mode check for App Store review
-    debugPrint('Demo check: "${email.toLowerCase()}" == "${DemoCredentials.email}" ? ${email.toLowerCase() == DemoCredentials.email}');
+    debugPrint(
+        'Demo check: "${email.toLowerCase()}" == "${DemoCredentials.email}" ? ${email.toLowerCase() == DemoCredentials.email}');
     if (email.toLowerCase() == DemoCredentials.email.toLowerCase()) {
       if (password == DemoCredentials.password) {
         HueServiceLocator.setDemoMode(true);
@@ -120,19 +171,125 @@ class AuthProvider extends ChangeNotifier {
       return false;
     }
 
-    return _runAuthOperation(
+    final success = await _runAuthOperation(
       operationName: 'Sign in',
       operation: () => _authService.signInWithEmailPassword(email, password),
     );
+    _rememberEmailPasswordKeyMaterialIfAuthenticated(
+      email: email,
+      password: password,
+      success: success,
+    );
+    return success;
   }
 
   /// Create account with email and password.
   /// If user is currently anonymous, links credentials to preserve uid.
   Future<bool> createAccount(String email, String password) async {
     _email = email;
-    return _runAuthOperation(
+    final success = await _runAuthOperation(
       operationName: 'Account creation',
-      operation: () => _authService.createAccountWithEmailPassword(email, password),
+      operation: () =>
+          _authService.createAccountWithEmailPassword(email, password),
+    );
+    _rememberEmailPasswordKeyMaterialIfAuthenticated(
+      email: email,
+      password: password,
+      success: success,
+    );
+    return success;
+  }
+
+  Future<bool> sendPasswordResetEmail(String email) async {
+    try {
+      await _authService.sendPasswordResetEmail(email);
+      _errorMessage = null;
+      return true;
+    } on AuthException catch (e) {
+      _errorMessage = _getErrorMessage(e.message);
+      notifyListeners();
+      return false;
+    } catch (e, stackTrace) {
+      debugPrint('Error sending password reset: $e');
+      debugPrint('Stack trace: $stackTrace');
+      _errorMessage = 'Could not send reset email. Please try again.';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> updatePassword(String password) async {
+    try {
+      _state = AuthState.authenticating;
+      _errorMessage = null;
+      notifyListeners();
+
+      final user = await _authService.updatePassword(password);
+      _user = user ?? _authService.currentUser;
+      final email = _user?.email;
+      if (_user != null && email != null && !_user!.isAnonymous) {
+        AccountDataEncryptionService.instance.rememberEmailPasswordKeyMaterial(
+          userId: _user!.id,
+          email: email,
+          password: password,
+        );
+      }
+      _state = AuthState.authenticated;
+      notifyListeners();
+      return true;
+    } on AuthException catch (e) {
+      _state = AuthState.error;
+      _errorMessage = _getErrorMessage(e.message);
+      notifyListeners();
+      return false;
+    } catch (e, stackTrace) {
+      debugPrint('Error updating password: $e');
+      debugPrint('Stack trace: $stackTrace');
+      _state = AuthState.error;
+      _errorMessage = 'Could not update password. Please try again.';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<AuthUser?> _createOrSignInWithEmailPassword(
+    String email,
+    String password,
+  ) async {
+    try {
+      final user =
+          await _authService.createAccountWithEmailPassword(email, password);
+      _lastEmailAuthResult = EmailAuthResult.created;
+      return user;
+    } on AuthException catch (error) {
+      if (!_isExistingAccountError(error.message)) rethrow;
+
+      final user = await _authService.signInWithEmailPassword(email, password);
+      _lastEmailAuthResult = EmailAuthResult.signedIn;
+      return user;
+    }
+  }
+
+  bool _isExistingAccountError(String message) {
+    final lowerMessage = message.toLowerCase();
+    return lowerMessage.contains('already registered') ||
+        lowerMessage.contains('already exists') ||
+        lowerMessage.contains('email exists') ||
+        lowerMessage.contains('email address has already');
+  }
+
+  void _rememberEmailPasswordKeyMaterialIfAuthenticated({
+    required String email,
+    required String password,
+    required bool success,
+  }) {
+    final user = _user;
+    if (!success || user == null || user.isAnonymous) return;
+
+    AccountDataEncryptionService.instance.rememberEmailPasswordKeyMaterial(
+      userId: user.id,
+      email: email,
+      password: password,
     );
   }
 
@@ -182,7 +339,8 @@ class AuthProvider extends ChangeNotifier {
   }
 
   /// Handle generic errors.
-  void _handleGenericError(String operationName, Object e, StackTrace stackTrace) {
+  void _handleGenericError(
+      String operationName, Object e, StackTrace stackTrace) {
     debugPrint('Error with $operationName: $e');
     debugPrint('Stack trace: $stackTrace');
     _state = AuthState.error;
@@ -192,26 +350,15 @@ class AuthProvider extends ChangeNotifier {
 
   /// Save user preferences.
   ///
-  /// Note: Location, sleep schedule, and timezone are passed to HomeProvider
-  /// via SettingsService for creating the Home model in onUserSignIn().
+  /// Only the device-specific notification preference and the onboarding-
+  /// complete flag are persisted here. Location is no longer collected during
+  /// onboarding — it's captured when a Home is created (see AddHomeFlow).
   Future<bool> savePreferences(OnboardingPreferences preferences) async {
     try {
       final settings = SettingsService.instance;
 
       // Store notification preference (device-specific)
       await settings.setNotificationsEnabled(preferences.notificationsEnabled);
-
-      // Store onboarding data for HomeProvider to consume
-      settings.setOnboardingPreferences(OnboardingPreferencesData(
-        latitude: preferences.location?.latitude,
-        longitude: preferences.location?.longitude,
-        cityName: preferences.locationName,
-        timezone: preferences.timezone,
-        bedtimeHour: preferences.bedtimeHour,
-        bedtimeMinute: preferences.bedtimeMinute,
-        wakeTimeHour: preferences.wakeTimeHour,
-        wakeTimeMinute: preferences.wakeTimeMinute,
-      ));
 
       // Mark onboarding as complete
       await settings.setOnboardingComplete(true);
@@ -232,6 +379,7 @@ class AuthProvider extends ChangeNotifier {
   Future<void> signOut() async {
     // Note: Demo mode is cleared in AuthService.signOut()
     await _authService.signOut();
+    AccountDataEncryptionService.instance.clearRememberedKeyMaterial();
     _state = AuthState.initial;
     _email = null;
     _errorMessage = null;
@@ -242,6 +390,7 @@ class AuthProvider extends ChangeNotifier {
   void resetState() {
     _state = AuthState.initial;
     _errorMessage = null;
+    _lastEmailAuthResult = null;
     notifyListeners();
   }
 
@@ -252,25 +401,43 @@ class AuthProvider extends ChangeNotifier {
     if (lowerMessage.contains('invalid email')) {
       return 'Please enter a valid email address.';
     }
-    if (lowerMessage.contains('user disabled') || lowerMessage.contains('banned')) {
+    if (lowerMessage.contains('user disabled') ||
+        lowerMessage.contains('banned')) {
       return 'This account has been disabled.';
     }
-    if (lowerMessage.contains('user not found') || lowerMessage.contains('no user found')) {
+    if (lowerMessage.contains('user not found') ||
+        lowerMessage.contains('no user found')) {
       return 'No account found with this email.';
     }
-    if (lowerMessage.contains('invalid password') || lowerMessage.contains('wrong password')) {
+    if (lowerMessage.contains('invalid password') ||
+        lowerMessage.contains('wrong password')) {
       return 'Incorrect password.';
     }
-    if (lowerMessage.contains('invalid credentials') || lowerMessage.contains('invalid login')) {
+    if (lowerMessage.contains('invalid credentials') ||
+        lowerMessage.contains('invalid login')) {
       return 'Invalid email or password.';
     }
-    if (lowerMessage.contains('already registered') || lowerMessage.contains('already exists')) {
+    if (lowerMessage.contains('already registered') ||
+        lowerMessage.contains('already exists')) {
       return 'An account already exists with this email.';
     }
-    if (lowerMessage.contains('weak password') || lowerMessage.contains('password should be')) {
+    if (lowerMessage.contains('weak password') ||
+        lowerMessage.contains('password should be')) {
       return 'Password must be at least 6 characters.';
     }
-    if (lowerMessage.contains('rate limit') || lowerMessage.contains('too many requests')) {
+    if (lowerMessage.contains('only request this after') ||
+        lowerMessage.contains('over_email_send_rate_limit') ||
+        lowerMessage.contains('email send rate limit')) {
+      return 'A reset email was just sent. Use the newest email or try again shortly.';
+    }
+    if (lowerMessage.contains('otp_expired') ||
+        lowerMessage.contains('email link is invalid') ||
+        lowerMessage.contains('link is invalid') ||
+        lowerMessage.contains('expired')) {
+      return 'This reset link is invalid or expired. Request a new reset email.';
+    }
+    if (lowerMessage.contains('rate limit') ||
+        lowerMessage.contains('too many requests')) {
       return 'Too many attempts. Please try again later.';
     }
 

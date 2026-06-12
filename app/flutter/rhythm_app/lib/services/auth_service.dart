@@ -6,7 +6,8 @@ import 'hue/hue_service_locator.dart';
 
 /// Result of a Google sign-in operation.
 /// Re-exported from backend for backwards compatibility.
-export '../backend/auth/auth_backend.dart' show GoogleSignInResult, AppleSignInResult;
+export '../backend/auth/auth_backend.dart'
+    show GoogleSignInResult, AppleSignInResult;
 
 /// Service for handling authentication.
 ///
@@ -45,10 +46,14 @@ class AuthService {
   Stream<AuthUser?> get authStateChanges =>
       _auth?.authStateChanges ?? const Stream.empty();
 
+  /// Stream of high-level auth events.
+  Stream<AuthEvent> get authEvents => _auth?.authEvents ?? const Stream.empty();
+
   /// Check if the current user has a specific feature flag enabled.
   /// Feature flags are stored in Supabase raw_user_meta_data.
   bool hasFeature(String feature) {
-    final userMetadata = currentUser?.metadata?['userMetadata'] as Map<String, dynamic>?;
+    final userMetadata =
+        currentUser?.metadata?['userMetadata'] as Map<String, dynamic>?;
     return userMetadata?[feature] == true;
   }
 
@@ -74,13 +79,15 @@ class AuthService {
   }
 
   /// Sign in with email and password.
-  Future<AuthUser?> signInWithEmailPassword(String email, String password) async {
+  Future<AuthUser?> signInWithEmailPassword(
+      String email, String password) async {
     return await _auth!.signInWithEmailPassword(email, password);
   }
 
   /// Create account with email and password.
   /// If user is currently anonymous, links credentials to preserve uid.
-  Future<AuthUser?> createAccountWithEmailPassword(String email, String password) async {
+  Future<AuthUser?> createAccountWithEmailPassword(
+      String email, String password) async {
     return await _auth!.createAccountWithEmailPassword(email, password);
   }
 
@@ -88,6 +95,21 @@ class AuthService {
   /// Throws if user is not signed in or email already exists.
   Future<AuthUser?> linkWithEmailPassword(String email, String password) async {
     return await _auth!.linkWithEmailPassword(email, password);
+  }
+
+  /// Send a password reset email.
+  Future<void> sendPasswordResetEmail(String email) async {
+    await _auth!.sendPasswordResetEmail(email);
+  }
+
+  /// Verify a password recovery email token hash and create a recovery session.
+  Future<AuthUser?> verifyPasswordRecoveryTokenHash(String tokenHash) async {
+    return await _auth!.verifyPasswordRecoveryTokenHash(tokenHash);
+  }
+
+  /// Update the current user's password.
+  Future<AuthUser?> updatePassword(String password) async {
+    return await _auth!.updatePassword(password);
   }
 
   /// Sign out from both backend and Google.

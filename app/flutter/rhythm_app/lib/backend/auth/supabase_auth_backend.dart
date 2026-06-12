@@ -22,6 +22,8 @@ class SupabaseAuthBackend implements AuthBackend {
   GoogleSignIn get _googleSignIn => GoogleSignIn.instance;
 
   StreamController<AuthUser?>? _authStateController;
+  StreamController<AuthEvent>? _authEventController;
+  AuthEvent? _latestAuthEvent;
 
   SupabaseAuthBackend({
     required this.supabaseUrl,
@@ -45,9 +47,15 @@ class SupabaseAuthBackend implements AuthBackend {
 
     // Set up auth state stream
     _authStateController = StreamController<AuthUser?>.broadcast();
+    _authEventController = StreamController<AuthEvent>.broadcast();
     _client!.auth.onAuthStateChange.listen((data) {
       final user = data.session?.user;
       _authStateController!.add(user != null ? _mapUser(user) : null);
+      final event = _mapAuthEvent(data.event);
+      if (event != null) {
+        _latestAuthEvent = event;
+        _authEventController!.add(event);
+      }
     });
 
     debugPrint('SupabaseAuthBackend: Initialized');
@@ -69,6 +77,17 @@ class SupabaseAuthBackend implements AuthBackend {
   @override
   bool get isAnonymous => client.auth.currentUser?.isAnonymous ?? true;
 
+  AuthEvent? _mapAuthEvent(AuthChangeEvent event) {
+    return switch (event) {
+      AuthChangeEvent.passwordRecovery => AuthEvent.passwordRecovery,
+      AuthChangeEvent.signedIn => AuthEvent.signedIn,
+      AuthChangeEvent.signedOut => AuthEvent.signedOut,
+      AuthChangeEvent.tokenRefreshed => AuthEvent.tokenRefreshed,
+      AuthChangeEvent.userUpdated => AuthEvent.userUpdated,
+      _ => null,
+    };
+  }
+
   @override
   Stream<AuthUser?> get authStateChanges {
     if (_authStateController == null) {
@@ -78,11 +97,31 @@ class SupabaseAuthBackend implements AuthBackend {
   }
 
   @override
+  Stream<AuthEvent> get authEvents {
+    if (_authEventController == null) {
+      throw StateError('SupabaseAuthBackend not initialized');
+    }
+    return Stream.multi((controller) {
+      final latestAuthEvent = _latestAuthEvent;
+      if (latestAuthEvent != null) {
+        controller.add(latestAuthEvent);
+      }
+      final subscription = _authEventController!.stream.listen(
+        controller.add,
+        onError: controller.addError,
+        onDone: controller.close,
+      );
+      controller.onCancel = subscription.cancel;
+    });
+  }
+
+  @override
   Future<AuthUser?> signInAnonymously() async {
     try {
       final response = await client.auth.signInAnonymously();
       if (response.user != null) {
-        debugPrint('SupabaseAuthBackend: Signed in anonymously: ${response.user!.id}');
+        debugPrint(
+            'SupabaseAuthBackend: Signed in anonymously: ${response.user!.id}');
         return _mapUser(response.user!);
       }
       return null;
@@ -210,8 +249,10 @@ class SupabaseAuthBackend implements AuthBackend {
       );
 
       if (tokenResponse.statusCode != 200) {
-        debugPrint('SupabaseAuthBackend: Token exchange failed: ${tokenResponse.body}');
-        throw Exception('Failed to exchange code for tokens: ${tokenResponse.body}');
+        debugPrint(
+            'SupabaseAuthBackend: Token exchange failed: ${tokenResponse.body}');
+        throw Exception(
+            'Failed to exchange code for tokens: ${tokenResponse.body}');
       }
 
       final tokenData = jsonDecode(tokenResponse.body) as Map<String, dynamic>;
@@ -228,7 +269,8 @@ class SupabaseAuthBackend implements AuthBackend {
       AuthResponse response;
 
       if (currentUser != null && currentUser.isAnonymous) {
-        debugPrint('SupabaseAuthBackend: Linking Google to anonymous user: ${currentUser.id}');
+        debugPrint(
+            'SupabaseAuthBackend: Linking Google to anonymous user: ${currentUser.id}');
         try {
           response = await client.auth.signInWithIdToken(
             provider: OAuthProvider.google,
@@ -237,7 +279,8 @@ class SupabaseAuthBackend implements AuthBackend {
         } on AuthException catch (e) {
           if (e.message.contains('already registered') ||
               e.message.contains('already exists')) {
-            debugPrint('SupabaseAuthBackend: Google account exists, signing in to existing');
+            debugPrint(
+                'SupabaseAuthBackend: Google account exists, signing in to existing');
             await client.auth.signOut();
             response = await client.auth.signInWithIdToken(
               provider: OAuthProvider.google,
@@ -264,8 +307,10 @@ class SupabaseAuthBackend implements AuthBackend {
         email = payload['email'] as String?;
       }
 
-      final resultUser = response.user != null ? _mapUser(response.user!) : null;
-      debugPrint('SupabaseAuthBackend: macOS Google sign-in successful: $email');
+      final resultUser =
+          response.user != null ? _mapUser(response.user!) : null;
+      debugPrint(
+          'SupabaseAuthBackend: macOS Google sign-in successful: $email');
       return GoogleSignInResult(user: resultUser, email: email);
     } on TimeoutException {
       throw Exception('Google Sign-In timed out');
@@ -310,7 +355,8 @@ class SupabaseAuthBackend implements AuthBackend {
       AuthResponse response;
 
       if (currentUser != null && currentUser.isAnonymous) {
-        debugPrint('SupabaseAuthBackend: Linking Google to anonymous user: ${currentUser.id}');
+        debugPrint(
+            'SupabaseAuthBackend: Linking Google to anonymous user: ${currentUser.id}');
         try {
           response = await client.auth.signInWithIdToken(
             provider: OAuthProvider.google,
@@ -319,7 +365,8 @@ class SupabaseAuthBackend implements AuthBackend {
         } on AuthException catch (e) {
           if (e.message.contains('already registered') ||
               e.message.contains('already exists')) {
-            debugPrint('SupabaseAuthBackend: Google account exists, signing in to existing');
+            debugPrint(
+                'SupabaseAuthBackend: Google account exists, signing in to existing');
             await client.auth.signOut();
             response = await client.auth.signInWithIdToken(
               provider: OAuthProvider.google,
@@ -336,7 +383,8 @@ class SupabaseAuthBackend implements AuthBackend {
         );
       }
 
-      final resultUser = response.user != null ? _mapUser(response.user!) : null;
+      final resultUser =
+          response.user != null ? _mapUser(response.user!) : null;
       return GoogleSignInResult(user: resultUser, email: googleUser.email);
     } catch (e) {
       debugPrint('SupabaseAuthBackend: Google sign-in failed: $e');
@@ -373,14 +421,16 @@ class SupabaseAuthBackend implements AuthBackend {
         throw Exception('No identity token received from Apple');
       }
 
-      debugPrint('SupabaseAuthBackend: Apple credential received, email: ${credential.email}');
+      debugPrint(
+          'SupabaseAuthBackend: Apple credential received, email: ${credential.email}');
 
       // Sign in with Supabase using ID token
       final currentUser = client.auth.currentUser;
       AuthResponse response;
 
       if (currentUser != null && currentUser.isAnonymous) {
-        debugPrint('SupabaseAuthBackend: Linking Apple to anonymous user: ${currentUser.id}');
+        debugPrint(
+            'SupabaseAuthBackend: Linking Apple to anonymous user: ${currentUser.id}');
         try {
           response = await client.auth.signInWithIdToken(
             provider: OAuthProvider.apple,
@@ -390,7 +440,8 @@ class SupabaseAuthBackend implements AuthBackend {
         } on AuthException catch (e) {
           if (e.message.contains('already registered') ||
               e.message.contains('already exists')) {
-            debugPrint('SupabaseAuthBackend: Apple account exists, signing in to existing');
+            debugPrint(
+                'SupabaseAuthBackend: Apple account exists, signing in to existing');
             await client.auth.signOut();
             response = await client.auth.signInWithIdToken(
               provider: OAuthProvider.apple,
@@ -409,7 +460,8 @@ class SupabaseAuthBackend implements AuthBackend {
         );
       }
 
-      final resultUser = response.user != null ? _mapUser(response.user!) : null;
+      final resultUser =
+          response.user != null ? _mapUser(response.user!) : null;
       // Note: Apple only provides email on first sign-in, may be null on subsequent
       return AppleSignInResult(user: resultUser, email: credential.email);
     } catch (e) {
@@ -420,20 +472,24 @@ class SupabaseAuthBackend implements AuthBackend {
 
   /// Generate a cryptographically secure random nonce.
   String _generateNonce([int length = 32]) {
-    const charset = '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+    const charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
     final random = Random.secure();
-    return List.generate(length, (_) => charset[random.nextInt(charset.length)]).join();
+    return List.generate(length, (_) => charset[random.nextInt(charset.length)])
+        .join();
   }
 
   @override
-  Future<AuthUser?> signInWithEmailPassword(String email, String password) async {
+  Future<AuthUser?> signInWithEmailPassword(
+      String email, String password) async {
     try {
       final response = await client.auth.signInWithPassword(
         email: email,
         password: password,
       );
       if (response.user != null) {
-        debugPrint('SupabaseAuthBackend: Signed in with email: ${response.user!.email}');
+        debugPrint(
+            'SupabaseAuthBackend: Signed in with email: ${response.user!.email}');
         return _mapUser(response.user!);
       }
       return null;
@@ -444,13 +500,15 @@ class SupabaseAuthBackend implements AuthBackend {
   }
 
   @override
-  Future<AuthUser?> createAccountWithEmailPassword(String email, String password) async {
+  Future<AuthUser?> createAccountWithEmailPassword(
+      String email, String password) async {
     try {
       final currentUser = client.auth.currentUser;
 
       if (currentUser != null && currentUser.isAnonymous) {
         // Link email to anonymous account
-        debugPrint('SupabaseAuthBackend: Linking email to anonymous user: ${currentUser.id}');
+        debugPrint(
+            'SupabaseAuthBackend: Linking email to anonymous user: ${currentUser.id}');
         final response = await client.auth.updateUser(
           UserAttributes(
             email: email,
@@ -468,7 +526,8 @@ class SupabaseAuthBackend implements AuthBackend {
           password: password,
         );
         if (response.user != null) {
-          debugPrint('SupabaseAuthBackend: Created account: ${response.user!.email}');
+          debugPrint(
+              'SupabaseAuthBackend: Created account: ${response.user!.email}');
           return _mapUser(response.user!);
         }
         return null;
@@ -500,6 +559,66 @@ class SupabaseAuthBackend implements AuthBackend {
       return null;
     } catch (e) {
       debugPrint('SupabaseAuthBackend: Email link failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> sendPasswordResetEmail(String email) async {
+    try {
+      debugPrint(
+          'SupabaseAuthBackend: Password reset redirect: $_passwordResetRedirectTo');
+      await client.auth.resetPasswordForEmail(
+        email,
+        redirectTo: _passwordResetRedirectTo,
+      );
+      debugPrint('SupabaseAuthBackend: Sent password reset email: $email');
+    } catch (e) {
+      debugPrint('SupabaseAuthBackend: Password reset failed: $e');
+      rethrow;
+    }
+  }
+
+  String? get _passwordResetRedirectTo {
+    if (kIsWeb) {
+      return Uri.base.toString();
+    }
+    return 'rhythmapp://password-reset';
+  }
+
+  @override
+  Future<AuthUser?> verifyPasswordRecoveryTokenHash(String tokenHash) async {
+    try {
+      final response = await client.auth.verifyOTP(
+        type: OtpType.recovery,
+        tokenHash: tokenHash,
+      );
+      if (response.user != null) {
+        debugPrint(
+            'SupabaseAuthBackend: Verified password recovery for ${response.user!.email}');
+        return _mapUser(response.user!);
+      }
+      return currentUser;
+    } catch (e) {
+      debugPrint('SupabaseAuthBackend: Password recovery verify failed: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<AuthUser?> updatePassword(String password) async {
+    try {
+      final response = await client.auth.updateUser(
+        UserAttributes(password: password),
+      );
+      if (response.user != null) {
+        debugPrint(
+            'SupabaseAuthBackend: Updated password for ${response.user!.email}');
+        return _mapUser(response.user!);
+      }
+      return currentUser;
+    } catch (e) {
+      debugPrint('SupabaseAuthBackend: Password update failed: $e');
       rethrow;
     }
   }
@@ -539,7 +658,8 @@ class SupabaseAuthBackend implements AuthBackend {
       try {
         await _googleSignIn.signOut();
       } catch (e) {
-        debugPrint('SupabaseAuthBackend: Google sign out error during delete: $e');
+        debugPrint(
+            'SupabaseAuthBackend: Google sign out error during delete: $e');
       }
 
       // Force local sign out
@@ -563,6 +683,8 @@ class SupabaseAuthBackend implements AuthBackend {
   void dispose() {
     _authStateController?.close();
     _authStateController = null;
+    _authEventController?.close();
+    _authEventController = null;
   }
 
   /// Map Supabase User to AuthUser.

@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../backend/backend.dart';
+import 'account_data_encryption_service.dart';
 import 'auth_service.dart';
 
 /// A Home plus the Rhythm Server hubs saved for that Home in the account.
@@ -47,12 +49,24 @@ class AccountCloudSyncService {
 
   static final AccountCloudSyncService instance = AccountCloudSyncService._();
 
+  static const _serverHubColumns =
+      'id,home_id,type,name,endpoint,enabled,token,encrypted_token,remote_endpoint,last_connected,created_at,updated_at';
+  static const _legacyServerHubColumns =
+      'id,home_id,type,name,endpoint,enabled,token,remote_endpoint,last_connected,created_at,updated_at';
+
   bool get canUseSignedInCloudFeatures {
     final auth = AuthService();
     return _client != null &&
         auth.isSignedIn &&
         !auth.isAnonymous &&
         auth.currentUserId != null;
+  }
+
+  static String hubTokenPurpose({
+    required String homeId,
+    required String hubId,
+  }) {
+    return 'hub-token:$homeId:$hubId';
   }
 
   Future<List<AccountHomeServerHubs>> loadHomesAndServerHubs() async {
@@ -74,18 +88,23 @@ class AccountCloudSyncService {
     if (homes.isEmpty) return const [];
 
     final homeIds = homes.map((home) => home.id).toList(growable: false);
-    final hubRows = await client
-        .from('hubs')
-        .select(
-          'id,home_id,type,name,endpoint,enabled,remote_endpoint,last_connected,created_at,updated_at',
-        )
-        .eq('type', HubType.server.name)
-        .inFilter('home_id', homeIds)
-        .order('updated_at', ascending: false);
-    final hubs = hubRows
-        .whereType<Map>()
-        .map((row) => Hub.fromSupabase(_stringKeyMap(row)))
-        .toList(growable: false);
+    final hubRows = await _loadServerHubRows(client, homeIds);
+    final hubs = <Hub>[];
+    for (final row in hubRows.whereType<Map>()) {
+      final mapped = _stringKeyMap(row);
+      final decryptedToken = await _decryptHubToken(mapped);
+      final legacyEncryptedToken =
+          _encryptedEnvelopeFromLegacyToken(mapped['token']);
+      final legacyToken =
+          legacyEncryptedToken == null ? mapped['token'] as String? : null;
+      final token = decryptedToken ?? legacyToken;
+      hubs.add(
+        Hub.fromSupabase({
+          ...mapped,
+          if (token != null && token.trim().isNotEmpty) 'token': token,
+        }),
+      );
+    }
 
     return accountHomeServerHubsFromRowsForTesting(
       homes: homes,
@@ -112,6 +131,16 @@ class AccountCloudSyncService {
     final serverHubs = hubs
         .where((hub) => hub.type == HubType.server && hub.homeId == home.id)
         .toList(growable: false);
+    if (!shouldSyncHomeAndServerHubsForTesting(
+      home: home,
+      serverHubs: serverHubs,
+    )) {
+      debugPrint(
+        'AccountCloudSyncService: sync skipped for home=${home.id} '
+        'reason=$reason server_hubs=0',
+      );
+      return;
+    }
 
     try {
       await client.from('homes').upsert(
@@ -120,10 +149,8 @@ class AccountCloudSyncService {
           );
 
       for (final hub in serverHubs) {
-        await client.from('hubs').upsert(
-              serverHubSnapshotPayload(hub),
-              onConflict: 'id',
-            );
+        final encryptedToken = await _encryptedHubToken(hub);
+        await _upsertServerHub(client, hub, encryptedToken);
       }
 
       debugPrint(
@@ -197,7 +224,12 @@ class AccountCloudSyncService {
     };
   }
 
-  static Map<String, dynamic> serverHubSnapshotPayload(Hub hub) {
+  static Map<String, dynamic> serverHubSnapshotPayload(
+    Hub hub, {
+    Map<String, dynamic>? encryptedToken,
+    bool useLegacyEncryptedTokenStorage = false,
+    bool clearRemoteEndpoint = false,
+  }) {
     if (hub.type != HubType.server) {
       throw ArgumentError(
           'Only Rhythm Server hubs can be synced as server hubs.');
@@ -210,12 +242,129 @@ class AccountCloudSyncService {
       'name': hub.name,
       'endpoint': hub.endpoint.toJson(),
       'enabled': hub.enabled,
-      'remote_endpoint': hub.remoteEndpoint?.toJson(),
+      if (hub.remoteEndpoint != null || clearRemoteEndpoint)
+        'remote_endpoint': hub.remoteEndpoint?.toJson(),
+      'token': useLegacyEncryptedTokenStorage && encryptedToken != null
+          ? jsonEncode(encryptedToken)
+          : null,
+      if (!useLegacyEncryptedTokenStorage && encryptedToken != null)
+        'encrypted_token': encryptedToken,
       if (hub.lastConnected != null)
         'last_connected': hub.lastConnected!.toUtc().toIso8601String(),
       'created_at': hub.createdAt.toUtc().toIso8601String(),
       'updated_at': hub.updatedAt.toUtc().toIso8601String(),
     };
+  }
+
+  Future<Map<String, dynamic>?> _encryptedHubToken(Hub hub) {
+    final token = hub.token?.trim();
+    if (token == null || token.isEmpty) {
+      return Future.value(null);
+    }
+    return AccountDataEncryptionService.instance.encryptStringForCurrentUser(
+      token,
+      purpose: hubTokenPurpose(homeId: hub.homeId, hubId: hub.id),
+    );
+  }
+
+  Future<String?> _decryptHubToken(Map<String, dynamic> row) {
+    final encryptedToken = row['encrypted_token'];
+    final envelope = encryptedToken is Map
+        ? Map<String, dynamic>.from(encryptedToken)
+        : _encryptedEnvelopeFromLegacyToken(row['token']);
+    if (envelope == null) return Future.value(null);
+
+    return AccountDataEncryptionService.instance.decryptStringForCurrentUser(
+      envelope,
+      purpose: hubTokenPurpose(
+        homeId: row['home_id'] as String,
+        hubId: row['id'] as String,
+      ),
+    );
+  }
+
+  Future<Iterable<Map>> _loadServerHubRows(
+    SupabaseClient client,
+    List<String> homeIds,
+  ) async {
+    try {
+      return await _selectServerHubRows(client, homeIds, _serverHubColumns);
+    } catch (error) {
+      if (!_isMissingColumnError(error, 'encrypted_token')) rethrow;
+      debugPrint(
+        'AccountCloudSyncService: encrypted_token column unavailable; '
+        'loading legacy encrypted token storage',
+      );
+      return _selectServerHubRows(client, homeIds, _legacyServerHubColumns);
+    }
+  }
+
+  Future<Iterable<Map>> _selectServerHubRows(
+    SupabaseClient client,
+    List<String> homeIds,
+    String columns,
+  ) async {
+    final rows = await client
+        .from('hubs')
+        .select(columns)
+        .eq('type', HubType.server.name)
+        .inFilter('home_id', homeIds)
+        .order('updated_at', ascending: false);
+    return rows.whereType<Map>();
+  }
+
+  Future<void> _upsertServerHub(
+    SupabaseClient client,
+    Hub hub,
+    Map<String, dynamic>? encryptedToken,
+  ) async {
+    try {
+      await client.from('hubs').upsert(
+            serverHubSnapshotPayload(
+              hub,
+              encryptedToken: encryptedToken,
+            ),
+            onConflict: 'id',
+          );
+    } catch (error) {
+      if (!_isMissingColumnError(error, 'encrypted_token')) rethrow;
+      debugPrint(
+        'AccountCloudSyncService: encrypted_token column unavailable; '
+        'saving encrypted token envelope in legacy token column',
+      );
+      await client.from('hubs').upsert(
+            serverHubSnapshotPayload(
+              hub,
+              encryptedToken: encryptedToken,
+              useLegacyEncryptedTokenStorage: true,
+            ),
+            onConflict: 'id',
+          );
+    }
+  }
+
+  Map<String, dynamic>? _encryptedEnvelopeFromLegacyToken(Object? token) {
+    if (token is! String || token.trim().isEmpty) return null;
+    try {
+      final decoded = jsonDecode(token);
+      if (decoded is! Map) return null;
+      final envelope = Map<String, dynamic>.from(decoded);
+      if (envelope['version'] != AccountDataEncryptionService.envelopeVersion) {
+        return null;
+      }
+      return envelope;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isMissingColumnError(Object error, String column) {
+    final message = error.toString();
+    return message.contains(column) &&
+        (message.contains('schema cache') ||
+            message.contains('column') ||
+            message.contains('PGRST204') ||
+            message.contains('42703'));
   }
 
   SupabaseClient? get _client {
@@ -227,6 +376,14 @@ class AccountCloudSyncService {
 }
 
 @visibleForTesting
+bool shouldSyncHomeAndServerHubsForTesting({
+  required Home? home,
+  required Iterable<Hub> serverHubs,
+}) {
+  return home != null && serverHubs.any((hub) => hub.type == HubType.server);
+}
+
+@visibleForTesting
 List<AccountHomeServerHubs> accountHomeServerHubsFromRowsForTesting({
   required Iterable<Home> homes,
   required Iterable<Hub> serverHubs,
@@ -234,7 +391,15 @@ List<AccountHomeServerHubs> accountHomeServerHubsFromRowsForTesting({
   final hubsByHomeId = <String, List<Hub>>{};
   for (final hub in serverHubs) {
     if (hub.type != HubType.server) continue;
-    hubsByHomeId.putIfAbsent(hub.homeId, () => []).add(hub);
+    final hubs = hubsByHomeId.putIfAbsent(hub.homeId, () => []);
+    final matchIndex = hubs.indexWhere(
+      (existing) => _accountServerHubsRepresentSameBox(existing, hub),
+    );
+    if (matchIndex == -1) {
+      hubs.add(hub);
+    } else {
+      hubs[matchIndex] = _mergeAccountServerHubRows(hubs[matchIndex], hub);
+    }
   }
 
   return [
@@ -244,6 +409,63 @@ List<AccountHomeServerHubs> accountHomeServerHubsFromRowsForTesting({
         serverHubs: List.unmodifiable(hubsByHomeId[home.id] ?? const []),
       ),
   ];
+}
+
+bool _accountServerHubsRepresentSameBox(Hub left, Hub right) {
+  if (left.id == right.id) return true;
+  if (_sameEndpoint(left.endpoint, right.endpoint)) return true;
+  final leftRemote = left.remoteEndpoint;
+  final rightRemote = right.remoteEndpoint;
+  if (leftRemote != null &&
+      rightRemote != null &&
+      _sameEndpoint(leftRemote, rightRemote)) {
+    return true;
+  }
+
+  return left.type == HubType.server &&
+      right.type == HubType.server &&
+      _normalizedName(left.name) == _normalizedName(right.name) &&
+      (leftRemote != null || rightRemote != null);
+}
+
+Hub _mergeAccountServerHubRows(Hub base, Hub incoming) {
+  final baseToken = base.token?.trim();
+  final incomingToken = incoming.token?.trim();
+  final baseHasRemote = base.remoteEndpoint != null;
+  final incomingHasRemote = incoming.remoteEndpoint != null;
+  final winner = incomingHasRemote && !baseHasRemote ? incoming : base;
+  final fallback = identical(winner, base) ? incoming : base;
+
+  return winner.copyWith(
+    token: baseToken != null && baseToken.isNotEmpty
+        ? base.token
+        : incomingToken != null && incomingToken.isNotEmpty
+            ? incoming.token
+            : winner.token,
+    lastConnected:
+        _latestNullableDate(base.lastConnected, incoming.lastConnected),
+    updatedAt: _latestDate(base.updatedAt, incoming.updatedAt),
+    enabled: base.enabled || incoming.enabled,
+    remoteEndpoint: winner.remoteEndpoint ?? fallback.remoteEndpoint,
+  );
+}
+
+bool _sameEndpoint(HubEndpoint left, HubEndpoint right) {
+  return left.host == right.host &&
+      left.port == right.port &&
+      left.useSsl == right.useSsl;
+}
+
+String _normalizedName(String name) => name.trim().toLowerCase();
+
+DateTime _latestDate(DateTime left, DateTime right) {
+  return left.isAfter(right) ? left : right;
+}
+
+DateTime? _latestNullableDate(DateTime? left, DateTime? right) {
+  if (left == null) return right;
+  if (right == null) return left;
+  return _latestDate(left, right);
 }
 
 Map<String, dynamic> _stringKeyMap(Map<dynamic, dynamic> row) {
