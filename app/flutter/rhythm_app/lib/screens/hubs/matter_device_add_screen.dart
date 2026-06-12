@@ -1060,7 +1060,7 @@ class _QrScanButtonState extends State<_QrScanButton> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Scan pairing code',
+                      'Scan QR Code',
                       style: TextStyle(
                         color: CelestialColors.textPrimary,
                         fontSize: 15,
@@ -1132,9 +1132,8 @@ class _PayloadConsole extends StatelessWidget {
     final statusColor = empty
         ? CelestialColors.textSecondary.withValues(alpha: 0.55)
         : (isValidLooking ? accent : warning);
-    final statusLabel = empty
-        ? 'AWAITING INPUT'
-        : (isValidLooking ? 'READY' : 'UNVERIFIED');
+    final statusLabel =
+        empty ? 'AWAITING INPUT' : (isValidLooking ? 'READY' : 'UNVERIFIED');
 
     return Container(
       decoration: BoxDecoration(
@@ -1175,7 +1174,8 @@ class _PayloadConsole extends StatelessWidget {
                 Text(
                   'PAYLOAD · MT://',
                   style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.75),
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.75),
                     fontSize: 10.5,
                     fontFamily: 'monospace',
                     fontWeight: FontWeight.w700,
@@ -1320,10 +1320,9 @@ class _PrimaryTransmitButton extends StatelessWidget {
                 child: Icon(
                   Icons.bolt_rounded,
                   size: 18,
-                  color: (enabled
-                          ? Colors.white
-                          : CelestialColors.textSecondary)
-                      .withValues(alpha: enabled ? 0.9 : 0.4),
+                  color:
+                      (enabled ? Colors.white : CelestialColors.textSecondary)
+                          .withValues(alpha: enabled ? 0.9 : 0.4),
                 ),
               ),
             ),
@@ -1348,10 +1347,9 @@ class _PrimaryTransmitButton extends StatelessWidget {
                 child: Icon(
                   Icons.arrow_forward_rounded,
                   size: 18,
-                  color: (enabled
-                          ? Colors.white
-                          : CelestialColors.textSecondary)
-                      .withValues(alpha: enabled ? 0.85 : 0.35),
+                  color:
+                      (enabled ? Colors.white : CelestialColors.textSecondary)
+                          .withValues(alpha: enabled ? 0.85 : 0.35),
                 ),
               ),
             ),

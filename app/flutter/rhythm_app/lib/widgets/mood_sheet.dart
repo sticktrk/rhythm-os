@@ -72,12 +72,26 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   // Scene state.
   late List<RhythmSceneDefinition> _scenes;
   late bool _loadingScenes;
+  bool _scenesLoadStarted = false;
   String? _selectedSceneId;
 
   late final AnimationController _glowPulse;
   late final AnimationController _enter;
 
   static const _bg = Color(0xFF12151D);
+  static const _colorPresets = <({
+    String id,
+    String label,
+    double hue,
+    Color color,
+  })>[
+    (id: 'red', label: 'Red', hue: 4, color: Color(0xFFFF3B30)),
+    (id: 'ember', label: 'Ember', hue: 14, color: Color(0xFFFF6B4A)),
+    (id: 'amber', label: 'Amber', hue: 35, color: Color(0xFFFF9500)),
+    (id: 'rose', label: 'Rose', hue: 345, color: Color(0xFFFF6E8A)),
+    (id: 'blue', label: 'Blue', hue: 210, color: Color(0xFF3BA7FF)),
+    (id: 'violet', label: 'Violet', hue: 275, color: Color(0xFF9B5CFF)),
+  ];
 
   @override
   void initState() {
@@ -88,7 +102,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
         : 35; // warm amber default
     _scenes = widget.initialScenes;
     _selectedSceneId = widget.initialSceneId;
-    _loadingScenes = widget.initialScenes.isEmpty;
+    _loadingScenes = _tab == MoodTab.scenes && widget.initialScenes.isEmpty;
 
     _glowPulse = AnimationController(
       vsync: this,
@@ -99,16 +113,29 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 650),
     )..forward();
 
-    _loadScenes();
+    if (_tab == MoodTab.scenes) {
+      _ensureScenesLoaded();
+    }
   }
 
-  Future<void> _loadScenes() async {
-    final scenes = await widget.scenesLoader();
-    if (!mounted) return;
-    setState(() {
-      _scenes = scenes;
-      _loadingScenes = false;
-    });
+  Future<void> _ensureScenesLoaded() async {
+    if (_scenesLoadStarted || _scenes.isNotEmpty) return;
+    _scenesLoadStarted = true;
+    if (!_loadingScenes) {
+      setState(() => _loadingScenes = true);
+    }
+
+    try {
+      final scenes = await widget.scenesLoader();
+      if (!mounted) return;
+      setState(() {
+        _scenes = scenes;
+        _loadingScenes = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loadingScenes = false);
+    }
   }
 
   @override
@@ -165,6 +192,9 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
     if (_tab == tab) return;
     HapticFeedback.selectionClick();
     setState(() => _tab = tab);
+    if (tab == MoodTab.scenes) {
+      _ensureScenesLoaded();
+    }
   }
 
   @override
@@ -277,7 +307,30 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
         _ColorPreviewOrb(color: color, pulse: _glowPulse),
         const SizedBox(height: 28),
         _spectrumBar(),
+        const SizedBox(height: 14),
+        _presetSwatches(),
         const SizedBox(height: 10),
+      ],
+    );
+  }
+
+  Widget _presetSwatches() {
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        for (final preset in _colorPresets)
+          _ColorPresetSwatch(
+            gestureKey: Key('mood_color_preset_${preset.id}'),
+            label: preset.label,
+            color: preset.color,
+            selected: (_hue - preset.hue).abs() < 0.5,
+            onTap: () {
+              HapticFeedback.selectionClick();
+              _setHue(preset.hue);
+            },
+          ),
       ],
     );
   }
@@ -592,6 +645,78 @@ class _ColorPreviewOrb extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+class _ColorPresetSwatch extends StatelessWidget {
+  final Key gestureKey;
+  final String label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ColorPresetSwatch({
+    required this.gestureKey,
+    required this.label,
+    required this.color,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      key: gestureKey,
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Semantics(
+        button: true,
+        label: '$label mood color',
+        selected: selected,
+        child: SizedBox(
+          width: 48,
+          height: 56,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color,
+                  border: Border.all(
+                    color: selected
+                        ? Colors.white.withValues(alpha: 0.95)
+                        : Colors.white.withValues(alpha: 0.18),
+                    width: selected ? 3 : 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withValues(alpha: selected ? 0.55 : 0.25),
+                      blurRadius: selected ? 14 : 8,
+                      spreadRadius: selected ? 1 : 0,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: selected ? 0.86 : 0.55),
+                  fontSize: 10.5,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
