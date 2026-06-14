@@ -124,6 +124,27 @@ void main() {
       expect(result, isFalse);
     });
 
+    test('changeWifi puts credentials to wifi endpoint', () async {
+      server = await _FakeDiagnosticsServer.start();
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      final result = await api.changeWifi(
+        ssid: 'New Network',
+        password: 'new-secret',
+      );
+
+      expect(result.accepted, isTrue);
+      expect(result.status, 'accepted');
+      expect(result.ssid, 'New Network');
+      expect(server!.requests, ['/api/wifi']);
+      expect(server!.wifiBodies, [
+        {'ssid': 'New Network', 'password': 'new-secret'},
+      ]);
+    });
+
     test('factoryReset posts the shared reset endpoint', () async {
       server = await _FakeDiagnosticsServer.start();
       final api = RhythmDiagnosticsApi(
@@ -174,6 +195,7 @@ class _FakeDiagnosticsServer {
   final int debugBundleStatusCode;
   final Duration debugBundleDelay;
   final List<String> requests = [];
+  final List<Map<String, dynamic>> wifiBodies = [];
 
   int get port => _server.port;
 
@@ -226,6 +248,17 @@ class _FakeDiagnosticsServer {
 
     if (request.method == 'DELETE' && request.uri.path == '/api/wifi') {
       await _writeJson(request.response, {'ok': true});
+      return;
+    }
+
+    if (request.method == 'PUT' && request.uri.path == '/api/wifi') {
+      final body = await utf8.decoder.bind(request).join();
+      wifiBodies.add(Map<String, dynamic>.from(jsonDecode(body) as Map));
+      await _writeJson(request.response, {
+        'status': 'accepted',
+        'message': 'Wi-Fi change scheduled',
+        'ssid': wifiBodies.last['ssid'],
+      });
       return;
     }
 

@@ -9,6 +9,52 @@ import '../errors/rhythm_exception.dart';
 import '../models/rhythm_debug_bundle.dart';
 import '../rhythm_log_interceptor.dart';
 
+class RhythmWifiChangeResponse {
+  const RhythmWifiChangeResponse({
+    this.httpStatus,
+    this.status,
+    this.message,
+    this.ssid,
+    this.error,
+  });
+
+  factory RhythmWifiChangeResponse.fromHttp({
+    required int? statusCode,
+    required Object? data,
+  }) {
+    if (data is Map) {
+      final json = Map<String, dynamic>.from(data);
+      return RhythmWifiChangeResponse(
+        httpStatus: statusCode,
+        status: json['status'] as String?,
+        message: (json['message'] ?? json['error']) as String?,
+        ssid: json['ssid'] as String?,
+        error: statusCode == 200
+            ? null
+            : (json['error'] ?? json['message']) as String?,
+      );
+    }
+
+    final text = data?.toString().trim();
+    return RhythmWifiChangeResponse(
+      httpStatus: statusCode,
+      error: text == null || text.isEmpty
+          ? (statusCode == null
+              ? 'Wi-Fi change request failed.'
+              : 'Wi-Fi change request failed with HTTP $statusCode.')
+          : text,
+    );
+  }
+
+  final int? httpStatus;
+  final String? status;
+  final String? message;
+  final String? ssid;
+  final String? error;
+
+  bool get accepted => httpStatus == 200 && error == null;
+}
+
 /// Lightweight HTTP client for device diagnostic endpoints.
 ///
 /// Can be instantiated directly with a host for one-off operations
@@ -149,6 +195,40 @@ class RhythmDiagnosticsApi {
     } catch (e) {
       _log.warning('resetWifi failed', e);
       return false;
+    }
+  }
+
+  /// Schedule a Wi-Fi credential change on an already reachable appliance.
+  Future<RhythmWifiChangeResponse> changeWifi({
+    required String ssid,
+    required String password,
+  }) async {
+    if (ssid.trim().isEmpty) {
+      return const RhythmWifiChangeResponse(error: 'SSID is required.');
+    }
+
+    try {
+      final response = await _dio.put(
+        'api/wifi',
+        data: {
+          'ssid': ssid,
+          'password': password,
+        },
+        options: Options(validateStatus: (_) => true),
+      );
+      return RhythmWifiChangeResponse.fromHttp(
+        statusCode: response.statusCode,
+        data: response.data,
+      );
+    } on DioException catch (error) {
+      return RhythmWifiChangeResponse(
+        httpStatus: error.response?.statusCode,
+        error: _responseBodyText(error.response?.data) ??
+            _networkErrorText(error) ??
+            error.message,
+      );
+    } catch (error) {
+      return RhythmWifiChangeResponse(error: error.toString());
     }
   }
 
