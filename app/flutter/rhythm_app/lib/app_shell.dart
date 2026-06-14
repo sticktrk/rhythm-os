@@ -85,8 +85,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// we've been unable to reach the server *and* have never completed a hello
   /// with it for longer than [_serverConnectGrace] (so we don't flash the
   /// disconnect screen during the normal connect/reconnect handshake — e.g.
-  /// app resume or a bridge waking up). Cleared on
-  /// [RhythmConnectionState.connected].
+  /// app resume or a bridge waking up). Cleared once the selected server has
+  /// connected far enough for the shell to leave the retry screen.
   bool _serverLostConnection = false;
 
   /// How long a cold connection may stay unconnected before we escalate from
@@ -136,13 +136,22 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _pingServer();
+      _refreshActiveHomeOnResume();
     }
   }
 
-  void _pingServer() {
+  void _refreshActiveHomeOnResume() {
     try {
-      context.read<ServerSyncProvider>().retryActiveServerConnection();
+      final homeProvider = context.read<HomeProvider>();
+      final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+      if (serverHub == null) return;
+
+      final homeName = homeProvider.currentHome?.name ?? 'Home';
+      unawaited(
+        context
+            .read<ServerSyncProvider>()
+            .refreshForHomeEntry(homeName: homeName),
+      );
     } catch (e) {
       // Server not available, ignore
     }
@@ -490,9 +499,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final hasServerHub = context.select<HomeProvider, bool>(
-      (homeProvider) => homeProvider.getFirstHubOfType(HubType.server) != null,
+    final activeServerHub = context.select<HomeProvider, Hub?>(
+      (homeProvider) => homeProvider.getFirstHubOfType(HubType.server),
     );
+    final hasServerHub = activeServerHub != null;
     _handleServerHubLifecycle(hasServerHub: hasServerHub);
 
     // The "Do you have a LightBox?" gate occupies the full Home-tab body and
@@ -508,8 +518,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // The "Entering Home…" handshake takes over the full Home-tab body. Like
     // the hardware gate, it's a blocking full-screen state — drop the bottom
     // nav so the server connection screen reads as one surface.
-    final enteringHome = _currentTab == MainNavTab.home &&
-        hasServerHub &&
+    final enteringHome = hasServerHub &&
         context.select<ServerSyncProvider, bool>(
           (s) => s.hasHomeEntryRefreshGate,
         );
@@ -589,6 +598,23 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
+                if (enteringHome)
+                  Positioned.fill(
+                    child: Consumer2<HomeProvider, ServerSyncProvider>(
+                      builder: (context, homeProvider, serverSync, _) {
+                        final serverHub =
+                            homeProvider.getFirstHubOfType(HubType.server);
+                        if (serverHub == null) {
+                          return const SizedBox.shrink();
+                        }
+                        return _buildHomeEntryState(
+                          serverSync: serverSync,
+                          serverHub: serverHub,
+                          homeName: homeProvider.currentHome?.name,
+                        );
+                      },
+                    ),
+                  ),
                 if (!hideChrome)
                   Positioned(
                     right: 14,
@@ -721,14 +747,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         }
 
         if (serverHub != null) {
-          if (serverSync.hasHomeEntryRefreshGate) {
-            return _buildHomeEntryState(
-              serverSync: serverSync,
-              serverHub: serverHub,
-              homeName: homeProvider.currentHome?.name,
-            );
-          }
-
           if (_serverLostConnection) {
             return ServerDisconnectedScreen(
               serverHub: serverHub,
@@ -737,6 +755,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 mode: ConnectHubMode.rhythmServer,
               ),
             );
+          }
+
+          if (!serverSync.hasBeenSynced) {
+            return _buildServerConnectingState();
           }
 
           if (state == RhythmConnectionState.connected) {
@@ -817,10 +839,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     return ServerDisconnectedScreen(
       serverHub: serverHub,
       title: error == null ? displayHome : 'Server Unreachable',
+      autoRetry: error != null,
       onRetry: error == null
           ? null
           : () async {
-              await serverSync.refreshForHomeEntry(homeName: displayHome);
+              await serverSync.refreshForHomeEntry(
+                homeName: displayHome,
+                allowWifiFastPath: false,
+              );
             },
       // Escape hatch so a hung handshake never traps the user: drop the gate
       // and open the Home chooser.

@@ -16,6 +16,7 @@ class ServerDisconnectedScreen extends StatefulWidget {
   final Hub serverHub;
   final String? title;
   final FutureOr<void> Function()? onRetry;
+  final bool autoRetry;
 
   /// Non-destructive escape hatch. When provided, a "Choose a different Home"
   /// action is offered so the user is never trapped on this screen.
@@ -28,6 +29,7 @@ class ServerDisconnectedScreen extends StatefulWidget {
     required this.serverHub,
     this.title,
     this.onRetry,
+    this.autoRetry = true,
     this.onChooseHome,
     this.retryInterval = const Duration(seconds: 6),
   });
@@ -71,10 +73,12 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
       duration: const Duration(milliseconds: 600),
     )..forward();
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _startRetryLoop();
-    });
+    if (widget.autoRetry) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _startRetryLoop();
+      });
+    }
   }
 
   @override

@@ -17,6 +17,7 @@ import '../data/local_data_source.dart';
 /// device-local settings.
 class SettingsService {
   static const String roomPageLayoutScopePrefix = 'room_page_layout::';
+  static const String selectedHomeIdKey = 'selected_home_id';
   static const String _handledPasswordRecoveryLinksKey =
       'handled_password_recovery_links_v1';
   static const int _maxHandledPasswordRecoveryLinks = 20;
@@ -305,6 +306,24 @@ class SettingsService {
   Future<void> clearRunnerState() async {
     _settings = _settings.clearField(clearRunnerStateJson: true);
     await _save();
+  }
+
+  /// Device-local Home selection restored on app startup.
+  String? get selectedHomeId {
+    if (_localDataSource?.isInitialized != true) return null;
+    final value = _localDataSource?.getSettingsValue(selectedHomeIdKey);
+    if (value is String && value.isNotEmpty) return value;
+    return null;
+  }
+
+  /// Save the last active Home on this device.
+  Future<void> setSelectedHomeId(String? homeId) async {
+    if (_localDataSource?.isInitialized != true) return;
+    if (homeId == null || homeId.isEmpty) {
+      await _localDataSource!.deleteSettingsValue(selectedHomeIdKey);
+      return;
+    }
+    await _localDataSource!.saveSettingsValue(selectedHomeIdKey, homeId);
   }
 
   // ============================================================

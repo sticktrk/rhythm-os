@@ -8,6 +8,7 @@ import '../repositories/home_repository.dart';
 import '../services/account_cloud_sync_service.dart';
 import '../services/auth_service.dart';
 import '../services/hue/hue_service_locator.dart';
+import '../services/settings_service.dart';
 
 /// Resolved location with source indicator for debugging.
 typedef ResolvedLocation = ({
@@ -139,6 +140,28 @@ Hub accountHomeServerHubForLocalStorageForTesting({
 
   return normalized;
 }
+
+Home? _selectedHomeFrom(
+  Iterable<Home> homes, {
+  required String? selectedHomeId,
+}) {
+  final homeList = homes.toList(growable: false);
+  if (homeList.isEmpty) return null;
+  if (selectedHomeId == null || selectedHomeId.isEmpty) {
+    return homeList.first;
+  }
+  for (final home in homeList) {
+    if (home.id == selectedHomeId) return home;
+  }
+  return homeList.first;
+}
+
+@visibleForTesting
+Home? selectedHomeFromForTesting(
+  Iterable<Home> homes, {
+  required String? selectedHomeId,
+}) =>
+    _selectedHomeFrom(homes, selectedHomeId: selectedHomeId);
 
 /// Provider for Home and Hub state management.
 ///
@@ -308,7 +331,12 @@ class HomeProvider extends ChangeNotifier {
 
     // Set current home to first home if not set
     if (_currentHome == null && _homes.isNotEmpty) {
-      _setCurrentHome(_homes.first);
+      _setCurrentHome(
+        _selectedHomeFrom(
+          _homes,
+          selectedHomeId: SettingsService.instance.selectedHomeId,
+        ),
+      );
     } else if (_currentHome != null) {
       // Refresh current home from local data
       final refreshedHome = _repository.getHome(_currentHome!.id);
@@ -333,6 +361,7 @@ class HomeProvider extends ChangeNotifier {
   void _setCurrentHome(Home? home) {
     _currentHome = home;
     _loadCurrentHomeHubs();
+    unawaited(SettingsService.instance.setSelectedHomeId(home?.id));
 
     // Update hubs subscription
     _hubsSubscription?.cancel();

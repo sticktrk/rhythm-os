@@ -1312,9 +1312,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       if (!mounted) return;
 
       final homeName = context.read<HomeProvider>().currentHome?.name ?? 'Home';
-      final serverSync = context.read<ServerSyncProvider>();
-      serverSync.beginHomeEntryRefresh(homeName: homeName);
-      unawaited(serverSync.refreshForHomeEntry(homeName: homeName));
+      unawaited(
+        context
+            .read<ServerSyncProvider>()
+            .refreshForHomeEntry(homeName: homeName),
+      );
 
       if (!kIsWeb) HapticFeedback.heavyImpact();
       await SuccessModal.show(
@@ -1382,17 +1384,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     });
 
     final serverSync = context.read<ServerSyncProvider>();
-    if (snapshot.hasServerHub) {
-      serverSync.beginHomeEntryRefresh(homeName: snapshot.home.name);
-    }
 
     final result = await context.read<HomeProvider>().enterHome(snapshot);
     if (!mounted) return;
 
     if (snapshot.hasServerHub && result == null) {
-      serverSync.cancelHomeEntryRefresh(
-        error: 'Could not enter ${snapshot.home.name}',
-      );
       setState(() {
         _enteringHomeId = null;
         _homeActionError = 'Could not enter ${snapshot.home.name}';
@@ -1464,9 +1460,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
       if (!mounted) return;
       final homeName = context.read<HomeProvider>().currentHome?.name ?? 'Home';
-      final serverSync = context.read<ServerSyncProvider>();
-      serverSync.beginHomeEntryRefresh(homeName: homeName);
-      unawaited(serverSync.refreshForHomeEntry(homeName: homeName));
+      unawaited(
+        context
+            .read<ServerSyncProvider>()
+            .refreshForHomeEntry(homeName: homeName),
+      );
 
       setState(() => _isStartingLocalServer = false);
       if (!kIsWeb) HapticFeedback.heavyImpact();

@@ -10,6 +10,7 @@ library;
 
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -36,6 +37,11 @@ bool _isGeneratedMoodSceneId(String? sceneId) =>
 bool _sameEndpoint(HubEndpoint? left, HubEndpoint? right) {
   if (left == null || right == null) return left == right;
   return left == right;
+}
+
+bool _sameServerHubIdentity(Hub? left, Hub? right) {
+  if (left == null || right == null) return left == right;
+  return left.id == right.id && left.homeId == right.homeId;
 }
 
 typedef ServerEndpointReachability = Future<bool> Function(
@@ -83,6 +89,7 @@ class ServerSyncProvider extends ChangeNotifier {
   final RoomProvider _roomProvider;
   final HomeProvider _homeProvider;
   final ServerEndpointReachability? _endpointReachability;
+  final Future<List<ConnectivityResult>> Function()? _connectivityCheck;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -156,9 +163,14 @@ class ServerSyncProvider extends ChangeNotifier {
   bool _homeEntryRefreshAwaitingHello = false;
   String? _homeEntryRefreshHomeName;
   String? _homeEntryRefreshHubId;
+  String? _homeEntryRefreshHomeId;
   String? _homeEntryRefreshError;
   Completer<void>? _homeEntryRefreshHelloCompleter;
   int _homeEntryRefreshGeneration = 0;
+  static const Duration _homeEntryWifiFastPathTimeout =
+      Duration(milliseconds: 1200);
+  static const Duration _homeEntryConnectivityTimeout =
+      Duration(milliseconds: 300);
 
   /// Per-node cooldown for preview refreshes triggered by room detail views.
   final Map<String, DateTime> _lastPreviewRefreshTimeByNode = {};
@@ -231,12 +243,11 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Sticky flag: true once we've completed at least one hello with the
   /// currently paired server hub. Stays true across transient reconnects
-  /// (e.g. pull-to-refresh), and resets only when the hub is unpaired and
-  /// the connection drops to `disconnected`. Used by UI surfaces that should
-  /// not flicker out during reconnect — like the Transitions bottom-nav tab.
+  /// (e.g. pull-to-refresh), and resets when the selected Home/server identity
+  /// changes or the hub is unpaired. Used by UI surfaces that should not
+  /// flicker out during reconnect — like the Transitions bottom-nav tab.
   bool _hasBeenSynced = false;
-  bool get hasBeenSynced =>
-      _hasBeenSynced || _connection.connected || HueServiceLocator.isDemoMode;
+  bool get hasBeenSynced => _hasBeenSynced || HueServiceLocator.isDemoMode;
 
   /// Whether the server can dispatch room actions.
   bool get canDispatchActions =>
@@ -991,10 +1002,13 @@ class ServerSyncProvider extends ChangeNotifier {
     required RoomProvider roomProvider,
     required HomeProvider homeProvider,
     @visibleForTesting ServerEndpointReachability? endpointReachability,
+    @visibleForTesting
+    Future<List<ConnectivityResult>> Function()? connectivityCheck,
   })  : _connection = connection,
         _roomProvider = roomProvider,
         _homeProvider = homeProvider,
-        _endpointReachability = endpointReachability {
+        _endpointReachability = endpointReachability,
+        _connectivityCheck = connectivityCheck {
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
@@ -1034,9 +1048,10 @@ class ServerSyncProvider extends ChangeNotifier {
     if (HueServiceLocator.isDemoMode) {
       final serverHub = _homeProvider.activeServerHub;
       if (serverHub != null) {
-        final hubChanged = _serverHub?.id != serverHub.id;
+        final hubChanged = !_sameServerHubIdentity(_serverHub, serverHub);
         _serverHub = serverHub;
         if (hubChanged) {
+          _hasBeenSynced = false;
           notifyListeners();
           // Refresh demo state once per hub change. Don't do this on every
           // call — ProxyProvider re-fires on every RoomProvider notify, and
@@ -1051,7 +1066,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final serverHub = _homeProvider.activeServerHub;
 
     if (serverHub != null) {
-      if (serverHub.id == _serverHub?.id &&
+      if (_sameServerHubIdentity(serverHub, _serverHub) &&
           serverHub.endpoint.host == _serverHub?.endpoint.host &&
           serverHub.endpoint.port == _serverHub?.endpoint.port &&
           serverHub.endpoint.useSsl == _serverHub?.endpoint.useSsl &&
@@ -1063,7 +1078,12 @@ class ServerSyncProvider extends ChangeNotifier {
       }
       debugPrint(
           'ServerSync: connectIfAvailable — connecting to ${serverHub.endpoint.host}:${serverHub.endpoint.port}');
+      final hubChanged = !_sameServerHubIdentity(_serverHub, serverHub);
       _serverHub = serverHub;
+      if (hubChanged) {
+        _hasBeenSynced = false;
+        _resetConnectionMetadata();
+      }
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
       final pendingHub = serverHub;
       Future.microtask(() async {
@@ -1078,6 +1098,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverHub = null;
       _activeConnectionEndpoint = null;
       _hasBeenSynced = false;
+      _resetConnectionMetadata();
       Future.microtask(() async {
         final localServer = LocalRhythmServerService.instance;
         if (removedHub != null &&
@@ -1096,11 +1117,13 @@ class ServerSyncProvider extends ChangeNotifier {
   Future<void> _connectToServerHub(
     Hub hub, {
     required bool clearTransientState,
+    bool assumeLanReachable = false,
+    bool assumeSavedAuth = false,
   }) async {
     var targetHub = hub;
     if (FeatureFlags.remoteAccessTunnel) {
       targetHub = await _homeProvider.refreshServerHubEndpoints(hub);
-      if (_serverHub?.id != hub.id) return;
+      if (!_sameServerHubIdentity(_serverHub, hub)) return;
       _serverHub = targetHub;
     }
 
@@ -1108,14 +1131,21 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomProvider.clearTransientState();
     }
     await _syncLocalServerProcessForHub(targetHub);
-    if (_serverHub?.id != targetHub.id) return;
+    if (!_sameServerHubIdentity(_serverHub, targetHub)) return;
 
-    final auth = await _prepareServerHubAuth(targetHub);
-    if (_serverHub?.id != targetHub.id) return;
+    final auth = await _prepareServerHubAuth(
+      targetHub,
+      assumeSavedAuth: assumeSavedAuth,
+    );
+    if (!_sameServerHubIdentity(_serverHub, targetHub)) return;
 
     _serverHub = auth.hub;
-    final endpoint = await _selectConnectionEndpoint(auth.hub, auth.authToken);
-    if (_serverHub?.id != targetHub.id) return;
+    final endpoint = await _selectConnectionEndpoint(
+      auth.hub,
+      auth.authToken,
+      assumeLanReachable: assumeLanReachable,
+    );
+    if (!_sameServerHubIdentity(_serverHub, targetHub)) return;
 
     _activeConnectionEndpoint = endpoint;
     await _connection.connect(
@@ -1134,14 +1164,24 @@ class ServerSyncProvider extends ChangeNotifier {
   /// saved tunnel endpoint.
   Future<void> retryActiveServerConnection({
     bool authoritative = false,
+    bool assumeLanReachable = false,
+    bool assumeSavedAuth = false,
   }) async {
     final hub = _homeProvider.activeServerHub ?? _serverHub;
     if (hub == null) return;
 
+    final hubChanged = !_sameServerHubIdentity(_serverHub, hub);
     _serverHub = hub;
+    if (hubChanged) {
+      _hasBeenSynced = false;
+      _resetConnectionMetadata();
+      _roomProvider.clearTransientState();
+    }
     await _connectToServerHub(
       hub,
       clearTransientState: false,
+      assumeLanReachable: assumeLanReachable,
+      assumeSavedAuth: assumeSavedAuth,
     );
     if (authoritative) {
       await _connection.reconnect(authoritative: true);
@@ -1173,15 +1213,24 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  Future<({Hub hub, String? authToken})> _prepareServerHubAuth(Hub hub) async {
+  Future<({Hub hub, String? authToken})> _prepareServerHubAuth(
+    Hub hub, {
+    bool assumeSavedAuth = false,
+  }) async {
     final existingToken = hub.token?.trim();
+    if (existingToken != null && existingToken.isNotEmpty) {
+      return (
+        hub: hub,
+        authToken: existingToken,
+      );
+    }
+    if (assumeSavedAuth) {
+      return (hub: hub, authToken: null);
+    }
 
     try {
       final authApi = RhythmAuthApi(baseUrl: hub.endpoint.baseUrl);
       final status = await authApi.getStatus();
-      if (existingToken != null && existingToken.isNotEmpty) {
-        return (hub: hub, authToken: existingToken);
-      }
 
       final shouldClaimToken = status.claimAvailable &&
           (status.requiresAuth || FeatureFlags.remoteAccessTunnel);
@@ -1223,10 +1272,15 @@ class ServerSyncProvider extends ChangeNotifier {
 
   Future<HubEndpoint> _selectConnectionEndpoint(
     Hub hub,
-    String? authToken,
-  ) async {
+    String? authToken, {
+    bool assumeLanReachable = false,
+  }) async {
     final remote = hub.remoteEndpoint;
     if (!FeatureFlags.remoteAccessTunnel || remote == null) {
+      return hub.endpoint;
+    }
+
+    if (assumeLanReachable) {
       return hub.endpoint;
     }
 
@@ -1275,6 +1329,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _homeEntryRefreshHomeName = homeName;
     _homeEntryRefreshHubId =
         _homeProvider.activeServerHub?.id ?? _serverHub?.id;
+    _homeEntryRefreshHomeId =
+        _homeProvider.activeServerHub?.homeId ?? _serverHub?.homeId;
     _homeEntryRefreshError = null;
     notifyListeners();
   }
@@ -1287,6 +1343,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _homeEntryRefreshPending = false;
     _homeEntryRefreshAwaitingHello = false;
     _homeEntryRefreshHubId = null;
+    _homeEntryRefreshHomeId = null;
     _homeEntryRefreshError = error;
     notifyListeners();
   }
@@ -1302,6 +1359,8 @@ class ServerSyncProvider extends ChangeNotifier {
   Future<bool> refreshForHomeEntry({
     required String homeName,
     Duration timeout = const Duration(seconds: 20),
+    bool allowWifiFastPath = true,
+    Duration wifiFastPathTimeout = _homeEntryWifiFastPathTimeout,
   }) async {
     if (HueServiceLocator.isDemoMode) {
       beginHomeEntryRefresh(homeName: homeName);
@@ -1316,6 +1375,29 @@ class ServerSyncProvider extends ChangeNotifier {
       }
     }
 
+    final hub = _homeProvider.activeServerHub ?? _serverHub;
+    if (hub == null) {
+      if (!_homeEntryRefreshPending) {
+        beginHomeEntryRefresh(homeName: homeName);
+      }
+      cancelHomeEntryRefresh(error: 'No Box is saved for $homeName');
+      return false;
+    }
+
+    if (allowWifiFastPath &&
+        !_homeEntryRefreshPending &&
+        _homeEntryRefreshError == null &&
+        await _canUseWifiHomeEntryFastPath(hub)) {
+      final fastPathSucceeded = await _refreshForHomeEntryFastPath(
+        hub: hub,
+        homeName: homeName,
+        timeout: wifiFastPathTimeout,
+      );
+      if (fastPathSucceeded) {
+        return true;
+      }
+    }
+
     if (!_homeEntryRefreshPending) {
       beginHomeEntryRefresh(homeName: homeName);
     } else {
@@ -1324,20 +1406,16 @@ class ServerSyncProvider extends ChangeNotifier {
       notifyListeners();
     }
 
-    final hub = _homeProvider.activeServerHub ?? _serverHub;
-    if (hub == null) {
-      cancelHomeEntryRefresh(error: 'No Box is saved for $homeName');
-      return false;
-    }
-
     final generation = _homeEntryRefreshGeneration;
     _homeEntryRefreshHubId = hub.id;
+    _homeEntryRefreshHomeId = hub.homeId;
     notifyListeners();
 
     try {
       await retryActiveServerConnection();
       await _waitForHomeEntryConnection(
         hubId: hub.id,
+        homeId: hub.homeId,
         generation: generation,
         timeout: timeout,
       );
@@ -1369,8 +1447,69 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
+  Future<bool> _refreshForHomeEntryFastPath({
+    required Hub hub,
+    required String homeName,
+    required Duration timeout,
+  }) async {
+    _homeEntryRefreshGeneration++;
+    _completeHomeEntryRefreshWaiter();
+    final generation = _homeEntryRefreshGeneration;
+    final helloCompleter = Completer<void>();
+    _homeEntryRefreshHelloCompleter = helloCompleter;
+    _homeEntryRefreshPending = false;
+    _homeEntryRefreshAwaitingHello = true;
+    _homeEntryRefreshHomeName = homeName;
+    _homeEntryRefreshHubId = hub.id;
+    _homeEntryRefreshHomeId = hub.homeId;
+    _homeEntryRefreshError = null;
+
+    try {
+      await retryActiveServerConnection(
+        assumeLanReachable: true,
+        assumeSavedAuth: true,
+      );
+      if (_homeEntryRefreshGeneration != generation) return false;
+
+      await _connection.reconnect(authoritative: true);
+      await helloCompleter.future.timeout(timeout);
+
+      if (_homeEntryRefreshGeneration != generation) return false;
+      cancelHomeEntryRefresh();
+      return true;
+    } catch (error) {
+      debugPrint('ServerSync: Wi-Fi Home entry fast path missed: $error');
+      if (_homeEntryRefreshGeneration == generation) {
+        _completeHomeEntryRefreshWaiter();
+        _homeEntryRefreshHelloCompleter = null;
+        _homeEntryRefreshAwaitingHello = false;
+        _homeEntryRefreshHubId = null;
+        _homeEntryRefreshHomeId = null;
+      }
+      return false;
+    }
+  }
+
+  Future<bool> _canUseWifiHomeEntryFastPath(Hub hub) async {
+    if (!_hasBeenSynced || !_sameServerHubIdentity(_serverHub, hub)) {
+      return false;
+    }
+
+    try {
+      final results =
+          await (_connectivityCheck ?? Connectivity().checkConnectivity)
+              .call()
+              .timeout(_homeEntryConnectivityTimeout);
+      return results.contains(ConnectivityResult.wifi) ||
+          results.contains(ConnectivityResult.ethernet);
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _waitForHomeEntryConnection({
     required String hubId,
+    required String homeId,
     required int generation,
     required Duration timeout,
   }) async {
@@ -1381,8 +1520,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
       final activeHub = _homeProvider.activeServerHub ?? _serverHub;
       if (activeHub != null &&
-          activeHub.id != hubId &&
-          _serverHub?.id != hubId) {
+          (activeHub.id != hubId || activeHub.homeId != homeId)) {
         throw StateError('Active server hub changed while entering Home');
       }
 
@@ -1391,6 +1529,7 @@ class ServerSyncProvider extends ChangeNotifier {
               _connection.connectionState == RhythmConnectionState.connected) &&
           connectedHub != null &&
           connectedHub.id == hubId &&
+          connectedHub.homeId == homeId &&
           _activeEndpointIsUnsetOrBelongsToHub(connectedHub)) {
         return;
       }
@@ -1525,6 +1664,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _helloRooms = _buildRoomSummaries();
     _lastHubInfos = hello.hubs;
     _capabilities = hello.capabilities;
+    _hasBeenSynced = true;
 
     // Bootstrap countdown timer from server's last tick timestamp
     if (hello.lastTickEpochMs != null) {
@@ -1570,12 +1710,13 @@ class ServerSyncProvider extends ChangeNotifier {
     _refreshTopologyNodes();
 
     final homeEntryCompleter = _homeEntryRefreshHelloCompleter;
-    if (_homeEntryRefreshPending &&
-        _homeEntryRefreshAwaitingHello &&
+    if (_homeEntryRefreshAwaitingHello &&
         homeEntryCompleter != null &&
         !homeEntryCompleter.isCompleted &&
         (_homeEntryRefreshHubId == null ||
-            _homeEntryRefreshHubId == _serverHub?.id)) {
+            _homeEntryRefreshHubId == _serverHub?.id) &&
+        (_homeEntryRefreshHomeId == null ||
+            _homeEntryRefreshHomeId == _serverHub?.homeId)) {
       homeEntryCompleter.complete();
     }
 
@@ -1883,6 +2024,29 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
+  void _resetConnectionMetadata() {
+    _firmwareVersion = '0.0.0';
+    _serverPlatformType = 'desktop';
+    _serverPlatformContext = 'server';
+    _powerSave = true;
+    _autoUpdate = true;
+    _lightBreakerEnabled = true;
+    _activeMode = null;
+    _activeProfileId = null;
+    _helloNodes = [];
+    _helloRooms = [];
+    _topologyNodes = [];
+    _lastHubInfos = [];
+    _capabilities = null;
+    _rhythmIntervalSecs = 60;
+    _effectiveFadeMs = null;
+    _effectiveMotionTimeoutSecs = null;
+    _review = const RhythmReviewSummary();
+    _triagePendingCount = 0;
+    _triagePendingDevices = 0;
+    _triagePendingRooms = 0;
+  }
+
   void _onConnectionStateChanged(RhythmConnectionState current) {
     if (HueServiceLocator.isDemoMode) {
       notifyListeners();
@@ -1891,35 +2055,15 @@ class ServerSyncProvider extends ChangeNotifier {
     final previous = _previousConnectionState;
     _previousConnectionState = current;
 
-    if (current == RhythmConnectionState.connected) {
-      _hasBeenSynced = true;
-    }
-
     if (current != previous &&
         (current == RhythmConnectionState.disconnected ||
             current == RhythmConnectionState.reconnecting)) {
+      final clearMetadata = !_hasBeenSynced || _homeEntryRefreshPending;
       debugPrint(
-          'ServerSync: Connection lost ($previous → $current) — resetting metadata, keeping rooms');
-      _firmwareVersion = '0.0.0';
-      _serverPlatformType = 'desktop';
-      _serverPlatformContext = 'server';
-      _powerSave = true;
-      _autoUpdate = true;
-      _lightBreakerEnabled = true;
-      _activeMode = null;
-      _activeProfileId = null;
-      _helloNodes = [];
-      _helloRooms = [];
-      _topologyNodes = [];
-      _lastHubInfos = [];
-      _capabilities = null;
-      _rhythmIntervalSecs = 60;
-      _effectiveFadeMs = null;
-      _effectiveMotionTimeoutSecs = null;
-      _review = const RhythmReviewSummary();
-      _triagePendingCount = 0;
-      _triagePendingDevices = 0;
-      _triagePendingRooms = 0;
+          'ServerSync: Connection lost ($previous → $current) — ${clearMetadata ? 'resetting metadata' : 'keeping synced metadata'} and keeping rooms');
+      if (clearMetadata) {
+        _resetConnectionMetadata();
+      }
       _maybeFailOverToRemoteEndpoint(current);
     }
 
@@ -1951,7 +2095,7 @@ class ServerSyncProvider extends ChangeNotifier {
       try {
         final failoverHub = await _homeProvider.refreshServerHubEndpoints(hub);
         final currentHub = _serverHub;
-        if (currentHub?.id != hub.id ||
+        if (!_sameServerHubIdentity(currentHub, hub) ||
             !_sameEndpoint(_activeConnectionEndpoint, hub.endpoint)) {
           return;
         }

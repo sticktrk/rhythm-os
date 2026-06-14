@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1542,6 +1543,34 @@ void main() {
       expect(provider.activeMode, RhythmMode.sleep);
     });
 
+    test('preserves active mode across transient reconnect after hello',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'mode': {'active': 'day'},
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.activeMode, RhythmMode.day);
+      expect(provider.hasBeenSynced, isTrue);
+
+      connection.emitConnectionState(RhythmConnectionState.reconnecting);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.activeMode, RhythmMode.day);
+      expect(provider.hasBeenSynced, isTrue);
+    });
+
     test('settings_changed without power_save preserves legacy cache',
         () async {
       final provider = ServerSyncProvider(
@@ -2164,6 +2193,7 @@ void main() {
             name: 'Kitchen Server',
             host: '127.0.0.1',
             port: 54448,
+            token: 'owner-token',
           ),
         ]),
       );
@@ -2172,6 +2202,7 @@ void main() {
       final refresh = provider.refreshForHomeEntry(
         homeName: 'Kitchen',
         timeout: const Duration(seconds: 1),
+        allowWifiFastPath: false,
       );
 
       expect(provider.hasHomeEntryRefreshGate, isTrue);
@@ -2188,6 +2219,103 @@ void main() {
       expect(await refresh, isTrue);
       expect(provider.hasHomeEntryRefreshGate, isFalse);
       expect(provider.homeEntryRefreshError, isNull);
+    });
+
+    test('wifi fast path refreshes an already synced Home without gate',
+        () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: 'home-1',
+        name: 'Kitchen Server',
+        host: '127.0.0.1',
+        port: 54448,
+        token: 'owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'server.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([hub]),
+        connectivityCheck: () async => const [ConnectivityResult.wifi],
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection(
+        assumeLanReachable: true,
+        assumeSavedAuth: true,
+      );
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final priorConnectCalls = helloConnection.connectCalls.length;
+      final refresh = provider.refreshForHomeEntry(
+        homeName: 'Kitchen',
+        wifiFastPathTimeout: const Duration(milliseconds: 50),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasHomeEntryRefreshGate, isFalse);
+      expect(helloConnection.connectCalls.length, priorConnectCalls + 1);
+      expect(helloConnection.connectCalls.last.host, '127.0.0.1');
+
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+
+      expect(await refresh, isTrue);
+      expect(provider.hasHomeEntryRefreshGate, isFalse);
+      expect(provider.homeEntryRefreshError, isNull);
+    });
+
+    test('wifi fast path miss falls back to visible Home entry gate', () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: 'home-1',
+        name: 'Kitchen Server',
+        host: '127.0.0.1',
+        port: 54448,
+        token: 'owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'server.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([hub]),
+        connectivityCheck: () async => const [ConnectivityResult.wifi],
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection(
+        assumeLanReachable: true,
+        assumeSavedAuth: true,
+      );
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final refresh = provider.refreshForHomeEntry(
+        homeName: 'Kitchen',
+        timeout: const Duration(seconds: 1),
+        wifiFastPathTimeout: const Duration(milliseconds: 20),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(provider.hasHomeEntryRefreshGate, isTrue);
+      expect(provider.isHomeEntryRefreshPending, isTrue);
+
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+
+      expect(await refresh, isTrue);
+      expect(provider.hasHomeEntryRefreshGate, isFalse);
     });
 
     test('fails over from LAN to remote endpoint when LAN reconnects',

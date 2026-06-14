@@ -240,6 +240,11 @@ class _TestRhythmConnection extends RhythmConnection {
   Stream<RhythmConnectionState> get connectionStateStream =>
       _connectionStateController.stream;
 
+  void emitHello(RhythmHello hello) {
+    if (_disposed) return;
+    _helloController.add(hello);
+  }
+
   void setConnectionState(RhythmConnectionState state) {
     _connectionState = state;
     if (_disposed) return;
@@ -329,6 +334,37 @@ Future<void> _seedRoom(RoomProvider roomProvider) {
         brightnessOffset: 0,
       ),
     ],
+  );
+}
+
+void _emitSyncedHello(
+  _TestRhythmConnection connection, {
+  bool withKitchen = false,
+  RhythmMode activeMode = RhythmMode.day,
+}) {
+  connection.emitHello(
+    RhythmHello.fromJson({
+      'nodes': withKitchen
+          ? [
+              {
+                'id': 'room-1',
+                'name': 'Kitchen',
+                'kind': 'room',
+                'hub_types': ['matter'],
+                'state': 'active',
+                'rhythm_enabled': true,
+                'disabled': false,
+                'time_offset': 0.0,
+                'brightness_offset': 0.0,
+                'lights_on': true,
+              },
+            ]
+          : const <Map<String, dynamic>>[],
+      'mode': {
+        'active': activeMode == RhythmMode.sleep ? 'sleep' : 'day',
+      },
+      'location': const <String, dynamic>{},
+    }),
   );
 }
 
@@ -480,6 +516,9 @@ void main() {
       serverSync: serverSync,
     );
 
+    _emitSyncedHello(connection);
+    await tester.pump(const Duration(milliseconds: 10));
+
     expect(find.text('Add Hubs'), findsOneWidget);
     expect(find.text('Setting up...'), findsNothing);
   });
@@ -515,6 +554,56 @@ void main() {
 
     expect(find.text('Kitchen'), findsOneWidget);
     expect(find.text('Connecting to Home'), findsNothing);
+  });
+
+  testWidgets(
+      'home entry refresh overlays non-home tabs and hides shell chrome',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final home = Home.create(
+      id: 'home-1',
+      name: 'Kitchen',
+      ownerId: 'user-1',
+    );
+    final homeProvider =
+        _FakeHomeProvider([_serverHub(remote: true)], currentHome: home);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    _emitSyncedHello(connection);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.tap(find.text('Settings'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('Settings'), findsWidgets);
+    expect(find.byType(MainBottomNav), findsOneWidget);
+
+    serverSync.beginHomeEntryRefresh(homeName: home.name);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.byType(MainBottomNav), findsNothing);
+
+    serverSync.cancelHomeEntryRefresh();
+    await tester.pump(const Duration(milliseconds: 10));
   });
 
   testWidgets(
@@ -559,6 +648,8 @@ void main() {
     connection.setConnectionState(RhythmConnectionState.connected);
     await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Server Unreachable'), findsNothing);
+    _emitSyncedHello(connection);
+    await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Add Hubs'), findsOneWidget);
   });
 
@@ -612,6 +703,8 @@ void main() {
       homeProvider: homeProvider,
       serverSync: serverSync,
     );
+    _emitSyncedHello(connection);
+    await tester.pump(const Duration(milliseconds: 10));
 
     final nestedNavigatorContext = tester.element(find.text('Add Hubs'));
     unawaited(
@@ -692,12 +785,14 @@ void main() {
       homeProvider: homeProvider,
       serverSync: serverSync,
     );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
 
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
   testWidgets(
-      'shows the room grid while a server with cached rooms is still connecting',
+      'shows setup loading while a server with cached rooms is still connecting',
       (tester) async {
     final roomProvider = RoomProvider();
     await _seedRoom(roomProvider);
@@ -722,7 +817,8 @@ void main() {
       serverSync: serverSync,
     );
 
-    expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.text('Setting up...'), findsOneWidget);
+    expect(find.text('Kitchen'), findsNothing);
   });
 
   testWidgets('shows the room grid when rooms exist without a server hub',
@@ -775,6 +871,8 @@ void main() {
       homeProvider: homeProvider,
       serverSync: serverSync,
     );
+    _emitSyncedHello(connection);
+    await tester.pump(const Duration(milliseconds: 10));
 
     expect(api.getModeCallCount, 0);
     expect(api.getProfilesCallCount, 0);
@@ -824,6 +922,15 @@ void main() {
     addTearDown(connection.dispose);
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
+
     await serverSync.dispatchSetTransitions(const [
       RhythmModeTransitionConfig(
         id: 'sleep_to_day',
@@ -845,13 +952,7 @@ void main() {
       ),
     ]);
     await serverSync.dispatchSetActiveMode(RhythmMode.day);
-
-    await _pumpAppShell(
-      tester,
-      roomProvider: roomProvider,
-      homeProvider: homeProvider,
-      serverSync: serverSync,
-    );
+    await tester.pump(const Duration(milliseconds: 10));
 
     final roomGrid = find.byType(AllRoomsScreen);
     final sleepPill = find.descendant(

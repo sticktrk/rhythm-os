@@ -3,6 +3,50 @@ import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
+  group('home selection', () {
+    test('restores the saved Home when it still exists', () {
+      final kitchen = Home.create(
+        id: 'home-a',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final cabin = Home.create(
+        id: 'home-b',
+        name: 'Cabin',
+        ownerId: 'user-1',
+      );
+
+      expect(
+        selectedHomeFromForTesting(
+          [kitchen, cabin],
+          selectedHomeId: cabin.id,
+        )?.id,
+        cabin.id,
+      );
+    });
+
+    test('falls back to the first Home when the saved Home is gone', () {
+      final kitchen = Home.create(
+        id: 'home-a',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final cabin = Home.create(
+        id: 'home-b',
+        name: 'Cabin',
+        ownerId: 'user-1',
+      );
+
+      expect(
+        selectedHomeFromForTesting(
+          [kitchen, cabin],
+          selectedHomeId: 'deleted-home',
+        )?.id,
+        kitchen.id,
+      );
+    });
+  });
+
   group('server hub switching', () {
     test('prefers the enabled server hub by recency', () {
       final older = _serverHub(
