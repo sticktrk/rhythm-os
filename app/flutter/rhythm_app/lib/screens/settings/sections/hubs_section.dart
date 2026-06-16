@@ -1,0 +1,155 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../../widgets/settings_row.dart';
+import '../../../widgets/solar_orbit.dart';
+import '../../../providers/home_provider.dart';
+import '../../../providers/server_sync_provider.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
+import '../../triage_screen.dart';
+import '../../../widgets/connect_hub_screen.dart';
+import 'rhythm_server_section.dart';
+
+/// Hubs section — RhythmServer connection and device review.
+class HubsSection extends StatelessWidget {
+  const HubsSection({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer2<HomeProvider, ServerSyncProvider>(
+      builder: (context, homeProvider, serverSync, child) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const SettingsSectionHeader(title: 'RhythmServer'),
+            SettingsGroup(
+              children: [
+                // ── RhythmServer ──
+                Builder(
+                  builder: (context) {
+                    final bridgeHub = homeProvider.activeServerHub;
+                    final serverState = serverSync.connectionState;
+                    final isOnline =
+                        serverState == RhythmConnectionState.connected;
+                    final isConnecting =
+                        serverState == RhythmConnectionState.connecting ||
+                            serverState == RhythmConnectionState.reconnecting;
+
+                    String? statusText;
+                    Color? statusColor;
+                    if (bridgeHub != null) {
+                      if (isOnline) {
+                        statusText = 'Online';
+                        statusColor = const Color(0xFF22C55E);
+                      } else if (isConnecting) {
+                        statusText = 'Connecting...';
+                        statusColor = const Color(0xFFE8A54B);
+                      } else {
+                        statusText = 'Offline';
+                        statusColor = Colors.red.shade400;
+                      }
+                    }
+
+                    return SettingsRow(
+                      icon: Icons.developer_board,
+                      iconColor: const Color(0xFF00BCD4),
+                      label: 'RhythmServer',
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (bridgeHub != null && statusText != null) ...[
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: statusColor,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              statusText,
+                              style: TextStyle(
+                                color: statusColor,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                          Icon(
+                            Icons.chevron_right,
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.7),
+                            size: 24,
+                          ),
+                        ],
+                      ),
+                      showChevron: false,
+                      value: bridgeHub?.name,
+                      onTap: bridgeHub != null
+                          ? () => RhythmServerDetailScreen.show(context)
+                          : () => ConnectHubScreen.show(
+                                context,
+                                mode: ConnectHubMode.rhythmServer,
+                              ),
+                    );
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // Device Review row (triage)
+            SettingsGroup(
+              children: [
+                SettingsRow(
+                  icon: Icons.devices_other,
+                  iconColor: const Color(0xFFFF9800),
+                  label: 'Device Review',
+                  value: serverSync.hubConfiguredConflicts.isNotEmpty
+                      ? '${serverSync.hubConfiguredConflicts.length} conflict${serverSync.hubConfiguredConflicts.length == 1 ? '' : 's'}'
+                      : serverSync.triagePendingCount > 0
+                          ? '${serverSync.triagePendingCount} pending'
+                          : 'Clear',
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (serverSync.triagePendingCount > 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFF9800),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            '${serverSync.triagePendingCount}',
+                            style: const TextStyle(
+                              color: Color(0xFF1A1A1A),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      if (serverSync.triagePendingCount > 0)
+                        const SizedBox(width: 8),
+                      Icon(
+                        Icons.chevron_right,
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
+                        size: 22,
+                      ),
+                    ],
+                  ),
+                  showChevron: false,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const TriageScreen()),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        );
+      },
+    );
+  }
+}

@@ -1,0 +1,1014 @@
+/// Room management provider for Rhythm Lighting.
+///
+/// Manages rooms across multiple sources (Hue, Home Assistant, Rhythm bridge)
+/// with Dart-side room state and local Rust curve math.
+library;
+
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_core/runner/room_state_store.dart' as room_state;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode, RoomModeState;
+import '../services/analytics_service.dart';
+import '../services/settings_service.dart';
+
+const _roomTransitionFallbackTimeout = Duration(seconds: 15);
+
+/// Replace rooms from a source while preserving runtime state.
+///
+/// Preserves:
+/// - `disabled` (user preference)
+/// - `rhythmEnabled`, `timeOffset`, `brightnessOffset` (bridge-authoritative)
+/// - `lightsOn` (replaced from server-observed power on refresh)
+/// - `curveConfig` (per-room override)
+///
+/// Fresh rooms provide updated metadata (name, deviceIds) from the hub.
+RunnerStateDto replaceRoomsPreservingUserState(
+  RunnerStateDto state, {
+  required RoomSourceDto source,
+  required List<RoomDto> freshRooms,
+}) {
+  final existing = room_state.roomsBySource(state: state, source: source);
+  final existingById = <String, RoomDto>{
+    for (final r in existing) r.id: r,
+  };
+
+  // Remove existing rooms from this source
+  for (final room in existing) {
+    state = room_state.removeRoom(state: state, roomId: room.id);
+  }
+
+  // Add fresh rooms, restoring preserved state from existing
+  for (final room in freshRooms) {
+    final prev = existingById[room.id];
+    final toAdd = prev != null
+        ? RoomDto(
+            id: room.id,
+            name: room.name,
+            source: room.source,
+            kind: room.kind,
+            parentId: room.parentId,
+            placement: room.placement,
+            deviceIds: room.deviceIds,
+            // Preserve runtime state from previous
+            rhythmEnabled: prev.rhythmEnabled,
+            disabled: prev.disabled,
+            lightsOn: room.lightsOn,
+            timeOffsetMinutes: prev.timeOffsetMinutes,
+            brightnessOffset: prev.brightnessOffset,
+            curveConfig: prev.curveConfig,
+          )
+        : room;
+    state = room_state.addRoom(state: state, room: toAdd);
+  }
+
+  return state;
+}
+
+/// Motion timer info for a room, stored separately from RoomDto.
+class MotionTimerInfo {
+  final bool motionActive;
+  final bool motionOwned;
+  final int? remainingSecs;
+  final int timeoutSecs;
+  final bool warningActive;
+
+  /// When this info was received — used for local countdown interpolation.
+  final DateTime receivedAt;
+
+  const MotionTimerInfo({
+    required this.motionActive,
+    required this.motionOwned,
+    this.remainingSecs,
+    required this.timeoutSecs,
+    this.warningActive = false,
+    required this.receivedAt,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MotionTimerInfo &&
+          motionActive == other.motionActive &&
+          motionOwned == other.motionOwned &&
+          remainingSecs == other.remainingSecs &&
+          timeoutSecs == other.timeoutSecs &&
+          warningActive == other.warningActive;
+
+  @override
+  int get hashCode => Object.hash(
+        motionActive,
+        motionOwned,
+        remainingSecs,
+        timeoutSecs,
+        warningActive,
+      );
+}
+
+/// Manages room state across all connected hubs.
+///
+/// Features:
+/// - Syncs rooms from Hue, Home Assistant, Rhythm bridge
+/// - Persists state via SettingsService (Hive)
+/// - Tracks current room index for swipeable UI
+/// - Provides enabled/disabled room filtering
+class RoomProvider extends ChangeNotifier {
+  RunnerStateDto _state = room_state.emptyRunnerState();
+  int _currentIndex = 0;
+  bool _initialized = false;
+  int _resetGeneration = 0;
+
+  /// Monotonic counter incremented on every reset action.
+  ///
+  /// Widgets watching this can detect reset actions and drop stale local
+  /// overrides so the curve-computed values show through.
+  int get resetGeneration => _resetGeneration;
+
+  /// Bump the reset generation counter so room cards clear stale slider state.
+  void bumpResetGeneration() {
+    _resetGeneration++;
+    notifyListeners();
+  }
+
+  /// Per-room motion timer state from the Rhythm bridge (not part of RoomDto to avoid FRB regen).
+  final Map<String, MotionTimerInfo> _motionTimers = {};
+
+  /// Rooms that have at least one motion sensor configured (sticky).
+  ///
+  /// Set when a motion timer event arrives for a room; never cleared until
+  /// the server connection resets. This lets the UI show a stable sensor icon
+  /// even when no motion is currently active.
+  final Set<String> _roomsWithSensors = {};
+
+  /// Per-room lock timestamps to suppress stale external lightsOn overrides.
+  ///
+  /// When the user toggles a light locally, the room is locked for 3s so that
+  /// incoming hub state (which may still reflect the old value) doesn't
+  /// flicker the UI back.
+  final Map<String, DateTime> _lightsOnLockedUntil = {};
+
+  /// Per-room lock timestamps to suppress stale external room-state overrides.
+  ///
+  /// Same pattern as [_lightsOnLockedUntil] — when the user toggles idle or
+  /// hard-off locally, the room is locked for 3s so stale server state does
+  /// not immediately flip the UI back.
+  final Map<String, DateTime> _roomStateLockedUntil = {};
+
+  /// Per-room mode state from the server, tracked separately from RoomDto.
+  final Map<String, RoomModeState> _roomStates = {};
+
+  /// Per-room live mode from SSE (`day` / `sleep`).
+  final Map<String, RhythmMode> _roomModes = {};
+
+  /// Per-room global mode-transition flag from the server.
+  final Map<String, bool> _roomTransitioning = {};
+  final Map<String, Timer> _roomTransitionTimers = {};
+
+  /// Per-room brightness from server (effective brightness after offsets).
+  final Map<String, int> _roomBrightness = {};
+
+  /// Per-room kelvin from server (effective color temperature after offsets).
+  final Map<String, int> _roomKelvin = {};
+
+  /// Per-room direct color from server (for direct-color profiles like idle).
+  final Map<String, (int r, int g, int b)> _roomColor = {};
+
+  /// Last known Mood color for each room.
+  ///
+  /// This is separate from [_roomColor] because the live direct color is
+  /// cleared when a room returns to Kelvin/CCT mode, while Mood should still
+  /// remember the last selected color when the user comes back to it.
+  final Map<String, (int r, int g, int b)> _roomMoodColor = {};
+
+  /// Last known Mood brightness for each room.
+  ///
+  /// This is separate from [_roomBrightness] because the generic brightness
+  /// cache can hold the active-mode runtime brightness.
+  final Map<String, int> _roomMoodBrightness = {};
+
+  /// Whether Mood lighting is enabled for this room.
+  final Map<String, bool> _roomMoodEnabled = {};
+
+  /// Whether this room is currently in its Mood state.
+  final Map<String, bool> _roomMoodActive = {};
+
+  /// Per-room timestamp of the last rhythm tick from the server.
+  final Map<String, DateTime> _lastTickTime = {};
+
+  /// Fires after rooms from a source are added or cleared.
+  final StreamController<RoomSourceDto> _sourceChangedController =
+      StreamController<RoomSourceDto>.broadcast();
+
+  /// Stream that emits after [addRoomsFromSource] or [clearRoomsBySource].
+  Stream<RoomSourceDto> get onSourceRoomsChanged =>
+      _sourceChangedController.stream;
+
+  /// Raw room mode state from the server/local controls.
+  ///
+  /// This represents Rhythm's automation intent (`active`, `mood`, `standby`,
+  /// `hardOff`, etc.) and may remain `active` even when the physical lights
+  /// are currently off due to an external wall switch, dimmer, or hub action.
+  ///
+  /// Until the first authoritative server state arrives, default to `active`
+  /// rather than inferring semantics from observed power alone.
+  RoomModeState getRoomState(String roomId) {
+    final state = _roomStates[roomId];
+    if (state != null) return state;
+    return RoomModeState.active;
+  }
+
+  /// Visual room state for cards and other UI that reflects actual power.
+  ///
+  /// The backend can legitimately report `state=active` while `lightsOn=false`
+  /// when a room is configured to participate in Rhythm but was turned off
+  /// outside the app. For "is this room on right now?" UI, `lightsOn` wins.
+  RoomModeState getDisplayRoomState(String roomId) {
+    final state = getRoomState(roomId);
+    final room = getRoom(roomId);
+    if (room == null) return state;
+    if (!room.lightsOn) return RoomModeState.hardOff;
+    return state;
+  }
+
+  /// Whether a room is in Standby mode.
+  bool isRoomIdle(String roomId) {
+    final state = getRoomState(roomId);
+    return state == RoomModeState.standby || state == RoomModeState.idle;
+  }
+
+  /// Whether a room has per-room Mood lighting enabled.
+  bool isMoodEnabled(String roomId) => _roomMoodEnabled[roomId] ?? false;
+
+  /// Whether a room is actively showing Mood lighting.
+  bool isMoodActive(String roomId) =>
+      _roomMoodActive[roomId] ?? getRoomState(roomId) == RoomModeState.mood;
+
+  /// Latest live mode for a room from SSE, when available.
+  RhythmMode? getRoomMode(String roomId) => _roomModes[roomId];
+
+  /// Whether the server reports an active mode-transition fade for a room.
+  bool isRoomTransitioning(String roomId) =>
+      _roomTransitioning[roomId] ?? false;
+
+  /// Whether any current room is inside a server-side mode transition.
+  bool get anyRoomTransitioning =>
+      rooms.any((room) => _roomTransitioning[room.id] ?? false);
+
+  bool _setRoomTransitioning(
+    String roomId,
+    bool transitioning, {
+    Duration timeout = _roomTransitionFallbackTimeout,
+  }) {
+    _roomTransitionTimers.remove(roomId)?.cancel();
+
+    final current = _roomTransitioning[roomId] ?? false;
+    if (transitioning) {
+      _roomTransitioning[roomId] = true;
+      _roomTransitionTimers[roomId] = Timer(timeout, () {
+        if ((_roomTransitioning[roomId] ?? false) == false) return;
+        _roomTransitioning.remove(roomId);
+        _roomTransitionTimers.remove(roomId);
+        notifyListeners();
+      });
+      return !current;
+    }
+
+    if (!current) {
+      _roomTransitioning.remove(roomId);
+      return false;
+    }
+    _roomTransitioning.remove(roomId);
+    return true;
+  }
+
+  void _cancelRoomTransitionTimers() {
+    for (final timer in _roomTransitionTimers.values) {
+      timer.cancel();
+    }
+    _roomTransitionTimers.clear();
+  }
+
+  void _clearRoomTransitioningState(String roomId) {
+    _roomTransitionTimers.remove(roomId)?.cancel();
+    _roomTransitioning.remove(roomId);
+  }
+
+  /// Set room state locally with a 3s optimistic lock.
+  void setRoomStateLocal(String roomId, RoomModeState state) {
+    final previous = getRoomState(roomId);
+    if (previous == state) return;
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    _roomStates[roomId] = state;
+    notifyListeners();
+  }
+
+  // Display value getters (from server)
+  /// Get server-computed brightness for a room, or null if not available.
+  int? getBrightness(String roomId) => _roomBrightness[roomId];
+
+  /// Get server-computed kelvin for a room, or null if not available.
+  int? getKelvin(String roomId) => _roomKelvin[roomId];
+
+  /// Get direct color for a room (from direct-color profiles), or null.
+  (int r, int g, int b)? getRoomColor(String roomId) => _roomColor[roomId];
+
+  /// Get the last known Mood color for a room, or null.
+  (int r, int g, int b)? getMoodColor(String roomId) => _roomMoodColor[roomId];
+
+  /// Get the last known Mood brightness for a room, or null.
+  int? getMoodBrightness(String roomId) => _roomMoodBrightness[roomId];
+
+  /// Update cached Mood color from the server's persisted mood profile.
+  void setMoodColorFromServer(String roomId, (int r, int g, int b)? color) {
+    var changed = false;
+    if (color == null) {
+      changed = _roomMoodColor.remove(roomId) != null;
+    } else if (_roomMoodColor[roomId] != color) {
+      _roomMoodColor[roomId] = color;
+      changed = true;
+    }
+    if (changed) notifyListeners();
+  }
+
+  /// Update cached Mood brightness from the server's persisted mood profile.
+  void setMoodBrightnessFromServer(String roomId, int? brightness) {
+    var changed = false;
+    if (brightness == null) {
+      changed = _roomMoodBrightness.remove(roomId) != null;
+    } else {
+      final clamped = brightness.clamp(1, 100).toInt();
+      if (_roomMoodBrightness[roomId] != clamped) {
+        _roomMoodBrightness[roomId] = clamped;
+        changed = true;
+      }
+    }
+    if (changed) notifyListeners();
+  }
+
+  /// Set Mood brightness locally with a 3s optimistic lock.
+  void setMoodBrightnessLocal(String roomId, int brightness) {
+    final clamped = brightness.clamp(1, 100).toInt();
+    if (_roomMoodBrightness[roomId] == clamped) return;
+    _roomMoodBrightness[roomId] = clamped;
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    notifyListeners();
+  }
+
+  /// Set room color locally with a 3s optimistic lock.
+  void setRoomColorLocal(
+    String roomId,
+    int r,
+    int g,
+    int b, {
+    bool rememberAsMood = false,
+  }) {
+    _roomColor[roomId] = (r, g, b);
+    if (rememberAsMood) {
+      _roomMoodColor[roomId] = (r, g, b);
+    }
+    _roomStateLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    notifyListeners();
+  }
+
+  /// Set Mood enablement locally for optimistic UI.
+  void setMoodEnabledLocal(String roomId, bool enabled) {
+    if (_roomMoodEnabled[roomId] == enabled) return;
+    _roomMoodEnabled[roomId] = enabled;
+    notifyListeners();
+  }
+
+  /// Get the timestamp of the last rhythm tick for a room.
+  DateTime? getLastTickTime(String roomId) => _lastTickTime[roomId];
+
+  /// Set the last tick time for a room (bootstrap from server hello).
+  void setLastTickTime(String roomId, DateTime time) {
+    _lastTickTime[roomId] = time;
+  }
+
+  /// Whether lights are on in a room (falls back to room.lightsOn).
+  bool isLightsOn(String roomId) {
+    final room = getRoom(roomId);
+    return room?.lightsOn ?? false;
+  }
+
+  // Motion timer getters
+  /// Get motion timer info for a room, or null if no motion tracking active.
+  MotionTimerInfo? getMotionTimer(String roomId) => _motionTimers[roomId];
+
+  /// Whether a room has a motion sensor configured (sticky).
+  bool hasMotionSensor(String roomId) => _roomsWithSensors.contains(roomId);
+
+  /// Mark a room as having a motion sensor. Only notifies if newly added.
+  void markRoomHasSensor(String roomId) {
+    if (_roomsWithSensors.add(roomId)) {
+      notifyListeners();
+    }
+  }
+
+  void markNodeHasSensor(String nodeId) => markRoomHasSensor(nodeId);
+
+  /// Remove rooms from [_roomsWithSensors] that are no longer reported by
+  /// the server. Also clears stale motion timers for those rooms.
+  void reconcileMotionSensors(Set<String> serverRoomsWithSensors) {
+    final stale = _roomsWithSensors.difference(serverRoomsWithSensors);
+    if (stale.isEmpty) return;
+    for (final roomId in stale) {
+      _roomsWithSensors.remove(roomId);
+      _motionTimers.remove(roomId);
+    }
+    notifyListeners();
+  }
+
+  /// Replace the known motion-target node set with a fresh authoritative set.
+  ///
+  /// This is used during hello/topology refresh when the backend graph is the
+  /// source of truth for automation wiring.
+  void setMotionSensorNodes(Set<String> nodeIds) {
+    final stale = _roomsWithSensors.difference(nodeIds);
+    final added = nodeIds.difference(_roomsWithSensors);
+    if (stale.isEmpty && added.isEmpty) return;
+
+    for (final nodeId in stale) {
+      _roomsWithSensors.remove(nodeId);
+      _motionTimers.remove(nodeId);
+    }
+    _roomsWithSensors.addAll(added);
+    notifyListeners();
+  }
+
+  /// Update motion timer info for a room. Only notifies if values changed.
+  void updateMotionTimer(String roomId, MotionTimerInfo info) {
+    final existing = _motionTimers[roomId];
+    if (existing == info) return;
+    _motionTimers[roomId] = info;
+    notifyListeners();
+  }
+
+  void updateNodeMotionTimer(String nodeId, MotionTimerInfo info) =>
+      updateMotionTimer(nodeId, info);
+
+  /// Clear motion timer for a room. Only notifies if it was present.
+  void clearMotionTimer(String roomId) {
+    if (_motionTimers.remove(roomId) != null) {
+      notifyListeners();
+    }
+  }
+
+  void clearNodeMotionTimer(String nodeId) => clearMotionTimer(nodeId);
+
+  // Getters
+  List<RoomDto> get rooms => _state.rooms;
+  List<RoomDto> get enabledRooms => room_state.enabledRooms(state: _state);
+  RoomDto? get currentRoom => rooms.isNotEmpty && _currentIndex < rooms.length
+      ? rooms[_currentIndex]
+      : null;
+  int get currentIndex => _currentIndex;
+  bool get initialized => _initialized;
+  RunnerStateDto get state => _state;
+
+  /// Initialize the provider by loading saved state.
+  Future<void> initialize() async {
+    if (_initialized) return;
+
+    try {
+      final loaded = SettingsService.instance.getRunnerState();
+      if (loaded != null) {
+        _state = loaded;
+      }
+    } catch (e) {
+      debugPrint('Failed to load room state: $e');
+    }
+
+    _initialized = true;
+    notifyListeners();
+  }
+
+  /// Save current state to persistent storage.
+  Future<void> _save() async {
+    try {
+      await SettingsService.instance.saveRunnerState(_state);
+    } catch (e) {
+      debugPrint('Failed to save room state: $e');
+    }
+  }
+
+  // ============================================================================
+  // Room Sync
+  // ============================================================================
+
+  /// Add rooms from a specific source.
+  ///
+  /// Removes all existing rooms from this source first, then adds the new ones.
+  /// This ensures a clean sync without duplicates.
+  Future<void> addRoomsFromSource(
+      RoomSourceDto source, List<RoomDto> rooms) async {
+    final previousIds = room_state
+        .roomsBySource(state: _state, source: source)
+        .map((r) => r.id);
+    final nextIds = rooms.map((r) => r.id).toSet();
+    for (final roomId in previousIds) {
+      if (!nextIds.contains(roomId)) {
+        _clearRoomTransitioningState(roomId);
+      }
+    }
+
+    _state = replaceRoomsPreservingUserState(
+      _state,
+      source: source,
+      freshRooms: rooms,
+    );
+
+    // Reset index if needed
+    if (_currentIndex >= _state.rooms.length) {
+      _currentIndex = _state.rooms.isEmpty ? 0 : _state.rooms.length - 1;
+    }
+
+    await _save();
+    // Update room count analytics property
+    AnalyticsService().setRoomCount(roomCount);
+    notifyListeners();
+    _sourceChangedController.add(source);
+  }
+
+  /// Add a single room.
+  Future<void> addRoom(RoomDto room) async {
+    _state = room_state.addRoom(state: _state, room: room);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Remove a room by ID.
+  Future<void> removeRoom(String roomId) async {
+    _state = room_state.removeRoom(state: _state, roomId: roomId);
+    _clearRoomTransitioningState(roomId);
+
+    // Adjust current index if needed
+    if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
+      _currentIndex = _state.rooms.length - 1;
+    }
+
+    await _save();
+    notifyListeners();
+  }
+
+  /// Get rooms from a specific source.
+  List<RoomDto> getRoomsBySource(RoomSourceDto source) {
+    return room_state.roomsBySource(state: _state, source: source);
+  }
+
+  /// Clear all rooms from a specific source.
+  Future<void> clearRoomsBySource(RoomSourceDto source) async {
+    final roomsToRemove =
+        room_state.roomsBySource(state: _state, source: source);
+    for (final room in roomsToRemove) {
+      _state = room_state.removeRoom(state: _state, roomId: room.id);
+      _clearRoomTransitioningState(room.id);
+    }
+    if (_currentIndex >= _state.rooms.length && _state.rooms.isNotEmpty) {
+      _currentIndex = _state.rooms.length - 1;
+    } else if (_state.rooms.isEmpty) {
+      _currentIndex = 0;
+    }
+    await _save();
+    // Update room count analytics property
+    AnalyticsService().setRoomCount(roomCount);
+    notifyListeners();
+    _sourceChangedController.add(source);
+  }
+
+  // ============================================================================
+  // Navigation
+  // ============================================================================
+
+  /// Set the current room index (for swipeable PageView).
+  void setCurrentIndex(int index) {
+    if (index >= 0 && index < rooms.length && index != _currentIndex) {
+      _currentIndex = index;
+      notifyListeners();
+    }
+  }
+
+  /// Move to the next room.
+  void nextRoom() {
+    if (_currentIndex < rooms.length - 1) {
+      _currentIndex++;
+      notifyListeners();
+    }
+  }
+
+  /// Move to the previous room.
+  void previousRoom() {
+    if (_currentIndex > 0) {
+      _currentIndex--;
+      notifyListeners();
+    }
+  }
+
+  // ============================================================================
+  // Room Control
+  // ============================================================================
+
+  /// Toggle the disabled state of a room.
+  Future<void> toggleDisabled(String roomId) async {
+    final room = rooms.firstWhere((r) => r.id == roomId,
+        orElse: () => throw Exception('Room not found'));
+    _state = room_state.setRoomDisabled(
+        state: _state, roomId: roomId, disabled: !room.disabled);
+    await _save();
+    notifyListeners();
+    _sourceChangedController.add(room.source);
+  }
+
+  /// Set the disabled state of a room.
+  Future<void> setRoomDisabled(String roomId, bool disabled) async {
+    final room = rooms.firstWhere((r) => r.id == roomId,
+        orElse: () => throw Exception('Room not found'));
+    _state = room_state.setRoomDisabled(
+        state: _state, roomId: roomId, disabled: disabled);
+    await _save();
+    notifyListeners();
+    _sourceChangedController.add(room.source);
+  }
+
+  /// Set the per-room curve configuration.
+  ///
+  /// Pass `null` to use the global configuration.
+  Future<void> setRoomCurveConfig(String roomId, CurveConfigDto? config) async {
+    _state = room_state.setRoomCurveConfig(
+        state: _state, roomId: roomId, config: config);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Update room devices.
+  Future<void> setRoomDevices(String roomId, List<String> deviceIds) async {
+    _state = room_state.setRoomDevices(
+        state: _state, roomId: roomId, deviceIds: deviceIds);
+    await _save();
+    notifyListeners();
+  }
+
+  // ============================================================================
+  // Room Control
+  // ============================================================================
+
+  /// Apply all server-authoritative room state in a single atomic update.
+  ///
+  /// One [_save] + one [notifyListeners] instead of per-field updates.
+  /// This prevents intermediate states from being visible to widgets.
+  Future<void> applyServerRoomState(
+    String roomId, {
+    required bool rhythmEnabled,
+    required double timeOffset,
+    required double brightnessOffset,
+    required RoomModeState state,
+    bool transitioning = false,
+    RhythmMode? mode,
+    bool? lightsOn,
+    int? brightness,
+    int? kelvin,
+    (int r, int g, int b)? color,
+    bool? moodEnabled,
+    bool? moodActive,
+    bool tick = false,
+  }) async {
+    bool changed = false;
+    final room = getRoom(roomId);
+    if (room == null) return;
+
+    if (tick) {
+      _lastTickTime[roomId] = DateTime.now();
+      changed = true;
+    }
+
+    if (room.rhythmEnabled != rhythmEnabled) {
+      _state = room_state.setRoomRhythmEnabled(
+          state: _state, roomId: roomId, rhythmEnabled: rhythmEnabled);
+      changed = true;
+    }
+    if (room.timeOffsetMinutes != timeOffset) {
+      _state = room_state.setRoomTimeOffset(
+          state: _state, roomId: roomId, timeOffsetMinutes: timeOffset);
+      changed = true;
+    }
+    if (room.brightnessOffset != brightnessOffset) {
+      _state = room_state.setRoomBrightnessOffset(
+          state: _state, roomId: roomId, brightnessOffset: brightnessOffset);
+      changed = true;
+    }
+    final roomStateLocked = _roomStateLockedUntil[roomId];
+    final roomStateUnlocked =
+        roomStateLocked == null || DateTime.now().isAfter(roomStateLocked);
+    if (roomStateUnlocked && _roomStates[roomId] != state) {
+      _roomStates[roomId] = state;
+      changed = true;
+    }
+    if (_setRoomTransitioning(roomId, transitioning)) {
+      changed = true;
+    }
+    if (mode != null && _roomModes[roomId] != mode) {
+      _roomModes[roomId] = mode;
+      changed = true;
+    }
+    // Update observed lights_on (respecting the 3s lock for optimistic UI).
+    if (lightsOn != null) {
+      final lockedUntil = _lightsOnLockedUntil[roomId];
+      if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
+        if (room.lightsOn != lightsOn) {
+          _state = room_state.setRoomLightsOn(
+              state: _state, roomId: roomId, lightsOn: lightsOn);
+          changed = true;
+        }
+      }
+    }
+    // Update display values
+    if (brightness != null && _roomBrightness[roomId] != brightness) {
+      _roomBrightness[roomId] = brightness;
+      changed = true;
+    }
+    if (brightness != null &&
+        (state == RoomModeState.mood || moodActive == true)) {
+      final clamped = brightness.clamp(1, 100).toInt();
+      if (_roomMoodBrightness[roomId] != clamped) {
+        _roomMoodBrightness[roomId] = clamped;
+        changed = true;
+      }
+    }
+    if (kelvin != null && _roomKelvin[roomId] != kelvin) {
+      _roomKelvin[roomId] = kelvin;
+      changed = true;
+    }
+    if (color != null) {
+      _roomColor[roomId] = color;
+      if (state == RoomModeState.mood || moodActive == true) {
+        _roomMoodColor[roomId] = color;
+      }
+      changed = true;
+    } else if (kelvin != null && kelvin > 0) {
+      // Clear direct color when receiving a real kelvin value.
+      if (_roomColor.remove(roomId) != null) changed = true;
+    }
+    if (moodEnabled != null && _roomMoodEnabled[roomId] != moodEnabled) {
+      _roomMoodEnabled[roomId] = moodEnabled;
+      changed = true;
+    }
+    if (moodActive != null && _roomMoodActive[roomId] != moodActive) {
+      _roomMoodActive[roomId] = moodActive;
+      changed = true;
+    }
+    if (changed) {
+      await _save();
+      notifyListeners();
+    }
+  }
+
+  Future<void> applyServerNodeState(
+    String nodeId, {
+    required bool rhythmEnabled,
+    required double timeOffset,
+    required double brightnessOffset,
+    required RoomModeState state,
+    bool transitioning = false,
+    RhythmMode? mode,
+    bool? lightsOn,
+    int? brightness,
+    int? kelvin,
+    (int r, int g, int b)? color,
+    bool? moodEnabled,
+    bool? moodActive,
+    bool tick = false,
+  }) {
+    return applyServerRoomState(
+      nodeId,
+      rhythmEnabled: rhythmEnabled,
+      timeOffset: timeOffset,
+      brightnessOffset: brightnessOffset,
+      state: state,
+      transitioning: transitioning,
+      mode: mode,
+      lightsOn: lightsOn,
+      brightness: brightness,
+      kelvin: kelvin,
+      color: color,
+      moodEnabled: moodEnabled,
+      moodActive: moodActive,
+      tick: tick,
+    );
+  }
+
+  /// Set rhythm enabled/disabled for a room.
+  Future<void> setRoomRhythmEnabled(String roomId, bool enabled) async {
+    _state = room_state.setRoomRhythmEnabled(
+        state: _state, roomId: roomId, rhythmEnabled: enabled);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Set lights_on state for a room (sync with actual device state).
+  ///
+  /// Skips the update if the room is currently locked by a recent
+  /// [setRoomLightsOnLocal] call, preventing stale external state from
+  /// overriding the user's optimistic toggle.
+  ///
+  /// Power-only updates do not rewrite semantic room mode.
+  Future<void> setRoomLightsOn(String roomId, bool lightsOn) async {
+    final lockedUntil = _lightsOnLockedUntil[roomId];
+    if (lockedUntil != null && DateTime.now().isBefore(lockedUntil)) {
+      return; // suppress stale external override
+    }
+    _state = room_state.setRoomLightsOn(
+        state: _state, roomId: roomId, lightsOn: lightsOn);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Set lights_on from a local UI toggle with a 3s lock.
+  ///
+  /// Locks the room so that incoming hub state events don't
+  /// immediately overwrite the optimistic value before the bridge
+  /// has processed the command.
+  ///
+  /// Local power toggles do not rewrite semantic room mode.
+  Future<void> setRoomLightsOnLocal(String roomId, bool lightsOn) async {
+    _lightsOnLockedUntil[roomId] =
+        DateTime.now().add(const Duration(seconds: 3));
+    _state = room_state.setRoomLightsOn(
+        state: _state, roomId: roomId, lightsOn: lightsOn);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Set time offset for a room (from dragging the blue dot).
+  Future<void> setRoomTimeOffset(String roomId, double offsetMinutes) async {
+    _state = room_state.setRoomTimeOffset(
+        state: _state, roomId: roomId, timeOffsetMinutes: offsetMinutes);
+    await _save();
+    notifyListeners();
+  }
+
+  /// Handle a rhythm action for any room by ID.
+  ///
+  /// Returns the action result with commands to execute.
+  RunnerActionResultDto? handleRoomAction({
+    required String roomId,
+    required RhythmActionDto action,
+    required CurveConfigDto config,
+    required double latitude,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
+    required double currentHour,
+  }) {
+    final result = room_state.calculateRoomActionResult(
+      state: _state,
+      config: config,
+      latitude: latitude,
+      longitude: longitude,
+      year: year,
+      month: month,
+      day: day,
+      timezone: timezone,
+      currentHour: currentHour,
+      roomId: roomId,
+      action: action,
+    );
+
+    if (result.stateChanged) {
+      _state = result.state;
+      if (action == RhythmActionDto.reset) {
+        _resetGeneration++;
+      }
+      _save();
+      notifyListeners();
+    }
+
+    return result;
+  }
+
+  // ============================================================================
+  // Rhythm Mode (legacy - for current room)
+  // ============================================================================
+
+  /// Handle a rhythm action for the current room.
+  ///
+  /// Returns the light commands to execute.
+  Future<RunnerActionResultDto?> handleAction({
+    required CurveConfigDto config,
+    required double latitude,
+    required double longitude,
+    required int year,
+    required int month,
+    required int day,
+    required String timezone,
+    required double currentHour,
+    required RhythmActionDto action,
+  }) async {
+    final room = currentRoom;
+    if (room == null) return null;
+
+    final result = room_state.calculateRoomActionResult(
+      state: _state,
+      config: config,
+      latitude: latitude,
+      longitude: longitude,
+      year: year,
+      month: month,
+      day: day,
+      timezone: timezone,
+      currentHour: currentHour,
+      roomId: room.id,
+      action: action,
+    );
+
+    if (result.stateChanged) {
+      _state = result.state;
+      await _save();
+      notifyListeners();
+    }
+
+    return result;
+  }
+
+  // ============================================================================
+  // Utilities
+  // ============================================================================
+
+  /// Get a room by ID.
+  RoomDto? getRoom(String roomId) {
+    return room_state.roomById(state: _state, roomId: roomId);
+  }
+
+  RoomDto? getNode(String nodeId) => getRoom(nodeId);
+
+  /// Check if there are any rooms.
+  bool get hasRooms => rooms.isNotEmpty;
+
+  /// Get the count of rooms.
+  int get roomCount => rooms.length;
+
+  /// Get the count of enabled rooms.
+  int get enabledRoomCount => enabledRooms.length;
+
+  /// Clear transient per-room state without removing rooms.
+  ///
+  /// Called when switching to a different server so stale motion timers,
+  /// display values, and optimistic UI locks don't bleed across servers.
+  void clearTransientState() {
+    _motionTimers.clear();
+    _roomsWithSensors.clear();
+    _lightsOnLockedUntil.clear();
+    _roomStateLockedUntil.clear();
+    _roomStates.clear();
+    _roomModes.clear();
+    _cancelRoomTransitionTimers();
+    _roomTransitioning.clear();
+    _roomBrightness.clear();
+    _roomKelvin.clear();
+    _roomColor.clear();
+    _roomMoodColor.clear();
+    _roomMoodBrightness.clear();
+    _roomMoodEnabled.clear();
+    _roomMoodActive.clear();
+    _lastTickTime.clear();
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _cancelRoomTransitionTimers();
+    _sourceChangedController.close();
+    super.dispose();
+  }
+
+  /// Clear all rooms and associated transient state.
+  Future<void> clearAllRooms() async {
+    _state = room_state.emptyRunnerState();
+    _currentIndex = 0;
+    _motionTimers.clear();
+    _roomsWithSensors.clear();
+    _lightsOnLockedUntil.clear();
+    _roomStateLockedUntil.clear();
+    _roomStates.clear();
+    _roomModes.clear();
+    _cancelRoomTransitionTimers();
+    _roomTransitioning.clear();
+    _roomBrightness.clear();
+    _roomKelvin.clear();
+    _roomColor.clear();
+    _roomMoodColor.clear();
+    _roomMoodBrightness.clear();
+    _roomMoodEnabled.clear();
+    _roomMoodActive.clear();
+    _lastTickTime.clear();
+    await _save();
+    // Update room count analytics property
+    AnalyticsService().setRoomCount(0);
+    notifyListeners();
+  }
+}

@@ -1,0 +1,20 @@
+# Flutter Rust Bridge Configuration
+# See: https://cjycode.com/flutter_rust_bridge/manual/
+
+# Rust crate configuration
+rust_input: crate::api
+rust_root: rust/
+
+# Dart output configuration
+# Output to rhythm_core package for sharing between web and mobile
+dart_output: ../rhythm_core/lib/src/rust/
+
+# Enable WASM for web support
+web: true
+
+# Enable full dependency tracking
+full_dep: true
+
+# Disable async to avoid web worker/SharedArrayBuffer issues on WASM
+# Makes all generated functions synchronous (runs on main thread)
+default_dart_async: false

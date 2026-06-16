@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>MagicLight Designer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root{
+    --bg:#121212; --panel:#1e1e1e; --muted:#9aa0a6; --fg:#ffffff; --grid:#444;
+    --accent:#1e90ff; --btn:#2a2a2a; --btnBorder:#444; --nowBlue:#66b8ff;
+  }
+  html,body{height:100%}
+  body{font-family:system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:1.5rem; background:var(--bg); color:var(--fg)}
+  .container{max-width:1200px;margin:0 auto;background:var(--panel);padding:1.25rem 1.5rem;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.35)}
+  h2{margin:0 0 .75rem;color:#e0e0e0}
+  #plot{height:460px;touch-action:none}
+  .dragging #plot{cursor:ew-resize!important}
+
+  .section{border:1px solid #2a2a2a;border-radius:10px;padding:12px;background:#1a1a1a;margin-top:10px}
+  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .section-title{font-size:1rem;font-weight:900;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .group-title{font-size:1rem;font-weight:800;color:var(--muted);margin:6px 0 6px;display:flex;align-items:center;gap:10px}
+
+  .controls-row{display:grid;grid-template-columns:160px 1fr 110px;gap:8px;align-items:center;margin:8px 0}
+  label{font-size:.9rem;color:var(--muted);font-weight:800;cursor:pointer}
+  .value{font-variant-numeric:tabular-nums;text-align:right;color:#c9cfd6;font-weight:700}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  input[type=text],select{width:100%;padding:6px 8px;border:1px solid var(--btnBorder);border-radius:6px;background:var(--btn);color:#fff}
+  input[type=number]{width:90px;padding:6px 8px;border:1px solid var(--btnBorder);border-radius:6px;background:var(--btn);color:#fff}
+
+  .dual-range{position:relative;display:flex;align-items:center;gap:8px;width:100%}
+  .dual-track{position:relative;flex:1;height:6px;background:var(--grid);border-radius:3px}
+  .dual-range input[type=range]{position:absolute;width:100%;margin:0;background:transparent;appearance:none;height:6px;top:0}
+  .dual-range input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;background:var(--accent);border-radius:50%;cursor:pointer;position:relative;z-index:2}
+  .dual-range input[type=range]::-moz-range-thumb{width:16px;height:16px;background:var(--accent);border-radius:50%;cursor:pointer;position:relative;z-index:2}
+  .dual-range input[id$="-min"]{z-index:2}
+  .dual-range input[id$="-max"]{z-index:1}
+  .fill{position:absolute;top:0;height:6px;background:var(--accent);border-radius:3px;z-index:0}
+  .chip{font-size:.9rem;color:#c9cfd6;width:68px;text-align:right;font-variant-numeric:tabular-nums}
+
+  .btn{border:1px solid var(--btnBorder);background:var(--btn);color:#c8c8c8;padding:6px 10px;border-radius:6px;cursor:pointer;font-weight:800;font-size:.9rem}
+  .btn:hover{filter:brightness(1.1)}
+  .control-bar{display:flex;align-items:center;gap:12px;justify-content:space-between;flex-wrap:wrap}
+  .ctrl-side{display:flex;align-items:center;gap:10px}
+
+  /* muted/disabled look for mirrored CCT sliders */
+  .is-mirrored .controls-row input[type=range]{opacity:0.35}
+  .mirror-chip{display:inline-flex;align-items:center;gap:6px;font-size:.85rem;color:#c9cfd6}
+  .mirror-chip input{transform:translateY(1px)}
+  
+
+  /* Default value hash marks on sliders */
+  .track-wrap{position:relative;width:100%}
+  .default-mark{position:absolute;top:50%;transform:translate(-50%, -50%);width:2px;height:12px;background:#6b6f76;border-radius:1px;pointer-events:none}
+
+  .success { 
+    color:#51cf66; 
+    font-size:1rem; 
+    margin:10px 0; 
+    padding:12px 16px; 
+    background:rgba(81,207,102,0.15); 
+    border: 1px solid rgba(81,207,102,0.3);
+    border-radius:6px; 
+    font-weight: 600;
+    animation: slideDown 0.3s ease-out;
+  }
+  .warn {
+    color:#ff6b6b; 
+    font-size:1rem; 
+    margin:10px 0;
+    padding:12px 16px;
+    background:rgba(255,107,107,0.15);
+    border: 1px solid rgba(255,107,107,0.3);
+    border-radius:6px;
+    font-weight: 600;
+    animation: slideDown 0.3s ease-out;
+  }
+  @keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Pulsing animation for live markers */
+  @keyframes pulse {
+    0% { opacity: 1; stroke-width: 3px; }
+    50% { opacity: 0.6; stroke-width: 6px; }
+    100% { opacity: 1; stroke-width: 3px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h2>MagicLight Designer</h2>
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+    <button id="save-config" class="btn" style="background:var(--accent);color:#fff">Save Configuration</button>
+  </div>
+  <div id="save-status"></div>
+  <div id="plot"></div>
+
+  <!-- Control bar -->
+  <div class="section" id="control-section">
+    <div class="section-head"><div class="section-title">Control</div></div>
+    <div class="control-bar">
+      <div class="ctrl-side">
+        <button id="left-btn" class="btn">Step down</button>
+      </div>
+      <div class="ctrl-side" style="gap:14px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <label for="step-count">Steps</label>
+          <input id="step-count" type="number" min="1" max="500" step="1" value="10" />
+        </div>
+        <!-- Show steps checkbox -->
+        <label class="mirror-chip" style="gap:8px">
+          <input type="checkbox" id="show-steps" checked>
+          Show steps
+        </label>
+      </div>
+      <div class="ctrl-side">
+        <button id="right-btn" class="btn">Step up</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Morning -->
+    <div class="section">
+      <div class="section-head">
+        <div class="section-title">Morning</div>
+        <button id="reset-morning" class="btn">Reset</button>
+      </div>
+
+      <div class="group-title">Brightness</div>
+      <div id="morning-bri"></div>
+
+      <div class="group-title">
+        <span>Color Temperature</span>
+        <label class="mirror-chip"><input type="checkbox" id="mirror-up" checked> mirror brightness</label>
+      </div>
+      <div id="morning-cct"></div>
+    </div>
+
+    <!-- Evening -->
+    <div class="section">
+      <div class="section-head">
+        <div class="section-title">Evening</div>
+        <button id="reset-evening" class="btn">Reset</button>
+      </div>
+
+      <div class="group-title">Brightness</div>
+      <div id="evening-bri"></div>
+
+      <div class="group-title">
+        <span>Color Temperature</span>
+        <label class="mirror-chip"><input type="checkbox" id="mirror-dn" checked> mirror brightness</label>
+      </div>
+      <div id="evening-cct"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><div class="section-title">Ranges</div></div>
+    <div class="controls-row">
+      <label>Brightness (min–max)</label>
+      <div class="dual-range">
+        <span id="min-intensity-value" class="chip">1</span>
+        <div class="dual-track">
+          <input type="range" id="min-intensity" min="0" max="100" step="1" value="1">
+          <input type="range" id="max-intensity" min="0" max="100" step="1" value="100">
+          <div class="fill" id="intensity-fill"></div>
+        </div>
+        <span id="max-intensity-value" class="chip">100</span>
+      </div>
+    </div>
+    <div class="controls-row">
+      <label>Color Temperature (K, min–max)</label>
+      <div class="dual-range">
+        <span id="min-temp-value" class="chip">500</span>
+        <div class="dual-track">
+          <input type="range" id="min-temp" min="500" max="6500" step="50" value="500">
+          <input type="range" id="max-temp" min="500" max="6500" step="50" value="6500">
+          <div class="fill" id="temp-fill"></div>
+        </div>
+        <span id="max-temp-value" class="chip">6500</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><div class="section-title">Color Output</div></div>
+    <div class="controls-row">
+      <label for="color-mode">Color Mode</label>
+      <select id="color-mode">
+        <option value="kelvin">Kelvin (color temperature)</option>
+        <option value="rgb">RGB (red, green, blue)</option>
+        <option value="xy">CIE xy coordinates</option>
+      </select>
+      <div class="value" id="color-mode-label"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><div class="section-title">Display Settings</div></div>
+    <div class="controls-row">
+      <label>Test Month</label>
+      <select id="month"></select>
+      <div class="value" id="month-label"></div>
+    </div>
+    <div class="controls-row">
+      <label>12-Hour Format (AM/PM)</label>
+      <div>
+        <input id="fmt12" type="checkbox" checked>
+        <span id="fmt12-label">Enabled</span>
+      </div>
+      <div class="value"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><div class="section-title">Location (from Home Assistant)</div></div>
+    <div class="controls-row">
+      <label>Latitude</label>
+      <div id="lat-display" style="flex:1;padding:6px 8px;color:#9aa0a6">35.0°</div>
+      <div class="value" id="lat-label"></div>
+    </div>
+    <div class="controls-row">
+      <label>Longitude</label>
+      <div id="lon-display" style="flex:1;padding:6px 8px;color:#9aa0a6">-78.6°</div>
+      <div class="value" id="lon-label"></div>
+    </div>
+    <div class="controls-row">
+      <label>Time Zone</label>
+      <div id="tz-display" style="flex:1;padding:6px 8px;color:#9aa0a6">US/Eastern</div>
+      <div class="value" id="tz-label"></div>
+    </div>
+  </div>
+
+  <div class="section" style="display:flex;justify-content:flex-end;gap:8px">
+    <button id="reset-all" class="btn">Reset All</button>
+  </div>
+</div>
+
+<script>
+/* =========================
+   Globals & defaults
+========================= */
+let plotDivRef=null;
+let listenersBound=false;
+let rafId=0,lastClientX=null;
+let setCursorRef = ()=>{};
+let selectedHour = new Date().getHours() + new Date().getMinutes()/60;
+let calloutAutoFollow = true;
+let autoCalloutHour = selectedHour;
+let autoCalloutHalf = null;
+
+// Time progression tracking
+let nowMarkerInterval = null;
+let nowMarkerIndex = -1;
+
+const SAMPLE_STEP = 0.1;
+const SOLAR_LABEL_SIZE = 10;
+const EPS_H = 1/3600;
+const HYST_H = 1/60;
+let activeHalf = null;
+
+const SUN_LINE = { width: 0.6, alpha: 0.35, dash: 'dot' }; // dimmed sun curve
+
+const UI = { sliders: {} };
+
+
+/* trace indices for callout markers */
+let CALL_UP_IDX = -1;   // "step up → beginning" path
+let CALL_DN_IDX = -1;   // "step down → end" path
+
+function detectHalfSticky(h, prev){
+  const { solarNoon, solarMidnight } = getSolarTimes();
+  if (h >= solarNoon + HYST_H || h < solarMidnight - HYST_H) return 'evening';
+  if (h > solarMidnight + HYST_H && h <= solarNoon - HYST_H) return 'morning';
+  return prev || ((h >= solarNoon) ? 'evening' : 'morning');
+}
+function clampToHalf(hour, half){
+  const { solarNoon, solarMidnight } = getSolarTimes();
+  const eps = HYST_H * 1.01;
+
+  // Morning window is (midnight, noon]
+  if (half === 'morning'){
+    if (hour <= solarMidnight + eps) return (solarMidnight + eps);
+    if (hour >= solarNoon    - eps)  return (solarNoon    - eps);
+    return hour;
+  }
+
+  // Evening window is [noon, 24) ∪ [0, midnight)
+  const inMorning = (hour > solarMidnight + eps) && (hour < solarNoon - eps);
+  if (!inMorning) return hour;
+
+  // Snap to nearest evening boundary if we accidentally landed in morning
+  const noonEdge = (solarNoon + eps) % 24;
+  const midEdge  = (solarMidnight - eps + 24) % 24;
+  const dist = (a,b)=> Math.min(Math.abs(a-b), 24 - Math.abs(a-b));
+  return dist(hour, noonEdge) <= dist(hour, midEdge) ? noonEdge : midEdge;
+}
+
+
+/* =========================
+   Params (simplified - no gain/offset)
+========================= */
+const defaults = {
+  color_mode: 'kelvin',
+  min_color_temp: 500, max_color_temp: 6500,
+  min_brightness: 1,   max_brightness: 100,
+  // Morning (up) — only midpoint & steepness
+  mid_bri_up: 6.0,  steep_bri_up: 1.5,
+  mid_cct_up: 6.0,  steep_cct_up: 1.5,
+  // Evening (down) — only midpoint & steepness
+  mid_bri_dn: 8.0,  steep_bri_dn: 1.3,
+  mid_cct_dn: 8.0,  steep_cct_dn: 1.3,
+  // mirror flags (default ON)
+  mirror_up: true,
+  mirror_dn: true,
+  // Sun/time defaults
+  month: new Date().getMonth()+1,
+  latitude: 35.0, longitude: -78.6, timezone: 'US/Eastern',
+  use12Hour: true,
+  // Max dim steps for saving
+  max_dim_steps: 10
+};
+const params = JSON.parse(JSON.stringify(defaults));
+
+
+/* =========================
+   Solar helpers + caching
+========================= */
+const CUM_DAYS=[0,31,59,90,120,151,181,212,243,273,304,334];
+const deg2rad=d=>d*Math.PI/180, rad2deg=r=>r*180/Math.PI, doyForMonthMid=m=>CUM_DAYS[m-1]+15;
+
+function utcOffsetFor(zone, month){
+  const dst=(zone!=='US/Arizona'&&zone!=='US/Hawaii')&&(month>=3&&month<=10);
+  switch(zone){
+    case 'US/Eastern': return dst?-4:-5;
+    case 'US/Central': return dst?-5:-6;
+    case 'US/Mountain': return dst?-6:-7;
+    case 'US/Pacific': return dst?-7:-8;
+    case 'US/Alaska': return dst?-8:-9;
+    case 'US/Arizona': return -7;
+    case 'US/Hawaii': return -10;
+    default: return -5;
+  }
+}
+function solarDeclinationRad(doy){
+  const g=2*Math.PI/365*(doy-1);
+  return 0.006918-0.399912*Math.cos(g)+0.070257*Math.sin(g)-0.006758*Math.cos(2*g)+0.000907*Math.sin(2*g)-0.002697*Math.cos(3*g)+0.00148*Math.sin(3*g);
+}
+function equationOfTimeMinutes(doy){
+  const B=2*Math.PI*(doy-81)/364;
+  return 9.87*Math.sin(2*B)-7.53*Math.cos(B)-1.5*Math.sin(B);
+}
+function calculateSunTimes(month, lat, lon, tz){
+  const doy=doyForMonthMid(month), phi=deg2rad(lat), delta=solarDeclinationRad(doy);
+  const utc=utcOffsetFor(tz,month);
+  const LSTM=15*utc; const TC=equationOfTimeMinutes(doy)+4*(lon-LSTM);
+  const solarNoon=12 - TC/60;
+  const solarMidnight=(solarNoon+12)%24;
+  const cosH=-Math.tan(phi)*Math.tan(delta);
+  if (cosH>1) return {sunrise:null,sunset:null,solarNoon,solarMidnight};
+  if (cosH<-1) return {sunrise:0,sunset:24,solarNoon,solarMidnight};
+  const H=rad2deg(Math.acos(cosH));
+  return {sunrise:(12-H/15)-TC/60, sunset:(12+H/15)-TC/60, solarNoon, solarMidnight};
+}
+function hourAngleRad(clockHour,utcOffset,longitude,doy){ const LST = (clockHour + (equationOfTimeMinutes(doy)+4*(longitude-15*utcOffset))/60); return deg2rad(15*(LST-12)); }
+function sunElevationDeg(clockHour,month,latDeg,lonDeg,tz){ const doy=doyForMonthMid(month); const utc=utcOffsetFor(tz,month); const phi=deg2rad(latDeg), delta=solarDeclinationRad(doy), H=hourAngleRad(clockHour,utc,lonDeg,doy); return rad2deg(Math.asin(Math.sin(phi)*Math.sin(delta)+Math.cos(phi)*Math.cos(delta)*Math.cos(H))); }
+function clearSkyGHI(hour,month,lat,lon,tz){ const alt=sunElevationDeg(hour,month,lat,lon,tz); if(alt<=0) return null; const cosZ=Math.sin(deg2rad(alt)); return 1098*cosZ*Math.exp(-0.059/cosZ)*300/1098; }
+
+let _solarCache=null;
+function getSolarTimes(){
+  if(!_solarCache){
+    _solarCache = calculateSunTimes(params.month, params.latitude, params.longitude, params.timezone);
+  }
+  return _solarCache;
+}
+
+function formatTime(hour,use12){
+  let total=Math.round(hour*60); let h=Math.floor(total/60), m=total%60;
+  if(!use12) return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  const ampm=h<12?'AM':'PM'; h=h%12; if(h===0) h=12; return `${h}:${String(m).padStart(2,'0')}${ampm}`;
+}
+
+/* =========================
+   Curves (simplified logistic)
+========================= */
+function mapHalf(t, { m, k, outMin, outMax, dir }) {
+  // dir: +1 = morning (rises), -1 = evening (falls)
+  const te = (dir > 0) ? t : (t - 12);
+  const base = (dir > 0)
+    ? 1 / (1 + Math.exp(-k * (te - m)))
+    : 1 - 1 / (1 + Math.exp(-k * (te - m)));
+  const span = outMax - outMin;
+  return Math.max(outMin, Math.min(outMax, outMin + span * base));
+}
+
+/* =========================
+   Compute series
+========================= */
+function sampleHalf(dir, startT, endT, hoursArr, briArr, cctArr, sunArr, anchorHour, briBounds, cctBounds){
+  if (anchorHour != null) {
+    hoursArr.push(anchorHour%24);
+    briArr.push(params.max_brightness);
+    cctArr.push(params.max_color_temp);
+    sunArr.push(clearSkyGHI(anchorHour%24, params.month, params.latitude, params.longitude, params.timezone));
+  }
+  for(let t=startT; t<=endT; t+=SAMPLE_STEP){
+    const { solarNoon, solarMidnight } = getSolarTimes();
+    const hour = (dir>0)
+      ? (solarMidnight + (t/12)*((solarNoon - solarMidnight + 24)%24))%24
+      : (solarNoon + ((t-12)/12)*((solarMidnight - solarNoon + 24)%24))%24;
+    hoursArr.push(hour);
+    const halfKey = (dir>0) ? 'up' : 'dn';
+    const vb = mapHalf(t, { m: params[`mid_bri_${halfKey}`], k: params[`steep_bri_${halfKey}`], outMin: briBounds[0], outMax: briBounds[1], dir });
+    const vc = mapHalf(t, { m: params[`mid_cct_${halfKey}`], k: params[`steep_cct_${halfKey}`], outMin: cctBounds[0], outMax: cctBounds[1], dir });
+    briArr.push(Math.max(0, Math.min(100, vb)));
+    cctArr.push(Math.max(500, Math.min(6500, vc)));
+    sunArr.push(clearSkyGHI(hour, params.month, params.latitude, params.longitude, params.timezone));
+  }
+}
+
+function compute(){
+  const {solarNoon, solarMidnight, sunrise, sunset} = getSolarTimes();
+
+  const briBounds=[params.min_brightness, params.max_brightness];
+  const cctBounds=[params.min_color_temp, params.max_color_temp];
+
+  const mHours=[], mBri=[], mCct=[], mSun=[];
+  // Build morning without an anchor first (0 → ~12)
+  sampleHalf(+1, 0, 12 - SAMPLE_STEP, mHours, mBri, mCct, mSun, null, briBounds, cctBounds);
+  // Append a noon anchor at the *end* so time stays monotonic
+  mHours.push(getSolarTimes().solarNoon);
+  mBri.push(params.max_brightness);
+  mCct.push(params.max_color_temp);
+  mSun.push(clearSkyGHI(getSolarTimes().solarNoon, params.month, params.latitude, params.longitude, params.timezone));
+
+  const eHours=[], eBri=[], eCct=[], eSun=[];
+  sampleHalf(-1, 12 + SAMPLE_STEP, 24.0001, eHours, eBri, eCct, eSun, solarNoon, briBounds, cctBounds);
+  eBri[eBri.length-1] = params.min_brightness;
+  eCct[eCct.length-1] = params.min_color_temp;
+
+  const hours=[...mHours,...eHours], bri=[...mBri,...eBri], cct=[...mCct,...eCct], sun=[...mSun,...eSun];
+  const idx=hours.map((_,i)=>i).sort((a,b)=>hours[a]-hours[b]);
+  const H=idx.map(i=>hours[i]), B=idx.map(i=>bri[i]), C=idx.map(i=>cct[i]), S=idx.map(i=>sun[i]);
+
+  return {
+    hours:H, bris:B, ccts:C, sunPower:S,
+    morn:{hours:mHours, bris:mBri, ccts:mCct},
+    eve: {hours:eHours, bris:eBri, ccts:eCct},
+    solar:{sunrise, sunset, solarNoon, solarMidnight}
+  };
+}
+
+/* =========================
+   Perceptual half arcs
+========================= */
+let arc = { hours:[], bris:[], ccts:[], sun:[] };
+let morningArc=null, eveningArc=null;
+
+function buildHalfArc(half){
+  const H=half.hours, B=half.bris, K=half.ccts;
+  const S=[0];
+  for(let i=1;i<H.length;i++){
+    let span=H[i]-H[i-1];
+    if(span<-12) span+=24;
+    if(span>12)  span-=24;
+    S.push(S[i-1] + Math.abs(span));
+  }
+  const total=S[S.length-1];
+
+  function sAtHour(h){
+    for(let i=1;i<H.length;i++){
+      let h0=H[i-1], h1=H[i];
+      let span=h1-h0;
+      if(span<-12) span+=24;
+      if(span>12)  span-=24;
+      let dh=h-h0;
+      if(dh<-12) dh+=24;
+      if(dh>12)  dh-=24;
+      const between = span>=0 ? (dh>=0 && dh<=span) : (dh<=0 && dh>=span);
+      if(between){
+        const t=(span===0)?0:(dh/span);
+        return S[i-1] + t*(S[i]-S[i-1]);
+      }
+    }
+    const dStart=Math.min(Math.abs(h-H[0]),24-Math.abs(h-H[0]));
+    const dEnd=Math.min(Math.abs(h-H[H.length-1]),24-Math.abs(h-H[H.length-1]));
+    return (dStart<=dEnd)?0:total;
+  }
+  function hourAtS(s){
+    if(s<=0) return H[0];
+    if(s>=total) return H[H.length-1];
+    for(let i=1;i<S.length;i++){
+      if(s<=S[i]){
+        const t=(s-S[i-1])/Math.max(1e-9,(S[i]-S[i-1]));
+        let h0=H[i-1], h1=H[i];
+        let span=h1-h0;
+        if(span<-12) span+=24;
+        if(span>12)  span-=24;
+        let h=h0+t*span;
+        if(h<0) h+=24;
+        if(h>=24) h-=24;
+        return h;
+      }
+    }
+    return H[H.length-1];
+  }
+  function makeGrid(stepCount){
+    const n=Math.max(1,Math.min(500,stepCount));
+    const pitch=total/n;
+    const ticks=[]; for(let i=0;i<=n;i++) ticks.push(i*pitch);
+    return {pitch,ticks};
+  }
+  return {hours:H, bris:B, ccts:K, S, total, sAtHour, hourAtS, makeGrid};
+}
+function rebuildHalfArcCaches(morn, eve){
+  morningArc=buildHalfArc(morn);
+  eveningArc=buildHalfArc(eve);
+}
+
+/* =========================
+   Stepper (simplified brightness-based)
+========================= */
+function brightnessStepSize(){
+  const steps = Math.max(1, Math.min(500,
+    parseInt(document.getElementById('step-count')?.value || '10', 10)
+  ));
+  return (params.max_brightness - params.min_brightness) / steps;
+}
+
+function findHourForBrightnessOnHalf(targetBri, half){
+  const ref = (half === 'morning') ? morningArc : eveningArc;
+  if (!ref) return null;
+  const H = ref.hours, B = ref.bris;
+
+  for (let i=1; i<H.length; i++){
+    const b0 = B[i-1], b1 = B[i];
+    const between = (b0 <= b1)
+      ? (targetBri >= b0 && targetBri <= b1)
+      : (targetBri <= b0 && targetBri >= b1);
+    if (between && b1 !== b0){
+      const t = (targetBri - b0) / (b1 - b0);
+      const h = H[i-1] + t * (H[i] - H[i-1]);
+      return clampToHalf(h, half);
+    }
+  }
+  const end = (Math.abs(targetBri - B[0]) < Math.abs(targetBri - B[B.length-1])) ? 0 : B.length-1;
+  return clampToHalf(H[end], half);
+}
+
+function computeActionTarget(action){
+  if (!morningArc || !eveningArc) return null;
+  const half = activeHalf || detectHalfSticky(selectedHour, activeHalf);
+
+  const minB = params.min_brightness;
+  const maxB = params.max_brightness;
+  const step = brightnessStepSize();
+
+  const bNow = interpAtHour(arc.hours, arc.bris, selectedHour);
+  const dir  = (action === 'brighten') ? +1 : -1;
+
+  if ((dir > 0 && bNow >= maxB - 1e-9) || (dir < 0 && bNow <= minB + 1e-9)) return null;
+
+  let bTgt = bNow + dir * step;
+  bTgt = Math.max(minB, Math.min(maxB, bTgt));
+  return findHourForBrightnessOnHalf(bTgt, half);
+}
+
+function stepArc(action){
+  const hTarget=computeActionTarget(action);
+  if(hTarget==null) return;
+  calloutAutoFollow = false;
+  setCursorRef(hTarget);
+}
+
+/* boundaries + sequences for callouts */
+function getHalfBounds(half){
+  const { solarNoon, solarMidnight } = getSolarTimes();
+  if (half === 'morning'){
+    const startHour = solarMidnight + 1e-3;
+    const endHour   = solarNoon - 1e-3;
+    return {
+      startHour: clampToHalf(startHour,'morning'),
+      endHour:   clampToHalf(endHour,'morning'),
+      startBri: interpAtHour(arc.hours, arc.bris, startHour),
+      endBri:   interpAtHour(arc.hours, arc.bris, endHour)
+    };
+  } else {
+    const startHour = solarNoon + 1e-3;
+    const endHour   = (solarMidnight + 24 - 1e-3) % 24;
+    return {
+      startHour: clampToHalf(startHour,'evening'),
+      endHour:   clampToHalf(endHour,'evening'),
+      startBri: interpAtHour(arc.hours, arc.bris, startHour),
+      endBri:   interpAtHour(arc.hours, arc.bris, endHour)
+    };
+  }
+}
+
+/* simulate pressing step repeatedly toward a boundary brightness */
+function sequenceTowardBoundary(currentBri, boundaryBri, half){
+  const step = brightnessStepSize();
+  const dir  = (boundaryBri >= currentBri) ? +1 : -1;
+  const xs=[], ys=[];
+  let b = currentBri;
+  let guard = 0;
+  while (guard++ < 1000){
+    let next = b + dir*step;
+    if ((dir > 0 && next > boundaryBri) || (dir < 0 && next < boundaryBri)) next = boundaryBri;
+    if (Math.abs(next - b) < 1e-9) break;
+    const h = findHourForBrightnessOnHalf(next, half);
+    if (h == null) break;
+    xs.push(h);
+    ys.push(next);
+    b = next;
+    if (Math.abs(b - boundaryBri) < 1e-9) break;
+    if (xs.length > 600) break;
+  }
+  return { x: xs, y: ys };
+}
+
+/* =========================
+   Interp + formatting
+========================= */
+function interpAtHour(hours, arr, h){
+  if(h<=hours[0]) return arr[0];
+  for(let i=1;i<hours.length;i++){
+    if(h<=hours[i]){
+      const h0=hours[i-1], h1=hours[i], t=(h-h0)/(h1-h0);
+      return arr[i-1] + t*(arr[i-1]!==arr[i]? (arr[i]-arr[i-1]) : 0);
+    }
+  }
+  return arr[arr.length-1];
+}
+function cctToRGB(k){
+  k=Math.max(500,Math.min(6500,k)); const t=k/100; let r,g,b;
+  if(t<=66) r=255; else r=329.698727446*Math.pow(t-60,-0.1332047592);
+  if(t<=66) g=99.4708025861*Math.log(t)-161.1195681661; else g=288.1221695283*Math.pow(t-60,-0.0755148492);
+  if(t>=66) b=255; else if(t<=19) b=0; else b=138.5177312231*Math.log(t-10)-305.0447927307;
+  const clamp=v=>Math.max(0,Math.min(255,Math.round(v))); return `rgb(${clamp(r)},${clamp(g)},${clamp(b)})`;
+}
+function parseRGB(str){ const m=str.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/i); return m?[+m[1],+m[2],+m[3]]:[255,255,255]; }
+function blend(a,b,t){ return [Math.round(a[0]*(1-t)+b[0]*t), Math.round(a[1]*(1-t)+b[1]*t), Math.round(a[2]*(1-t)+b[2]*t)]; }
+function lineColorForCCT(k){
+  const base=parseRGB(cctToRGB(k));
+  if(k<=6000) return `rgb(${base[0]},${base[1]},${base[2]})`;
+  const f=Math.min(1,Math.max(0,(k-6000)/500));
+  const blue=[150,200,255]; const t=0.6*f;
+  const [r,g,b]=blend(base,blue,t); return `rgb(${r},${g},${b})`;
+}
+
+/* compute a color array for markers at given hours */
+function calloutFillColors(hoursArr){
+  return hoursArr.map(h => {
+    const k = interpAtHour(arc.hours, arc.ccts, h);
+    return cctToRGB(k);
+  });
+}
+
+/* check "Show steps" toggle */
+function calloutsVisible(){
+  const el = document.getElementById('show-steps');
+  return !el || !!el.checked;
+}
+function resolveCalloutContext(){
+  const hasAutoHour = calloutAutoFollow && Number.isFinite(autoCalloutHour);
+  return {
+    hour: hasAutoHour ? autoCalloutHour : selectedHour,
+    halfOverride: calloutAutoFollow ? autoCalloutHalf : null
+  };
+}
+function fmtSigned(n,unit){
+  const sign=n>0?'+':(n<0?'−':'±'); const abs=Math.abs(Math.round(n));
+  return `${sign}${abs}${unit}`;
+}
+function fmtTimeDelta(hNew,hOld){
+  const minutes=Math.round((hNew-hOld)*60);
+  const sign=minutes>0?'+':(minutes<0?'−':'±'); const a=Math.abs(minutes);
+  const hh=Math.floor(a/60), mm=a%60; if(hh>0) return `${sign}${hh}h ${mm}m`;
+  return `${sign}${mm}m`;
+}
+
+/* =========================
+   Plot rendering
+========================= */
+/* build callout traces for both directions */
+function buildStepCalloutsTraces(currentHour, halfOverride){
+  let half = halfOverride;
+  if (!half) {
+    half = activeHalf || detectHalfSticky(currentHour, activeHalf);
+  }
+  const bNow = interpAtHour(arc.hours, arc.bris, currentHour);
+  const bounds = getHalfBounds(half);
+
+  const upSeq = sequenceTowardBoundary(bNow, bounds.startBri, half);
+  const dnSeq = sequenceTowardBoundary(bNow, bounds.endBri,   half);
+
+  // Per-point marker colors from curve
+  const upColors = calloutFillColors(upSeq.x);
+  const dnColors = calloutFillColors(dnSeq.x);
+
+  // Build per-point labels ("step up 2x", time string, CCT)
+  const buildMeta = (xs, ys, dir) => {
+    const labels = xs.map((_, i) => {
+      const base = (dir === 'up') ? 'step up' : 'step down';
+      return i === 0 ? base : `${base} ${i+1}x`;
+    });
+    const times = xs.map(h => formatTime(h, params.use12Hour));
+    const ccts  = xs.map(h => Math.round(interpAtHour(arc.hours, arc.ccts, h)));
+    const texts = xs.map((_, i) => {
+      const pct = Math.round(ys[i]);
+      return `${labels[i]}<br>${times[i]} • ${pct}% • ${ccts[i]} K`;
+    });
+    return { labels, times, ccts, texts };
+  };
+
+  const upMeta = buildMeta(upSeq.x, upSeq.y, 'up');
+  const dnMeta = buildMeta(dnSeq.x, dnSeq.y, 'dn');
+
+  const upTrace = {
+    type:'scatter', mode:'markers',
+    x: upSeq.x, y: upSeq.y,
+    name:'step-up path',
+    text: upMeta.texts,                              // per-point hover text
+    hovertemplate: '%{text}<extra></extra>',         // show our formatted text
+    marker:{
+      size:10,
+      color: upColors,
+      line:{ width:3, color: upColors },
+      symbol:'circle'
+    },
+    hoverlabel: { bgcolor: upColors },               // hover box uses curve color
+    showlegend:false,
+    visible: calloutsVisible()
+  };
+
+  const dnTrace = {
+    type:'scatter', mode:'markers',
+    x: dnSeq.x, y: dnSeq.y,
+    name:'step-down path',
+    text: dnMeta.texts,
+    hovertemplate: '%{text}<extra></extra>',
+    marker:{
+      size:10,
+      color: dnColors,
+      line:{ width:3, color: dnColors },
+      symbol:'circle'
+    },
+    hoverlabel: { bgcolor: dnColors },
+    showlegend:false,
+    visible: calloutsVisible()
+  };
+
+  return { upTrace, dnTrace };
+}
+
+function buildMagicLightColored(x,bri,cct){
+  const segs=[];
+  for(let i=1;i<x.length;i++){
+    if(x[i]-x[i-1]>1.5) continue;
+    const midC=0.5*(cct[i-1]+cct[i]);
+    segs.push({type:'scatter',mode:'lines',x:[x[i-1],x[i]],y:[bri[i-1],bri[i]],
+      line:{width:4,color:lineColorForCCT(midC)},name:'MagicLight',yaxis:'y',hoverinfo:'skip',showlegend:false});
+  }
+  return segs;
+}
+function buildSunColored(x,sun){
+  const segs=[];
+  for(let i=1;i<x.length;i++){
+    if(sun[i-1]==null || sun[i]==null) continue;
+    if(x[i]-x[i-1] > 1.5) continue;
+    const mid=0.5*(sun[i-1]+sun[i]);
+    let r=255,g=255,b=255;
+    if(mid<=2){ r=255; g=255; b=200; }
+    else if(mid>200){ const t=(mid-200)/100; r=Math.round(255-55*t); g=Math.round(255-55*t); b=255; }
+    else { const t=(mid-2)/198; r=255; g=255; b=Math.round(200+t*(255-200)); }
+    segs.push({type:'scatter',mode:'lines',x:[x[i-1],x[i]],y:[sun[i-1],sun[i]],
+               line:{width:SUN_LINE.width,color:`rgba(${r},${g},${b},${SUN_LINE.alpha})`,dash:SUN_LINE.dash},
+               name:'Sun power',yaxis:'y',hoverinfo:'skip',showlegend:false});
+  }
+  return segs;
+}
+
+/* =========================
+   Now marker auto-update
+========================= */
+function updateNowMarker(){
+  if(!plotDivRef || nowMarkerIndex === -1) return;
+
+  const now = new Date();
+  const nowHour = now.getHours() + now.getMinutes()/60;
+  const nowBri = interpAtHour(arc.hours, arc.bris, nowHour);
+  const nowCCT = interpAtHour(arc.hours, arc.ccts, nowHour);
+  const nowOutline = getComputedStyle(document.documentElement).getPropertyValue('--nowBlue').trim()||'#66b8ff';
+
+  // Update now marker position and color
+  Plotly.restyle(plotDivRef, {
+    x: [[nowHour]],
+    y: [[nowBri]],
+    'marker.color': [[cctToRGB(nowCCT)]],
+    'marker.line.color': [[nowOutline]],
+    'marker.line.width': [[3]] // Make it slightly thicker for the pulse effect
+  }, nowMarkerIndex);
+
+  // Add pulsing effect to now marker
+  setTimeout(() => {
+    const nowMarkerElements = plotDivRef.querySelectorAll('.scatterlayer .trace:nth-child(' + (nowMarkerIndex + 1) + ') .points path');
+    nowMarkerElements.forEach(el => {
+      el.style.animation = 'pulse 2s ease-in-out infinite';
+    });
+  }, 100); // Small delay to ensure DOM is updated
+
+  // Update now annotation
+  const annotations = plotDivRef.layout.annotations || [];
+  const nowAnnotationIndex = annotations.findIndex(ann =>
+    ann.text && ann.text.toLowerCase().includes('now ')
+  );
+
+  if (nowAnnotationIndex !== -1) {
+    const upd = {};
+    upd[`annotations[${nowAnnotationIndex}].x`] = nowHour;
+    upd[`annotations[${nowAnnotationIndex}].text`] = `now ${formatTime(nowHour, params.use12Hour).toLowerCase()}`;
+    Plotly.relayout(plotDivRef, upd);
+  }
+
+  autoCalloutHour = nowHour;
+  autoCalloutHalf = detectHalfSticky(nowHour, autoCalloutHalf || activeHalf);
+
+  if (calloutAutoFollow) {
+    if (autoCalloutHalf && autoCalloutHalf !== activeHalf) {
+      activeHalf = autoCalloutHalf;
+      updateStepButtons();
+    }
+    refreshCallouts();
+  }
+}
+
+function renderPlot(series){
+  const {hours,ccts,bris,morn,eve,solar,sunPower}=series;
+  rebuildHalfArcCaches(morn, eve);
+
+  arc.hours=hours.slice();
+  arc.bris=bris.map(v=>Math.round(v));
+  arc.ccts=ccts.slice();
+  arc.sun=sunPower.slice();
+
+  const segs=buildMagicLightColored(hours,bris.map(v=>Math.round(v)),ccts);
+  const sunSegs=buildSunColored(hours,sunPower);
+
+  // Legend entries (dummy)
+  const homeLegend={type:'scatter',mode:'lines',x:[null],y:[null],name:'MagicLight',
+    line:{width:4,color:'#fff'},hoverinfo:'skip',showlegend:true,yaxis:'y'};
+  const sunLegend={type:'scatter',mode:'lines',x:[null],y:[null],name:'Sun power',
+    line:{width:SUN_LINE.width,color:'rgba(255,255,255,0.35)',dash:SUN_LINE.dash},hoverinfo:'skip',showlegend:true,yaxis:'y'};
+
+  const hoverProxy={type:'scatter',mode:'lines',x:hours,y:bris,name:'MagicLight (hover)',
+    line:{width:14,color:'rgba(0,0,0,0)'},
+    hovertemplate:'%{text}<br>MagicLight %{y:.0f}%<br>color temperature %{customdata:.0f} K<extra></extra>',
+    text:hours.map(h=>formatTime(h,params.use12Hour)), customdata:ccts, yaxis:'y', showlegend:false};
+
+  const now=new Date(); const nowHour=now.getHours()+now.getMinutes()/60;
+  const nowBri=interpAtHour(hours,bris,nowHour);
+  const nowCCT=interpAtHour(hours,ccts,nowHour);
+  const nowOutline=getComputedStyle(document.documentElement).getPropertyValue('--nowBlue').trim()||'#66b8ff';
+  const nowMarker={type:'scatter',mode:'markers',x:[nowHour],y:[nowBri],name:'now',
+    marker:{size:12,color:cctToRGB(nowCCT),line:{width:3,color:nowOutline}},hoverinfo:'skip',showlegend:false};
+
+  const annotations=[];
+  const annotate=(xpos,label,color)=>{ if(xpos==null) return;
+    annotations.push({x:xpos,y:-0.15,yref:'paper',text:`${label}<br>${formatTime(xpos,params.use12Hour)}`,
+      showarrow:false,font:{size:SOLAR_LABEL_SIZE,color:color||'#fff'},xanchor:'center',yanchor:'top',cliponaxis:false});
+  };
+  annotate(solar.sunrise,'sunrise');
+  annotate(solar.sunset,'sunset');
+  annotate(solar.solarNoon,'solar noon');
+  annotate(solar.solarMidnight,'solar midnight');
+
+  annotations.push({
+    x: nowHour, y: -0.10, yref: 'paper',
+    text: `now ${formatTime(nowHour, params.use12Hour).toLowerCase()}`,
+    showarrow: false,
+    font: { size: SOLAR_LABEL_SIZE, color: '#ffffff', weight: 800 },
+    xanchor: 'center', yanchor: 'top', cliponaxis: false
+  });
+
+  const selBri = interpAtHour(hours,bris,selectedHour);
+  const selCCT = interpAtHour(hours,ccts,selectedHour);
+  const selectionMarker={ type:'scatter',mode:'markers',x:[selectedHour],y:[selBri],name:'selected',
+    marker:{size:12,color:cctToRGB(selCCT),line:{width:2,color:'#fff'}},hoverinfo:'skip',showlegend:false };
+  const cursorShape={type:'line',xref:'x',x0:selectedHour,x1:selectedHour,yref:'paper',y0:0,y1:1,line:{color:'#1e90ff',width:2}};
+
+  const { hour, halfOverride } = resolveCalloutContext();
+  const { upTrace, dnTrace } = buildStepCalloutsTraces(hour, halfOverride);
+
+  const data=[...segs, homeLegend, sunLegend, hoverProxy, ...sunSegs, upTrace, dnTrace, selectionMarker, nowMarker];
+
+  const layout={
+    dragmode:'pan', hovermode:'closest',
+    xaxis:{range:[0,24], tickmode:'array', tickvals:[0,3,6,9,12,15,18,21,24],
+      ticktext: params.use12Hour? ['12am','3am','6am','9am','12pm','3pm','6pm','9pm','12am']
+                                : ['00:00','03:00','06:00','09:00','12:00','15:00','18:00','21:00','00:00'],
+      tickfont:{color:'#fff'}, showgrid:true, gridcolor:'#444', fixedrange:true,
+      minor:{tickmode:'array', tickvals:Array.from({length:25},(_,i)=>i), ticks:'outside', ticklen:4, tickcolor:'#444', showgrid:true, minor_gridcolor:'#333'} },
+    yaxis:{title:'brightness', range:[0,300], autorange:false, tickfont:{color:'#fff'}, fixedrange:true, showgrid:true, gridcolor:'#444'},
+    showlegend:true, legend:{x:0.02,y:0.98, font:{color:'#fff'}, bgcolor:'rgba(0,0,0,.5)'},
+    margin:{t:24,b:96},
+    annotations:[
+      ...annotations,
+      {
+        x:selectedHour, y:selBri,
+        text:`${formatTime(selectedHour,params.use12Hour)}<br><b>${Math.round(selBri)}%</b> • ${Math.round(selCCT)} K`,
+        showarrow:true, arrowhead:4, arrowsize:1, arrowwidth:1, arrowcolor:'rgba(200,200,200,0.8)',
+        ax:0, ay:-40, bgcolor:'rgba(0,0,0,0.65)', bordercolor:'rgba(150,150,150,0.6)', borderwidth:1, font:{color:'#fff',size:12}
+      }
+    ],
+    shapes:[cursorShape], paper_bgcolor:'#1e1e1e', plot_bgcolor:'#1e1e1e', uirevision:'keep'
+  };
+  const config={responsive:true, editable:false, scrollZoom:false, doubleClick:false, displayModeBar:false};
+
+  function setCursor(xh){
+    if(!plotDivRef) return;
+    const clamped=Math.max(0,Math.min(24,xh)); selectedHour=clamped;
+    const yB=interpAtHour(hours,bris,clamped);
+    const yK=interpAtHour(hours,ccts,clamped);
+
+    Plotly.relayout(plotDivRef, {'shapes[0].x0':clamped,'shapes[0].x1':clamped});
+    const selIdx=plotDivRef.data.findIndex(t=>t && t.name==='selected');
+    if(selIdx!==-1) Plotly.restyle(plotDivRef, {x:[[clamped]], y:[[yB]], 'marker.color':[[cctToRGB(yK)]]}, selIdx);
+
+    const annLen=(plotDivRef.layout.annotations||[]).length; const annIndex=annLen-1;
+    const upd={}; upd[`annotations[${annIndex}].x`]=clamped; upd[`annotations[${annIndex}].y`]=yB;
+    upd[`annotations[${annIndex}].text`]=`${formatTime(clamped,params.use12Hour)}<br><b>${Math.round(yB)}%</b> • ${Math.round(yK)} K`;
+    const prevHalf = activeHalf;
+    activeHalf = detectHalfSticky(selectedHour, prevHalf);
+
+    Plotly.relayout(plotDivRef, upd);
+
+    // if we crossed morning/evening boundary, swap the button roles/labels
+    if (activeHalf !== prevHalf) updateStepButtons();
+
+    refreshCallouts(); // always refresh callouts on cursor changes
+  }
+  setCursorRef=setCursor;
+
+  if(plotDivRef){
+    Plotly.react(plotDivRef,data,layout,config).then(() => {
+      CALL_UP_IDX = plotDivRef.data.findIndex(t => t && t.name === 'step-up path');
+      CALL_DN_IDX = plotDivRef.data.findIndex(t => t && t.name === 'step-down path');
+      nowMarkerIndex = plotDivRef.data.findIndex(t => t && t.name === 'now');
+      refreshCallouts(); // make sure first paint uses the new per-point colors
+
+      // Add pulsing effect to now marker
+      setTimeout(() => {
+        const nowMarkerElements = plotDivRef.querySelectorAll('.scatterlayer .trace:nth-child(' + (nowMarkerIndex + 1) + ') .points path');
+        nowMarkerElements.forEach(el => {
+          el.style.animation = 'pulse 2s ease-in-out infinite';
+        });
+      }, 200);
+    });
+  }
+  else{
+    Plotly.newPlot('plot',data,layout,config).then(div=>{
+      plotDivRef=div;
+      bindInteractionsOnce();
+      CALL_UP_IDX = plotDivRef.data.findIndex(t => t && t.name === 'step-up path');
+      CALL_DN_IDX = plotDivRef.data.findIndex(t => t && t.name === 'step-down path');
+      nowMarkerIndex = plotDivRef.data.findIndex(t => t && t.name === 'now');
+      refreshCallouts(); // first paint
+
+      // Add pulsing effect to now marker
+      setTimeout(() => {
+        const nowMarkerElements = plotDivRef.querySelectorAll('.scatterlayer .trace:nth-child(' + (nowMarkerIndex + 1) + ') .points path');
+        nowMarkerElements.forEach(el => {
+          el.style.animation = 'pulse 2s ease-in-out infinite';
+        });
+      }, 200);
+    });
+  }
+}
+
+/* recompute/paint the callouts */
+function refreshCallouts(){
+  if(!plotDivRef) return;
+
+  // Resolve indices once if needed
+  if (CALL_UP_IDX === -1 || CALL_DN_IDX === -1) {
+    CALL_UP_IDX = plotDivRef.data.findIndex(t => t && t.name === 'step-up path');
+    CALL_DN_IDX = plotDivRef.data.findIndex(t => t && t.name === 'step-down path');
+  }
+
+  const { hour, halfOverride } = resolveCalloutContext();
+  const { upTrace, dnTrace } = buildStepCalloutsTraces(hour, halfOverride);
+  const vis = calloutsVisible();
+
+  if (CALL_UP_IDX !== -1){
+    Plotly.restyle(plotDivRef, {
+      x:[upTrace.x],
+      y:[upTrace.y],
+      text:[upTrace.text],                         // new
+      'marker.color':[upTrace.marker.color],
+      'marker.line.color':[upTrace.marker.line.color],
+      'hoverlabel.bgcolor':[upTrace.hoverlabel.bgcolor],  // new
+      visible: vis
+    }, CALL_UP_IDX);
+  }
+  if (CALL_DN_IDX !== -1){
+    Plotly.restyle(plotDivRef, {
+      x:[dnTrace.x],
+      y:[dnTrace.y],
+      text:[dnTrace.text],                         // new
+      'marker.color':[dnTrace.marker.color],
+      'marker.line.color':[dnTrace.marker.line.color],
+      'hoverlabel.bgcolor':[dnTrace.hoverlabel.bgcolor],  // new
+      visible: vis
+    }, CALL_DN_IDX);
+  }
+}
+
+/* =========================
+   Interactions (buttons)
+========================= */
+function toggleCalloutsVisibility(){
+  if(!plotDivRef) return;
+  const vis = calloutsVisible();
+  if (CALL_UP_IDX !== -1) Plotly.restyle(plotDivRef, { visible: vis }, CALL_UP_IDX);
+  if (CALL_DN_IDX !== -1) Plotly.restyle(plotDivRef, { visible: vis }, CALL_DN_IDX);
+}
+
+function bindInteractionsOnce(){
+  if(listenersBound||!plotDivRef) return;
+
+  // Use the true data-drag rectangle Plotly overlays on the plotting area
+  const getPlotArea = () => plotDivRef.querySelector('.nsewdrag') || plotDivRef;
+
+  // Map a clientX to hour using the actual plot area width and current x-range
+  const mapClientXToHour = (clientX) => {
+    const el = getPlotArea();
+    const r = el.getBoundingClientRect();
+    const t = (clientX - r.left) / r.width;
+    // Use the actual axis range (still 0..24 in your layout, but future-proof)
+    const xr = (plotDivRef._fullLayout?.xaxis?.range) || [0, 24];
+    const x = xr[0] + t * (xr[1] - xr[0]);
+    return Math.max(0, Math.min(24, x));
+  };
+
+  let dragging=false;
+  const tick=()=>{ if(lastClientX==null){rafId=0;return;} setCursorRef(mapClientXToHour(lastClientX)); rafId=0; };
+  const onPointerDown=e=>{ calloutAutoFollow=false; dragging=true; document.body.classList.add('dragging'); lastClientX=e.clientX; if(!rafId) rafId=requestAnimationFrame(tick); };
+  const onPointerMove=e=>{ if(!dragging) return; lastClientX=e.clientX; if(!rafId) rafId=requestAnimationFrame(tick); };
+  const onPointerUp=()=>{ dragging=false; document.body.classList.remove('dragging'); lastClientX=null; };
+  const onClick=e=> { calloutAutoFollow=false; setCursorRef(mapClientXToHour(e.clientX)); };
+
+  const area=plotDivRef;
+  area.addEventListener('pointerdown', onPointerDown, {passive:true});
+  window.addEventListener('pointermove', onPointerMove, {passive:true});
+  window.addEventListener('pointerup', onPointerUp, {passive:true});
+  plotDivRef.on('plotly_click', (ev) => {
+    calloutAutoFollow=false;
+    const x = ev?.points?.[0]?.x;
+    if (typeof x === 'number') setCursorRef(x);
+  });
+
+  plotDivRef.on('plotly_relayout', ev=>{
+    if(('xaxis.range[0]' in ev)||('xaxis.range[1]' in ev)||('yaxis.range[0]' in ev)||('yaxis.range[1]' in ev)){
+      Plotly.relayout(plotDivRef, {'xaxis.range':[0,24],'yaxis.range':[0,300]});
+    }
+  });
+
+  // Wire up step buttons
+  updateStepButtons();
+
+  // Wire up step count changes to refresh callouts
+  document.getElementById('step-count').addEventListener('input', ()=>{ refreshCallouts(); });
+  
+  // Wire up show steps checkbox
+  const showSteps = document.getElementById('show-steps');
+  if (showSteps) showSteps.addEventListener('change', toggleCalloutsVisibility);
+
+  listenersBound=true;
+}
+
+function updateStepButtons(){
+  if (!activeHalf) activeHalf = detectHalfSticky(selectedHour, activeHalf);
+  const leftBtn   = document.getElementById('left-btn');
+  const rightBtn  = document.getElementById('right-btn');
+
+  if (activeHalf === 'morning'){
+    leftBtn.textContent  = 'Step down';
+    leftBtn.onclick      = () => stepArc('dim');
+    rightBtn.textContent = 'Step up';
+    rightBtn.onclick     = () => stepArc('brighten');
+  } else {
+    leftBtn.textContent  = 'Step up';
+    leftBtn.onclick      = () => stepArc('brighten');
+    rightBtn.textContent = 'Step down';
+    rightBtn.onclick     = () => stepArc('dim');
+  }
+}
+
+/* =========================
+   UI (sliders & controls)
+========================= */
+function resetSlider(key){
+  const ui = UI.sliders[key];
+  if(!ui) return;
+  const def = ui.def;
+  params[key] = def;
+  ui.input.value = def;
+  ui.val.textContent = ui.format ? ui.format(def) : def;
+  maybeMirrorParam(key);
+  draw();
+}
+
+function addSliderRow(parent,{ label, key, min, max, step, format, def }){
+  const row = document.createElement('div');
+  row.className = 'controls-row';
+
+  const lab = document.createElement('label');
+  lab.textContent = label;
+
+  const trackWrap = document.createElement('div');
+  trackWrap.className = 'track-wrap';
+
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = min; input.max = max; input.step = step; input.value = params[key] ?? def;
+
+  const pin = document.createElement('div');
+  pin.className = 'default-mark';
+  trackWrap.appendChild(input); trackWrap.appendChild(pin);
+
+  const val = document.createElement('div'); val.className = 'value';
+  const fmt = (v) => format ? format(v) : (typeof v === 'number' ? v.toFixed(2) : v);
+
+  function positionPinAtDefault(){
+    const THUMB=16; const w=input.clientWidth||0; const v=(def ?? min); // default marker position
+    const t=(v-min)/(max-min); const px=t*Math.max(0,w-THUMB)+THUMB/2; pin.style.left=`${px}px`;
+  }
+  requestAnimationFrame(positionPinAtDefault); window.addEventListener('resize', positionPinAtDefault);
+
+  const apply = (v)=>{
+    params[key]=v; val.textContent = fmt(v);
+    maybeMirrorParam(key);
+    draw();
+  };
+
+  input.oninput = (e)=> apply(parseFloat(e.target.value));
+  val.textContent = fmt(params[key] ?? def);
+  lab.addEventListener('click', ()=> resetSlider(key));
+
+  row.append(lab, trackWrap, val);
+  parent.appendChild(row);
+  UI.sliders[key] = { input, val, labelEl: lab, format: fmt, def, rowEl: row, pinEl: pin, min, max, _repositionPin: positionPinAtDefault };
+}
+
+function refreshFormattedSliderValues(){
+  Object.keys(UI.sliders).forEach(key=>{
+    const ui = UI.sliders[key];
+    if (ui && typeof ui.format === 'function') {
+      ui.val.textContent = ui.format(params[key]);
+    }
+  });
+}
+
+function maybeMirrorParam(key){
+  // Mirror BRIGHTNESS -> CCT for midpoint and steepness when enabled
+  if(key.includes('_bri_')){
+    const half = key.includes('_up') ? 'up' : 'dn';
+    if ((half==='up'  && params.mirror_up) || (half==='dn'  && params.mirror_dn)){
+      const cctKey = key.replace('_bri_','_cct_');
+      params[cctKey] = params[key];
+      const ui = UI.sliders[cctKey];
+      if(ui){ ui.input.value = params[cctKey]; ui.val.textContent = ui.format?ui.format(params[cctKey]):params[cctKey]; }
+    }
+  }
+}
+
+function setCCTMirrorUI(half, enabled){
+  const keys = (half==='up') ? ['mid_cct_up','steep_cct_up'] : ['mid_cct_dn','steep_cct_dn'];
+  keys.forEach(k=>{
+    const ui = UI.sliders[k]; if(!ui) return;
+    ui.input.disabled = enabled;
+    ui.rowEl.classList.toggle('is-mirrored', enabled);
+  });
+  if(enabled){
+    const map = (half==='up')
+      ? [['mid_bri_up','mid_cct_up'],['steep_bri_up','steep_cct_up']]
+      : [['mid_bri_dn','mid_cct_dn'],['steep_bri_dn','steep_cct_dn']];
+    map.forEach(([briKey,cctKey])=>{
+      params[cctKey] = params[briKey];
+      const ui = UI.sliders[cctKey];
+      if(ui){ ui.input.value = params[cctKey]; ui.val.textContent = ui.format?ui.format(params[cctKey]):params[cctKey]; }
+    });
+  }
+}
+
+function addMorningEveningUI() {
+  // Defensive: hide any stray Midpoint group titles
+  document.querySelectorAll('.group-title')
+    .forEach(el => { if (el.textContent.trim().toLowerCase() === 'midpoint') el.style.display = 'none'; });
+  ['morning-mid','evening-mid'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+
+  const bounds = { mid:[0,12,0.01], steep:[0.05,8,0.05] };
+
+  const fmtMid = (isMorning) => (v => {
+    const { solarNoon, solarMidnight } = getSolarTimes();
+    const hour = isMorning
+      ? (solarMidnight + (v / 12) * ((solarNoon - solarMidnight + 24) % 24)) % 24
+      : (solarNoon + (v / 12) * ((solarMidnight - solarNoon + 24) % 24)) % 24;
+    return formatTime(hour, params.use12Hour);
+  });
+
+  const mB = document.getElementById('morning-bri');
+  const mC = document.getElementById('morning-cct');
+  const eB = document.getElementById('evening-bri');
+  const eC = document.getElementById('evening-cct');
+  [mB,mC,eB,eC].forEach(el => el.innerHTML = '');
+
+  const blocks = [
+    [mB, 'up',  true,  'bri'],
+    [mC, 'up',  true,  'cct'],
+    [eB, 'dn',  false, 'bri'],
+    [eC, 'dn',  false, 'cct'],
+  ];
+
+  for (const [el, half, isMorning, ch] of blocks) {
+    addSliderRow(el, {
+      label: 'Midpoint',
+      key: `mid_${ch}_${half}`,
+      min: bounds.mid[0], max: bounds.mid[1], step: bounds.mid[2],
+      def: defaults[`mid_${ch}_${half}`],
+      format: fmtMid(isMorning)
+    });
+    addSliderRow(el, {
+      label: 'Steepness',
+      key: `steep_${ch}_${half}`,
+      min: bounds.steep[0], max: bounds.steep[1], step: bounds.steep[2],
+      def: defaults[`steep_${ch}_${half}`]
+    });
+  }
+
+  // Reset buttons
+  document.getElementById('reset-morning').onclick = () => {
+    ['mid_bri_up','steep_bri_up','mid_cct_up','steep_cct_up'].forEach(k=>{
+      params[k]=defaults[k];
+      const ui=UI.sliders[k];
+      if(ui){ ui.input.value=params[k]; ui.val.textContent=ui.format?ui.format(params[k]):params[k]; ui._repositionPin?.(); }
+    });
+    if (params.mirror_up) setCCTMirrorUI('up', true);
+    draw();
+  };
+  document.getElementById('reset-evening').onclick = () => {
+    ['mid_bri_dn','steep_bri_dn','mid_cct_dn','steep_cct_dn'].forEach(k=>{
+      params[k]=defaults[k];
+      const ui=UI.sliders[k];
+      if(ui){ ui.input.value=params[k]; ui.val.textContent=ui.format?ui.format(params[k]):params[k]; ui._repositionPin?.(); }
+    });
+    if (params.mirror_dn) setCCTMirrorUI('dn', true);
+    draw();
+  };
+
+  // Mirror toggles
+  const upChk = document.getElementById('mirror-up');
+  const dnChk = document.getElementById('mirror-dn');
+  if (upChk) { upChk.checked = params.mirror_up; upChk.onchange = (e)=>{ params.mirror_up = e.target.checked; setCCTMirrorUI('up', params.mirror_up); draw(); }; setCCTMirrorUI('up', params.mirror_up); }
+  if (dnChk) { dnChk.checked = params.mirror_dn; dnChk.onchange = (e)=>{ params.mirror_dn = e.target.checked; setCCTMirrorUI('dn', params.mirror_dn); draw(); }; setCCTMirrorUI('dn', params.mirror_dn); }
+}
+
+
+/* =========================
+   Ranges & Sun UI
+========================= */
+function addRangesUI(){
+  const minT=document.getElementById('min-temp'), maxT=document.getElementById('max-temp');
+  const minI=document.getElementById('min-intensity'), maxI=document.getElementById('max-intensity');
+  const tempFill=document.getElementById('temp-fill'), intFill=document.getElementById('intensity-fill');
+  const minTVal=document.getElementById('min-temp-value'), maxTVal=document.getElementById('max-temp-value');
+  const minIVal=document.getElementById('min-intensity-value'), maxIVal=document.getElementById('max-intensity-value');
+
+  // Set slider values from loaded params before setting up event handlers
+  minT.value = params.min_color_temp || defaults.min_color_temp;
+  maxT.value = params.max_color_temp || defaults.max_color_temp;
+  minI.value = params.min_brightness || defaults.min_brightness;
+  maxI.value = params.max_brightness || defaults.max_brightness;
+
+  function updateTempFill(){ const left=((+minT.value-500)/(6500-500))*100, width=((+maxT.value-+minT.value)/(6500-500))*100; tempFill.style.left=`${left}%`; tempFill.style.width=`${width}%`; }
+  function updateIntFill(){ const left=((+minI.value)/100)*100, width=((+maxI.value-+minI.value)/100)*100; intFill.style.left=`${left}%`; intFill.style.width=`${width}%`; }
+  function commit(){
+    if(+minT.value>+maxT.value){ const t=minT.value; minT.value=maxT.value; maxT.value=t; }
+    if(+minI.value>+maxI.value){ const t=minI.value; minI.value=maxI.value; maxI.value=t; }
+    params.min_color_temp=+minT.value; params.max_color_temp=+maxT.value;
+    params.min_brightness=+minI.value; params.max_brightness=+maxI.value;
+    minTVal.textContent=params.min_color_temp; maxTVal.textContent=params.max_color_temp;
+    minIVal.textContent=params.min_brightness; maxIVal.textContent=params.max_brightness;
+    updateTempFill(); updateIntFill(); draw();
+  }
+  minT.oninput=commit; maxT.oninput=commit; minI.oninput=commit; maxI.oninput=commit;
+  commit();
+}
+
+function describeColorMode(mode){
+  switch((mode || '').toLowerCase()){
+    case 'rgb': return 'RGB values';
+    case 'xy': return 'CIE xy coordinates';
+    default: return 'Color temperature (Kelvin)';
+  }
+}
+
+function addColorModeUI(){
+  const selector=document.getElementById('color-mode');
+  const label=document.getElementById('color-mode-label');
+  if(!selector||!label){
+    return;
+  }
+
+  const valid=['kelvin','rgb','xy'];
+  const current=(params.color_mode||defaults.color_mode||'kelvin').toLowerCase();
+  const normalized=valid.includes(current)?current:'kelvin';
+  selector.value=normalized;
+  params.color_mode=normalized;
+  label.textContent=describeColorMode(normalized);
+
+  selector.onchange=e=>{
+    const value=(e.target.value||'').toLowerCase();
+    params.color_mode=valid.includes(value)?value:'kelvin';
+    label.textContent=describeColorMode(params.color_mode);
+  };
+}
+
+function addSunUI(){
+  // Test month selector - for testing different seasons
+  const selMonth=document.getElementById('month'); const mLabel=document.getElementById('month-label');
+  selMonth.innerHTML=''; ['January','February','March','April','May','June','July','August','September','October','November','December']
+    .forEach((n,i)=>{ const o=document.createElement('option'); o.value=String(i+1); o.textContent=n; if(i+1===params.month) o.selected=true; selMonth.appendChild(o); });
+  selMonth.onchange=e=>{ params.month=+e.target.value; mLabel.textContent=selMonth.options[selMonth.selectedIndex].text; _solarCache=null; draw(); refreshFormattedSliderValues();  };
+  mLabel.textContent=selMonth.options[selMonth.selectedIndex]?.text || '';
+
+  // 12-hour format toggle
+  const fmt12=document.getElementById('fmt12'), f12L=document.getElementById('fmt12-label');
+  fmt12.checked=params.use12Hour; f12L.textContent=params.use12Hour?'Enabled':'Disabled';
+  fmt12.onchange=e=>{ params.use12Hour=e.target.checked; f12L.textContent=params.use12Hour?'Enabled':'Disabled'; draw();   refreshFormattedSliderValues();  };
+  
+  // Update location display
+  updateLocationDisplay();
+}
+
+function updateLocationDisplay(){
+  // Update the display-only location values from params
+  const latDisplay = document.getElementById('lat-display');
+  const lonDisplay = document.getElementById('lon-display');
+  const tzDisplay = document.getElementById('tz-display');
+  
+  if (latDisplay) latDisplay.textContent = `${params.latitude}°`;
+  if (lonDisplay) lonDisplay.textContent = `${params.longitude}°`;
+  if (tzDisplay) tzDisplay.textContent = params.timezone;
+}
+
+/* =========================
+   Save Configuration
+========================= */
+async function saveConfiguration() {
+  const statusDiv = document.getElementById('save-status');
+  const saveBtn = document.getElementById('save-config');
+  
+  // Show saving state
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving...';
+  statusDiv.innerHTML = '';
+  
+  try {
+    // Prepare config object with simplified parameters (exclude month - it's just for testing)
+    const config = {
+      color_mode: params.color_mode,
+      min_color_temp: params.min_color_temp,
+      max_color_temp: params.max_color_temp,
+      min_brightness: params.min_brightness,
+      max_brightness: params.max_brightness,
+      mid_bri_up: params.mid_bri_up,
+      steep_bri_up: params.steep_bri_up,
+      mid_cct_up: params.mid_cct_up,
+      steep_cct_up: params.steep_cct_up,
+      mid_bri_dn: params.mid_bri_dn,
+      steep_bri_dn: params.steep_bri_dn,
+      mid_cct_dn: params.mid_cct_dn,
+      steep_cct_dn: params.steep_cct_dn,
+      mirror_up: params.mirror_up,
+      mirror_dn: params.mirror_dn,
+      max_dim_steps: parseInt(document.getElementById('step-count')?.value || params.max_dim_steps)
+    };
+    
+    // Send to server (use relative path for ingress compatibility)
+    const response = await fetch('api/config', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(config)
+    });
+    
+    if (response.ok) {
+      statusDiv.innerHTML = '<div class="success">✓ Configuration saved successfully! Lights will use new settings immediately.</div>';
+      saveBtn.textContent = 'Saved!';
+      setTimeout(() => { 
+        statusDiv.innerHTML = ''; 
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save Configuration';
+      }, 4000);
+    } else {
+      statusDiv.innerHTML = '<div class="warn">✗ Failed to save configuration. Please try again.</div>';
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Configuration';
+      setTimeout(() => { statusDiv.innerHTML = ''; }, 5000);
+    }
+  } catch (error) {
+    console.error('Error saving configuration:', error);
+    statusDiv.innerHTML = '<div class="warn">✗ Error saving configuration: ' + error.message + '</div>';
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'Save Configuration';
+    setTimeout(() => { statusDiv.innerHTML = ''; }, 5000);
+  }
+}
+
+/* =========================
+   Load Configuration
+========================= */
+async function loadConfiguration() {
+  try {
+    const response = await fetch('api/config');
+    if (response.ok) {
+      const config = await response.json();
+      
+      // Update params with loaded config (but skip month - it's just for testing)
+      Object.keys(config).forEach(key => {
+        if (config[key] !== null && config[key] !== undefined && key !== 'month') {
+          params[key] = config[key];
+        }
+      });
+      
+      // Update step count input
+      const stepInput = document.getElementById('step-count');
+      if (stepInput) {
+        stepInput.value = params.max_dim_steps || defaults.max_dim_steps;
+      }
+      
+      // Rebuild UI with new values
+      addMorningEveningUI();
+      addRangesUI();
+      addColorModeUI();
+      addSunUI();
+      updateLocationDisplay();
+      draw();
+    }
+  } catch (error) {
+    console.error('Error loading configuration:', error);
+    // Use defaults if load fails
+    const stepInput = document.getElementById('step-count');
+    if (stepInput) {
+      stepInput.value = params.max_dim_steps || defaults.max_dim_steps;
+    }
+    
+    // Rebuild UI with defaults
+    addMorningEveningUI();
+    addRangesUI();
+    addColorModeUI();
+    addSunUI();
+    draw();
+  }
+}
+
+/* =========================
+   Draw & reset
+========================= */
+function draw(){ const series=compute(); renderPlot(series); updateStepButtons(); }
+function resetAll(){
+  Object.keys(defaults).forEach(k=>params[k]=defaults[k]);
+  selectedHour = new Date().getHours()+new Date().getMinutes()/60;
+  _solarCache=null;
+  calloutAutoFollow = true;
+  autoCalloutHour = selectedHour;
+  autoCalloutHalf = detectHalfSticky(selectedHour, null);
+  activeHalf = autoCalloutHalf;
+
+  addMorningEveningUI();
+  addRangesUI();
+  addColorModeUI();
+  addSunUI();
+
+  document.getElementById('step-count').value='10';
+  updateLocationDisplay();
+  draw();
+  refreshFormattedSliderValues();  
+}
+
+/* =========================
+   Bootstrap
+========================= */
+document.getElementById('reset-all').onclick=resetAll;
+document.getElementById('save-config').onclick=saveConfiguration;
+document.getElementById('step-count').value=params.max_dim_steps || defaults.max_dim_steps;
+
+// Initialize
+loadConfiguration();
+
+// Start auto-updating now marker every minute
+function startNowMarkerUpdates() {
+  // Clear any existing interval
+  if (nowMarkerInterval) {
+    clearInterval(nowMarkerInterval);
+  }
+
+  // Update immediately, then every minute
+  updateNowMarker();
+  nowMarkerInterval = setInterval(updateNowMarker, 60000); // 60 seconds
+}
+
+// Start the timer after page loads
+setTimeout(startNowMarkerUpdates, 1000); // Wait 1 second for plot to initialize
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  if (nowMarkerInterval) {
+    clearInterval(nowMarkerInterval);
+  }
+});
+</script>
+</body>
+</html>
