@@ -1,0 +1,18 @@
+.DS_Store
+
+# Local Dart analysis/cache folders found at the app repo root.
+app/.dart-tool/
+app/.dartServer/
+
+# Local backups of the pre-monorepo git metadata for os/app/sdk.
+.repo-git-backups/
+
+# Local working-tree backups made during monorepo import.
+.repo-working-backups/
+
+# Temporary history-filtered import clones.
+.repo-import-work/
+
+# Local legacy/reference checkout. This repo is still maintained upstream and
+# should not be absorbed into the CROSS monorepo until legacy support settles.
+legacy/removed-project/
