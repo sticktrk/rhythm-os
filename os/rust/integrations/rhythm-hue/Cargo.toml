@@ -1,0 +1,30 @@
+[package]
+name = "rhythm-hue"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Platform-agnostic Philips Hue integration for Rhythm OS"
+
+[features]
+default = []
+test-support = ["rhythm-core/test-support"]
+
+[[test]]
+name = "integration_flow"
+required-features = ["test-support"]
+
+[dependencies]
+rhythm-core = { path = "../../core/rhythm-core" }
+rhythm-devices = { path = "../../core/rhythm-devices" }
+rhythm-os = { path = "../../core/rhythm-os" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tracing = { workspace = true }
+
+reqwest = { workspace = true }
+reqwest-eventsource = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }

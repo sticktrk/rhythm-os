@@ -1,0 +1,4 @@
+kernel=kernel.img
+dtoverlay=miniuart-bt
+core_freq=250
+enable_uart=1

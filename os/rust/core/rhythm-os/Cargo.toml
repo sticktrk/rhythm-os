@@ -1,0 +1,35 @@
+[package]
+name = "rhythm-os"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Platform-agnostic business logic for Rhythm OS controllers"
+
+[dependencies]
+rhythm-core = { path = "../rhythm-core" }
+rhythm-devices = { path = "../rhythm-devices" }
+rhythm-profile = { path = "../rhythm-profile" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+chrono = { workspace = true }
+rand = "0.8"
+sha2 = "0.10"
+
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+mdns-sd = { workspace = true }
+if-addrs = { version = "0.13" }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tower = { version = "0.4", features = ["util"] }
+rhythm-core = { path = "../rhythm-core", features = ["test-support"] }
+rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["test-support"] }
+rhythm-ha = { path = "../../integrations/rhythm-ha", features = ["test-support"] }

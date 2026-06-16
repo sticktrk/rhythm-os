@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_RHYTHM_PATH/package/rhythm-cloudflared/Config.in"
+source "$BR2_EXTERNAL_RHYTHM_PATH/package/rhythm-prebuilt/Config.in"

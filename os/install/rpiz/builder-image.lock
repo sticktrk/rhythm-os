@@ -1,0 +1,5 @@
+# Managed by scripts/build/refresh-builder-image.sh — do not edit by hand.
+# Bump by rerunning the refresh script after changing any baked input.
+image=dtconcepts/rhythm-rpiz-builder:v1-d6b67518470e
+hash=d6b67518470e
+baked_prefix=/home/gpu/Documents/rhythm-os/out/rpiz

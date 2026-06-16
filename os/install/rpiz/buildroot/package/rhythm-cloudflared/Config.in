@@ -1,0 +1,7 @@
+config BR2_PACKAGE_RHYTHM_CLOUDFLARED
+	bool "rhythm-cloudflared"
+	help
+	  Install the pinned Cloudflare Tunnel connector binary for the
+	  Raspberry Pi Zero / Zero W ARMv6 appliance image.
+
+	  https://github.com/cloudflare/cloudflared

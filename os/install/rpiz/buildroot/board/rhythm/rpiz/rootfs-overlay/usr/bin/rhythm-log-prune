@@ -1,0 +1,88 @@
+#!/bin/sh
+
+set -eu
+
+DEV_DEFAULTS=/etc/default/rhythm-dev
+LOG_DIR_DEFAULT=/data/log
+LOG_DIR_FALLBACK=/var/log
+
+if [ -r "$DEV_DEFAULTS" ]; then
+    # shellcheck disable=SC1090
+    . "$DEV_DEFAULTS"
+fi
+
+: "${RHYTHM_SERVER_LOG_MAX_BYTES:=2097152}"
+: "${RHYTHM_SERVER_LOG_KEEP:=2}"
+: "${RHYTHM_MATTER_LOG_MAX_BYTES:=2097152}"
+: "${RHYTHM_MATTER_LOG_KEEP:=3}"
+: "${RHYTHM_WIFI_LOG_MAX_BYTES:=131072}"
+: "${RHYTHM_WIFI_LOG_KEEP:=2}"
+: "${RHYTHM_BLUETOOTH_LOG_MAX_BYTES:=131072}"
+: "${RHYTHM_BLUETOOTH_LOG_KEEP:=2}"
+
+resolve_log_dir() {
+    if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
+        printf '%s\n' "$RHYTHM_LOG_DIR"
+        return 0
+    fi
+
+    if grep -qs '[[:space:]]/data[[:space:]]' /proc/mounts 2>/dev/null; then
+        printf '%s\n' "$LOG_DIR_DEFAULT"
+    else
+        printf '%s\n' "$LOG_DIR_FALLBACK"
+    fi
+}
+
+file_size_bytes() {
+    wc -c < "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+rotate_file() {
+    path="$1"
+    max_bytes="$2"
+    keep_count="$3"
+
+    [ -f "$path" ] || return 0
+
+    size_bytes="$(file_size_bytes "$path")"
+    [ -n "$size_bytes" ] || return 0
+    [ "$size_bytes" -gt "$max_bytes" ] || return 0
+
+    if [ "$keep_count" -gt 0 ]; then
+        idx="$keep_count"
+        while [ "$idx" -ge 2 ]; do
+            prev=$((idx - 1))
+            if [ -f "$path.$prev" ]; then
+                mv -f "$path.$prev" "$path.$idx"
+            fi
+            idx=$((idx - 1))
+        done
+
+        tail -c "$max_bytes" "$path" > "$path.1"
+    fi
+
+    : > "$path"
+}
+
+prune_logs() {
+    log_dir="$(resolve_log_dir)"
+    mkdir -p "$log_dir"
+
+    rotate_file "$log_dir/rhythm-server.log" "$RHYTHM_SERVER_LOG_MAX_BYTES" "$RHYTHM_SERVER_LOG_KEEP"
+    rotate_file "$log_dir/rhythm-matter.log" "$RHYTHM_MATTER_LOG_MAX_BYTES" "$RHYTHM_MATTER_LOG_KEEP"
+    rotate_file "$log_dir/wifi.log" "$RHYTHM_WIFI_LOG_MAX_BYTES" "$RHYTHM_WIFI_LOG_KEEP"
+    rotate_file "$log_dir/bluetooth.log" "$RHYTHM_BLUETOOTH_LOG_MAX_BYTES" "$RHYTHM_BLUETOOTH_LOG_KEEP"
+}
+
+case "${1:-run}" in
+    run)
+        prune_logs
+        ;;
+    log-dir)
+        resolve_log_dir
+        ;;
+    *)
+        printf 'Usage: %s [run|log-dir]\n' "$0" >&2
+        exit 1
+        ;;
+esac

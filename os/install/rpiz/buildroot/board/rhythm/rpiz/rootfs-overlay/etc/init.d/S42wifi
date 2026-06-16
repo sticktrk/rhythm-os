@@ -1,0 +1,409 @@
+#!/bin/sh
+
+WPA_CONF=/etc/wpa_supplicant.conf
+DEV_DEFAULTS=/etc/default/rhythm-dev
+LOG_DIR_DEFAULT=/data/log
+LOG_DIR_FALLBACK=/var/log
+
+resolve_log_dir() {
+    if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
+        printf '%s\n' "$RHYTHM_LOG_DIR"
+        return 0
+    fi
+
+    if grep -qs '[[:space:]]/data[[:space:]]' /proc/mounts 2>/dev/null; then
+        printf '%s\n' "$LOG_DIR_DEFAULT"
+    else
+        printf '%s\n' "$LOG_DIR_FALLBACK"
+    fi
+}
+
+if [ -r "$DEV_DEFAULTS" ]; then
+    # shellcheck disable=SC1090
+    . "$DEV_DEFAULTS"
+fi
+
+LOGFILE="$(resolve_log_dir)/wifi.log"
+
+log() {
+    local msg="wifi: $*"
+    mkdir -p "$(dirname "$LOGFILE")"
+    printf '%s\n' "$msg" >> "$LOGFILE"
+    if [ -w /dev/console ]; then
+        printf '%s\n' "$msg" > /dev/console
+    fi
+}
+
+find_wifi_iface() {
+    local netdir path iface
+
+    netdir=/sys/class/net
+    [ -d "$netdir" ] || return 1
+
+    for path in "$netdir"/*; do
+        [ -e "$path" ] || continue
+        iface="${path##*/}"
+        [ "$iface" = "lo" ] && continue
+        case "$iface" in
+            wlan*|wl*)
+                printf '%s\n' "$iface"
+                return 0
+                ;;
+        esac
+        if [ -d "$path/wireless" ]; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+        if [ -L "$path/phy80211" ]; then
+            printf '%s\n' "$iface"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+has_wifi_config() {
+    [ -s "$WPA_CONF" ] && grep -q '^network={[[:space:]]*$' "$WPA_CONF"
+}
+
+pid_is_running() {
+    [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+status_field() {
+    local iface="$1"
+    local field="$2"
+
+    /usr/sbin/wpa_cli -i "$iface" status 2>/dev/null | sed -n "s/^$field=//p" | head -n 1
+}
+
+log_kernel_excerpt() {
+    local lines
+
+    lines="$(dmesg 2>/dev/null | grep -E 'brcmfmac|cfg80211|firmware|mmc[0-9]' | tail -n 20 || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "kernel: $line"
+        done
+    fi
+}
+
+log_firmware_inventory() {
+    local fw_lines
+
+    fw_lines="$(find /lib/firmware/brcm -maxdepth 1 -type f 2>/dev/null | sort || true)"
+    if [ -n "$fw_lines" ]; then
+        printf '%s\n' "$fw_lines" | while IFS= read -r line; do
+            log "firmware: $line"
+        done
+    else
+        log "firmware: no files found under /lib/firmware/brcm"
+    fi
+}
+
+log_net_inventory() {
+    local lines
+
+    lines="$(ifconfig -a 2>/dev/null || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "ifconfig: $line"
+        done
+    fi
+}
+
+log_lsmod_inventory() {
+    local lines
+
+    lines="$(lsmod 2>/dev/null || true)"
+    if [ -n "$lines" ]; then
+        printf '%s\n' "$lines" | while IFS= read -r line; do
+            log "lsmod: $line"
+        done
+    fi
+}
+
+log_sdio_inventory() {
+    local path modalias vendor device
+
+    for path in /sys/bus/sdio/devices/*; do
+        [ -e "$path" ] || continue
+        vendor="$(cat "$path/vendor" 2>/dev/null || true)"
+        device="$(cat "$path/device" 2>/dev/null || true)"
+        modalias="$(cat "$path/modalias" 2>/dev/null || true)"
+        log "sdio: ${path##*/} vendor=${vendor:-?} device=${device:-?} modalias=${modalias:-?}"
+    done
+}
+
+disable_wifi_power_save() {
+    local iface="$1"
+    local status
+
+    if command -v iw >/dev/null 2>&1; then
+        if iw dev "$iface" set power_save off 2>/tmp/rhythm-wifi-powersave.err; then
+            status="$(iw dev "$iface" get power_save 2>/dev/null || true)"
+            if [ -n "$status" ]; then
+                log "power_save: $status"
+            else
+                log "power_save: disabled via iw"
+            fi
+            rm -f /tmp/rhythm-wifi-powersave.err
+            return 0
+        fi
+        log "power_save: iw failed: $(cat /tmp/rhythm-wifi-powersave.err 2>/dev/null || true)"
+        rm -f /tmp/rhythm-wifi-powersave.err
+    fi
+
+    if command -v iwconfig >/dev/null 2>&1; then
+        if iwconfig "$iface" power off >/dev/null 2>&1; then
+            log "power_save: disabled via iwconfig"
+            return 0
+        fi
+        log "power_save: iwconfig failed"
+    fi
+
+    log "power_save: no supported tool available"
+}
+
+KEEPALIVE_PIDFILE_PATTERN="/var/run/wifi-keepalive.%s.pid"
+KEEPALIVE_INTERVAL_SECS="${RHYTHM_WIFI_KEEPALIVE_SECS:-30}"
+
+# Periodic outbound poke from the rpiz so upstream bridge/ARP tables don't
+# age out our entry while every TCP flow we hold is outbound-initiated.
+# Without this, the AP's IPv4 ARP entry for our wlan0 IP can go stale even
+# though we're TX'ing to Hue/HA every few seconds, and inbound new TCP
+# (the iOS app, mDNS scanners) is silently dropped at the AP until something
+# triggers a fresh ARP resolution. Gratuitous-ARP is the gold standard;
+# fall back to a unicast ping to the gateway if arping isn't available.
+run_keepalive_loop() {
+    local iface="$1"
+    local ip="$2"
+    local interval="$3"
+    local gw
+
+    while sleep "$interval"; do
+        if ! ifconfig "$iface" 2>/dev/null | grep -q "$ip"; then
+            return 0
+        fi
+
+        if command -v arping >/dev/null 2>&1; then
+            arping -U -I "$iface" -c 1 -w 2 "$ip" >/dev/null 2>&1 || true
+            continue
+        fi
+
+        gw="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+        if [ -n "$gw" ] && command -v ping >/dev/null 2>&1; then
+            ping -c 1 -W 2 "$gw" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+start_wifi_keepalive() {
+    local iface="$1"
+    local ip="$2"
+    local pidfile
+
+    # shellcheck disable=SC2059
+    pidfile="$(printf "$KEEPALIVE_PIDFILE_PATTERN" "$iface")"
+
+    if pid_is_running "$pidfile"; then
+        log "keepalive: already running (pid=$(cat "$pidfile"))"
+        return 0
+    fi
+
+    run_keepalive_loop "$iface" "$ip" "$KEEPALIVE_INTERVAL_SECS" &
+    echo $! > "$pidfile"
+
+    if command -v arping >/dev/null 2>&1; then
+        log "keepalive: started arping -U for $ip on $iface every ${KEEPALIVE_INTERVAL_SECS}s (pid=$!)"
+    else
+        log "keepalive: started gateway ping every ${KEEPALIVE_INTERVAL_SECS}s (pid=$!) -- arping unavailable"
+    fi
+}
+
+stop_wifi_keepalive() {
+    local iface="$1"
+    local pidfile
+
+    # shellcheck disable=SC2059
+    pidfile="$(printf "$KEEPALIVE_PIDFILE_PATTERN" "$iface")"
+
+    if pid_is_running "$pidfile"; then
+        kill "$(cat "$pidfile")" 2>/dev/null || true
+        log "keepalive: stopped"
+    fi
+    rm -f "$pidfile"
+}
+
+reprobe_sdio_devices() {
+    local path devname
+
+    for path in /sys/bus/sdio/devices/*; do
+        [ -e "$path" ] || continue
+        devname="${path##*/}"
+
+        if [ -w /sys/bus/sdio/drivers_probe ]; then
+            echo "$devname" > /sys/bus/sdio/drivers_probe 2>/dev/null || true
+            log "reprobe: drivers_probe $devname"
+        fi
+
+        if [ -w /sys/bus/sdio/drivers/brcmfmac/bind ]; then
+            echo "$devname" > /sys/bus/sdio/drivers/brcmfmac/bind 2>/dev/null || true
+            log "reprobe: bind brcmfmac $devname"
+        fi
+    done
+}
+
+modprobe_logged() {
+    local module="$1"
+    local output status
+
+    output="$(modprobe "$module" 2>&1)" || status=$?
+    status="${status:-0}"
+    if [ "$status" -eq 0 ]; then
+        log "modprobe $module: ok"
+    else
+        log "modprobe $module: failed ($status): $output"
+    fi
+}
+
+start() {
+    local iface attempt state ssid ip_addr
+
+    if ! has_wifi_config; then
+        log "no bundled credentials; skipping wlan0 bring-up"
+        return 0
+    fi
+
+    log "starting wlan0"
+
+    modprobe_logged cfg80211
+    modprobe_logged brcmutil
+    modprobe_logged brcmfmac
+
+    iface=""
+    attempt=1
+    while [ "$attempt" -le 30 ]; do
+        iface="$(find_wifi_iface || true)"
+        if [ -n "$iface" ]; then
+            break
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    if [ -z "$iface" ]; then
+        log "no wireless interface yet; forcing SDIO reprobe"
+        reprobe_sdio_devices
+        attempt=1
+        while [ "$attempt" -le 10 ]; do
+            iface="$(find_wifi_iface || true)"
+            if [ -n "$iface" ]; then
+                break
+            fi
+            sleep 1
+            attempt=$((attempt + 1))
+        done
+    fi
+
+    if [ -z "$iface" ]; then
+        log "no wireless interface appeared after brcmfmac load"
+        log_net_inventory
+        log_lsmod_inventory
+        log_sdio_inventory
+        log_firmware_inventory
+        log_kernel_excerpt
+        return 0
+    fi
+
+    WPA_PIDFILE="/var/run/wpa_supplicant.${iface}.pid"
+    DHCP_PIDFILE="/var/run/udhcpc.${iface}.pid"
+
+    log "using interface $iface"
+
+    ifconfig "$iface" up 2>/dev/null || true
+    disable_wifi_power_save "$iface"
+
+    if ! pid_is_running "$WPA_PIDFILE"; then
+        if /usr/sbin/wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
+            log "wpa_supplicant started"
+        else
+            log "wpa_supplicant failed to start"
+            log_kernel_excerpt
+            return 0
+        fi
+    fi
+
+    if ! pid_is_running "$DHCP_PIDFILE"; then
+        if udhcpc -b -i "$iface" -p "$DHCP_PIDFILE" >/dev/null 2>&1; then
+            log "udhcpc started"
+        else
+            log "udhcpc failed to start"
+        fi
+    fi
+
+    attempt=1
+    while [ "$attempt" -le 8 ]; do
+        state="$(status_field "$iface" wpa_state)"
+        ssid="$(status_field "$iface" ssid)"
+        ip_addr="$(status_field "$iface" ip_address)"
+
+        if [ -n "$ip_addr" ]; then
+            if [ -n "$ssid" ]; then
+                log "connected to '$ssid' with IP $ip_addr"
+            else
+                log "connected with IP $ip_addr"
+            fi
+            start_wifi_keepalive "$iface" "$ip_addr"
+            return 0
+        fi
+
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+
+    state="$(status_field "$iface" wpa_state)"
+    ssid="$(status_field "$iface" ssid)"
+    if [ -n "$ssid" ]; then
+        log "no IP yet; state=${state:-unknown} ssid='$ssid'"
+    else
+        log "no IP yet; state=${state:-unknown}"
+    fi
+}
+
+stop() {
+    local iface
+
+    iface="$(find_wifi_iface || true)"
+    [ -n "$iface" ] || iface="wlan0"
+    WPA_PIDFILE="/var/run/wpa_supplicant.${iface}.pid"
+    DHCP_PIDFILE="/var/run/udhcpc.${iface}.pid"
+
+    stop_wifi_keepalive "$iface"
+
+    if pid_is_running "$DHCP_PIDFILE"; then
+        kill "$(cat "$DHCP_PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$DHCP_PIDFILE"
+
+    if pid_is_running "$WPA_PIDFILE"; then
+        kill "$(cat "$WPA_PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$WPA_PIDFILE"
+
+    ifconfig "$iface" down 2>/dev/null || true
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+esac

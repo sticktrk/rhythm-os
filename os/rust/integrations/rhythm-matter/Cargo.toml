@@ -1,0 +1,25 @@
+[package]
+name = "rhythm-matter"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Matter integration for Rhythm OS — controls Matter-over-WiFi/Thread lights"
+
+[features]
+default = []
+test-support = ["rhythm-core/test-support"]
+
+[dependencies]
+rhythm-core = { path = "../../core/rhythm-core" }
+rhythm-devices = { path = "../../core/rhythm-devices" }
+rhythm-os = { path = "../../core/rhythm-os" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tracing = { workspace = true }
+reqwest = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9.10", features = ["vendored"] }

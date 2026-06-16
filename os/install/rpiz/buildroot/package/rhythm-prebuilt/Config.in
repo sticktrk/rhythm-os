@@ -1,0 +1,5 @@
+config BR2_PACKAGE_RHYTHM_PREBUILT
+	bool "rhythm-prebuilt"
+	help
+	  Install the prebuilt Linux appliance binary from
+	  dist/bin/rpiz into the target image.
