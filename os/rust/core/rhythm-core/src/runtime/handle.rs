@@ -13,7 +13,9 @@ use crate::solar::{SolarTime, SunTimes};
 use anyhow::Result;
 
 use crate::runtime::events::InputEvent;
+use crate::runtime::plan::{RhythmInputPlanOutcome, RhythmPeriodicPlanOutcome};
 use crate::runtime::{DeviceRegistry, RhythmRuntime, Scheduler, TimeProvider};
+use rhythm_runtime_api::{RuntimePlan, TickContext};
 
 // ============================================================================
 // RuntimeHandle — type-erased interface to RhythmRuntime<C,T,S,R>
@@ -29,6 +31,42 @@ pub trait RuntimeHandle: Send + Sync {
     /// Route a button/service event through the engine.
     /// Returns true if lights were turned on.
     fn handle_event(&self, event: &InputEvent) -> Result<bool>;
+
+    /// Plan a button/service event without executing controller I/O.
+    fn plan_input_event(
+        &self,
+        event: &InputEvent,
+        _lights_on: Option<bool>,
+    ) -> Result<RhythmInputPlanOutcome> {
+        let turned_on = self.handle_event(event)?;
+        Ok(RhythmInputPlanOutcome::Plan {
+            plan: RuntimePlan::noop(),
+            turned_on,
+            dispatch_records: Vec::new(),
+        })
+    }
+
+    /// Plan a periodic node tick without executing controller I/O.
+    fn plan_periodic_node_tick(
+        &self,
+        tick: &TickContext,
+        source_node_id: &str,
+        _lights_on: Option<bool>,
+    ) -> Result<RhythmPeriodicPlanOutcome> {
+        self.periodic_tick_node(&tick.node_id, source_node_id, tick.hour as f32)?;
+        Ok(RhythmPeriodicPlanOutcome::Plan {
+            plan: RuntimePlan::noop(),
+            dispatch_records: Vec::new(),
+        })
+    }
+
+    /// Record runtime-specific turn-on bookkeeping after a neutral dispatch.
+    fn record_rhythm_dispatches(
+        &self,
+        _records: &[crate::runtime::plan::RhythmDispatchRecord],
+    ) -> Result<()> {
+        Ok(())
+    }
 
     /// Sync rooms from the light controller.
     fn sync_rooms(&self) -> Result<()>;
@@ -425,6 +463,35 @@ where
         Ok(crate::runtime::executor::block_on(
             RhythmRuntime::handle_event(self, event),
         )?)
+    }
+
+    fn plan_input_event(
+        &self,
+        event: &InputEvent,
+        lights_on: Option<bool>,
+    ) -> Result<RhythmInputPlanOutcome> {
+        Ok(RhythmRuntime::plan_input_event(self, event, lights_on)?)
+    }
+
+    fn plan_periodic_node_tick(
+        &self,
+        tick: &TickContext,
+        source_node_id: &str,
+        lights_on: Option<bool>,
+    ) -> Result<RhythmPeriodicPlanOutcome> {
+        Ok(RhythmRuntime::plan_periodic_node_tick(
+            self,
+            tick,
+            source_node_id,
+            lights_on,
+        )?)
+    }
+
+    fn record_rhythm_dispatches(
+        &self,
+        records: &[crate::runtime::plan::RhythmDispatchRecord],
+    ) -> Result<()> {
+        Ok(RhythmRuntime::record_rhythm_dispatches(self, records)?)
     }
 
     fn sync_rooms(&self) -> Result<()> {

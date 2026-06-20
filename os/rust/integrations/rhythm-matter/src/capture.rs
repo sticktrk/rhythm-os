@@ -262,8 +262,7 @@ mod tests {
     fn write_file_with_mtime(dir: &Path, name: &str, mtime_offset_secs: u64) {
         let path = dir.join(name);
         fs::write(&path, b"{}").unwrap();
-        let mtime =
-            UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + mtime_offset_secs);
+        let mtime = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + mtime_offset_secs);
         fs::OpenOptions::new()
             .write(true)
             .open(&path)

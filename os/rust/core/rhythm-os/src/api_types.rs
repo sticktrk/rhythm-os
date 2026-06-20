@@ -12,6 +12,7 @@ use rhythm_core::{
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+use crate::app_runtime::LightingRuntimeKind;
 use crate::canonical::triage::{TriageKind, TriageStatus};
 use crate::scenes::SceneDefinition;
 use crate::topology::{DevicePlacement, HubRoomBinding, InputBinding, NodeControlKind};
@@ -310,6 +311,7 @@ pub struct LocationDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
     pub auto_update: bool,
+    pub lighting_runtime: LightingRuntimeKind,
 }
 
 /// Global Rhythm light-breaker switch in `GET/PUT /api/light-breaker`.
@@ -891,10 +893,14 @@ mod tests {
 
     #[test]
     fn settings_dto_serializes() {
-        let dto = SettingsDto { auto_update: true };
+        let dto = SettingsDto {
+            auto_update: true,
+            lighting_runtime: LightingRuntimeKind::default(),
+        };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert!(json.get("power_save").is_none());
         assert_eq!(json["auto_update"], true);
+        assert_eq!(json["lighting_runtime"], "rhythm-adaptive");
         assert!(json.get("light_breaker_enabled").is_none());
         assert!(json.get("mode").is_none());
         assert!(json.get("profiles").is_none());
@@ -1172,7 +1178,10 @@ mod tests {
                 timezone_name: None,
                 twilight: None,
             },
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                lighting_runtime: LightingRuntimeKind::default(),
+            },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
@@ -1281,7 +1290,10 @@ mod tests {
                     },
                 }),
             },
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                lighting_runtime: LightingRuntimeKind::default(),
+            },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,

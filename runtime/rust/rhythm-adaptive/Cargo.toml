@@ -1,0 +1,11 @@
+[package]
+name = "rhythm-adaptive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhythm-core = { path = "../../../os/rust/core/rhythm-core" }
+rhythm-runtime-api = { path = "../rhythm-runtime-api" }
+anyhow = "1.0"

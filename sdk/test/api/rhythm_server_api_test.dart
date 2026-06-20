@@ -828,6 +828,29 @@ void main() {
       expect(saved, isFalse);
     });
 
+    test('sends lighting runtime wire value', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/settings'),
+            statusCode: 200,
+          ));
+
+      final saved = await api.settingsSet(
+        lightingRuntime: RhythmLightingRuntime.removed-projectCircadian,
+      );
+
+      expect(saved, isTrue);
+      final captured = verify(() => dio.put(
+            'api/settings',
+            data: captureAny(named: 'data'),
+            queryParameters: captureAny(named: 'queryParameters'),
+          )).captured;
+      expect(captured[0], {'lighting_runtime': 'removed-circadian'});
+    });
+
     test('includes null idle_profile_id when clearing custom idle', () async {
       when(() => dio.put(
             any(),

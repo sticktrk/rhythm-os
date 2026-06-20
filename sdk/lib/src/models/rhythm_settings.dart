@@ -370,6 +370,31 @@ class RhythmModeResource {
   }
 }
 
+enum RhythmLightingRuntime {
+  rhythmAdaptive('rhythm-adaptive'),
+  removed-projectCircadian('removed-circadian');
+
+  const RhythmLightingRuntime(this.wireValue);
+
+  final String wireValue;
+
+  static RhythmLightingRuntime fromString(String? value) {
+    return switch (value?.trim().toLowerCase()) {
+      'removed-circadian' ||
+      'removed-project' ||
+      'removed_circadian' =>
+        RhythmLightingRuntime.removed-projectCircadian,
+      'rhythm-adaptive' ||
+      'rhythm' ||
+      'rhythm_adaptive' ||
+      null ||
+      '' =>
+        RhythmLightingRuntime.rhythmAdaptive,
+      _ => RhythmLightingRuntime.rhythmAdaptive,
+    };
+  }
+}
+
 /// App-level settings from the Rhythm server.
 class RhythmSettings {
   /// Legacy setting retained for older servers/callers.
@@ -379,19 +404,27 @@ class RhythmSettings {
   final bool powerSave;
   final bool hasPowerSave;
   final bool autoUpdate;
+  final bool hasLightingRuntime;
+  final RhythmLightingRuntime lightingRuntime;
 
   const RhythmSettings({
     required this.powerSave,
     this.hasPowerSave = true,
     this.autoUpdate = true,
+    this.hasLightingRuntime = true,
+    this.lightingRuntime = RhythmLightingRuntime.rhythmAdaptive,
   });
 
   factory RhythmSettings.fromJson(Map<String, dynamic> json) {
     final hasPowerSave = json.containsKey('power_save');
+    final hasLightingRuntime = json.containsKey('lighting_runtime');
     return RhythmSettings(
       powerSave: hasPowerSave ? json['power_save'] as bool? ?? true : true,
       hasPowerSave: hasPowerSave,
       autoUpdate: json['auto_update'] as bool? ?? true,
+      hasLightingRuntime: hasLightingRuntime,
+      lightingRuntime:
+          RhythmLightingRuntime.fromString(json['lighting_runtime'] as String?),
     );
   }
 }

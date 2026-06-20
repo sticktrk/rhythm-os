@@ -1241,9 +1241,12 @@ class RhythmServerApi {
   Future<bool> settingsSet({
     bool? powerSave,
     bool? autoUpdate,
+    RhythmLightingRuntime? lightingRuntime,
   }) async {
     final data = <String, dynamic>{
       if (autoUpdate != null) 'auto_update': autoUpdate,
+      if (lightingRuntime != null)
+        'lighting_runtime': lightingRuntime.wireValue,
     };
     if (data.isEmpty) return true;
     try {
@@ -1253,6 +1256,10 @@ class RhythmServerApi {
       _log.warning('settingsSet failed', e);
       return false;
     }
+  }
+
+  Future<bool> setLightingRuntime(RhythmLightingRuntime runtime) {
+    return settingsSet(lightingRuntime: runtime);
   }
 
   // =========================================================================

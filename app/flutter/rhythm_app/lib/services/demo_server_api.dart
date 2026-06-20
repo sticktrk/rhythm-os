@@ -54,6 +54,7 @@ class DemoServerApi extends RhythmServerApi {
   int _nextRoomOrdinal = 1;
   bool _powerSave = true;
   bool _autoUpdate = true;
+  RhythmLightingRuntime _lightingRuntime = RhythmLightingRuntime.rhythmAdaptive;
   bool _lightBreakerEnabled = true;
   RhythmMode _activeMode = RhythmMode.day;
 
@@ -91,6 +92,7 @@ class DemoServerApi extends RhythmServerApi {
     _seeded = true;
     _powerSave = true;
     _autoUpdate = true;
+    _lightingRuntime = RhythmLightingRuntime.rhythmAdaptive;
     _lightBreakerEnabled = true;
     _activeMode = RhythmMode.day;
     _nextRoomOrdinal = 5;
@@ -623,11 +625,16 @@ class DemoServerApi extends RhythmServerApi {
     return RhythmSettings.fromJson({
       'power_save': _powerSave,
       'auto_update': _autoUpdate,
+      'lighting_runtime': _lightingRuntime.wireValue,
     });
   }
 
   @override
-  Future<bool> settingsSet({bool? powerSave, bool? autoUpdate}) async {
+  Future<bool> settingsSet({
+    bool? powerSave,
+    bool? autoUpdate,
+    RhythmLightingRuntime? lightingRuntime,
+  }) async {
     ensureSeeded();
     var mutated = false;
     if (powerSave != null) {
@@ -636,6 +643,10 @@ class DemoServerApi extends RhythmServerApi {
     }
     if (autoUpdate != null) {
       _autoUpdate = autoUpdate;
+      mutated = true;
+    }
+    if (lightingRuntime != null) {
+      _lightingRuntime = lightingRuntime;
       mutated = true;
     }
     if (mutated) {

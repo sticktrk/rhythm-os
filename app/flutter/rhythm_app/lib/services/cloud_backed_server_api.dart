@@ -453,11 +453,17 @@ class CloudBackedServerApi {
   Future<bool> settingsSet({
     bool? powerSave,
     bool? autoUpdate,
+    RhythmLightingRuntime? lightingRuntime,
   }) {
     return _delegate.settingsSet(
       powerSave: powerSave,
       autoUpdate: autoUpdate,
+      lightingRuntime: lightingRuntime,
     );
+  }
+
+  Future<bool> setLightingRuntime(RhythmLightingRuntime runtime) {
+    return _delegate.setLightingRuntime(runtime);
   }
 
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) {

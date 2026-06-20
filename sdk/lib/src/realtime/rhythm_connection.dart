@@ -930,7 +930,8 @@ class RhythmConnection {
           final settingsJson =
               payload['settings'] as Map<String, dynamic>? ?? payload;
           if (settingsJson.containsKey('power_save') ||
-              settingsJson.containsKey('auto_update')) {
+              settingsJson.containsKey('auto_update') ||
+              settingsJson.containsKey('lighting_runtime')) {
             _settingsChangedController.add(RhythmSettings.fromJson(
               Map<String, dynamic>.from(settingsJson),
             ));

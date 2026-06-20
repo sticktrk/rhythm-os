@@ -1137,7 +1137,7 @@ packages:
   rhythm_sdk:
     dependency: "direct main"
     description:
-      path: "../../../rhythm_sdk"
+      path: "../../../sdk"
       relative: true
     source: path
     version: "0.1.0"

@@ -760,6 +760,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "removed-circadian"
+version = "0.1.0"
+dependencies = [
+ "rhythm-runtime-api",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1658,6 +1668,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-adaptive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rhythm-core",
+ "rhythm-runtime-api",
+]
+
+[[package]]
 name = "rhythm-addon"
 version = "0.4.264-beta"
 dependencies = [
@@ -1702,6 +1721,7 @@ dependencies = [
  "libm",
  "log",
  "rhythm-profile",
+ "rhythm-runtime-api",
  "serde",
  "serde_json",
  "sunrise",
@@ -1803,15 +1823,18 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
+ "removed-circadian",
  "if-addrs",
  "log",
  "mdns-sd",
  "rand 0.8.5",
+ "rhythm-adaptive",
  "rhythm-core",
  "rhythm-devices",
  "rhythm-ha",
  "rhythm-hue",
  "rhythm-profile",
+ "rhythm-runtime-api",
  "serde",
  "serde_json",
  "sha2",
@@ -1829,6 +1852,16 @@ dependencies = [
  "libm",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rhythm-runtime-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

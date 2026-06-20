@@ -29,6 +29,7 @@ use crate::api_types::{
     ReviewHubDto, ReviewSummaryDto, RoomPollState, RoomProfileSettingsDto, RoomRhythmState,
     RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
 };
+use crate::app_runtime::LightingRuntimeKind;
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
     BackupHubRegistry, BackupInstallation, BackupIntegrationFile, BackupRuntimeState,
@@ -2119,6 +2120,7 @@ fn persist_settings_locked(s: &AppState) {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
             light_breaker_enabled: s.light_breaker_enabled,
+            lighting_runtime: s.lighting_runtime_kind,
             active_mode: s.active_mode,
             last_active_mode_cause: s.last_active_mode_cause,
             last_active_mode_transition_id: s.last_active_mode_transition_id.clone(),
@@ -3272,6 +3274,7 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
         auto_update: s.auto_update,
+        lighting_runtime: s.lighting_runtime_kind,
     }
 }
 
@@ -6856,6 +6859,43 @@ pub fn do_light_breaker_set(state: &SharedState, enabled: bool) -> Result<String
     }
 
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+/// Select the plan-based lighting app runtime.
+pub fn do_lighting_runtime_set(
+    state: &SharedState,
+    runtime_kind: LightingRuntimeKind,
+) -> Result<String> {
+    let (settings, changed, dispatch_generation) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let changed = s.lighting_runtime_kind != runtime_kind;
+        let dispatch_generation = if changed {
+            crate::app_runtime::reset_app_runtime_for_kind(&mut s, runtime_kind);
+            Some(s.invalidate_queued_light_dispatches())
+        } else {
+            None
+        };
+        persist_settings_locked(&s);
+        (build_settings_dto_inner(&s), changed, dispatch_generation)
+    };
+
+    if changed {
+        info!(
+            target: "cmd",
+            "lighting_runtime: selected={} dispatch_generation={:?}",
+            runtime_kind.as_str(),
+            dispatch_generation
+        );
+    }
+
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::SettingsChanged {
+            settings: settings.clone(),
+        },
+    );
+
+    serde_json::to_string(&settings).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
 /// Update global settings (partial: only provided fields are changed).
@@ -19390,6 +19430,36 @@ mod tests {
             }
         }
         assert_eq!(auto_update, Some(false));
+    }
+
+    #[test]
+    fn lighting_runtime_set_emits_settings_changed_payload() {
+        let (state, _rt) = setup_state(vec![]);
+        let (event_tx, mut event_rx) =
+            tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
+        state.lock().unwrap().event_tx = Some(event_tx);
+
+        let result =
+            do_lighting_runtime_set(&state, LightingRuntimeKind::removed-projectCircadian).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["lighting_runtime"], "removed-circadian");
+        assert_eq!(
+            state.lock().unwrap().lighting_runtime_kind,
+            LightingRuntimeKind::removed-projectCircadian
+        );
+
+        let mut lighting_runtime = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let crate::server_event::ServerEvent::SettingsChanged { settings } = event {
+                lighting_runtime = Some(settings.lighting_runtime);
+                break;
+            }
+        }
+        assert_eq!(
+            lighting_runtime,
+            Some(LightingRuntimeKind::removed-projectCircadian)
+        );
     }
 
     #[test]

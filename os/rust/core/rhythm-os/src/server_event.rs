@@ -320,11 +320,15 @@ impl MotionTimerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_runtime::LightingRuntimeKind;
 
     #[test]
     fn server_event_serializes_with_tagged_type_and_data() {
         let event = ServerEvent::SettingsChanged {
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                lighting_runtime: LightingRuntimeKind::default(),
+            },
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -525,7 +529,10 @@ mod tests {
         // Push more events than the channel capacity.
         for _ in 0..32 {
             let _ = tx.send(ServerEvent::SettingsChanged {
-                settings: SettingsDto { auto_update: true },
+                settings: SettingsDto {
+                    auto_update: true,
+                    lighting_runtime: LightingRuntimeKind::default(),
+                },
             });
         }
 
@@ -571,7 +578,10 @@ mod tests {
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(4);
         drop(rx);
         let result = tx.send(ServerEvent::SettingsChanged {
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                lighting_runtime: LightingRuntimeKind::default(),
+            },
         });
         assert!(
             result.is_err(),

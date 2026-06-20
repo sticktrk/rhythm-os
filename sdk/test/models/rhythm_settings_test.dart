@@ -30,6 +30,23 @@ void main() {
       expect(settings.powerSave, isTrue);
       expect(settings.hasPowerSave, isFalse);
       expect(settings.autoUpdate, isTrue);
+      expect(settings.hasLightingRuntime, isFalse);
+      expect(settings.lightingRuntime, RhythmLightingRuntime.rhythmAdaptive);
+    });
+
+    test('parses lighting runtime and aliases', () {
+      final settings = RhythmSettings.fromJson({
+        'lighting_runtime': 'removed-circadian',
+      });
+      expect(settings.hasLightingRuntime, isTrue);
+      expect(
+        settings.lightingRuntime,
+        RhythmLightingRuntime.removed-projectCircadian,
+      );
+      expect(
+        RhythmLightingRuntime.fromString('rhythm_adaptive'),
+        RhythmLightingRuntime.rhythmAdaptive,
+      );
     });
   });
 

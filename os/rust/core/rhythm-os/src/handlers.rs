@@ -1042,10 +1042,35 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
     }
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
+    let lighting_runtime = match body
+        .get("lighting_runtime")
+        .or_else(|| body.get("app_runtime"))
+    {
+        Some(Value::String(value)) => {
+            match value.parse::<crate::app_runtime::LightingRuntimeKind>() {
+                Ok(kind) => Some(kind),
+                Err(e) => return ApiResponse::bad_request(&e.to_string()),
+            }
+        }
+        Some(_) => return ApiResponse::bad_request("lighting_runtime must be a string"),
+        None => None,
+    };
 
-    match commands::do_settings_set(state, None, None, None, None, auto_update) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
+    if auto_update.is_some() {
+        if let Err(e) = commands::do_settings_set(state, None, None, None, None, auto_update) {
+            return ApiResponse::server_error(e);
+        }
+    }
+
+    match lighting_runtime {
+        Some(kind) => match commands::do_lighting_runtime_set(state, kind) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::server_error(e),
+        },
+        None => match commands::build_settings(state) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::server_error(e),
+        },
     }
 }
 
@@ -4821,8 +4846,26 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert_eq!(parsed["auto_update"], false);
+        assert_eq!(parsed["lighting_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_settings_updates_lighting_runtime() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"lighting_runtime": "removed-circadian"}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["lighting_runtime"], "removed-circadian");
+    }
+
+    #[test]
+    fn put_settings_rejects_unknown_lighting_runtime() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"lighting_runtime": "unknown"}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("unknown lighting runtime"));
     }
 
     #[test]
@@ -4833,6 +4876,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert!(parsed["auto_update"].is_boolean());
+        assert_eq!(parsed["lighting_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }

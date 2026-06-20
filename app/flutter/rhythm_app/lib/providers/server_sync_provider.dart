@@ -191,6 +191,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Default true to match server contract for new installs / missing field.
   bool _autoUpdate = true;
 
+  /// Selected lighting runtime on the server.
+  RhythmLightingRuntime _lightingRuntime = RhythmLightingRuntime.rhythmAdaptive;
+
   /// Whether autonomous global light control is enabled on the server.
   bool _lightBreakerEnabled = true;
 
@@ -295,6 +298,14 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether automatic firmware updates are enabled on the server.
   bool get autoUpdate => _autoUpdate;
+
+  /// Selected lighting runtime on the server.
+  RhythmLightingRuntime get lightingRuntime => _lightingRuntime;
+
+  /// App-facing runtime mode. Basic uses the default adaptive runtime; Expert
+  /// enables the removed-project/Circadian runtime.
+  bool get expertMode =>
+      _lightingRuntime == RhythmLightingRuntime.removed-projectCircadian;
 
   /// Whether autonomous global light control is enabled on the server.
   bool get lightBreakerEnabled => _lightBreakerEnabled;
@@ -1640,6 +1651,8 @@ class ServerSyncProvider extends ChangeNotifier {
       _powerSave = settings!.powerSave;
     }
     _autoUpdate = settings?.autoUpdate ?? true;
+    _lightingRuntime =
+        settings?.lightingRuntime ?? RhythmLightingRuntime.rhythmAdaptive;
     _lightBreakerEnabled = hello.lightBreaker?.enabled ?? true;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
@@ -1917,6 +1930,11 @@ class ServerSyncProvider extends ChangeNotifier {
       _autoUpdate = settings.autoUpdate;
       changed = true;
     }
+    if (settings.hasLightingRuntime &&
+        _lightingRuntime != settings.lightingRuntime) {
+      _lightingRuntime = settings.lightingRuntime;
+      changed = true;
+    }
     if (!changed) return;
     notifyListeners();
   }
@@ -2030,6 +2048,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _serverPlatformContext = 'server';
     _powerSave = true;
     _autoUpdate = true;
+    _lightingRuntime = RhythmLightingRuntime.rhythmAdaptive;
     _lightBreakerEnabled = true;
     _activeMode = null;
     _activeProfileId = null;
@@ -2480,6 +2499,39 @@ class ServerSyncProvider extends ChangeNotifier {
 
     if (!success && _autoUpdate == enabled) {
       _autoUpdate = previous;
+      notifyListeners();
+    }
+    return success;
+  }
+
+  /// Switch the server between Basic and Expert runtime modes.
+  ///
+  /// Basic is always `rhythm-adaptive`; Expert is `removed-circadian`.
+  Future<bool> setExpertMode(bool enabled) async {
+    final target = enabled
+        ? RhythmLightingRuntime.removed-projectCircadian
+        : RhythmLightingRuntime.rhythmAdaptive;
+    return setLightingRuntime(target);
+  }
+
+  /// Set the selected lighting runtime on the server with an optimistic cache
+  /// update. The server remains authoritative through subsequent settings SSE
+  /// and hello payloads.
+  Future<bool> setLightingRuntime(RhythmLightingRuntime runtime) async {
+    final previous = _lightingRuntime;
+    if (_lightingRuntime != runtime) {
+      _lightingRuntime = runtime;
+      notifyListeners();
+    }
+
+    final success = HueServiceLocator.isDemoMode
+        ? await DemoServerApi.instance.settingsSet(lightingRuntime: runtime)
+        : _connection.connected
+            ? await api.settingsSet(lightingRuntime: runtime)
+            : false;
+
+    if (!success && _lightingRuntime == runtime) {
+      _lightingRuntime = previous;
       notifyListeners();
     }
     return success;
@@ -3027,6 +3079,8 @@ class ServerSyncProvider extends ChangeNotifier {
       _powerSave = settings!.powerSave;
     }
     _autoUpdate = settings?.autoUpdate ?? true;
+    _lightingRuntime =
+        settings?.lightingRuntime ?? RhythmLightingRuntime.rhythmAdaptive;
     _lightBreakerEnabled = lightBreaker?.enabled ?? true;
     _activeMode = mode?.active;
     _activeProfileId = null;

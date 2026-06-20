@@ -204,6 +204,26 @@ void main() {
       expect(settings.autoUpdate, isFalse);
     });
 
+    test('parses runtime-only settings_changed SSE payload', () async {
+      sseEventChunks = [
+        'event: settings_changed\n'
+            'data: {"type":"settings_changed","data":{"settings":{"lighting_runtime":"removed-circadian"}}}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final settingsFuture = connection.settingsChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      final settings = await settingsFuture;
+      expect(settings.lightingRuntime, RhythmLightingRuntime.removed-projectCircadian);
+    });
+
     test('parses light_breaker_changed SSE payload', () async {
       sseEventChunks = [
         'event: light_breaker_changed\n'

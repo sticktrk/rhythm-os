@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
-use rhythm_core::{ButtonAction, InputEvent};
+use rhythm_core::ButtonAction;
+use rhythm_runtime_api::{RuntimeEvent, RuntimeInputEvent, TickContext};
 
 use crate::canonical::identity::HubKey;
 use crate::commands;
@@ -37,6 +38,42 @@ const HUB_DISCONNECT_GRACE: Duration = Duration::from_secs(120);
 const EVENT_LOOP_IDLE_SLEEP: Duration = Duration::from_millis(10);
 /// How often to evaluate motion timeouts while sources are active.
 const MOTION_TIMER_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+fn runtime_event_for_button(
+    node_id: &str,
+    action: ButtonAction,
+    device_id: Option<&str>,
+) -> RuntimeEvent {
+    RuntimeEvent::Input(RuntimeInputEvent {
+        source_id: device_id.unwrap_or(node_id).to_string(),
+        target_id: node_id.to_string(),
+        action: rhythm_core::runtime_input_from_button_action(action),
+        epoch_ms: Some(chrono::Utc::now().timestamp_millis()),
+        metadata: Default::default(),
+    })
+}
+
+fn runtime_event_for_periodic_tick(
+    node_id: &str,
+    settings_node_id: &str,
+    current_hour: f32,
+    command_id: &str,
+) -> RuntimeEvent {
+    RuntimeEvent::PeriodicTick(TickContext {
+        node_id: node_id.to_string(),
+        hour: current_hour as f64,
+        epoch_ms: Some(chrono::Utc::now().timestamp_millis()),
+        metadata: [
+            (
+                "source_node_id".to_string(),
+                serde_json::json!(settings_node_id),
+            ),
+            ("command_id".to_string(), serde_json::json!(command_id)),
+        ]
+        .into_iter()
+        .collect(),
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct MotionSourceState {
@@ -338,14 +375,9 @@ pub fn process_button_inline(
         return false;
     };
 
-    let event = if let Some(dev_id) = device_id {
-        InputEvent::with_device(node_id, action, dev_id)
-    } else {
-        InputEvent::new(node_id, action)
-    };
-
-    match runtime.handle_event(&event) {
-        Ok(turned_on) => {
+    let event = runtime_event_for_button(node_id, action, device_id);
+    match crate::app_runtime::run_selected_app_runtime_event(state, event) {
+        Ok(report) => {
             tracing::info!(
                 target: "evt",
                 event = "button_action_applied",
@@ -354,7 +386,8 @@ pub fn process_button_inline(
                 node_id = %node_id,
                 device_id = ?device_id,
                 source = "inline",
-                turned_on,
+                dispatch_count = report.dispatch_count,
+                state_write_count = report.state_write_count,
                 latency_ms = started.elapsed().as_millis(),
                 "Inline button action applied"
             );
@@ -368,9 +401,6 @@ pub fn process_button_inline(
                     );
                 }
             }
-            crate::commands::update_lights_on_cache_for_runtime_node(
-                state, &runtime, node_id, turned_on,
-            );
             true
         }
         Err(e) => {
@@ -2307,20 +2337,15 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             };
 
-            let event = if let Some(ref dev_id) = device_id {
-                InputEvent::with_device(&node_id, action, dev_id)
-            } else {
-                InputEvent::new(&node_id, action)
-            };
-
             crate::periodic::wait_for_interactive_node_dispatch_slot(
                 state,
                 &command_id,
                 &node_id,
                 dispatch_spacing,
             );
-            match runtime.handle_event(&event) {
-                Ok(turned_on) => {
+            let event = runtime_event_for_button(&node_id, action, device_id.as_deref());
+            match crate::app_runtime::run_selected_app_runtime_event(state, event) {
+                Ok(report) => {
                     tracing::info!(
                         target: "evt",
                         event = "queued_node_action_applied",
@@ -2329,7 +2354,8 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                         node_id = %node_id,
                         device_id = ?device_id.as_deref(),
                         source = "worker",
-                        turned_on,
+                        dispatch_count = report.dispatch_count,
+                        state_write_count = report.state_write_count,
                         latency_ms = started.elapsed().as_millis(),
                         "Worker queued node action applied"
                     );
@@ -2343,10 +2369,6 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                             );
                         }
                     }
-                    crate::commands::update_lights_on_cache_for_runtime_node(
-                        state, &runtime, &node_id, turned_on,
-                    );
-                    crate::commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
                     if persist_after {
                         crate::commands::persist_rooms(state);
                     }
@@ -2691,20 +2713,44 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
             let tick_started = Instant::now();
-            let tick_result = runtime.periodic_tick_node(&node_id, &settings_node_id, current_hour);
-            let elapsed = tick_started.elapsed();
-            if let Err(e) = tick_result {
-                tracing::warn!(
-                    target: "sys",
-                    event = "periodic_node_tick_failed",
-                    command_id = %command_id,
-                    node_id = %node_id,
-                    settings_node_id = %settings_node_id,
+            let tick_result = crate::app_runtime::run_selected_app_runtime_event(
+                state,
+                runtime_event_for_periodic_tick(
+                    &node_id,
+                    &settings_node_id,
                     current_hour,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %e,
-                    "Periodic node tick failed"
-                );
+                    &command_id,
+                ),
+            );
+            let elapsed = tick_started.elapsed();
+            match tick_result {
+                Ok(report) => {
+                    tracing::debug!(
+                        target: "sys",
+                        event = "periodic_node_tick_applied",
+                        command_id = %command_id,
+                        node_id = %node_id,
+                        settings_node_id = %settings_node_id,
+                        current_hour,
+                        dispatch_count = report.dispatch_count,
+                        state_write_count = report.state_write_count,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "Periodic node tick applied"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "sys",
+                        event = "periodic_node_tick_failed",
+                        command_id = %command_id,
+                        node_id = %node_id,
+                        settings_node_id = %settings_node_id,
+                        current_hour,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        error = %e,
+                        "Periodic node tick failed"
+                    );
+                }
             }
             if matches!(
                 crate::periodic::classify_tick_latency(elapsed),
@@ -2748,7 +2794,9 @@ mod tests {
     use super::*;
     use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
     use rhythm_core::runtime::{RoomSnapshot, RuntimeHandle};
-    use rhythm_core::{HubRegistry, LightProfileConfig, RoomProfileSettings, TimerSetting};
+    use rhythm_core::{
+        HubRegistry, InputEvent, LightProfileConfig, RoomProfileSettings, TimerSetting,
+    };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};

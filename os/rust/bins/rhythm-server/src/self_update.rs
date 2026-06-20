@@ -1621,7 +1621,11 @@ fn write_appliance_image_version_marker(
 /// and gets re-flashed by every later check — a nightly reflash loop that
 /// burns out the SD card.
 fn appliance_image_marker_value(asset: &UpdateImageAsset) -> String {
-    if let Some(version) = asset.version.as_deref().and_then(normalize_version_candidate) {
+    if let Some(version) = asset
+        .version
+        .as_deref()
+        .and_then(normalize_version_candidate)
+    {
         return version;
     }
     if let Some(sha256) = asset
@@ -3186,10 +3190,7 @@ fn bundle_rollback_record_path_for_marker(marker_path: &Path) -> PathBuf {
 
 fn bundle_rollback_record_path() -> Option<PathBuf> {
     let install_root = install_target_executable().ok()?;
-    Some(
-        pending_update_marker_path(&install_root)
-            .with_file_name(BUNDLE_ROLLBACK_RECORD_FILE),
-    )
+    Some(pending_update_marker_path(&install_root).with_file_name(BUNDLE_ROLLBACK_RECORD_FILE))
 }
 
 fn record_bundle_rollback_at(record_path: &Path, marker: &PendingUpdateMarker) {
@@ -4099,7 +4100,10 @@ mod tests {
         let marker = dir.join("marker");
 
         fs::write(&marker, "v0.4.257-beta\n").unwrap();
-        assert_eq!(read_version_marker(&marker).as_deref(), Some("0.4.257-beta"));
+        assert_eq!(
+            read_version_marker(&marker).as_deref(),
+            Some("0.4.257-beta")
+        );
 
         fs::write(&marker, "sha256-abcdef0123456789\n").unwrap();
         assert_eq!(
@@ -4108,7 +4112,10 @@ mod tests {
         );
 
         fs::write(&marker, "rootfs.ext2.gz\n").unwrap();
-        assert_eq!(read_version_marker(&marker).as_deref(), Some("rootfs.ext2.gz"));
+        assert_eq!(
+            read_version_marker(&marker).as_deref(),
+            Some("rootfs.ext2.gz")
+        );
 
         fs::write(&marker, "\n").unwrap();
         assert_eq!(read_version_marker(&marker), None);
