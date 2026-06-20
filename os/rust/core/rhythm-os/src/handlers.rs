@@ -4162,6 +4162,34 @@ mod tests {
         ))
     }
 
+    const HANDLER_EXTERNAL_RUNTIME_ID: &str = "handler-lab";
+    const HANDLER_EXTERNAL_RUNTIME_ALIAS: &str = "handler_lab";
+
+    fn register_external_handler_light_runtime_module(state: &SharedState) {
+        let mut s = state.lock().unwrap();
+        crate::light_runtime::register_light_runtime_module(
+            &mut s,
+            crate::light_runtime::LightRuntimeModule::ephemeral(
+                HANDLER_EXTERNAL_RUNTIME_ID,
+                &[HANDLER_EXTERNAL_RUNTIME_ALIAS],
+                handler_external_runtime_manifest,
+                create_handler_external_runtime,
+            ),
+        )
+        .expect("external handler test runtime should register");
+    }
+
+    fn handler_external_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(HANDLER_EXTERNAL_RUNTIME_ID, "Handler Lab")
+            .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_handler_external_runtime(
+        _: Arc<dyn rhythm_core::RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(HANDLER_EXTERNAL_RUNTIME_ID))
+    }
+
     struct NoopTestLightRuntime(&'static str);
 
     impl LightRuntime for NoopTestLightRuntime {
@@ -5059,6 +5087,57 @@ mod tests {
             state.lock().unwrap().light_runtime_kind,
             crate::light_runtime::LightRuntimeKind::removed_circadian()
         );
+    }
+
+    #[test]
+    fn light_runtime_handlers_expose_and_select_external_registered_module_by_alias() {
+        let state = handler_state_with_runtime();
+        register_external_handler_light_runtime_module(&state);
+
+        let r = handle_get_light_runtime_manifests(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert!(parsed["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|manifest| manifest["id"] == HANDLER_EXTERNAL_RUNTIME_ID));
+
+        let r = handle_get_light_runtime_manifest(&state, HANDLER_EXTERNAL_RUNTIME_ALIAS);
+        assert_eq!(r.status, 200);
+        let manifest: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(manifest["id"], HANDLER_EXTERNAL_RUNTIME_ID);
+        assert_eq!(manifest["name"], "Handler Lab");
+
+        let r = handle_put_light_runtime(
+            &state,
+            &json!({"runtime_id": HANDLER_EXTERNAL_RUNTIME_ALIAS}),
+        );
+        assert_eq!(r.status, 200);
+        let selected: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(selected["runtime_id"], HANDLER_EXTERNAL_RUNTIME_ID);
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind.as_str(),
+            HANDLER_EXTERNAL_RUNTIME_ID
+        );
+
+        let r = handle_put_settings(
+            &state,
+            &json!({"light_runtime": HANDLER_EXTERNAL_RUNTIME_ALIAS}),
+        );
+        assert_eq!(r.status, 200);
+        let settings: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(settings["light_runtime"], HANDLER_EXTERNAL_RUNTIME_ID);
+    }
+
+    #[test]
+    fn light_runtime_manifest_rejects_unknown_runtime() {
+        let state = handler_state_with_runtime();
+
+        let r = handle_get_light_runtime_manifest(&state, "not-registered");
+
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("unknown light runtime"));
     }
 
     #[test]

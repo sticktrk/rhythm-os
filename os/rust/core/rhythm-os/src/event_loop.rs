@@ -3052,7 +3052,9 @@ mod tests {
     // ========================================================================
 
     fn make_state() -> SharedState {
-        std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()))
+        let mut app = crate::state::AppState::default();
+        install_test_light_runtime_modules(&mut app);
+        std::sync::Arc::new(std::sync::Mutex::new(app))
     }
 
     fn wait_for_atomic_at_least(counter: &AtomicUsize, expected: usize) {
@@ -3146,6 +3148,7 @@ mod tests {
 
     fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
         let mut app = crate::state::AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let hub_type = HubType::new("test");
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
         app.hubs.insert(
@@ -3161,6 +3164,25 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn install_test_light_runtime_modules(app: &mut crate::state::AppState) {
+        crate::light_runtime::register_light_runtime_module(
+            app,
+            crate::light_runtime::LightRuntimeModule::ephemeral(
+                crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                &["rhythm", "rhythm_adaptive"],
+                rhythm_adaptive::runtime_manifest,
+                create_test_rhythm_adaptive_runtime,
+            ),
+        )
+        .expect("event loop test light runtime module should register");
+    }
+
+    fn create_test_rhythm_adaptive_runtime(
+        runtime: Arc<dyn RuntimeHandle>,
+    ) -> Box<dyn rhythm_runtime_api::LightRuntime> {
+        Box::new(rhythm_adaptive::RuntimeHandleAdaptiveRuntime::new(runtime))
     }
 
     fn only_hub_key(state: &SharedState) -> HubKey {
@@ -3713,6 +3735,7 @@ mod tests {
 
     fn make_state_with_motion_override(timeout_secs: u32) -> SharedState {
         let mut app = crate::state::AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let mut active = app
             .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
             .cloned()
@@ -7262,6 +7285,7 @@ mod tests {
 
     fn make_state_with_room_snapshot(snapshot: RoomSnapshot) -> SharedState {
         let mut app = crate::state::AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(MotionTestRuntime {
             snapshots: vec![snapshot],
             any_lights_on_calls: None,

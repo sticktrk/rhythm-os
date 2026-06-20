@@ -12513,6 +12513,32 @@ mod tests {
         ))
     }
 
+    const COMMAND_EXTERNAL_RUNTIME_ID: &str = "command-lab";
+    const COMMAND_EXTERNAL_RUNTIME_ALIAS: &str = "command_lab";
+
+    fn register_external_test_light_runtime_module(state: &SharedState) {
+        let mut s = state.lock().unwrap();
+        crate::light_runtime::register_light_runtime_module(
+            &mut s,
+            crate::light_runtime::LightRuntimeModule::ephemeral(
+                COMMAND_EXTERNAL_RUNTIME_ID,
+                &[COMMAND_EXTERNAL_RUNTIME_ALIAS],
+                command_external_runtime_manifest,
+                create_command_external_runtime,
+            ),
+        )
+        .expect("external command test runtime should register");
+    }
+
+    fn command_external_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(COMMAND_EXTERNAL_RUNTIME_ID, "Command Lab")
+            .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_command_external_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(COMMAND_EXTERNAL_RUNTIME_ID))
+    }
+
     struct NoopTestLightRuntime(&'static str);
 
     impl LightRuntime for NoopTestLightRuntime {
@@ -19560,6 +19586,53 @@ mod tests {
             }
         }
         assert_eq!(light_runtime, Some(LightRuntimeKind::removed_circadian()));
+    }
+
+    #[test]
+    fn light_runtime_selector_lists_and_selects_external_registered_module_by_alias() {
+        let (state, _rt) = setup_state(vec![]);
+        register_external_test_light_runtime_module(&state);
+
+        let selector: serde_json::Value =
+            serde_json::from_str(&build_light_runtime(&state).unwrap()).unwrap();
+        assert_eq!(selector["runtime_id"], "rhythm-adaptive");
+        assert!(selector["available_runtime_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == COMMAND_EXTERNAL_RUNTIME_ID));
+
+        let selected = do_light_runtime_set(
+            &state,
+            crate::light_runtime::LightRuntimeKind::new(COMMAND_EXTERNAL_RUNTIME_ALIAS),
+        )
+        .unwrap();
+        let selected: serde_json::Value = serde_json::from_str(&selected).unwrap();
+
+        assert_eq!(selected["runtime_id"], COMMAND_EXTERNAL_RUNTIME_ID);
+        assert!(selected["available_runtime_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == COMMAND_EXTERNAL_RUNTIME_ID));
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind.as_str(),
+            COMMAND_EXTERNAL_RUNTIME_ID
+        );
+    }
+
+    #[test]
+    fn light_runtime_selection_rejects_unregistered_external_runtime() {
+        let (state, _rt) = setup_state(vec![]);
+
+        let error = do_light_runtime_settings_set(
+            &state,
+            crate::light_runtime::LightRuntimeKind::new("not-registered"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("unknown light runtime"));
     }
 
     #[test]

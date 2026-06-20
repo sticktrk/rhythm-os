@@ -614,16 +614,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "removed-circadian"
-version = "0.6.101"
-dependencies = [
- "rhythm-runtime-api",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1315,15 +1305,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhythm-adaptive"
-version = "0.6.103-beta"
-dependencies = [
- "anyhow",
- "rhythm-core",
- "rhythm-runtime-api",
-]
-
-[[package]]
 name = "rhythm-core"
 version = "0.6.103-beta"
 dependencies = [
@@ -1379,12 +1360,10 @@ dependencies = [
  "axum",
  "chrono",
  "futures",
- "removed-circadian",
  "if-addrs",
  "log",
  "mdns-sd",
  "rand",
- "rhythm-adaptive",
  "rhythm-core",
  "rhythm-devices",
  "rhythm-profile",
@@ -1409,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-runtime-api"
-version = "0.6.103-beta"
+version = "0.6.101"
 dependencies = [
  "async-trait",
  "serde",

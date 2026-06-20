@@ -202,6 +202,9 @@ impl LightRuntimeRegistry {
     }
 
     pub fn parse_runtime_kind(&self, runtime_id: &str) -> Result<LightRuntimeKind> {
+        if let Some(canonical) = self.resolve_id(runtime_id) {
+            return Ok(LightRuntimeKind::from_canonical_id(canonical));
+        }
         let parsed = runtime_id.parse::<LightRuntimeKind>()?;
         let canonical = self
             .resolve_id(parsed.as_str())
@@ -728,7 +731,8 @@ mod tests {
     use crate::canonical::identity::HubKey;
     use crate::hub::{ActiveHub, HubType};
     use rhythm_runtime_api::{
-        DiagnosticLevel, InputAction, LightingCommand, RuntimeDiagnostic, RuntimeInputEvent,
+        DiagnosticLevel, InputAction, LightingCommand, RuntimeDiagnostic, RuntimeError,
+        RuntimeHttpMethod, RuntimeInputEvent,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
@@ -750,6 +754,115 @@ mod tests {
             store["removed-project"]["kitchen"]["removed-project_area_runtime_state"],
             json!({ "is_on": true })
         );
+    }
+
+    #[test]
+    fn registry_registers_external_runtime_ids_and_aliases_in_order() {
+        let mut registry = LightRuntimeRegistry::default();
+
+        registry.register(external_runtime_module()).unwrap();
+        registry.register(other_external_runtime_module()).unwrap();
+
+        assert_eq!(
+            registry.resolve_id(EXTERNAL_RUNTIME_ID),
+            Some(EXTERNAL_RUNTIME_ID)
+        );
+        assert_eq!(
+            registry.resolve_id(EXTERNAL_RUNTIME_ALIAS),
+            Some(EXTERNAL_RUNTIME_ID)
+        );
+        assert_eq!(
+            registry
+                .parse_runtime_kind(EXTERNAL_RUNTIME_ALIAS)
+                .unwrap()
+                .as_str(),
+            EXTERNAL_RUNTIME_ID
+        );
+        assert_eq!(
+            registry.module_for_id(EXTERNAL_RUNTIME_ALIAS).unwrap().id,
+            EXTERNAL_RUNTIME_ID
+        );
+
+        let manifest_ids: Vec<_> = registry
+            .manifests()
+            .into_iter()
+            .map(|manifest| manifest.id)
+            .collect();
+        assert_eq!(
+            manifest_ids,
+            vec![
+                EXTERNAL_RUNTIME_ID.to_string(),
+                OTHER_EXTERNAL_RUNTIME_ID.to_string()
+            ]
+        );
+
+        let available_ids: Vec<_> = registry
+            .available_runtime_ids()
+            .into_iter()
+            .map(|kind| kind.as_str().to_string())
+            .collect();
+        assert_eq!(
+            available_ids,
+            vec![
+                EXTERNAL_RUNTIME_ID.to_string(),
+                OTHER_EXTERNAL_RUNTIME_ID.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_ids_alias_conflicts_and_bad_manifests() {
+        let mut registry = LightRuntimeRegistry::default();
+        registry.register(external_runtime_module()).unwrap();
+
+        let duplicate_id = registry
+            .register(external_runtime_module())
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate_id.contains("already registered"));
+
+        let duplicate_alias = registry
+            .register(conflicting_alias_runtime_module())
+            .unwrap_err()
+            .to_string();
+        assert!(duplicate_alias.contains("alias"));
+        assert!(duplicate_alias.contains("already registered"));
+
+        let manifest_mismatch = LightRuntimeRegistry::default()
+            .register(mismatched_manifest_runtime_module())
+            .unwrap_err()
+            .to_string();
+        assert!(manifest_mismatch.contains("returned manifest id"));
+
+        let invalid_id = LightRuntimeRegistry::default()
+            .register(invalid_id_runtime_module())
+            .unwrap_err()
+            .to_string();
+        assert!(invalid_id.contains("invalid light runtime id"));
+
+        let invalid_alias = LightRuntimeRegistry::default()
+            .register(invalid_alias_runtime_module())
+            .unwrap_err()
+            .to_string();
+        assert!(invalid_alias.contains("invalid light runtime alias"));
+    }
+
+    #[test]
+    fn registry_rejects_unregistered_runtime_ids() {
+        let mut registry = LightRuntimeRegistry::default();
+        registry.register(external_runtime_module()).unwrap();
+
+        let unknown = registry
+            .parse_runtime_kind("not-registered")
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("unknown light runtime"));
+
+        let invalid = registry
+            .parse_runtime_kind("not_registered")
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("invalid light runtime id"));
     }
 
     #[test]
@@ -855,6 +968,68 @@ mod tests {
     }
 
     #[test]
+    fn selected_external_runtime_module_runs_and_namespaces_state() {
+        let runtime = test_runtime();
+        runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
+        let state = make_state_with_runtime(runtime);
+        install_external_runtime_module(&state);
+        select_external_runtime(&state, EXTERNAL_RUNTIME_ALIAS);
+
+        let report = run_selected_light_runtime_event(
+            &state,
+            RuntimeEvent::HostStateChanged {
+                reason: "topology-sync".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.dispatch_count, 1);
+        assert_eq!(report.state_write_count, 1);
+        assert_eq!(report.diagnostic_count, 1);
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_runtime_kind.as_str(), EXTERNAL_RUNTIME_ID);
+        assert_eq!(
+            s.light_runtime_state[EXTERNAL_RUNTIME_ID]["kitchen"]["external_event"],
+            json!("host_state_changed")
+        );
+        assert!(
+            !s.light_runtime_state
+                .contains_key(RHYTHM_ADAPTIVE_RUNTIME_ID),
+            "external runtime state must not leak into the default runtime namespace"
+        );
+    }
+
+    #[test]
+    fn external_runtime_extension_routes_by_alias_and_applies_plan() {
+        let runtime = test_runtime();
+        runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
+        let state = make_state_with_runtime(runtime);
+        install_external_runtime_module(&state);
+        select_external_runtime(&state, EXTERNAL_RUNTIME_ALIAS);
+
+        let response = run_light_runtime_extension(
+            &state,
+            EXTERNAL_RUNTIME_ALIAS,
+            RuntimeExtensionRequest {
+                method: RuntimeHttpMethod::Put,
+                path: "/settings".to_string(),
+                query: Default::default(),
+                body: json!({"level": 7}),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["runtime_id"], EXTERNAL_RUNTIME_ID);
+        assert_eq!(response.body["node_count"], 1);
+        assert_eq!(
+            state.lock().unwrap().light_runtime_state[EXTERNAL_RUNTIME_ID]["kitchen"]
+                ["external_extension"],
+            json!({"level": 7})
+        );
+    }
+
+    #[test]
     fn removed-project_runtime_rebuilds_when_host_topology_changes() {
         let runtime = test_runtime();
         runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
@@ -947,6 +1122,195 @@ mod tests {
                 diagnostics: vec![],
             })
         }
+    }
+
+    const EXTERNAL_RUNTIME_ID: &str = "sunrise-lab";
+    const EXTERNAL_RUNTIME_ALIAS: &str = "sunrise_lab";
+    const OTHER_EXTERNAL_RUNTIME_ID: &str = "moonrise-lab";
+
+    fn external_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::ephemeral(
+            EXTERNAL_RUNTIME_ID,
+            &[EXTERNAL_RUNTIME_ALIAS],
+            external_runtime_manifest,
+            create_external_runtime,
+        )
+    }
+
+    fn other_external_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::ephemeral(
+            OTHER_EXTERNAL_RUNTIME_ID,
+            &["moonrise"],
+            other_external_runtime_manifest,
+            create_other_external_runtime,
+        )
+    }
+
+    fn conflicting_alias_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::ephemeral(
+            "alias-conflict",
+            &[EXTERNAL_RUNTIME_ALIAS],
+            alias_conflict_runtime_manifest,
+            create_alias_conflict_runtime,
+        )
+    }
+
+    fn mismatched_manifest_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::ephemeral(
+            "manifest-mismatch",
+            &[],
+            mismatched_runtime_manifest,
+            create_manifest_mismatch_runtime,
+        )
+    }
+
+    fn invalid_id_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::ephemeral(
+            "InvalidRuntime",
+            &[],
+            invalid_id_runtime_manifest,
+            create_invalid_id_runtime,
+        )
+    }
+
+    fn invalid_alias_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::ephemeral(
+            "invalid-alias",
+            &["bad alias"],
+            invalid_alias_runtime_manifest,
+            create_invalid_alias_runtime,
+        )
+    }
+
+    fn external_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(EXTERNAL_RUNTIME_ID, "Sunrise Lab")
+            .with_description("External test runtime")
+    }
+
+    fn other_external_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(OTHER_EXTERNAL_RUNTIME_ID, "Moonrise Lab")
+    }
+
+    fn alias_conflict_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new("alias-conflict", "Alias Conflict")
+    }
+
+    fn mismatched_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new("wrong-runtime-id", "Wrong Runtime Id")
+    }
+
+    fn invalid_id_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new("InvalidRuntime", "Invalid Runtime")
+    }
+
+    fn invalid_alias_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new("invalid-alias", "Invalid Alias")
+    }
+
+    fn create_external_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(ExternalRuntime(EXTERNAL_RUNTIME_ID))
+    }
+
+    fn create_other_external_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(ExternalRuntime(OTHER_EXTERNAL_RUNTIME_ID))
+    }
+
+    fn create_alias_conflict_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(ExternalRuntime("alias-conflict"))
+    }
+
+    fn create_manifest_mismatch_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(ExternalRuntime("manifest-mismatch"))
+    }
+
+    fn create_invalid_id_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(ExternalRuntime("InvalidRuntime"))
+    }
+
+    fn create_invalid_alias_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(ExternalRuntime("invalid-alias"))
+    }
+
+    struct ExternalRuntime(&'static str);
+
+    impl LightRuntime for ExternalRuntime {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn handle_event(
+            &mut self,
+            snapshot: &RuntimeSnapshot,
+            event: RuntimeEvent,
+        ) -> rhythm_runtime_api::RuntimeResult<RuntimePlan> {
+            let node_id = first_snapshot_node_id(snapshot);
+            let event_name = match event {
+                RuntimeEvent::Input(_) => "input",
+                RuntimeEvent::PeriodicTick(_) => "periodic_tick",
+                RuntimeEvent::HostStateChanged { .. } => "host_state_changed",
+            };
+            Ok(RuntimePlan {
+                dispatch: vec![DispatchCommand::TurnOn {
+                    target: DispatchTarget::Node {
+                        node_id: node_id.clone(),
+                    },
+                    command: LightingCommand::new(64, 2700),
+                }],
+                state_writes: vec![StateWrite {
+                    node_id,
+                    key: "external_event".to_string(),
+                    value: json!(event_name),
+                }],
+                diagnostics: vec![RuntimeDiagnostic {
+                    level: DiagnosticLevel::Info,
+                    message: "external runtime handled event".to_string(),
+                }],
+            })
+        }
+
+        fn handle_extension(
+            &mut self,
+            snapshot: &RuntimeSnapshot,
+            request: RuntimeExtensionRequest,
+        ) -> rhythm_runtime_api::RuntimeResult<RuntimeExtensionResponse> {
+            if request.path != "/settings" {
+                return Err(RuntimeError::UnsupportedExtension(request.path));
+            }
+            let node_id = first_snapshot_node_id(snapshot);
+            let body = request.body;
+            Ok(RuntimeExtensionResponse::json(json!({
+                "runtime_id": self.runtime_id(),
+                "node_count": snapshot.nodes.len(),
+            }))
+            .with_plan(RuntimePlan {
+                state_writes: vec![StateWrite {
+                    node_id,
+                    key: "external_extension".to_string(),
+                    value: body,
+                }],
+                ..RuntimePlan::noop()
+            }))
+        }
+    }
+
+    fn first_snapshot_node_id(snapshot: &RuntimeSnapshot) -> String {
+        snapshot
+            .nodes
+            .first()
+            .map(|node| node.id.clone())
+            .expect("test runtime snapshot should contain a node")
+    }
+
+    fn install_external_runtime_module(state: &SharedState) {
+        let mut s = state.lock().unwrap();
+        register_light_runtime_module(&mut s, external_runtime_module())
+            .expect("external test runtime should register");
+    }
+
+    fn select_external_runtime(state: &SharedState, runtime_id: &str) {
+        let kind = parse_light_runtime_id(state, runtime_id).unwrap();
+        let mut s = state.lock().unwrap();
+        reset_light_runtime_for_kind(&mut s, kind);
     }
 
     fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {

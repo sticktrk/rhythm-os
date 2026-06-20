@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-core"
-version = "0.6.102-beta"
+version = "0.6.103-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-profile"
-version = "0.6.102-beta"
+version = "0.6.103-beta"
 dependencies = [
  "libm",
  "serde",
