@@ -23,6 +23,23 @@ Map<String, Object?> _runtimeSettings(Map<String, Object?> values) => {
       'off_threshold': 0,
       'filter_presets': _testFilterPresets,
       'card_freshness_minutes': 15,
+      'boost_default': 30,
+      'tick_repeat_after_user_action': 10,
+      'tick_repeat_after_autonomous_change': 3,
+      'periodic_refresh_interval_minutes': 15,
+      'duration_picker_presets': '5,60,240,1440,10080,forever',
+      'default_pause_duration_minutes': 240,
+      'default_freeze_duration_minutes': 60,
+      'default_boost_duration_minutes': 5,
+      'default_power_off_duration_minutes': 0,
+      'confirm_zone_pushes': true,
+      'rhythm_cursor_step_min': 5,
+      'controls_pulse_window_hours': 6.0,
+      'controls_recent_window_minutes': 5,
+      'ct_compensation_enabled': false,
+      'ct_compensation_begin_kelvin': 1650,
+      'ct_compensation_end_kelvin': 2250,
+      'ct_compensation_factor': 1.7,
       ...values,
     };
 
@@ -169,12 +186,10 @@ void main() {
         'periodic_refresh_interval_minutes': 45,
         'experimental_tick_mode': 'skip',
         'multi_area_dispatch_stagger_ms': 0,
-        'ct_compensation': {
-          'enabled': true,
-          'begin_kelvin': 1600,
-          'end_kelvin': 2300,
-          'factor': 1.6,
-        },
+        'ct_compensation_enabled': true,
+        'ct_compensation_begin_kelvin': 1600,
+        'ct_compensation_end_kelvin': 2300,
+        'ct_compensation_factor': 1.6,
         'two_step_turn_on': {
           'enabled': true,
           'kelvin_threshold': 220,
@@ -469,6 +484,35 @@ void main() {
         {'multi_area_dispatch_stagger_ms': '50'},
         {'card_freshness_minutes': 0},
         {'card_freshness_minutes': '15'},
+        {'boost_default': 9},
+        {'boost_default': '30'},
+        {'tick_repeat_after_user_action': 61},
+        {'tick_repeat_after_user_action': '10'},
+        {'tick_repeat_after_autonomous_change': 61},
+        {'tick_repeat_after_autonomous_change': '3'},
+        {'periodic_refresh_interval_minutes': 1441},
+        {'periodic_refresh_interval_minutes': '15'},
+        {'duration_picker_presets': '10,broken,forever'},
+        {
+          'duration_picker_presets': {'values': '10,30'},
+        },
+        {'default_pause_duration_minutes': 10081},
+        {'default_pause_duration_minutes': '240'},
+        {'default_freeze_duration_minutes': 10081},
+        {'default_freeze_duration_minutes': '60'},
+        {'default_boost_duration_minutes': 10081},
+        {'default_boost_duration_minutes': '5'},
+        {'default_power_off_duration_minutes': 10081},
+        {'default_power_off_duration_minutes': '0'},
+        {'confirm_zone_pushes': 'true'},
+        {'rhythm_cursor_step_min': 0},
+        {'rhythm_cursor_step_min': '5'},
+        {'controls_pulse_window_hours': 0.2},
+        {'controls_pulse_window_hours': 49},
+        {'controls_pulse_window_hours': '6'},
+        {'controls_recent_window_minutes': 0},
+        {'controls_recent_window_minutes': 121},
+        {'controls_recent_window_minutes': '5'},
       ]) {
         expect(
           () => expertSettingsValuesFromServerForTest(_runtimeSettings(raw)),
@@ -482,9 +526,135 @@ void main() {
         () => expertSettingsValuesFromServerForTest({
           'off_threshold': 0,
           'filter_presets': _testFilterPresets,
+          'boost_default': 30,
         }),
         throwsA(isA<FormatException>()),
       );
+    });
+
+    test('rejects runtime settings without boost default', () {
+      expect(
+        () => expertSettingsValuesFromServerForTest({
+          'off_threshold': 0,
+          'filter_presets': _testFilterPresets,
+          'card_freshness_minutes': 15,
+          'tick_repeat_after_user_action': 10,
+          'tick_repeat_after_autonomous_change': 3,
+          'periodic_refresh_interval_minutes': 15,
+          'duration_picker_presets': '5,60,240,1440,10080,forever',
+          'default_pause_duration_minutes': 240,
+          'default_freeze_duration_minutes': 60,
+          'default_boost_duration_minutes': 5,
+          'default_power_off_duration_minutes': 0,
+          'confirm_zone_pushes': true,
+          'rhythm_cursor_step_min': 5,
+          'controls_pulse_window_hours': 6.0,
+          'controls_recent_window_minutes': 5,
+        }),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('rejects runtime settings without G11 tick controls', () {
+      final base = <String, Object?>{
+        'off_threshold': 0,
+        'filter_presets': _testFilterPresets,
+        'card_freshness_minutes': 15,
+        'boost_default': 30,
+        'tick_repeat_after_user_action': 10,
+        'tick_repeat_after_autonomous_change': 3,
+        'periodic_refresh_interval_minutes': 15,
+        'duration_picker_presets': '5,60,240,1440,10080,forever',
+        'default_pause_duration_minutes': 240,
+        'default_freeze_duration_minutes': 60,
+        'default_boost_duration_minutes': 5,
+        'default_power_off_duration_minutes': 0,
+        'confirm_zone_pushes': true,
+        'rhythm_cursor_step_min': 5,
+        'controls_pulse_window_hours': 6.0,
+        'controls_recent_window_minutes': 5,
+      };
+      for (final key in [
+        'tick_repeat_after_user_action',
+        'tick_repeat_after_autonomous_change',
+        'periodic_refresh_interval_minutes',
+      ]) {
+        expect(
+          () => expertSettingsValuesFromServerForTest(
+            Map<String, Object?>.of(base)..remove(key),
+          ),
+          throwsA(isA<FormatException>()),
+        );
+      }
+    });
+
+    test('rejects runtime settings without duration defaults', () {
+      final base = <String, Object?>{
+        'off_threshold': 0,
+        'filter_presets': _testFilterPresets,
+        'card_freshness_minutes': 15,
+        'boost_default': 30,
+        'tick_repeat_after_user_action': 10,
+        'tick_repeat_after_autonomous_change': 3,
+        'periodic_refresh_interval_minutes': 15,
+        'duration_picker_presets': '5,60,240,1440,10080,forever',
+        'default_pause_duration_minutes': 240,
+        'default_freeze_duration_minutes': 60,
+        'default_boost_duration_minutes': 5,
+        'default_power_off_duration_minutes': 0,
+        'confirm_zone_pushes': true,
+        'rhythm_cursor_step_min': 5,
+        'controls_pulse_window_hours': 6.0,
+        'controls_recent_window_minutes': 5,
+      };
+      for (final key in [
+        'duration_picker_presets',
+        'default_pause_duration_minutes',
+        'default_freeze_duration_minutes',
+        'default_boost_duration_minutes',
+        'default_power_off_duration_minutes',
+      ]) {
+        expect(
+          () => expertSettingsValuesFromServerForTest(
+            Map<String, Object?>.of(base)..remove(key),
+          ),
+          throwsA(isA<FormatException>()),
+        );
+      }
+    });
+
+    test('rejects runtime settings without UI contract controls', () {
+      final base = <String, Object?>{
+        'off_threshold': 0,
+        'filter_presets': _testFilterPresets,
+        'card_freshness_minutes': 15,
+        'boost_default': 30,
+        'tick_repeat_after_user_action': 10,
+        'tick_repeat_after_autonomous_change': 3,
+        'periodic_refresh_interval_minutes': 15,
+        'duration_picker_presets': '5,60,240,1440,10080,forever',
+        'default_pause_duration_minutes': 240,
+        'default_freeze_duration_minutes': 60,
+        'default_boost_duration_minutes': 5,
+        'default_power_off_duration_minutes': 0,
+        'confirm_zone_pushes': true,
+        'rhythm_cursor_step_min': 5,
+        'controls_pulse_window_hours': 6.0,
+        'controls_recent_window_minutes': 5,
+      };
+      for (final key in [
+        'confirm_zone_pushes',
+        'rhythm_cursor_step_min',
+        'controls_pulse_window_hours',
+        'controls_recent_window_minutes',
+      ]) {
+        expect(
+          () => expertSettingsValuesFromServerForTest(
+            Map<String, Object?>.of(base)..remove(key),
+          ),
+          throwsA(isA<FormatException>()),
+        );
+      }
     });
 
     test('loads light purpose names from runtime scope', () {
@@ -604,20 +774,22 @@ void main() {
         throwsA(isA<FormatException>()),
       );
       expect(
-        expertDurationMinutesForTest(
+        () => expertDurationMinutesForTest(
           const {'default_boost_duration_minutes': 12000},
           'default_boost_duration_minutes',
-          fallback: 60,
+          fallback: 5,
         ),
-        10080,
+        throwsA(isA<FormatException>()),
       );
       expect(
-        expertCursorStepMinutesForTest(const {'rhythm_cursor_step_min': 0}),
-        1,
+        expertCursorStepMinutesForTest(const {'rhythm_cursor_step_min': 5}),
+        5,
       );
       expect(
-        expertCursorStepMinutesForTest(const {'rhythm_cursor_step_min': 90}),
-        60,
+        () => expertCursorStepMinutesForTest(
+          const {'rhythm_cursor_step_min': 0},
+        ),
+        throwsA(isA<FormatException>()),
       );
       expect(
         expertCardFreshnessMinutesForTest(
@@ -632,35 +804,43 @@ void main() {
         throwsA(isA<FormatException>()),
       );
       expect(
-        expertControlsPulseWindowHoursForTest(
-          const {'controls_pulse_window_hours': 0},
-        ),
-        1,
+        expertBoostDefaultForTest(const {'boost_default': 45}),
+        45,
+      );
+      expect(
+        () => expertBoostDefaultForTest(const {'boost_default': 9}),
+        throwsA(isA<FormatException>()),
       );
       expect(
         expertControlsPulseWindowHoursForTest(
-          const {'controls_pulse_window_hours': 200},
+          const {'controls_pulse_window_hours': 0.25},
         ),
-        168,
+        0.25,
+      );
+      expect(
+        () => expertControlsPulseWindowHoursForTest(
+          const {'controls_pulse_window_hours': 0.2},
+        ),
+        throwsA(isA<FormatException>()),
       );
       expect(
         expertControlsRecentWindowMinutesForTest(
-          const {'controls_recent_window_minutes': 0},
+          const {'controls_recent_window_minutes': 120},
         ),
-        1,
+        120,
       );
       expect(
-        expertControlsRecentWindowMinutesForTest(
-          const {'controls_recent_window_minutes': 2000},
+        () => expertControlsRecentWindowMinutesForTest(
+          const {'controls_recent_window_minutes': 121},
         ),
-        1440,
+        throwsA(isA<FormatException>()),
       );
       final now = DateTime.utc(2026, 6, 20, 12);
       expect(
         controlPulseStateForTest(
           now.subtract(const Duration(minutes: 4)),
           now,
-          6,
+          6.0,
           5,
         ),
         'recent',
@@ -669,7 +849,7 @@ void main() {
         controlPulseStateForTest(
           now.subtract(const Duration(hours: 3)),
           now,
-          6,
+          6.0,
           5,
         ),
         'pulse',
@@ -678,7 +858,7 @@ void main() {
         controlPulseStateForTest(
           now.subtract(const Duration(hours: 7)),
           now,
-          6,
+          6.0,
           5,
         ),
         'none',
@@ -957,8 +1137,16 @@ void main() {
         expertAreaActionRequestForTest(
           areaId: 'area-kitchen',
           action: 'boost_on',
+          extra: const {
+            'duration_minutes': 15,
+            'boost_brightness': 45,
+          },
         )['data'],
-        {'action': 'boost_on'},
+        {
+          'action': 'boost_on',
+          'duration_minutes': 15,
+          'boost_brightness': 45,
+        },
       );
       expect(
         expertAreaActionRequestForTest(
@@ -1385,6 +1573,49 @@ void main() {
       expect(curve['bed_speed'], 9);
       expect(curve['wake_brightness'], 50);
       expect(curve['bed_brightness'], 15);
+    });
+
+    test('preserves low removed-project profile color temperatures', () {
+      final config = expertProfileConfigFromDefinitionForTest(
+        wakeHour: 6.5,
+        bedHour: 22.25,
+        minBrightness: 12,
+        maxBrightness: 90,
+        sleepBrightness: 24,
+        minKelvin: 500,
+        maxKelvin: 7600,
+        transitionMinutes: 30,
+        phaseBalance: 0.5,
+      );
+
+      expect(config['min_color_temp'], 500);
+      expect(config['max_color_temp'], 7600);
+
+      final values = expertDefinitionValuesFromProfileForTest({
+        'id': 'expert',
+        'min_brightness': 10,
+        'max_brightness': 90,
+        'min_color_temp': 500,
+        'max_color_temp': 7600,
+        ..._runtimeProfileSkyFields(),
+        'curve': {
+          'type': 'sigmoid',
+          'schedule': {
+            'wake': {'hour': 6.5},
+            'bed': {'hour': 22.25},
+            'alternate_days': <dynamic>[],
+          },
+          'ascend_start': 3.5,
+          'descend_start': 18.25,
+          'wake_speed': 9,
+          'bed_speed': 9,
+          'wake_brightness': 50,
+          'bed_brightness': 25,
+        },
+      });
+
+      expect(values['min_kelvin'], 500);
+      expect(values['max_kelvin'], 7600);
     });
 
     test('loads editor values from an expert sigmoid profile payload', () {

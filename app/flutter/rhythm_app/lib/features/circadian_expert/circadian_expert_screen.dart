@@ -1918,18 +1918,46 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pauseDurationValue = _config
-        .intValue('default_pause_duration_minutes', fallback: 240)
-        .toString();
-    final freezeDurationValue = _config
-        .intValue('default_freeze_duration_minutes', fallback: 0)
-        .toString();
-    final boostDurationValue = _config
-        .intValue('default_boost_duration_minutes', fallback: 60)
-        .toString();
-    final powerOffDurationValue = _config
-        .intValue('default_power_off_duration_minutes', fallback: 60)
-        .toString();
+    final pauseDuration = _config.values.containsKey(
+      'default_pause_duration_minutes',
+    )
+        ? _expertDurationMinutes(
+            _config,
+            'default_pause_duration_minutes',
+            fallback: 240,
+          )
+        : null;
+    final freezeDuration = _config.values.containsKey(
+      'default_freeze_duration_minutes',
+    )
+        ? _expertDurationMinutes(
+            _config,
+            'default_freeze_duration_minutes',
+            fallback: 60,
+          )
+        : null;
+    final boostDuration = _config.values.containsKey(
+      'default_boost_duration_minutes',
+    )
+        ? _expertDurationMinutes(
+            _config,
+            'default_boost_duration_minutes',
+            fallback: 5,
+          )
+        : null;
+    final powerOffDuration = _config.values.containsKey(
+      'default_power_off_duration_minutes',
+    )
+        ? _expertDurationMinutes(
+            _config,
+            'default_power_off_duration_minutes',
+            fallback: 0,
+          )
+        : null;
+    final pauseDurationValue = (pauseDuration ?? 240).toString();
+    final freezeDurationValue = (freezeDuration ?? 60).toString();
+    final boostDurationValue = (boostDuration ?? 5).toString();
+    final powerOffDurationValue = (powerOffDuration ?? 0).toString();
     final durationPresetValues = _durationPresetValues(
       _config,
       includeValues: [
@@ -1943,6 +1971,17 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
     final cardFreshnessMinutes =
         _config.values.containsKey('card_freshness_minutes')
             ? _expertCardFreshnessMinutes(_config)
+            : null;
+    final boostDefault = _config.values.containsKey('boost_default')
+        ? _expertBoostDefault(_config)
+        : null;
+    final controlsPulseWindowHours =
+        _config.values.containsKey('controls_pulse_window_hours')
+            ? _expertControlsPulseWindowHours(_config)
+            : null;
+    final controlsRecentWindowMinutes =
+        _config.values.containsKey('controls_recent_window_minutes')
+            ? _expertControlsRecentWindowMinutes(_config)
             : null;
     final outdoorSource = _outdoorSourceConfigValue(_config);
     final luxSensor = _config.stringValue('outdoor_lux_sensor', fallback: '');
@@ -2421,42 +2460,57 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                           _saveField('rhythm_cursor_step_min', value),
                         ),
                       ),
-                      _ConfigNumberRow(
-                        label: 'Pulse window',
-                        unit: 'h',
-                        value: _config.intValue(
-                          'controls_pulse_window_hours',
-                          fallback: 6,
+                      if (controlsPulseWindowHours != null || _loading)
+                        _ConfigNumberRow(
+                          label: 'Pulse window',
+                          unit: 'h',
+                          value: controlsPulseWindowHours ?? 6,
+                          min: 0.25,
+                          max: 48,
+                          step: 0.25,
+                          saving: _savingKey == 'controls_pulse_window_hours',
+                          enabled: controlsPulseWindowHours != null &&
+                              _isExpertConfigKeyWritable(
+                                'controls_pulse_window_hours',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField('controls_pulse_window_hours', value),
+                          ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Pulse window',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                        min: 1,
-                        max: 168,
-                        step: 1,
-                        saving: _savingKey == 'controls_pulse_window_hours',
-                        enabled: _isExpertConfigKeyWritable(
-                          'controls_pulse_window_hours',
+                      if (controlsRecentWindowMinutes != null || _loading)
+                        _ConfigNumberRow(
+                          label: 'Recent window',
+                          unit: 'min',
+                          value: controlsRecentWindowMinutes ?? 5,
+                          min: 1,
+                          max: 120,
+                          step: 1,
+                          saving:
+                              _savingKey == 'controls_recent_window_minutes',
+                          enabled: controlsRecentWindowMinutes != null &&
+                              _isExpertConfigKeyWritable(
+                                'controls_recent_window_minutes',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField('controls_recent_window_minutes', value),
+                          ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Recent window',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                        onChanged: (value) => unawaited(
-                          _saveField('controls_pulse_window_hours', value),
-                        ),
-                      ),
-                      _ConfigNumberRow(
-                        label: 'Recent window',
-                        unit: 'min',
-                        value: _config.intValue(
-                          'controls_recent_window_minutes',
-                          fallback: 5,
-                        ),
-                        min: 1,
-                        max: 1440,
-                        step: 1,
-                        saving: _savingKey == 'controls_recent_window_minutes',
-                        enabled: _isExpertConfigKeyWritable(
-                          'controls_recent_window_minutes',
-                        ),
-                        onChanged: (value) => unawaited(
-                          _saveField('controls_recent_window_minutes', value),
-                        ),
-                      ),
                       _ConfigNumberRow(
                         label: 'Activity entries',
                         unit: 'entries',
@@ -2948,22 +3002,33 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                   _ConfigSectionCard(
                     title: 'Light Lab',
                     children: [
-                      _ConfigDropdownRow(
-                        label: 'Default pause',
-                        value: pauseDurationValue,
-                        items: durationPresetValues,
-                        itemLabel: _durationOptionLabel,
-                        saving: _savingKey == 'default_pause_duration_minutes',
-                        enabled: _isExpertConfigKeyWritable(
-                          'default_pause_duration_minutes',
-                        ),
-                        onChanged: (value) => unawaited(
-                          _saveField(
-                            'default_pause_duration_minutes',
-                            int.parse(value),
+                      if (pauseDuration != null || _loading)
+                        _ConfigDropdownRow(
+                          label: 'Default pause',
+                          value: pauseDurationValue,
+                          items: durationPresetValues,
+                          itemLabel: _durationOptionLabel,
+                          saving:
+                              _savingKey == 'default_pause_duration_minutes',
+                          enabled: pauseDuration != null &&
+                              _isExpertConfigKeyWritable(
+                                'default_pause_duration_minutes',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField(
+                              'default_pause_duration_minutes',
+                              int.parse(value),
+                            ),
                           ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Default pause',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                      ),
                       _ConfigTextRow(
                         label: 'Duration presets',
                         value: durationPresetCsvValue,
@@ -3009,51 +3074,83 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                           enabled: false,
                           onTap: () {},
                         ),
-                      _ConfigDropdownRow(
-                        label: 'Default freeze',
-                        value: freezeDurationValue,
-                        items: durationPresetValues,
-                        itemLabel: _durationOptionLabel,
-                        saving: _savingKey == 'default_freeze_duration_minutes',
-                        enabled: _isExpertConfigKeyWritable(
-                          'default_freeze_duration_minutes',
-                        ),
-                        onChanged: (value) => unawaited(
-                          _saveField(
-                            'default_freeze_duration_minutes',
-                            int.parse(value),
+                      if (freezeDuration != null || _loading)
+                        _ConfigDropdownRow(
+                          label: 'Default freeze',
+                          value: freezeDurationValue,
+                          items: durationPresetValues,
+                          itemLabel: _durationOptionLabel,
+                          saving:
+                              _savingKey == 'default_freeze_duration_minutes',
+                          enabled: freezeDuration != null &&
+                              _isExpertConfigKeyWritable(
+                                'default_freeze_duration_minutes',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField(
+                              'default_freeze_duration_minutes',
+                              int.parse(value),
+                            ),
                           ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Default freeze',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                      ),
-                      _ConfigDropdownRow(
-                        label: 'Default boost',
-                        value: boostDurationValue,
-                        items: durationPresetValues,
-                        itemLabel: _durationOptionLabel,
-                        saving: _savingKey == 'default_boost_duration_minutes',
-                        enabled: _isExpertConfigKeyWritable(
-                          'default_boost_duration_minutes',
-                        ),
-                        onChanged: (value) => unawaited(
-                          _saveField(
-                            'default_boost_duration_minutes',
-                            int.parse(value),
+                      if (boostDuration != null || _loading)
+                        _ConfigDropdownRow(
+                          label: 'Default boost',
+                          value: boostDurationValue,
+                          items: durationPresetValues,
+                          itemLabel: _durationOptionLabel,
+                          saving:
+                              _savingKey == 'default_boost_duration_minutes',
+                          enabled: boostDuration != null &&
+                              _isExpertConfigKeyWritable(
+                                'default_boost_duration_minutes',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField(
+                              'default_boost_duration_minutes',
+                              int.parse(value),
+                            ),
                           ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Default boost',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                      ),
-                      _ConfigNumberRow(
-                        label: 'Boost intensity',
-                        unit: '%',
-                        value: _config.intValue('boost_default', fallback: 30),
-                        min: 10,
-                        max: 100,
-                        step: 5,
-                        saving: _savingKey == 'boost_default',
-                        enabled: _isExpertConfigKeyWritable('boost_default'),
-                        onChanged: (value) => unawaited(
-                          _saveField('boost_default', value),
+                      if (boostDefault != null || _loading)
+                        _ConfigNumberRow(
+                          label: 'Boost intensity',
+                          unit: '%',
+                          value: boostDefault ?? 30,
+                          min: 10,
+                          max: 100,
+                          step: 5,
+                          saving: _savingKey == 'boost_default',
+                          enabled: boostDefault != null &&
+                              _isExpertConfigKeyWritable('boost_default'),
+                          onChanged: (value) => unawaited(
+                            _saveField('boost_default', value),
+                          ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Boost intensity',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                      ),
                       _ConfigToggleRow(
                         label: 'Confirm zone pushes',
                         value: _config.boolValue(
@@ -3068,23 +3165,33 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                           _saveField('confirm_zone_pushes', value),
                         ),
                       ),
-                      _ConfigDropdownRow(
-                        label: 'Default power-off',
-                        value: powerOffDurationValue,
-                        items: durationPresetValues,
-                        itemLabel: _durationOptionLabel,
-                        saving:
-                            _savingKey == 'default_power_off_duration_minutes',
-                        enabled: _isExpertConfigKeyWritable(
-                          'default_power_off_duration_minutes',
-                        ),
-                        onChanged: (value) => unawaited(
-                          _saveField(
-                            'default_power_off_duration_minutes',
-                            int.parse(value),
+                      if (powerOffDuration != null || _loading)
+                        _ConfigDropdownRow(
+                          label: 'Default power-off',
+                          value: powerOffDurationValue,
+                          items: durationPresetValues,
+                          itemLabel: _durationOptionLabel,
+                          saving: _savingKey ==
+                              'default_power_off_duration_minutes',
+                          enabled: powerOffDuration != null &&
+                              _isExpertConfigKeyWritable(
+                                'default_power_off_duration_minutes',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField(
+                              'default_power_off_duration_minutes',
+                              int.parse(value),
+                            ),
                           ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Default power-off',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
                         ),
-                      ),
                       _ConfigToggleRow(
                         label: 'Read-only ZHA',
                         value: _config.boolValue(
@@ -4910,14 +5017,15 @@ class _AddControlSourceSheetState extends State<_AddControlSourceSheet> {
   }
 
   Future<void> _reportDevice(_ExpertControlSourceDevice device) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
     setState(() {
       _reportingDeviceId = device.deviceId;
       _error = null;
     });
     try {
-      await widget.client.reportControlDevice(device.deviceId);
+      await widget.client.reportControlDevice(device);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger?.showSnackBar(
         SnackBar(content: Text('Reported ${device.name}.')),
       );
     } catch (error, stackTrace) {
@@ -9695,19 +9803,21 @@ class _ExpertAreaDetailScreenState extends State<_ExpertAreaDetailScreen> {
   int get _defaultFreezeDurationMinutes => _expertDurationMinutes(
         _expertConfig,
         'default_freeze_duration_minutes',
-        fallback: 0,
+        fallback: 60,
       );
 
   int get _defaultBoostDurationMinutes => _expertDurationMinutes(
         _expertConfig,
         'default_boost_duration_minutes',
-        fallback: 60,
+        fallback: 5,
       );
+
+  int get _defaultBoostBrightness => _expertBoostDefault(_expertConfig);
 
   int get _defaultPowerOffDurationMinutes => _expertDurationMinutes(
         _expertConfig,
         'default_power_off_duration_minutes',
-        fallback: 60,
+        fallback: 0,
       );
 
   int get _rhythmCursorStepMinutes => _expertCursorStepMinutes(_expertConfig);
@@ -9858,6 +9968,7 @@ class _ExpertAreaDetailScreenState extends State<_ExpertAreaDetailScreen> {
         enabled ? 'boost_on' : 'boost_off',
         {
           if (enabled) 'duration_minutes': _defaultBoostDurationMinutes,
+          if (enabled) 'boost_brightness': _defaultBoostBrightness,
         },
       );
       await _loadArea(silent: true);
@@ -14762,7 +14873,7 @@ class _ControlCategoryDropdown extends StatelessWidget {
 class _SwitchRow extends StatelessWidget {
   final _ExpertControl control;
   final bool busy;
-  final int pulseWindowHours;
+  final double pulseWindowHours;
   final int recentWindowMinutes;
   final VoidCallback? onOpen;
   final VoidCallback onTogglePause;
@@ -14941,7 +15052,7 @@ class _AreaControlRow extends StatelessWidget {
   final _ExpertControl control;
   final String areaId;
   final Set<String> sectionIds;
-  final int pulseWindowHours;
+  final double pulseWindowHours;
   final int recentWindowMinutes;
   final VoidCallback onOpen;
 
@@ -20294,6 +20405,31 @@ int _strictIntSetting(
   return value;
 }
 
+bool _strictBoolSetting(Object? value, String label) {
+  if (value is! bool) {
+    throw FormatException('removed-project settings $label must be a boolean.');
+  }
+  return value;
+}
+
+double _strictDoubleSetting(
+  Object? value,
+  String label, {
+  required double min,
+  required double max,
+}) {
+  if (value is! num) {
+    throw FormatException('removed-project settings $label must be a number.');
+  }
+  final normalized = value.toDouble();
+  if (normalized < min || normalized > max) {
+    throw FormatException(
+      'removed-project settings $label must be between $min and $max.',
+    );
+  }
+  return normalized;
+}
+
 String _strictExperimentalTickMode(Object? value) {
   if (value is! String || !_experimentalTickModeOptions.contains(value)) {
     throw const FormatException(
@@ -20301,6 +20437,18 @@ String _strictExperimentalTickMode(Object? value) {
     );
   }
   return value;
+}
+
+Object? _strictDurationPickerPresetsSetting(Object? raw) {
+  if (raw == null) {
+    throw const FormatException(
+      'removed-project settings missing duration_picker_presets.',
+    );
+  }
+  _durationPresetValues(
+    _ExpertConfig({'duration_picker_presets': raw}),
+  );
+  return raw;
 }
 
 Set<String> _decodeRhythmDefineOpenSections(List<String>? raw) {
@@ -20888,7 +21036,7 @@ class _ExpertSwitchesLoad {
   final List<_ExpertMoment> moments;
   final int defaultPauseMinutes;
   final int refreshIntervalSeconds;
-  final int controlsPulseWindowHours;
+  final double controlsPulseWindowHours;
   final int controlsRecentWindowMinutes;
 
   const _ExpertSwitchesLoad({
@@ -20935,14 +21083,12 @@ class _ExpertSwitchesLoad {
         fallback: 240,
       ),
       refreshIntervalSeconds: 3,
-      controlsPulseWindowHours: _intValue(
-        configRaw['controls_pulse_window_hours'],
-        fallback: 6,
-      ).clamp(1, 168).toInt(),
-      controlsRecentWindowMinutes: _intValue(
-        configRaw['controls_recent_window_minutes'],
-        fallback: 5,
-      ).clamp(1, 1440).toInt(),
+      controlsPulseWindowHours: _expertControlsPulseWindowHours(
+        _ExpertConfig(configRaw.cast<String, Object?>()),
+      ),
+      controlsRecentWindowMinutes: _expertControlsRecentWindowMinutes(
+        _ExpertConfig(configRaw.cast<String, Object?>()),
+      ),
     );
   }
 
@@ -23690,10 +23836,27 @@ class _CircadianExpertClient {
     return firstBindingId;
   }
 
-  Future<void> reportControlDevice(String deviceId) async {
+  Future<void> reportControlDevice(_ExpertControlSourceDevice device) async {
     await _dio.post(
-      'api/devices/report',
-      data: {'device_id': deviceId},
+      '$_removed-projectRuntimeApi/control-sources/report',
+      data: {
+        'device_id': device.deviceId,
+        'name': device.name,
+        if (device.kind != null) 'kind': device.kind,
+        if (device.manufacturer != null) 'manufacturer': device.manufacturer,
+        if (device.model != null) 'model': device.model,
+        if (device.areaId != null) 'area_id': device.areaId,
+        if (device.areaName != null) 'area_name': device.areaName,
+        'binary_sensors': [
+          for (final sensor in device.binarySensors)
+            {
+              'entity_id': sensor.entityId,
+              'name': sensor.name,
+              if (sensor.deviceClass != null)
+                'device_class': sensor.deviceClass,
+            },
+        ],
+      },
     );
   }
 
@@ -24253,17 +24416,13 @@ _RhythmDefinition _rhythmDefinitionFromExpertProfile(
       'removed-project response max brightness must exceed min brightness.',
     );
   }
-  final minKelvin = _requiredIntInRange(
+  final minKelvin = _requiredInt(
     raw['min_color_temp'],
     'expert rhythm profile min color temperature',
-    min: 1500,
-    max: 7000,
   );
-  final maxKelvin = _requiredIntInRange(
+  final maxKelvin = _requiredInt(
     raw['max_color_temp'],
     'expert rhythm profile max color temperature',
-    min: 1500,
-    max: 7000,
   );
   if (maxKelvin <= minKelvin) {
     throw const FormatException(
@@ -24432,11 +24591,8 @@ Map<String, dynamic> _expertProfileConfigFromDefinition(
       .max(minBrightness + 1, definition.maxBrightness)
       .clamp(2, 100)
       .toInt();
-  final minKelvin = definition.minKelvin.clamp(1500, 6749).toInt();
-  final maxKelvin = math
-      .max(minKelvin + _expertKelvinStep, definition.maxKelvin)
-      .clamp(1750, 7000)
-      .toInt();
+  final minKelvin = definition.minKelvin;
+  final maxKelvin = definition.maxKelvin;
   final speed = _sigmoidSpeedFromTransitionMinutes(
     definition.transitionMinutes,
   );
@@ -26319,6 +26475,63 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     min: 1,
     max: 720,
   );
+  values['boost_default'] = _strictIntSetting(
+    raw['boost_default'],
+    'boost_default',
+    min: 10,
+    max: 100,
+  );
+  values['tick_repeat_after_user_action'] = _strictIntSetting(
+    raw['tick_repeat_after_user_action'],
+    'tick_repeat_after_user_action',
+    min: 0,
+    max: 60,
+  );
+  values['tick_repeat_after_autonomous_change'] = _strictIntSetting(
+    raw['tick_repeat_after_autonomous_change'],
+    'tick_repeat_after_autonomous_change',
+    min: 0,
+    max: 60,
+  );
+  values['periodic_refresh_interval_minutes'] = _strictIntSetting(
+    raw['periodic_refresh_interval_minutes'],
+    'periodic_refresh_interval_minutes',
+    min: 0,
+    max: 1440,
+  );
+  values['duration_picker_presets'] = _strictDurationPickerPresetsSetting(
+    raw['duration_picker_presets'],
+  );
+  for (final key in const [
+    'default_pause_duration_minutes',
+    'default_freeze_duration_minutes',
+    'default_boost_duration_minutes',
+    'default_power_off_duration_minutes',
+  ]) {
+    values[key] = _strictIntSetting(raw[key], key, min: 0, max: 10080);
+  }
+  values['confirm_zone_pushes'] = _strictBoolSetting(
+    raw['confirm_zone_pushes'],
+    'confirm_zone_pushes',
+  );
+  values['rhythm_cursor_step_min'] = _strictIntSetting(
+    raw['rhythm_cursor_step_min'],
+    'rhythm_cursor_step_min',
+    min: 1,
+    max: 60,
+  );
+  values['controls_pulse_window_hours'] = _strictDoubleSetting(
+    raw['controls_pulse_window_hours'],
+    'controls_pulse_window_hours',
+    min: 0.25,
+    max: 48,
+  );
+  values['controls_recent_window_minutes'] = _strictIntSetting(
+    raw['controls_recent_window_minutes'],
+    'controls_recent_window_minutes',
+    min: 1,
+    max: 120,
+  );
   if (raw.containsKey('weather_condition_map')) {
     values['weather_condition_map'] = _strictWeatherConditionMap(
       raw['weather_condition_map'],
@@ -26336,21 +26549,28 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     if (ms != null) values[key] = ms / 100;
   }
 
-  final ctCompensation = _asMapOrNull(raw['ct_compensation']);
-  if (ctCompensation != null) {
-    values['ct_comp_enabled'] = ctCompensation['enabled'];
-    values['ct_comp_begin'] = ctCompensation['begin_kelvin'];
-    values['ct_comp_end'] = ctCompensation['end_kelvin'];
-    values['ct_comp_factor'] = ctCompensation['factor'];
-  }
-  for (final entry in const {
-    'ct_comp_enabled': 'ct_compensation_enabled',
-    'ct_comp_begin': 'ct_compensation_begin_kelvin',
-    'ct_comp_end': 'ct_compensation_end_kelvin',
-    'ct_comp_factor': 'ct_compensation_factor',
-  }.entries) {
-    if (raw.containsKey(entry.value)) values[entry.key] = raw[entry.value];
-  }
+  values['ct_comp_enabled'] = _strictBoolSetting(
+    raw['ct_compensation_enabled'],
+    'ct_compensation_enabled',
+  );
+  values['ct_comp_begin'] = _strictIntSetting(
+    raw['ct_compensation_begin_kelvin'],
+    'ct_compensation_begin_kelvin',
+    min: 500,
+    max: 2500,
+  );
+  values['ct_comp_end'] = _strictIntSetting(
+    raw['ct_compensation_end_kelvin'],
+    'ct_compensation_end_kelvin',
+    min: 1500,
+    max: 3500,
+  );
+  values['ct_comp_factor'] = _strictDoubleSetting(
+    raw['ct_compensation_factor'],
+    'ct_compensation_factor',
+    min: 1,
+    max: 2,
+  );
 
   final twoStep = _asMapOrNull(raw['two_step_turn_on']);
   if (twoStep != null) {
@@ -26496,6 +26716,10 @@ int expertCardFreshnessMinutesForTest(Map<String, Object?> values) =>
     _expertCardFreshnessMinutes(_ExpertConfig(values));
 
 @visibleForTesting
+int expertBoostDefaultForTest(Map<String, Object?> values) =>
+    _expertBoostDefault(_ExpertConfig(values));
+
+@visibleForTesting
 double nudgeExpertPhaseHourForTest(
   double hour,
   int direction,
@@ -26504,7 +26728,7 @@ double nudgeExpertPhaseHourForTest(
     _nudgeExpertPhaseHour(hour, direction, stepMinutes);
 
 @visibleForTesting
-int expertControlsPulseWindowHoursForTest(Map<String, Object?> values) =>
+double expertControlsPulseWindowHoursForTest(Map<String, Object?> values) =>
     _expertControlsPulseWindowHours(_ExpertConfig(values));
 
 @visibleForTesting
@@ -26515,7 +26739,7 @@ int expertControlsRecentWindowMinutesForTest(Map<String, Object?> values) =>
 String controlPulseStateForTest(
   DateTime? lastActionTime,
   DateTime now,
-  int pulseWindowHours,
+  double pulseWindowHours,
   int recentWindowMinutes,
 ) =>
     _controlPulseState(
@@ -26920,14 +27144,18 @@ int _expertDurationMinutes(
   String key, {
   required int fallback,
 }) {
-  return config.intValue(key, fallback: fallback).clamp(0, 10080).toInt();
+  if (!config.values.containsKey(key)) return fallback;
+  return _strictIntSetting(config.values[key], key, min: 0, max: 10080);
 }
 
 int _expertCursorStepMinutes(_ExpertConfig config) {
-  return config
-      .intValue('rhythm_cursor_step_min', fallback: 5)
-      .clamp(1, 60)
-      .toInt();
+  if (!config.values.containsKey('rhythm_cursor_step_min')) return 5;
+  return _strictIntSetting(
+    config.values['rhythm_cursor_step_min'],
+    'rhythm_cursor_step_min',
+    min: 1,
+    max: 60,
+  );
 }
 
 int _expertCardFreshnessMinutes(_ExpertConfig config) {
@@ -26939,18 +27167,33 @@ int _expertCardFreshnessMinutes(_ExpertConfig config) {
   );
 }
 
-int _expertControlsPulseWindowHours(_ExpertConfig config) {
-  return config
-      .intValue('controls_pulse_window_hours', fallback: 6)
-      .clamp(1, 168)
-      .toInt();
+int _expertBoostDefault(_ExpertConfig config) {
+  return _strictIntSetting(
+    config.values['boost_default'],
+    'boost_default',
+    min: 10,
+    max: 100,
+  );
+}
+
+double _expertControlsPulseWindowHours(_ExpertConfig config) {
+  if (!config.values.containsKey('controls_pulse_window_hours')) return 6;
+  return _strictDoubleSetting(
+    config.values['controls_pulse_window_hours'],
+    'controls_pulse_window_hours',
+    min: 0.25,
+    max: 48,
+  );
 }
 
 int _expertControlsRecentWindowMinutes(_ExpertConfig config) {
-  return config
-      .intValue('controls_recent_window_minutes', fallback: 5)
-      .clamp(1, 1440)
-      .toInt();
+  if (!config.values.containsKey('controls_recent_window_minutes')) return 5;
+  return _strictIntSetting(
+    config.values['controls_recent_window_minutes'],
+    'controls_recent_window_minutes',
+    min: 1,
+    max: 120,
+  );
 }
 
 enum _ControlPulseState { none, pulse, recent }
@@ -26958,18 +27201,18 @@ enum _ControlPulseState { none, pulse, recent }
 _ControlPulseState _controlPulseState(
   DateTime? lastActionTime,
   DateTime now,
-  int pulseWindowHours,
+  double pulseWindowHours,
   int recentWindowMinutes,
 ) {
   if (lastActionTime == null) return _ControlPulseState.none;
   final age = now.difference(lastActionTime);
   final clampedAge = age.isNegative ? Duration.zero : age;
   final recentWindow = Duration(
-    minutes: recentWindowMinutes.clamp(1, 1440).toInt(),
+    minutes: recentWindowMinutes.clamp(1, 120).toInt(),
   );
   if (clampedAge <= recentWindow) return _ControlPulseState.recent;
   final pulseWindow = Duration(
-    hours: pulseWindowHours.clamp(1, 168).toInt(),
+    milliseconds: (pulseWindowHours.clamp(0.25, 48) * 3600000).round(),
   );
   if (clampedAge <= pulseWindow) return _ControlPulseState.pulse;
   return _ControlPulseState.none;
