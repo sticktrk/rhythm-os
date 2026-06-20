@@ -1,10 +1,126 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/features/circadian_expert/circadian_expert_screen.dart';
 
+const _testFilterPresets = <String, Object?>{
+  'Standard': <String, Object?>{
+    'at_dim': 100,
+    'at_bright': 100,
+    'off_threshold': 0,
+  },
+  'Overhead': <String, Object?>{
+    'at_dim': 0,
+    'at_bright': 100,
+    'off_threshold': 3,
+  },
+  'Task': <String, Object?>{
+    'at_dim': 80,
+    'at_bright': 120,
+    'off_threshold': 4,
+  },
+};
+
+Map<String, Object?> _runtimeSettings(Map<String, Object?> values) => {
+      'off_threshold': 0,
+      'filter_presets': _testFilterPresets,
+      'card_freshness_minutes': 15,
+      ...values,
+    };
+
 void main() {
+  group('expert runtime snapshot mapping', () {
+    test('loads top status from removed-project runtime now endpoint', () {
+      final summary = expertServerSnapshotSummaryForTest({
+        'current_hour': 9.5,
+        'state': {
+          'platform': 'removed-circadian-runtime',
+        },
+        'lighting': {
+          'brightness': 64,
+          'kelvin': 4120,
+        },
+      });
+
+      expect(summary['path'], 'api/light-runtimes/removed-circadian/now');
+      expect(summary['channel'], 'removed-circadian-runtime');
+      expect(summary['server_hour'], 9.5);
+      expect(summary['brightness'], 64);
+      expect(summary['kelvin'], 4120);
+    });
+  });
+
+  group('expert outdoor runtime mapping', () {
+    test('loads outdoor status from removed-project runtime endpoints', () {
+      final summary = expertOutdoorStatusSummaryForTest({
+        'outdoor_normalized': 0.1,
+        'source': 'override',
+        'preferred_source': 'weather',
+        'override': {
+          'condition': 'rainy',
+          'expires_in_minutes': 15.0,
+        },
+        'weather_condition': 'rainy',
+        'lux_smoothed': null,
+        'lux_learned_ceiling': null,
+        'lux_learned_floor': null,
+        'sun_elevation': null,
+        'sensor_entity': null,
+        'weather_groups': [
+          {'key': 'sunny', 'label': 'Sunny', 'multiplier': 1.0},
+          {'key': 'rainy', 'label': 'Rainy', 'multiplier': 0.2},
+        ],
+        'condition_multiplier': 0.2,
+        'angle_factor': 0.5,
+      });
+
+      expect(summary['path'],
+          'api/light-runtimes/removed-circadian/outdoor-status');
+      expect(summary['refresh_path'],
+          'api/light-runtimes/removed-circadian/refresh-outdoor');
+      expect(summary['learn_path'],
+          'api/light-runtimes/removed-circadian/learn-baselines');
+      expect(summary['override_path'],
+          'api/light-runtimes/removed-circadian/outdoor-override');
+      expect(summary['outdoor_normalized'], 0.1);
+      expect(summary['source'], 'override');
+      expect(summary['preferred_source'], 'weather');
+      expect(summary['override_condition'], 'rainy');
+      expect(summary['override_expires_in_minutes'], 15.0);
+      expect(summary['weather_condition'], 'rainy');
+      expect(summary['weather_group_count'], 2);
+      expect(summary['first_weather_group'], 'sunny');
+      expect(summary['condition_multiplier'], 0.2);
+      expect(summary['angle_factor'], 0.5);
+      expect(summary['sun_elevation'], isNull);
+    });
+
+    test('throws on malformed runtime outdoor status payloads', () {
+      expect(
+        () => expertOutdoorStatusSummaryForTest({
+          'source': 'weather',
+          'preferred_source': 'weather',
+          'weather_groups': [
+            {'key': 'clear', 'label': 'Clear', 'multiplier': 1.0},
+          ],
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => expertOutdoorStatusSummaryForTest({
+          'outdoor_normalized': 0.5,
+          'source': 'weather',
+          'preferred_source': 'weather',
+          'weather_groups': [
+            {'key': 'clear', 'label': 'Clear'},
+          ],
+        }),
+        throwsA(isA<FormatException>()),
+      );
+    });
+  });
+
   group('expert settings server mapping', () {
-    test('maps modern solar settings into legacy expert UI keys', () {
-      final values = expertSettingsValuesFromServerForTest({
+    test('maps modern solar settings into removed-project expert UI keys', () {
+      final values = expertSettingsValuesFromServerForTest(_runtimeSettings({
         'auto_update': false,
         'daily_sync_hour': 5,
         'daily_sync_minute': 30,
@@ -21,6 +137,16 @@ void main() {
         'alert_bounce_speed': 900,
         'boost_return_transition': 6500,
         'sun_saturation': 55,
+        'outdoor_brightness_source': 'lux',
+        'outdoor_lux_sensor': 'sensor.outdoor_illuminance',
+        'weather_condition_map': {
+          'sunny': 0.9,
+          'cloudy': 0.25,
+        },
+        'lux_smoothing_interval': 600,
+        'lux_learned_ceiling': 65000,
+        'lux_learned_floor': 1200,
+        'outdoor_refresh_interval': 45,
         'boost_default': 45,
         'confirm_zone_pushes': false,
         'duration_picker_presets': {
@@ -32,6 +158,7 @@ void main() {
         'default_boost_duration_minutes': 15,
         'default_power_off_duration_minutes': 0,
         'rhythm_cursor_step_min': 12,
+        'card_freshness_minutes': 20,
         'controls_pulse_window_hours': 9,
         'controls_recent_window_minutes': 7,
         'activity_log_min_entries': 150,
@@ -40,6 +167,8 @@ void main() {
         'tick_repeat_after_user_action': 12,
         'tick_repeat_after_autonomous_change': 4,
         'periodic_refresh_interval_minutes': 45,
+        'experimental_tick_mode': 'skip',
+        'multi_area_dispatch_stagger_ms': 0,
         'ct_compensation': {
           'enabled': true,
           'begin_kelvin': 1600,
@@ -66,7 +195,7 @@ void main() {
           'daylight_fade_minutes': 90,
           'color_sensitivity': 1.25,
         },
-      });
+      }));
 
       expect(values['auto_update'], false);
       expect(values['daily_sync_hour'], 5);
@@ -84,6 +213,16 @@ void main() {
       expect(values['alert_bounce_speed'], 9.0);
       expect(values['boost_return_transition'], 65.0);
       expect(values['sun_saturation'], 55);
+      expect(values['outdoor_brightness_source'], 'lux');
+      expect(values['outdoor_lux_sensor'], 'sensor.outdoor_illuminance');
+      expect(values['weather_condition_map'], {
+        'sunny': 0.9,
+        'cloudy': 0.25,
+      });
+      expect(values['lux_smoothing_interval'], 600);
+      expect(values['lux_learned_ceiling'], 65000);
+      expect(values['lux_learned_floor'], 1200);
+      expect(values['outdoor_refresh_interval'], 45);
       expect(values['boost_default'], 45);
       expect(values['confirm_zone_pushes'], false);
       expect(values['duration_picker_presets'], {
@@ -95,6 +234,7 @@ void main() {
       expect(values['default_boost_duration_minutes'], 15);
       expect(values['default_power_off_duration_minutes'], 0);
       expect(values['rhythm_cursor_step_min'], 12);
+      expect(values['card_freshness_minutes'], 20);
       expect(values['controls_pulse_window_hours'], 9);
       expect(values['controls_recent_window_minutes'], 7);
       expect(values['activity_log_min_entries'], 150);
@@ -103,6 +243,8 @@ void main() {
       expect(values['tick_repeat_after_user_action'], 12);
       expect(values['tick_repeat_after_autonomous_change'], 4);
       expect(values['periodic_refresh_interval_minutes'], 45);
+      expect(values['experimental_tick_mode'], 'skip');
+      expect(values['multi_area_dispatch_stagger_ms'], 0);
       expect(values['ct_comp_enabled'], true);
       expect(values['ct_comp_begin'], 1600);
       expect(values['ct_comp_end'], 2300);
@@ -125,7 +267,7 @@ void main() {
       expect(values['color_sensitivity'], 1.25);
     });
 
-    test('maps legacy expert UI keys to modern server keys', () {
+    test('maps removed-project expert UI keys to modern server keys', () {
       void expectEntry(String key, Object? value, String expectedKey,
           Object? expectedValue) {
         final entry = modernExpertSettingsEntryForTest(key, value);
@@ -159,6 +301,12 @@ void main() {
         6500,
       );
       expectEntry('rhythm_cursor_step_min', 12, 'rhythm_cursor_step_min', 12);
+      expectEntry(
+        'card_freshness_minutes',
+        20,
+        'card_freshness_minutes',
+        20,
+      );
       expectEntry(
         'controls_pulse_window_hours',
         9,
@@ -202,10 +350,219 @@ void main() {
         'periodic_refresh_interval_minutes',
         45,
       );
+      expectEntry(
+        'experimental_tick_mode',
+        'skip',
+        'experimental_tick_mode',
+        'skip',
+      );
+      expectEntry(
+        'multi_area_dispatch_stagger_ms',
+        0,
+        'multi_area_dispatch_stagger_ms',
+        0,
+      );
+      expectEntry(
+        'outdoor_brightness_source',
+        'weather',
+        'outdoor_brightness_source',
+        'weather',
+      );
+      expectEntry(
+        'outdoor_lux_sensor',
+        null,
+        'outdoor_lux_sensor',
+        null,
+      );
+      expectEntry(
+        'weather_condition_map',
+        {'rainy': 0.4},
+        'weather_condition_map',
+        {'rainy': 0.4},
+      );
       expectEntry('daylight_start', 15, 'daylight_start', 15);
     });
 
-    test('maps duration presets from legacy CSV and serialized Rust shape', () {
+    test('rejects malformed runtime weather condition maps', () {
+      expect(
+        () => expertSettingsValuesFromServerForTest(_runtimeSettings({
+          'weather_condition_map': {'rainy': 'broken'},
+        })),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => expertSettingsValuesFromServerForTest(_runtimeSettings({
+          'weather_condition_map': ['rainy', 0.2],
+        })),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('maps runtime light purpose presets for settings editing', () {
+      final values = expertSettingsValuesFromServerForTest(_runtimeSettings({
+        'filter_presets': {
+          'Task': {'at_dim': 80, 'at_bright': 120, 'off_threshold': 4},
+          'Standard': {'at_dim': 100, 'at_bright': 100},
+          'Nightlight': {'at_dim': 40, 'at_bright': 0, 'off_threshold': 2},
+        },
+      }));
+
+      expect(values['filter_presets'], {
+        'Task': {'at_dim': 80, 'at_bright': 120, 'off_threshold': 4},
+        'Standard': {'at_dim': 100, 'at_bright': 100},
+        'Nightlight': {'at_dim': 40, 'at_bright': 0, 'off_threshold': 2},
+      });
+      expect(lightPurposePresetsFromConfigForTest(values), [
+        {
+          'name': 'Standard',
+          'at_bright': 100,
+          'at_dim': 100,
+          'off_threshold': null,
+        },
+        {
+          'name': 'Nightlight',
+          'at_bright': 0,
+          'at_dim': 40,
+          'off_threshold': 2,
+        },
+        {
+          'name': 'Task',
+          'at_bright': 120,
+          'at_dim': 80,
+          'off_threshold': 4,
+        },
+      ]);
+
+      expect(
+        lightPurposePresetMapWithValueForTest(
+          values,
+          'Task',
+          'at_bright',
+          150,
+        )['Task'],
+        {'at_dim': 80, 'at_bright': 150, 'off_threshold': 4},
+      );
+    });
+
+    test('rejects malformed runtime lab settings', () {
+      for (final raw in [
+        {
+          'filter_presets': ['Standard']
+        },
+        {
+          'filter_presets': {
+            'Task': {'at_dim': 80, 'at_bright': 201},
+          },
+        },
+        {
+          'filter_presets': {
+            'Task': {'at_dim': 80, 'at_bright': 120, 'off_threshold': 21},
+          },
+        },
+        {
+          'filter_presets': {
+            '': {'at_dim': 80, 'at_bright': 120},
+          },
+        },
+        {'off_threshold': '0'},
+        {'experimental_tick_mode': 'unknown'},
+        {'multi_area_dispatch_stagger_ms': '50'},
+        {'card_freshness_minutes': 0},
+        {'card_freshness_minutes': '15'},
+      ]) {
+        expect(
+          () => expertSettingsValuesFromServerForTest(_runtimeSettings(raw)),
+          throwsA(isA<FormatException>()),
+        );
+      }
+    });
+
+    test('rejects runtime settings without card freshness window', () {
+      expect(
+        () => expertSettingsValuesFromServerForTest({
+          'off_threshold': 0,
+          'filter_presets': _testFilterPresets,
+        }),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('loads light purpose names from runtime scope', () {
+      expect(
+        lightPurposePresetNamesFromScopeForTest({
+          'light_filters': {
+            'presets': {
+              'Task': {'at_dim': 80, 'at_bright': 120, 'off_threshold': 4},
+              'Standard': {'at_dim': 100, 'at_bright': 100},
+              'Accent': {'at_dim': 50, 'at_bright': 50, 'off_threshold': 0},
+            },
+          },
+        }),
+        ['Standard', 'Accent', 'Task'],
+      );
+      expect(
+        () => lightPurposePresetNamesFromScopeForTest({}),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('updates every alias for a removed-project weather group', () {
+      final updated = expertWeatherConditionMapWithGroupValueForTest(
+        {'sunny': 1.0, 'cloudy': 0.3},
+        'rainy',
+        35,
+      );
+
+      expect(updated['sunny'], 1.0);
+      expect(updated['cloudy'], 0.3);
+      expect(updated['rainy'], 0.35);
+      expect(updated['exceptional'], 0.35);
+    });
+
+    test('maps flat runtime-owned settings back into removed-project expert UI keys',
+        () {
+      final values = expertSettingsValuesFromServerForTest(_runtimeSettings({
+        'ct_compensation_enabled': true,
+        'ct_compensation_begin_kelvin': 1650,
+        'ct_compensation_end_kelvin': 2250,
+        'ct_compensation_factor': 1.7,
+        'two_step_enabled': true,
+        'two_step_kelvin_threshold': 250,
+        'two_step_brightness_threshold': 18,
+        'two_step_delay_ms': 850,
+        'warm_night_enabled': true,
+        'warm_night_mode': 'clock',
+        'warm_night_start': -30,
+        'warm_night_end': 90,
+        'warm_night_fade': 45,
+        'daylight_enabled': true,
+        'daylight_start': 20,
+        'daylight_end': -40,
+        'daylight_fade': 100,
+        'color_sensitivity': 1.4,
+      }));
+
+      expect(values['ct_comp_enabled'], true);
+      expect(values['ct_comp_begin'], 1650);
+      expect(values['ct_comp_end'], 2250);
+      expect(values['ct_comp_factor'], 1.7);
+      expect(values['two_step_enabled'], true);
+      expect(values['two_step_ct_threshold'], 250);
+      expect(values['two_step_bri_threshold'], 18);
+      expect(values['two_step_delay'], 8.5);
+      expect(values['warm_night_enabled'], true);
+      expect(values['warm_night_mode'], 'clock');
+      expect(values['warm_night_start'], -30);
+      expect(values['warm_night_end'], 90);
+      expect(values['warm_night_fade'], 45);
+      expect(values['daylight_enabled'], true);
+      expect(values['daylight_start'], 20);
+      expect(values['daylight_end'], -40);
+      expect(values['daylight_fade'], 100);
+      expect(values['color_sensitivity'], 1.4);
+    });
+
+    test('maps duration presets from Python CSV and serialized Rust shape', () {
       expect(
         durationPresetValuesForTest({
           'duration_picker_presets': '10,30,forever',
@@ -235,6 +592,18 @@ void main() {
         ['5', '60', '240'],
       );
       expect(
+        () => durationPresetValuesForTest({
+          'duration_picker_presets': '10,broken,forever',
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => durationPresetValuesForTest({
+          'duration_picker_presets': {'values': '10,30'},
+        }),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
         expertDurationMinutesForTest(
           const {'default_boost_duration_minutes': 12000},
           'default_boost_duration_minutes',
@@ -249,6 +618,18 @@ void main() {
       expect(
         expertCursorStepMinutesForTest(const {'rhythm_cursor_step_min': 90}),
         60,
+      );
+      expect(
+        expertCardFreshnessMinutesForTest(
+          const {'card_freshness_minutes': 15},
+        ),
+        15,
+      );
+      expect(
+        () => expertCardFreshnessMinutesForTest(
+          const {'card_freshness_minutes': 0},
+        ),
+        throwsA(isA<FormatException>()),
       );
       expect(
         expertControlsPulseWindowHoursForTest(
@@ -664,6 +1045,280 @@ void main() {
   });
 
   group('expert rhythm profile mapping', () {
+    test('loads runtime rhythm preset profiles without app profile fallback',
+        () {
+      final summary = expertRhythmPresetLoadSummaryForTest({
+        'profiles': [
+          {
+            'id': 'young',
+            'curve': {
+              'schedule': {
+                'wake': {'hour': 6.0},
+                'bed': {'hour': 18.0},
+              },
+              'ascend_start': 2.0,
+              'descend_start': 13.0,
+            },
+          },
+          {
+            'id': 'adult',
+            'curve': {
+              'schedule': {
+                'wake': {'hour': 7.0},
+                'bed': {'hour': 21.0},
+              },
+              'ascend_start': 3.0,
+              'descend_start': 13.0,
+            },
+          },
+          {
+            'id': 'custom',
+            'curve': {
+              'schedule': {
+                'wake': {'hour': 6.0},
+                'bed': {'hour': 22.0},
+              },
+              'ascend_start': 3.0,
+              'descend_start': 12.0,
+            },
+          },
+        ],
+      });
+
+      expect(summary['path'],
+          'api/light-runtimes/removed-circadian/rhythm-presets');
+      expect(summary['names'], ['young', 'adult', 'custom']);
+      expect(summary['adult_wake'], 7.0);
+      expect(summary['adult_bed'], 21.0);
+      expect(summary['adult_ascend'], 3.0);
+      expect(summary['adult_descend'], 13.0);
+      expect(summary['young_ascend'], 2.0);
+      expect(summary['young_descend'], 13.0);
+    });
+
+    test('builds runtime default profile update requests', () {
+      final request = expertProfileUpdateRequestForTest(
+        {
+          'id': 'Main',
+          'name': 'Default zone',
+          'max_dim_steps': 8,
+          'unknown_runtime_field': {'preserve': true},
+        },
+        {
+          'id': 'ignored update id',
+          'min_brightness': 10,
+          'max_brightness': 90,
+          'curve': {
+            'schedule': {
+              'wake': {'hour': 6.5},
+              'bed': {'hour': 22.25},
+            },
+          },
+        },
+      );
+      final data = request['data']! as Map<String, Object?>;
+
+      expect(
+        request['path'],
+        'api/light-runtimes/removed-circadian/profile',
+      );
+      expect(data['id'], 'Main');
+      expect(data['name'], 'Default zone');
+      expect(data['max_dim_steps'], 8);
+      expect(data['unknown_runtime_field'], {'preserve': true});
+      expect(data['min_brightness'], 10);
+      expect(data['max_brightness'], 90);
+      expect(
+        ((data['curve']! as Map<dynamic, dynamic>)['schedule']
+            as Map<dynamic, dynamic>)['wake'],
+        {'hour': 6.5},
+      );
+    });
+
+    test('parses runtime preview payloads only when required fields exist', () {
+      final summary = expertRuntimePreviewSummaryForTest(
+        sunTimes: {
+          'sunrise_hour': 6.25,
+          'sunset_hour': 18.5,
+          'noon_hour': 12.4,
+          'midnight_hour': 0.4,
+        },
+        curve: {
+          'hours': [0.0, 12.0, 24.0],
+          'brightness': [20, 80, 20],
+          'kelvin': [2200, 5200, 2200],
+        },
+        steps: {
+          'step_up': {
+            'steps': [
+              {'hour': 7.0, 'brightness': 30, 'kelvin': 2400},
+            ],
+          },
+          'step_down': {
+            'steps': [
+              {'hour': 22.0, 'brightness': 15, 'kelvin': 2100},
+            ],
+          },
+        },
+      );
+
+      expect(summary['sunrise'], 6.25);
+      expect(summary['solar_noon'], 12.4);
+      expect(summary['curve_count'], 3);
+      expect(summary['first_curve_hour'], 0.0);
+      expect(summary['first_curve_brightness'], 20);
+      expect(summary['step_up_count'], 1);
+      expect(summary['step_down_count'], 1);
+      expect(summary['first_step_up_hour'], 7.0);
+    });
+
+    test('throws on malformed runtime preview payloads', () {
+      expect(
+        () => expertRuntimePreviewSummaryForTest(
+          sunTimes: {
+            'sunrise_hour': 6.25,
+            'sunset_hour': 18.5,
+            'midnight_hour': 0.4,
+          },
+          curve: {
+            'hours': [0.0],
+            'brightness': [20],
+            'kelvin': [2200],
+          },
+          steps: {
+            'step_up': {
+              'steps': [
+                {'hour': 7.0, 'brightness': 30, 'kelvin': 2400},
+              ],
+            },
+            'step_down': {
+              'steps': [
+                {'hour': 22.0, 'brightness': 15, 'kelvin': 2100},
+              ],
+            },
+          },
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => expertRuntimePreviewSummaryForTest(
+          sunTimes: {
+            'sunrise_hour': 6.25,
+            'sunset_hour': 18.5,
+            'noon_hour': 12.4,
+            'midnight_hour': 0.4,
+          },
+          curve: {
+            'hours': [0.0, 12.0],
+            'brightness': [20],
+            'kelvin': [2200, 5200],
+          },
+          steps: {
+            'step_up': {
+              'steps': [
+                {'hour': 7.0, 'brightness': 30, 'kelvin': 2400},
+              ],
+            },
+            'step_down': {
+              'steps': [
+                {'hour': 22.0, 'brightness': 15, 'kelvin': 2100},
+              ],
+            },
+          },
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => expertRuntimePreviewSummaryForTest(
+          sunTimes: {
+            'sunrise_hour': 6.25,
+            'sunset_hour': 18.5,
+            'noon_hour': 12.4,
+            'midnight_hour': 0.4,
+          },
+          curve: {
+            'hours': [0.0],
+            'brightness': [20],
+            'kelvin': [2200],
+          },
+          steps: {
+            'step_up': {
+              'steps': [
+                {'hour': 7.0, 'brightness': 30},
+              ],
+            },
+            'step_down': {
+              'steps': [
+                {'hour': 22.0, 'brightness': 15, 'kelvin': 2100},
+              ],
+            },
+          },
+        ),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('throws on malformed runtime rhythm profile payloads', () {
+      expect(
+        () => expertRhythmPresetLoadSummaryForTest({
+          'profiles': [
+            {
+              'id': 'adult',
+              'curve': {
+                'schedule': {
+                  'wake': {'hour': 7.0},
+                  'bed': {'hour': 21.0},
+                },
+                'ascend_start': 3.0,
+              },
+            },
+          ],
+        }),
+        throwsA(isA<FormatException>()),
+      );
+
+      expect(
+        () => expertDefinitionValuesFromProfileForTest({
+          'id': 'Main',
+          'min_brightness': 10,
+          'max_brightness': 90,
+          'min_color_temp': 2000,
+          'curve': {
+            'schedule': {
+              'wake': {'hour': 6.5},
+              'bed': {'hour': 22.25},
+            },
+            'ascend_start': 3.5,
+            'wake_speed': 9,
+            'bed_speed': 9,
+            'bed_brightness': 25,
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+
+      expect(
+        () => expertDefinitionValuesFromProfileForTest({
+          'id': 'Main',
+          'min_brightness': 90,
+          'max_brightness': 10,
+          'min_color_temp': 2000,
+          'max_color_temp': 6200,
+          'curve': {
+            'schedule': {
+              'wake': {'hour': 6.5},
+              'bed': {'hour': 22.25},
+            },
+            'ascend_start': 3.5,
+            'wake_speed': 9,
+            'bed_speed': 9,
+            'bed_brightness': 25,
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
     test('builds an expert sigmoid profile payload from editor values', () {
       final config = expertProfileConfigFromDefinitionForTest(
         wakeHour: 6.5,
@@ -675,6 +1330,20 @@ void main() {
         maxKelvin: 6100,
         transitionMinutes: 30,
         phaseBalance: 0.5,
+        daylightEnabled: false,
+        daylightCct: 5400,
+        daylightStart: 30,
+        daylightEnd: -120,
+        daylightFade: 90,
+        colorSensitivity: 1.25,
+        brightnessSensitivityEnabled: false,
+        brightnessSensitivity: 1.5,
+        warmNightEnabled: true,
+        warmNightMode: 'window',
+        warmNightTarget: 2400,
+        warmNightStart: -90,
+        warmNightEnd: 30,
+        warmNightFade: 150,
         base: {
           'id': 'rhythm',
           'name': 'Saved name should be replaced',
@@ -693,6 +1362,20 @@ void main() {
       expect(config['max_color_temp'], 6100);
       expect(config['max_dim_steps'], 9);
       expect(config['step_fallback_minutes'], 45);
+      expect(config['daylight_enabled'], false);
+      expect(config['daylight_cct'], 5400);
+      expect(config['daylight_start'], 30);
+      expect(config['daylight_end'], -120);
+      expect(config['daylight_fade'], 90);
+      expect(config['color_sensitivity'], 1.25);
+      expect(config['brightness_sensitivity_enabled'], false);
+      expect(config['brightness_sensitivity'], 1.5);
+      expect(config['warm_night_enabled'], true);
+      expect(config['warm_night_mode'], 'window');
+      expect(config['warm_night_target'], 2400);
+      expect(config['warm_night_start'], -90);
+      expect(config['warm_night_end'], 30);
+      expect(config['warm_night_fade'], 150);
       expect(curve['type'], 'sigmoid');
       expect((schedule['wake'] as Map<dynamic, dynamic>)['hour'], 6.5);
       expect((schedule['bed'] as Map<dynamic, dynamic>)['hour'], 22.25);
@@ -711,6 +1394,22 @@ void main() {
         'max_brightness': 90,
         'min_color_temp': 2000,
         'max_color_temp': 6200,
+        ..._runtimeProfileSkyFields(
+          daylightEnabled: false,
+          daylightCct: 5400,
+          daylightStart: 30,
+          daylightEnd: -120,
+          daylightFade: 90,
+          colorSensitivity: 1.25,
+          brightnessSensitivityEnabled: false,
+          brightnessSensitivity: 1.5,
+          warmNightEnabled: true,
+          warmNightMode: 'window',
+          warmNightTarget: 2400,
+          warmNightStart: -90,
+          warmNightEnd: 30,
+          warmNightFade: 150,
+        ),
         'curve': {
           'type': 'sigmoid',
           'schedule': {
@@ -737,6 +1436,20 @@ void main() {
       expect(values['max_kelvin'], 6200);
       expect(values['transition_minutes'], 28.18);
       expect(values['phase_balance'], 0.5);
+      expect(values['daylight_enabled'], false);
+      expect(values['daylight_cct'], 5400);
+      expect(values['daylight_start'], 30);
+      expect(values['daylight_end'], -120);
+      expect(values['daylight_fade'], 90);
+      expect(values['color_sensitivity'], 1.25);
+      expect(values['brightness_sensitivity_enabled'], false);
+      expect(values['brightness_sensitivity'], 1.5);
+      expect(values['warm_night_enabled'], true);
+      expect(values['warm_night_mode'], 'window');
+      expect(values['warm_night_target'], 2400);
+      expect(values['warm_night_start'], -90);
+      expect(values['warm_night_end'], 30);
+      expect(values['warm_night_fade'], 150);
     });
   });
 
@@ -830,4 +1543,38 @@ void main() {
       });
     });
   });
+}
+
+Map<String, Object?> _runtimeProfileSkyFields({
+  bool daylightEnabled = true,
+  int daylightCct = 5000,
+  int daylightStart = 60,
+  int daylightEnd = -60,
+  int daylightFade = 60,
+  double colorSensitivity = 1,
+  bool brightnessSensitivityEnabled = true,
+  double brightnessSensitivity = 1,
+  bool warmNightEnabled = true,
+  String warmNightMode = 'all',
+  int warmNightTarget = 2300,
+  int warmNightStart = -60,
+  int warmNightEnd = 60,
+  int warmNightFade = 120,
+}) {
+  return {
+    'daylight_enabled': daylightEnabled,
+    'daylight_cct': daylightCct,
+    'daylight_start': daylightStart,
+    'daylight_end': daylightEnd,
+    'daylight_fade': daylightFade,
+    'color_sensitivity': colorSensitivity,
+    'brightness_sensitivity_enabled': brightnessSensitivityEnabled,
+    'brightness_sensitivity': brightnessSensitivity,
+    'warm_night_enabled': warmNightEnabled,
+    'warm_night_mode': warmNightMode,
+    'warm_night_target': warmNightTarget,
+    'warm_night_start': warmNightStart,
+    'warm_night_end': warmNightEnd,
+    'warm_night_fade': warmNightFade,
+  };
 }

@@ -302,7 +302,7 @@ mod tests {
     use rhythm_core::NoOpController;
     use rhythm_runtime_api::{
         DispatchCommand, DispatchTarget, InputAction, NodeState, RuntimeInputEvent, RuntimeNode,
-        RuntimeNodeKind,
+        RuntimeNodeKind, TickContext,
     };
 
     fn test_runtime(
@@ -317,10 +317,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn rhythm_adaptive_runtime_returns_neutral_plan() {
-        let mut runtime = test_runtime();
-        let snapshot = RuntimeSnapshot {
+    fn room_snapshot(power_on: bool) -> RuntimeSnapshot {
+        RuntimeSnapshot {
             nodes: vec![RuntimeNode {
                 id: "room-a".to_string(),
                 name: "Room A".to_string(),
@@ -331,7 +329,7 @@ mod tests {
             state: [(
                 "room-a".to_string(),
                 NodeState {
-                    power_on: false,
+                    power_on,
                     rhythm_enabled: true,
                     brightness: None,
                     kelvin: None,
@@ -340,7 +338,26 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-        };
+        }
+    }
+
+    #[test]
+    fn manifest_declares_rhythm_adaptive_as_default_runtime() {
+        let manifest = runtime_manifest();
+
+        assert_eq!(manifest.id, RUNTIME_ID);
+        assert_eq!(manifest.name, "Rhythm Adaptive");
+        assert_eq!(
+            manifest.description.as_deref(),
+            Some("Default adaptive light runtime backed by the Rhythm core engine.")
+        );
+        assert_eq!(manifest.capabilities, RuntimeCapabilities::light_runtime());
+    }
+
+    #[test]
+    fn rhythm_adaptive_runtime_returns_neutral_plan() {
+        let mut runtime = test_runtime();
+        let snapshot = room_snapshot(false);
 
         let plan = runtime
             .handle_event(
@@ -362,5 +379,65 @@ mod tests {
                 ..
             }) if node_id == "room-a"
         ));
+    }
+
+    #[test]
+    fn periodic_tick_does_not_dispatch_when_snapshot_power_is_off() {
+        let mut runtime = test_runtime();
+        RuntimeHandle::add_room(runtime.inner(), "room-a", "Room A");
+        let snapshot = room_snapshot(false);
+
+        let plan = runtime
+            .handle_event(
+                &snapshot,
+                RuntimeEvent::PeriodicTick(TickContext {
+                    node_id: "room-a".to_string(),
+                    hour: 14.5,
+                    epoch_ms: None,
+                    metadata: Default::default(),
+                }),
+            )
+            .unwrap();
+
+        assert!(plan.dispatch.is_empty());
+        assert!(plan.state_writes.is_empty());
+    }
+
+    #[test]
+    fn host_state_changed_is_noop() {
+        let mut runtime = test_runtime();
+
+        let plan = runtime
+            .handle_event(
+                &RuntimeSnapshot::default(),
+                RuntimeEvent::HostStateChanged {
+                    reason: "startup".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn unknown_named_input_is_rejected() {
+        let mut runtime = test_runtime();
+        let snapshot = room_snapshot(true);
+
+        let error = runtime
+            .handle_event(
+                &snapshot,
+                RuntimeEvent::Input(RuntimeInputEvent {
+                    source_id: "switch-a".to_string(),
+                    target_id: "room-a".to_string(),
+                    action: InputAction::Named("not-a-rhythm-action".to_string()),
+                    epoch_ms: None,
+                    metadata: Default::default(),
+                }),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unsupported Rhythm input action"));
     }
 }

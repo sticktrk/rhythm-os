@@ -2951,6 +2951,25 @@ mod tests {
         }
 
         #[test]
+        fn stored_settings_without_light_runtime_defaults_to_rhythm_adaptive() {
+            let settings: StoredSettings = serde_json::from_value(serde_json::json!({
+                "power_save": false,
+                "light_breaker_enabled": true,
+                "active_mode": "day",
+                "last_active_mode_cause": "manual",
+                "modes": [],
+                "mode_transitions": [],
+                "auto_update": true
+            }))
+            .unwrap();
+
+            assert_eq!(
+                settings.light_runtime,
+                crate::light_runtime::LightRuntimeKind::RhythmAdaptive
+            );
+        }
+
+        #[test]
         fn save_cleans_up_tmp_file_on_success() {
             let (storage, path) = temp_storage();
             let settings = sample_settings();

@@ -5,14 +5,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show
-        RhythmDevice,
-        RhythmDeviceType,
-        RhythmHello,
-        RhythmRoom,
-        RhythmTopologyNode,
-        RoomModeState;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmTopologyNode;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
@@ -30,6 +24,20 @@ const _removed-projectRuntimeApi = 'api/light-runtimes/removed-circadian';
 const _expertMomentExtensionKey = 'circadian_expert';
 const _expertMaxReaches = 5;
 const _expertKelvinStep = 250;
+const _rhythmDefineCardTimestampKey = 'removed-project_flutter_rhythm_cards_ts';
+const _rhythmDefineCardOpenSectionsKey = 'removed-project_flutter_rhythm_open_sections';
+const _rhythmDefineCardSectionOrder = <String>[
+  'sleep',
+  'brightness',
+  'color',
+  'sun',
+];
+const _rhythmDefineCardSectionIds = <String>{
+  'sleep',
+  'brightness',
+  'color',
+  'sun',
+};
 const _modernExpertCanManageZones = true;
 const _modernExpertCanAddControlSources = true;
 const _modernExpertCanEditInputBindings = true;
@@ -61,6 +69,7 @@ const _expertSettingsKeys = <String>{
   'motion_blink_threshold',
   'motion_warning_time',
   'off_threshold',
+  'filter_presets',
   'daily_sync_hour',
   'daily_sync_minute',
   'read_only_zha',
@@ -77,6 +86,13 @@ const _expertSettingsKeys = <String>{
   'alert_bounce_speed',
   'boost_return_transition',
   'sun_saturation',
+  'outdoor_brightness_source',
+  'outdoor_lux_sensor',
+  'weather_condition_map',
+  'lux_smoothing_interval',
+  'lux_learned_ceiling',
+  'lux_learned_floor',
+  'outdoor_refresh_interval',
   'boost_default',
   'confirm_zone_pushes',
   'duration_picker_presets',
@@ -85,6 +101,7 @@ const _expertSettingsKeys = <String>{
   'default_boost_duration_minutes',
   'default_power_off_duration_minutes',
   'rhythm_cursor_step_min',
+  'card_freshness_minutes',
   'controls_pulse_window_hours',
   'controls_recent_window_minutes',
   'activity_log_min_entries',
@@ -154,32 +171,72 @@ const _momentCategoryOptions = [
   ('fun', 'Fun'),
 ];
 const _outdoorOverrideConditions = [
-  'clear',
-  'partly_cloudy',
+  'sunny',
+  'partlycloudy',
   'cloudy',
-  'overcast',
+  'rainy',
+  'snowy',
   'fog',
-  'rain',
-  'storm',
+  'pouring',
+  'lightning',
 ];
-const _modernWeatherGroups = [
-  _ExpertWeatherGroup(key: 'clear', label: 'Clear', multiplier: 1.0),
-  _ExpertWeatherGroup(
-      key: 'partly_cloudy', label: 'Partly cloudy', multiplier: 0.82),
-  _ExpertWeatherGroup(key: 'cloudy', label: 'Cloudy', multiplier: 0.62),
-  _ExpertWeatherGroup(key: 'overcast', label: 'Overcast', multiplier: 0.45),
-  _ExpertWeatherGroup(key: 'fog', label: 'Fog', multiplier: 0.38),
-  _ExpertWeatherGroup(key: 'rain', label: 'Rain', multiplier: 0.35),
-  _ExpertWeatherGroup(key: 'storm', label: 'Storm', multiplier: 0.22),
+const _outdoorSourceOptions = ['weather', 'lux', 'angle'];
+const _experimentalTickModeOptions = ['both', 'skip', 'bri_only', 'ct_only'];
+const _outdoorWeatherConfigGroups = [
+  _OutdoorWeatherConfigGroup(
+    label: 'Sunny',
+    keys: ['sunny', 'clear-night', 'windy', 'windy-variant'],
+    defaultPercent: 100,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Partly cloudy',
+    keys: ['partlycloudy', 'partly_cloudy', 'mixed'],
+    defaultPercent: 60,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Cloudy',
+    keys: ['cloudy'],
+    defaultPercent: 30,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Rainy',
+    keys: ['rainy', 'exceptional'],
+    defaultPercent: 20,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Snow',
+    keys: ['snowy', 'snowy-rainy'],
+    defaultPercent: 20,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Fog',
+    keys: ['fog', 'heavy_overcast'],
+    defaultPercent: 15,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Pouring',
+    keys: ['pouring', 'hail'],
+    defaultPercent: 10,
+  ),
+  _OutdoorWeatherConfigGroup(
+    label: 'Storm',
+    keys: ['lightning', 'lightning-rainy'],
+    defaultPercent: 8,
+  ),
 ];
-const _defaultRhythmPresetOptions = [
-  'young',
-  'adult',
-  'nightowl',
-  'duskbat',
-  'shiftearly',
-  'shiftlate',
-];
+
+class _OutdoorWeatherConfigGroup {
+  final String label;
+  final List<String> keys;
+  final int defaultPercent;
+
+  const _OutdoorWeatherConfigGroup({
+    required this.label,
+    required this.keys,
+    required this.defaultPercent,
+  });
+}
+
 const _momentIconOptions = [
   ('&#128716;', 'Bed'),
   ('&#127769;', 'Moon'),
@@ -256,12 +313,12 @@ class CircadianExpertScreen extends StatefulWidget {
 }
 
 class _CircadianExpertScreenState extends State<CircadianExpertScreen> {
-  late List<_ExpertZone> _zones = _demoZones();
+  List<_ExpertZone> _zones = const [];
   List<String> _serverOrder = const [];
   _CircadianExpertClient? _client;
   _ExpertServerSnapshot? _serverSnapshot;
   bool _isLoadingServer = false;
-  String _serverStatus = 'Demo data';
+  String _serverStatus = 'Expert runtime not loaded';
   bool _manageMode = false;
   final Map<String, bool> _areaPowerOverrides = {};
   final Map<String, double> _areaBrightnessOverrides = {};
@@ -291,10 +348,11 @@ class _CircadianExpertScreenState extends State<CircadianExpertScreen> {
           _client = null;
           _serverSnapshot = null;
           _serverOrder = const [];
+          _zones = const [];
           _areaPowerOverrides.clear();
           _areaBrightnessOverrides.clear();
           _areaBusyIds.clear();
-          _serverStatus = 'Demo data - no RhythmOS server selected';
+          _serverStatus = 'Expert runtime failed: no RhythmOS server selected';
           _isLoadingServer = false;
         });
         return;
@@ -323,10 +381,11 @@ class _CircadianExpertScreenState extends State<CircadianExpertScreen> {
         _client = null;
         _serverSnapshot = null;
         _serverOrder = const [];
+        _zones = const [];
         _areaPowerOverrides.clear();
         _areaBrightnessOverrides.clear();
         _areaBusyIds.clear();
-        _serverStatus = 'Demo data - circadian endpoints unavailable';
+        _serverStatus = 'Expert runtime failed: $error';
         _isLoadingServer = false;
       });
     }
@@ -743,6 +802,15 @@ class _CircadianExpertScreenState extends State<CircadianExpertScreen> {
   }
 
   void _createZone() {
+    if (_client == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Expert runtime is not connected; zone was not created.'),
+        ),
+      );
+      return;
+    }
     HapticFeedback.selectionClick();
     final n = _zones.length + 1;
     final name = 'New rhythm zone $n';
@@ -1005,12 +1073,12 @@ class CircadianExpertRhythmScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _ExpertServerScope(
-      builder: (context, client, zones, loading, refresh) {
+      builder: (context, client, zones, loading, error, refresh) {
         if (zones.isEmpty) {
           return _ExpertEmptyTabScaffold(
             title: 'Rhythm',
             loading: loading,
-            message: 'No rhythm zones found.',
+            message: error ?? 'No rhythm zones found.',
             onRefresh: refresh,
           );
         }
@@ -1034,12 +1102,20 @@ class CircadianExpertMomentsTabScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _ExpertServerScope(
-      builder: (context, client, zones, loading, refresh) {
+      builder: (context, client, zones, loading, error, refresh) {
         if (loading) {
           return _ExpertEmptyTabScaffold(
             title: 'Moments',
             loading: true,
             message: 'Loading expert moments...',
+            onRefresh: refresh,
+          );
+        }
+        if (error != null) {
+          return _ExpertEmptyTabScaffold(
+            title: 'Moments',
+            loading: false,
+            message: error,
             onRefresh: refresh,
           );
         }
@@ -1059,12 +1135,20 @@ class CircadianExpertControlsTabScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _ExpertServerScope(
-      builder: (context, client, zones, loading, refresh) {
+      builder: (context, client, zones, loading, error, refresh) {
         if (loading) {
           return _ExpertEmptyTabScaffold(
             title: 'Controls',
             loading: true,
             message: 'Loading expert controls...',
+            onRefresh: refresh,
+          );
+        }
+        if (error != null) {
+          return _ExpertEmptyTabScaffold(
+            title: 'Controls',
+            loading: false,
+            message: error,
             onRefresh: refresh,
           );
         }
@@ -1083,6 +1167,7 @@ typedef _ExpertServerScopeBuilder = Widget Function(
   _CircadianExpertClient? client,
   List<_ExpertZone> zones,
   bool loading,
+  String? error,
   VoidCallback refresh,
 );
 
@@ -1097,8 +1182,9 @@ class _ExpertServerScope extends StatefulWidget {
 
 class _ExpertServerScopeState extends State<_ExpertServerScope> {
   _CircadianExpertClient? _client;
-  List<_ExpertZone> _zones = _demoZones();
+  List<_ExpertZone> _zones = const [];
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -1114,7 +1200,8 @@ class _ExpertServerScopeState extends State<_ExpertServerScope> {
         if (!mounted) return;
         setState(() {
           _client = null;
-          _zones = _demoZones();
+          _zones = const [];
+          _error = 'Expert runtime failed: no RhythmOS server selected';
           _loading = false;
         });
         return;
@@ -1124,6 +1211,7 @@ class _ExpertServerScopeState extends State<_ExpertServerScope> {
       setState(() {
         _client = client;
         _zones = result.visibleZones;
+        _error = null;
         _loading = false;
       });
     } catch (error, stackTrace) {
@@ -1132,7 +1220,8 @@ class _ExpertServerScopeState extends State<_ExpertServerScope> {
       if (!mounted) return;
       setState(() {
         _client = null;
-        _zones = _demoZones();
+        _zones = const [];
+        _error = 'Expert runtime failed: $error';
         _loading = false;
       });
     }
@@ -1145,6 +1234,7 @@ class _ExpertServerScopeState extends State<_ExpertServerScope> {
       _client,
       _zones,
       _loading,
+      _error,
       () => unawaited(_load()),
     );
   }
@@ -1564,13 +1654,7 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
     });
     try {
       final config = await client.fetchExpertConfig();
-      _ExpertOutdoorStatus? outdoorStatus;
-      try {
-        outdoorStatus = await client.fetchOutdoorStatus();
-      } catch (error, stackTrace) {
-        debugPrint('CircadianExpert: outdoor status load failed: $error');
-        debugPrint('$stackTrace');
-      }
+      final outdoorStatus = await client.fetchOutdoorStatus();
       if (!mounted) return;
       setState(() {
         _config = config;
@@ -1746,6 +1830,56 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
     await _setDailySync(picked);
   }
 
+  Future<void> _editTextConfigField({
+    required String key,
+    required String title,
+    required String label,
+    required String initialValue,
+    bool emptyAsNull = false,
+  }) async {
+    final controller = TextEditingController(text: initialValue);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: Text(
+          title,
+          style: const TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: CelestialColors.textPrimary),
+          decoration: InputDecoration(
+            labelText: label,
+            labelStyle: const TextStyle(color: CelestialColors.textSecondary),
+            enabledBorder: const UnderlineInputBorder(
+              borderSide: BorderSide(color: CelestialColors.orbitRing),
+            ),
+            focusedBorder: const UnderlineInputBorder(
+              borderSide: BorderSide(color: _expertAccent),
+            ),
+          ),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null) return;
+    final trimmed = value.trim();
+    unawaited(_saveField(key, trimmed.isEmpty && emptyAsNull ? null : trimmed));
+  }
+
   Future<void> _syncEndpoint(String endpoint, String label) async {
     final client = widget.client;
     if (client == null) {
@@ -1805,6 +1939,26 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
         powerOffDurationValue,
       ],
     );
+    final durationPresetCsvValue = _durationPresetCsvValue(_config);
+    final cardFreshnessMinutes =
+        _config.values.containsKey('card_freshness_minutes')
+            ? _expertCardFreshnessMinutes(_config)
+            : null;
+    final outdoorSource = _outdoorSourceConfigValue(_config);
+    final luxSensor = _config.stringValue('outdoor_lux_sensor', fallback: '');
+    final lightPurposePresets = _config.values.containsKey('filter_presets')
+        ? _lightPurposePresetsFromConfig(_config)
+        : const <_LightPurposePreset>[];
+    final lightPurposeOffThreshold =
+        _config.values.containsKey('filter_presets')
+            ? _strictLightPurposeInt(
+                _config.values['off_threshold'],
+                'off_threshold',
+                min: 0,
+                max: 20,
+              )
+            : 0;
+    final lightPurposeWritable = _isExpertConfigKeyWritable('filter_presets');
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: SafeArea(
@@ -2361,6 +2515,43 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                           ),
                         ),
                       ),
+                      _ConfigDropdownRow<String>(
+                        label: 'Tick command shape',
+                        value: _config.stringValue(
+                          'experimental_tick_mode',
+                          fallback: 'both',
+                        ),
+                        items: _experimentalTickModeOptions,
+                        itemLabel: _experimentalTickModeLabel,
+                        saving: _savingKey == 'experimental_tick_mode',
+                        enabled: _isExpertConfigKeyWritable(
+                          'experimental_tick_mode',
+                        ),
+                        onChanged: (value) => unawaited(
+                          _saveField('experimental_tick_mode', value),
+                        ),
+                      ),
+                      _ConfigNumberRow(
+                        label: 'Dispatch stagger',
+                        unit: 'ms',
+                        value: _config.intValue(
+                          'multi_area_dispatch_stagger_ms',
+                          fallback: 0,
+                        ),
+                        min: 0,
+                        max: 500,
+                        step: 5,
+                        saving: _savingKey == 'multi_area_dispatch_stagger_ms',
+                        enabled: _isExpertConfigKeyWritable(
+                          'multi_area_dispatch_stagger_ms',
+                        ),
+                        onChanged: (value) => unawaited(
+                          _saveField(
+                            'multi_area_dispatch_stagger_ms',
+                            value,
+                          ),
+                        ),
+                      ),
                       _ConfigNumberRow(
                         label: 'Tick retry user',
                         unit: 'ticks',
@@ -2578,8 +2769,182 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                           _saveField('sun_saturation', value),
                         ),
                       ),
+                      _ConfigDropdownRow<String>(
+                        label: 'Outdoor source',
+                        value: outdoorSource,
+                        items: _outdoorSourceOptions,
+                        itemLabel: _outdoorSourceLabel,
+                        saving: _savingKey == 'outdoor_brightness_source',
+                        enabled: _isExpertConfigKeyWritable(
+                          'outdoor_brightness_source',
+                        ),
+                        onChanged: (value) => unawaited(
+                          _saveField('outdoor_brightness_source', value),
+                        ),
+                      ),
+                      if (outdoorSource == 'lux')
+                        _ConfigTextRow(
+                          label: 'Lux sensor',
+                          value: luxSensor.isEmpty ? 'Unset' : luxSensor,
+                          saving: _savingKey == 'outdoor_lux_sensor',
+                          enabled: _isExpertConfigKeyWritable(
+                            'outdoor_lux_sensor',
+                          ),
+                          onTap: () => unawaited(
+                            _editTextConfigField(
+                              key: 'outdoor_lux_sensor',
+                              title: 'Lux sensor',
+                              label: 'Home Assistant entity ID',
+                              initialValue: luxSensor,
+                              emptyAsNull: true,
+                            ),
+                          ),
+                        ),
+                      if (outdoorSource == 'lux')
+                        _ConfigNumberRow(
+                          label: 'Lux smoothing',
+                          unit: 's',
+                          value: _config.intValue(
+                            'lux_smoothing_interval',
+                            fallback: 300,
+                          ),
+                          min: 10,
+                          max: 3600,
+                          step: 10,
+                          saving: _savingKey == 'lux_smoothing_interval',
+                          enabled: _isExpertConfigKeyWritable(
+                            'lux_smoothing_interval',
+                          ),
+                          onChanged: (value) => unawaited(
+                            _saveField(
+                              'lux_smoothing_interval',
+                              value.round(),
+                            ),
+                          ),
+                        ),
+                      _ConfigNumberRow(
+                        label: 'Outdoor refresh',
+                        unit: 's',
+                        value: _config.intValue(
+                          'outdoor_refresh_interval',
+                          fallback: 60,
+                        ),
+                        min: 10,
+                        max: 600,
+                        step: 10,
+                        saving: _savingKey == 'outdoor_refresh_interval',
+                        enabled: _isExpertConfigKeyWritable(
+                          'outdoor_refresh_interval',
+                        ),
+                        onChanged: (value) => unawaited(
+                          _saveField(
+                            'outdoor_refresh_interval',
+                            value.round(),
+                          ),
+                        ),
+                      ),
+                      if (outdoorSource != 'lux')
+                        for (final group in _outdoorWeatherConfigGroups)
+                          _ConfigNumberRow(
+                            label: 'Weather ${group.label}',
+                            unit: '%',
+                            value: _weatherConditionGroupPercent(
+                              _config,
+                              group,
+                            ),
+                            min: 0,
+                            max: 100,
+                            step: 1,
+                            saving: _savingKey == 'weather_condition_map',
+                            enabled: _isExpertConfigKeyWritable(
+                              'weather_condition_map',
+                            ),
+                            onChanged: (value) => unawaited(
+                              _saveField(
+                                'weather_condition_map',
+                                _weatherConditionMapWithGroupValue(
+                                  _config,
+                                  group,
+                                  value.round(),
+                                ),
+                              ),
+                            ),
+                          ),
                     ],
                   ),
+                  if (lightPurposePresets.isNotEmpty)
+                    _ConfigSectionCard(
+                      title: 'Light Purposes',
+                      children: [
+                        for (final preset in lightPurposePresets) ...[
+                          _ConfigNumberRow(
+                            label: '${preset.name} bright',
+                            unit: '%',
+                            value: preset.atBright,
+                            min: 0,
+                            max: 200,
+                            step: 5,
+                            saving: _savingKey == 'filter_presets',
+                            enabled: lightPurposeWritable,
+                            onChanged: (value) => unawaited(
+                              _saveField(
+                                'filter_presets',
+                                _lightPurposePresetMapWithValue(
+                                  _config,
+                                  preset.name,
+                                  'at_bright',
+                                  value.round(),
+                                ),
+                              ),
+                            ),
+                          ),
+                          _ConfigNumberRow(
+                            label: '${preset.name} dim',
+                            unit: '%',
+                            value: preset.atDim,
+                            min: 0,
+                            max: 200,
+                            step: 5,
+                            saving: _savingKey == 'filter_presets',
+                            enabled: lightPurposeWritable,
+                            onChanged: (value) => unawaited(
+                              _saveField(
+                                'filter_presets',
+                                _lightPurposePresetMapWithValue(
+                                  _config,
+                                  preset.name,
+                                  'at_dim',
+                                  value.round(),
+                                ),
+                              ),
+                            ),
+                          ),
+                          _ConfigNumberRow(
+                            label: '${preset.name} off below',
+                            unit: '%',
+                            value: preset.effectiveOffThreshold(
+                              lightPurposeOffThreshold,
+                            ),
+                            min: 0,
+                            max: 20,
+                            step: 1,
+                            saving: _savingKey == 'filter_presets',
+                            enabled: lightPurposeWritable,
+                            onChanged: (value) => unawaited(
+                              _saveField(
+                                'filter_presets',
+                                _lightPurposePresetMapWithValue(
+                                  _config,
+                                  preset.name,
+                                  'off_threshold',
+                                  value.round(),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   _ConfigSectionCard(
                     title: 'Light Lab',
                     children: [
@@ -2599,6 +2964,51 @@ class _ExpertSettingsScreenState extends State<_ExpertSettingsScreen> {
                           ),
                         ),
                       ),
+                      _ConfigTextRow(
+                        label: 'Duration presets',
+                        value: durationPresetCsvValue,
+                        saving: _savingKey == 'duration_picker_presets',
+                        enabled: _isExpertConfigKeyWritable(
+                          'duration_picker_presets',
+                        ),
+                        onTap: () => unawaited(
+                          _editTextConfigField(
+                            key: 'duration_picker_presets',
+                            title: 'Duration presets',
+                            label: 'Minutes CSV or forever',
+                            initialValue: durationPresetCsvValue,
+                            emptyAsNull: true,
+                          ),
+                        ),
+                      ),
+                      if (cardFreshnessMinutes != null || _loading)
+                        _ConfigNumberRow(
+                          label: 'Card freshness',
+                          unit: 'min',
+                          value: cardFreshnessMinutes ?? 15,
+                          min: 1,
+                          max: 720,
+                          step: 1,
+                          saving: _savingKey == 'card_freshness_minutes',
+                          enabled: cardFreshnessMinutes != null &&
+                              _isExpertConfigKeyWritable(
+                                'card_freshness_minutes',
+                              ),
+                          onChanged: (value) => unawaited(
+                            _saveField(
+                              'card_freshness_minutes',
+                              value.round(),
+                            ),
+                          ),
+                        )
+                      else
+                        _ConfigTextRow(
+                          label: 'Card freshness',
+                          value: 'Missing runtime setting',
+                          saving: false,
+                          enabled: false,
+                          onTap: () {},
+                        ),
                       _ConfigDropdownRow(
                         label: 'Default freeze',
                         value: freezeDurationValue,
@@ -3117,14 +3527,7 @@ class _ExpertMomentDetailScreenState extends State<_ExpertMomentDetailScreen> {
           widget.initialMoment.id,
           usageCount: _moment.usageCount,
         ),
-        client.fetchSwitches().catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: moment controls load failed: $error');
-          debugPrint('$stackTrace');
-          return const _ExpertSwitchesLoad.empty();
-        }),
+        client.fetchSwitches(),
       ]);
       if (!mounted) return;
       setState(() {
@@ -3982,6 +4385,9 @@ class _ExpertSwitchesScreenState extends State<_ExpertSwitchesScreen> {
       }
     } catch (error) {
       debugPrint('CircadianExpert: controls refresh failed: $error');
+      if (mounted) {
+        setState(() => _error = 'Controls refresh failed: $error');
+      }
     } finally {
       _refreshingControls = false;
     }
@@ -6796,7 +7202,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
   late _RhythmDefinition _draft = widget.zone.definition;
   late _RhythmDefinition _savedDefinition = widget.zone.definition;
   Map<String, _ExpertRhythmPreset> _rhythmPresets = const {};
-  List<String> _presetOptions = _defaultRhythmPresetOptions;
+  List<String> _presetOptions = const [];
   _ExpertSunTimes? _sunTimes;
   _ExpertCurveData? _serverCurve;
   _ExpertStepSequences? _stepSequences;
@@ -6805,16 +7211,23 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
   bool _sunTimesLoading = false;
   bool _curveLoading = false;
   bool _stepsLoading = false;
+  String? _definitionError;
   String? _sunTimesError;
+  String? _presetsError;
   String? _curveError;
   String? _stepsError;
+  String? _cardStateError;
   bool _dirty = false;
   double _selectedHour = 13;
-  String _openSection = 'sleep';
+  Set<String> _openSections = <String>{};
 
   @override
   void initState() {
     super.initState();
+    if (widget.client == null) {
+      _definitionError = 'Expert runtime failed: no RhythmOS server selected';
+    }
+    unawaited(_loadRhythmCardState());
     unawaited(_loadSavedExpertDefinition());
     unawaited(_loadRhythmPresets());
     unawaited(_loadSunTimes());
@@ -6842,12 +7255,76 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
           _draft = definition;
           _dirty = false;
         }
+        _definitionError = null;
       });
       unawaited(_loadServerCurve(silent: true));
       unawaited(_loadStepSequences(silent: true));
     } catch (error, stackTrace) {
       debugPrint('CircadianExpert: expert profile load failed: $error');
       debugPrint('$stackTrace');
+      if (!mounted) return;
+      setState(() {
+        _definitionError = 'Saved rhythm unavailable: $error';
+      });
+    }
+  }
+
+  Future<void> _loadRhythmCardState() async {
+    final client = widget.client;
+    if (client == null) return;
+    try {
+      final freshnessMinutes = await client.fetchCardFreshnessMinutes();
+      final prefs = await SharedPreferences.getInstance();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final timestamp = prefs.getInt(_rhythmDefineCardTimestampKey);
+      final ttlMs = freshnessMinutes * Duration.millisecondsPerMinute;
+      final stale = timestamp == null || now - timestamp > ttlMs;
+      final sections = stale
+          ? <String>{}
+          : _decodeRhythmDefineOpenSections(
+              prefs.getStringList(_rhythmDefineCardOpenSectionsKey),
+            );
+      if (stale) {
+        await prefs.setStringList(
+          _rhythmDefineCardOpenSectionsKey,
+          const <String>[],
+        );
+        await prefs.setInt(_rhythmDefineCardTimestampKey, now);
+      }
+      if (!mounted) return;
+      setState(() {
+        _openSections = sections;
+        _cardStateError = null;
+      });
+    } catch (error, stackTrace) {
+      debugPrint('CircadianExpert: rhythm card state load failed: $error');
+      debugPrint('$stackTrace');
+      if (!mounted) return;
+      setState(() {
+        _openSections = <String>{};
+        _cardStateError = 'Rhythm card state unavailable: $error';
+      });
+    }
+  }
+
+  Future<void> _persistRhythmCardState(Set<String> sections) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        _rhythmDefineCardOpenSectionsKey,
+        _encodeRhythmDefineOpenSections(sections),
+      );
+      await prefs.setInt(
+        _rhythmDefineCardTimestampKey,
+        DateTime.now().millisecondsSinceEpoch,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('CircadianExpert: rhythm card state save failed: $error');
+      debugPrint('$stackTrace');
+      if (!mounted) return;
+      setState(() {
+        _cardStateError = 'Rhythm card state save failed: $error';
+      });
     }
   }
 
@@ -6856,6 +7333,9 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
     if (client == null) return;
     try {
       final load = await client.fetchRhythmPresets();
+      if (load.names.isEmpty) {
+        throw StateError('removed-project runtime returned no rhythm presets.');
+      }
       if (!mounted) return;
       setState(() {
         _rhythmPresets = load.presets;
@@ -6864,10 +7344,19 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
             if (name != 'custom' || name == _draft.sleepPattern) name,
           if (!load.names.contains(_draft.sleepPattern)) _draft.sleepPattern,
         ];
+        _presetsError = null;
       });
     } catch (error, stackTrace) {
       debugPrint('CircadianExpert: rhythm presets load failed: $error');
       debugPrint('$stackTrace');
+      if (!mounted) return;
+      setState(() {
+        _rhythmPresets = const {};
+        _presetOptions = [
+          if (_draft.sleepPattern.trim().isNotEmpty) _draft.sleepPattern,
+        ];
+        _presetsError = 'Rhythm presets unavailable: $error';
+      });
     }
   }
 
@@ -6890,6 +7379,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
       debugPrint('$stackTrace');
       if (!mounted) return;
       setState(() {
+        _sunTimes = null;
         _sunTimesLoading = false;
         _sunTimesError = 'Solar timing unavailable: $error';
       });
@@ -6935,6 +7425,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
       debugPrint('$stackTrace');
       if (!mounted) return;
       setState(() {
+        _serverCurve = null;
         _curveLoading = false;
         _curveError = 'Server curve unavailable: $error';
       });
@@ -6981,6 +7472,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
       debugPrint('$stackTrace');
       if (!mounted) return;
       setState(() {
+        _stepSequences = null;
         _stepsLoading = false;
         _stepsError = 'Step preview unavailable: $error';
       });
@@ -7012,17 +7504,30 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
   }
 
   void _toggleSection(String id) {
+    if (!_rhythmDefineCardSectionIds.contains(id)) {
+      throw StateError('Unknown rhythm card section: $id');
+    }
     HapticFeedback.selectionClick();
-    setState(() => _openSection = _openSection == id ? '' : id);
+    final next = Set<String>.from(_openSections);
+    if (!next.add(id)) next.remove(id);
+    setState(() => _openSections = next);
+    unawaited(_persistRhythmCardState(next));
   }
 
   Future<void> _save() async {
     HapticFeedback.lightImpact();
     final client = widget.client;
+    if (client == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Expert runtime is not connected; rhythm was not saved.'),
+        ),
+      );
+      return;
+    }
     try {
-      if (client != null) {
-        await client.updateZoneSettings(widget.zone.name, _draft);
-      }
+      await client.updateZoneSettings(widget.zone.name, _draft);
       final updated = widget.zone.copyWith(definition: _draft);
       widget.onZoneChanged(updated);
       setState(() {
@@ -7031,13 +7536,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
       });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            client == null
-                ? 'Expert rhythm saved locally'
-                : 'Expert rhythm saved to RhythmOS',
-          ),
-        ),
+        const SnackBar(content: Text('Expert rhythm saved to RhythmOS')),
       );
     } catch (error, stackTrace) {
       debugPrint('CircadianExpert: save failed: $error');
@@ -7075,8 +7574,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final reading = _serverCurve?.readingAt(_selectedHour) ??
-        _CurveReading.from(_draft, _selectedHour);
+    final reading = _serverCurve?.readingAt(_selectedHour);
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: SafeArea(
@@ -7115,18 +7613,55 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
                     onPatternChanged: _applyPattern,
                     onLive: _openLive,
                   ),
+                  if (_definitionError != null) ...[
+                    const SizedBox(height: 7),
+                    Text(
+                      _definitionError!,
+                      style: const TextStyle(
+                        color: _dangerAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                  if (_presetsError != null) ...[
+                    const SizedBox(height: 7),
+                    Text(
+                      _presetsError!,
+                      style: const TextStyle(
+                        color: _dangerAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                  if (_cardStateError != null) ...[
+                    const SizedBox(height: 7),
+                    Text(
+                      _cardStateError!,
+                      style: const TextStyle(
+                        color: _dangerAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   _CurveCard(
-                    title: '${reading.brightness}%  /  ${reading.kelvin} K',
+                    title: reading == null
+                        ? 'Curve unavailable'
+                        : '${reading.brightness}%  /  ${reading.kelvin} K',
                     subtitle: _curveLoading
                         ? 'loading server curve'
                         : _curveError == null
                             ? _formatHour(_selectedHour)
-                            : 'local curve',
+                            : 'server error',
                     definition: _draft,
                     serverCurve: _serverCurve,
                     selectedHour: _selectedHour,
                     accent: _expertAccent,
+                    loading: _curveLoading,
+                    allowLocalCurve: false,
                     onHourChanged: (hour) {
                       setState(() {
                         _selectedHour = hour;
@@ -7155,7 +7690,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
                     title: 'Sleep',
                     value: '${_formatHour(_draft.wakeHour)} wake, '
                         '${_formatHour(_draft.bedHour)} bed',
-                    expanded: _openSection == 'sleep',
+                    expanded: _openSections.contains('sleep'),
                     onToggle: () => _toggleSection('sleep'),
                     child: Column(
                       children: [
@@ -7213,7 +7748,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
                     id: 'brightness',
                     title: 'Brightness',
                     value: '${_draft.minBrightness}-${_draft.maxBrightness}%',
-                    expanded: _openSection == 'brightness',
+                    expanded: _openSections.contains('brightness'),
                     onToggle: () => _toggleSection('brightness'),
                     child: Column(
                       children: [
@@ -7268,7 +7803,7 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
                     id: 'color',
                     title: 'Color temperature',
                     value: '${_draft.minKelvin}-${_draft.maxKelvin} K',
-                    expanded: _openSection == 'color',
+                    expanded: _openSections.contains('color'),
                     onToggle: () => _toggleSection('color'),
                     child: Column(
                       children: [
@@ -7309,51 +7844,11 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
                   ),
                   _TuneSectionCard(
                     id: 'sun',
-                    title: 'Sun dimming',
-                    value: '${(_draft.daylightDimming * 100).round()}%',
-                    expanded: _openSection == 'sun',
+                    title: 'Sky impact',
+                    value: _skyImpactSummary(_draft),
+                    expanded: _openSections.contains('sun'),
                     onToggle: () => _toggleSection('sun'),
-                    child: Column(
-                      children: [
-                        _ExpertSliderRow(
-                          label: 'Daylight dimming',
-                          value: _draft.daylightDimming,
-                          min: 0,
-                          max: 1,
-                          divisions: 20,
-                          display: '${(_draft.daylightDimming * 100).round()}%',
-                          onChanged: (value) => _change(
-                            (definition) =>
-                                definition.copyWith(daylightDimming: value),
-                          ),
-                        ),
-                        _ExpertSliderRow(
-                          label: 'Natural exposure',
-                          value: _draft.naturalExposure,
-                          min: 0,
-                          max: 1,
-                          divisions: 20,
-                          display: '${(_draft.naturalExposure * 100).round()}%',
-                          onChanged: (value) => _change(
-                            (definition) =>
-                                definition.copyWith(naturalExposure: value),
-                          ),
-                        ),
-                        _ExpertSliderRow(
-                          label: 'Transition',
-                          value: _draft.transitionMinutes,
-                          min: 5,
-                          max: 90,
-                          divisions: 17,
-                          display: '${_draft.transitionMinutes.round()} min',
-                          onChanged: (value) => _change(
-                            (definition) => definition.copyWith(
-                              transitionMinutes: value,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                    child: _buildSkyImpactControls(),
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -7390,6 +7885,223 @@ class _ExpertZoneDefineScreenState extends State<_ExpertZoneDefineScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildSkyImpactControls() {
+    return Column(
+      children: [
+        _buildSkyToggleRow(
+          label: 'Sun dimming',
+          value: _draft.brightnessSensitivityEnabled,
+          onChanged: (value) => _change(
+            (definition) => definition.copyWith(
+              brightnessSensitivityEnabled: value,
+            ),
+          ),
+        ),
+        if (_draft.brightnessSensitivityEnabled)
+          _ExpertSliderRow(
+            label: 'Dimming strength',
+            value:
+                _sensitivityStepIndex(_draft.brightnessSensitivity).toDouble(),
+            min: 0,
+            max: (_expertSensitivitySteps.length - 1).toDouble(),
+            divisions: _expertSensitivitySteps.length - 1,
+            display: _sensitivityDisplay(_draft.brightnessSensitivity),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                brightnessSensitivity: _sensitivityFromSlider(value),
+              ),
+            ),
+          ),
+        _buildSkyToggleRow(
+          label: 'Sun cooling',
+          value: _draft.daylightEnabled,
+          onChanged: (value) => _change(
+            (definition) => definition.copyWith(daylightEnabled: value),
+          ),
+        ),
+        if (_draft.daylightEnabled) ...[
+          _ExpertSliderRow(
+            label: 'Cooling target',
+            value: _draft.daylightCct.toDouble(),
+            min: 500,
+            max: 6500,
+            divisions: 60,
+            display: '${_draft.daylightCct} K',
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                daylightCct: value.round(),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Cooling strength',
+            value: _sensitivityStepIndex(_draft.colorSensitivity).toDouble(),
+            min: 0,
+            max: (_expertSensitivitySteps.length - 1).toDouble(),
+            divisions: _expertSensitivitySteps.length - 1,
+            display: _sensitivityDisplay(_draft.colorSensitivity),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                colorSensitivity: _sensitivityFromSlider(value),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Cooling start',
+            value: _draft.daylightStart.toDouble(),
+            min: -180,
+            max: 180,
+            divisions: 12,
+            display: _solarOffsetLabel(_draft.daylightStart, 'sunrise'),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                daylightStart: value.round(),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Cooling end',
+            value: _draft.daylightEnd.toDouble(),
+            min: -180,
+            max: 180,
+            divisions: 12,
+            display: _solarOffsetLabel(_draft.daylightEnd, 'sunset'),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                daylightEnd: value.round(),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Cooling fade',
+            value: _draft.daylightFade.toDouble(),
+            min: 0,
+            max: 300,
+            divisions: 10,
+            display: _formatMinutes(_draft.daylightFade),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                daylightFade: value.round(),
+              ),
+            ),
+          ),
+        ],
+        _buildSkyToggleRow(
+          label: 'Night warming',
+          value: _draft.warmNightEnabled,
+          onChanged: (value) => _change(
+            (definition) => definition.copyWith(warmNightEnabled: value),
+          ),
+        ),
+        if (_draft.warmNightEnabled) ...[
+          _OptionRow(
+            label: 'Warming mode',
+            value: _draft.warmNightMode,
+            options: const ['all', 'window', 'sunset', 'sunrise'],
+            itemLabel: _warmNightModeLabel,
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(warmNightMode: value),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Warming target',
+            value: _draft.warmNightTarget.toDouble(),
+            min: 500,
+            max: 6500,
+            divisions: 60,
+            display: '${_draft.warmNightTarget} K',
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                warmNightTarget: value.round(),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Warming start',
+            value: _draft.warmNightStart.toDouble(),
+            min: -180,
+            max: 180,
+            divisions: 12,
+            display: _solarOffsetLabel(_draft.warmNightStart, 'sunset'),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                warmNightStart: value.round(),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Warming end',
+            value: _draft.warmNightEnd.toDouble(),
+            min: -180,
+            max: 180,
+            divisions: 12,
+            display: _solarOffsetLabel(_draft.warmNightEnd, 'sunrise'),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                warmNightEnd: value.round(),
+              ),
+            ),
+          ),
+          _ExpertSliderRow(
+            label: 'Warming fade',
+            value: _draft.warmNightFade.toDouble(),
+            min: 0,
+            max: 300,
+            divisions: 10,
+            display: _formatMinutes(_draft.warmNightFade),
+            onChanged: (value) => _change(
+              (definition) => definition.copyWith(
+                warmNightFade: value.round(),
+              ),
+            ),
+          ),
+        ],
+        _ExpertSliderRow(
+          label: 'Transition',
+          value: _draft.transitionMinutes,
+          min: 5,
+          max: 90,
+          divisions: 17,
+          display: '${_draft.transitionMinutes.round()} min',
+          onChanged: (value) => _change(
+            (definition) => definition.copyWith(
+              transitionMinutes: value,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSkyToggleRow({
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Switch(
+            value: value,
+            activeThumbColor: _expertAccent,
+            onChanged: onChanged,
+          ),
+        ],
       ),
     );
   }
@@ -7726,27 +8438,8 @@ class _ExpertZoneLiveScreenState extends State<_ExpertZoneLiveScreen> {
     try {
       final results = await Future.wait<Object?>([
         client.fetchZoneAdjust(_zone.name),
-        client.fetchZoneHistory(_zone.name, limit: 12).catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: zone history load failed: $error');
-          debugPrint('$stackTrace');
-          return const _ExpertAreaHistory(
-            entries: [],
-            hint: 'Zone history unavailable.',
-          );
-        }),
-        client.fetchZoneSchedule(_zone.name).catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: zone schedule load failed: $error');
-          debugPrint('$stackTrace');
-          return _ExpertZoneSchedule.unavailable(
-            'Zone schedule unavailable: $error',
-          );
-        }),
+        client.fetchZoneHistory(_zone.name, limit: 12),
+        client.fetchZoneSchedule(_zone.name),
       ]);
       if (!mounted) return;
       final status = results[0] as _ExpertAreaStatus;
@@ -8355,6 +9048,8 @@ class _ExpertZoneLiveScreenState extends State<_ExpertZoneLiveScreen> {
                     definition: _zone.definition,
                     selectedHour: _selectedHour,
                     accent: _circadianOn ? _expertAccent : _changedAccent,
+                    loading: false,
+                    allowLocalCurve: true,
                     onHourChanged: _setSelectedHour,
                   ),
                   const SizedBox(height: 10),
@@ -8918,38 +9613,10 @@ class _ExpertAreaDetailScreenState extends State<_ExpertAreaDetailScreen> {
         client.fetchAreaSettings(widget.area.id),
         client.fetchAreaHistory(widget.area.id, limit: 12),
         client.fetchAreaLightData(widget.area.id),
-        client.fetchAreaNow(widget.area.id).catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: area now load failed: $error');
-          debugPrint('$stackTrace');
-          return null;
-        }),
-        client.fetchAreaSliderPreview(widget.area.id).catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: slider preview load failed: $error');
-          debugPrint('$stackTrace');
-          return <_SliderPreviewPoint>[];
-        }),
-        client.fetchAreaControls(widget.area.id).catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: area controls load failed: $error');
-          debugPrint('$stackTrace');
-          return _ExpertAreaControlsLoad.unavailable(error.toString());
-        }),
-        client.fetchExpertConfig().catchError((
-          Object error,
-          StackTrace stackTrace,
-        ) {
-          debugPrint('CircadianExpert: expert config load failed: $error');
-          debugPrint('$stackTrace');
-          return const _ExpertConfig.empty();
-        }),
+        client.fetchAreaNow(widget.area.id),
+        client.fetchAreaSliderPreview(widget.area.id),
+        client.fetchAreaControls(widget.area.id),
+        client.fetchExpertConfig(),
       ]);
       if (!mounted) return;
       setState(() {
@@ -16300,16 +16967,16 @@ class _OutdoorStatusPanelState extends State<_OutdoorStatusPanel> {
               _AreaMetricChip(
                 icon: Icons.explore_rounded,
                 label: 'sun',
-                value: status == null
+                value: status?.angleFactor == null
                     ? '-'
-                    : '${(status.angleFactor * 100).round()}%',
+                    : '${(status!.angleFactor! * 100).round()}%',
               ),
               _AreaMetricChip(
                 icon: Icons.cloud_rounded,
                 label: 'clarity',
-                value: status == null
+                value: status?.conditionMultiplier == null
                     ? '-'
-                    : '${(status.conditionMultiplier * 100).round()}%',
+                    : '${(status!.conditionMultiplier! * 100).round()}%',
               ),
               _AreaMetricChip(
                 icon: Icons.sensors_rounded,
@@ -16638,6 +17305,77 @@ class _ConfigDropdownRow<T> extends StatelessWidget {
                           if (value != null) onChanged(value);
                         },
                 ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConfigTextRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool saving;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _ConfigTextRow({
+    required this.label,
+    required this.value,
+    required this.saving,
+    this.enabled = true,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: enabled
+                    ? CelestialColors.textPrimary
+                    : CelestialColors.textSecondary,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          if (saving) ...[
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 8),
+          ],
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 190, minWidth: 128),
+            child: OutlinedButton.icon(
+              onPressed: !enabled || saving ? null : onTap,
+              icon: const Icon(Icons.edit_rounded, size: 15),
+              label: Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: CelestialColors.textPrimary,
+                side: const BorderSide(color: CelestialColors.orbitRing),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                minimumSize: const Size(128, 34),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
               ),
             ),
           ),
@@ -17981,6 +18719,8 @@ class _CurveCard extends StatelessWidget {
   final _ExpertCurveData? serverCurve;
   final double selectedHour;
   final Color accent;
+  final bool loading;
+  final bool allowLocalCurve;
   final ValueChanged<double> onHourChanged;
 
   const _CurveCard({
@@ -17990,6 +18730,8 @@ class _CurveCard extends StatelessWidget {
     this.serverCurve,
     required this.selectedHour,
     required this.accent,
+    required this.loading,
+    required this.allowLocalCurve,
     required this.onHourChanged,
   });
 
@@ -18026,29 +18768,48 @@ class _CurveCard extends StatelessWidget {
           const SizedBox(height: 12),
           AspectRatio(
             aspectRatio: 1.72,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) => _selectHour(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  onHorizontalDragUpdate: (details) => _selectHour(
-                    details.localPosition.dx,
-                    constraints.maxWidth,
-                  ),
-                  child: CustomPaint(
-                    painter: _CurvePainter(
-                      definition: definition,
-                      serverCurve: serverCurve,
-                      selectedHour: selectedHour,
-                      accent: accent,
+            child: serverCurve == null && !allowLocalCurve
+                ? Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0B0D12),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: CelestialColors.orbitRing),
                     ),
+                    child: Text(
+                      loading
+                          ? 'Loading server curve'
+                          : 'Server curve unavailable',
+                      style: const TextStyle(
+                        color: _dangerAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  )
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      return GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTapDown: (details) => _selectHour(
+                          details.localPosition.dx,
+                          constraints.maxWidth,
+                        ),
+                        onHorizontalDragUpdate: (details) => _selectHour(
+                          details.localPosition.dx,
+                          constraints.maxWidth,
+                        ),
+                        child: CustomPaint(
+                          painter: _CurvePainter(
+                            definition: definition,
+                            serverCurve: serverCurve,
+                            selectedHour: selectedHour,
+                            accent: accent,
+                          ),
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
@@ -18960,10 +19721,6 @@ class _ExpertZoneSchedule {
     required this.nextTimes,
   }) : error = null;
 
-  const _ExpertZoneSchedule.unavailable(this.error)
-      : overrideData = null,
-        nextTimes = null;
-
   bool get hasOverride => overrideData != null && overrideData!.isNotEmpty;
 
   String? get mode => _stringValue(overrideData?['mode']);
@@ -19010,16 +19767,23 @@ class _ExpertRhythmPresetLoad {
 
   factory _ExpertRhythmPresetLoad.fromProfiles(Map<dynamic, dynamic> raw) {
     final rawProfiles = raw['profiles'];
+    if (rawProfiles is! Iterable) {
+      throw const FormatException(
+        'removed-project response missing rhythm preset profiles.',
+      );
+    }
     final presets = <String, _ExpertRhythmPreset>{};
     final names = <String>[];
-    if (rawProfiles is Iterable) {
-      for (final item in rawProfiles) {
-        final body = _asMapOrNull(item);
-        if (body == null) continue;
-        final preset = _ExpertRhythmPreset.fromModernProfile(body);
-        presets[preset.name] = preset;
-        names.add(preset.name);
-      }
+    for (final item in rawProfiles) {
+      final body = _requiredMap(item, 'rhythm preset profile');
+      final preset = _ExpertRhythmPreset.fromModernProfile(body);
+      presets[preset.name] = preset;
+      names.add(preset.name);
+    }
+    if (names.isEmpty) {
+      throw const FormatException(
+        'removed-project response returned no rhythm preset profiles.',
+      );
     }
     return _ExpertRhythmPresetLoad(
       names: List.unmodifiable(names),
@@ -19044,28 +19808,26 @@ class _ExpertRhythmPreset {
   });
 
   factory _ExpertRhythmPreset.fromModernProfile(Map<dynamic, dynamic> raw) {
-    final id = _stringValue(raw['id']) ??
-        _stringValue(raw['name'])?.toLowerCase().replaceAll(' ', '_') ??
-        'rhythm';
-    final curve = _asMapOrNull(raw['curve']) ?? const {};
-    final schedule = _asMapOrNull(curve['schedule']) ?? const {};
-    final wake = _doubleValue(
-      _asMapOrNull(schedule['wake'])?['hour'],
-      fallback: _patternWake(id),
+    final id = _requiredString(raw['id'], 'rhythm preset id');
+    final curve = _requiredMap(raw['curve'], 'rhythm preset curve');
+    final schedule = _requiredMap(curve['schedule'], 'rhythm preset schedule');
+    final wake = _requiredDouble(
+      _requiredMap(schedule['wake'], 'rhythm preset wake schedule')['hour'],
+      'rhythm preset wake hour',
     );
-    final bed = _doubleValue(
-      _asMapOrNull(schedule['bed'])?['hour'],
-      fallback: _patternBed(id),
+    final bed = _requiredDouble(
+      _requiredMap(schedule['bed'], 'rhythm preset bed schedule')['hour'],
+      'rhythm preset bed hour',
     );
     return _ExpertRhythmPreset(
       name: id,
       wakeHour: _normalizeHour(wake),
       bedHour: _normalizeHour(bed),
       ascendStart: _normalizeHour(
-        _doubleValue(curve['ascend_start'], fallback: wake - 3.5),
+        _requiredDouble(curve['ascend_start'], 'rhythm preset ascend start'),
       ),
       descendStart: _normalizeHour(
-        _doubleValue(curve['descend_start'], fallback: bed - 4),
+        _requiredDouble(curve['descend_start'], 'rhythm preset descend start'),
       ),
     );
   }
@@ -19089,12 +19851,25 @@ class _ExpertSunTimes {
   factory _ExpertSunTimes.fromServer(Map<dynamic, dynamic> raw) {
     return _ExpertSunTimes(
       date: _stringValue(raw['date']) ?? '',
-      sunrise: _doubleValue(raw['sunrise_hour'] ?? raw['sunrise'], fallback: 6),
-      sunset: _doubleValue(raw['sunset_hour'] ?? raw['sunset'], fallback: 18),
-      noon: _doubleValue(raw['noon_hour'] ?? raw['solar_noon'], fallback: 12),
-      midnight: _doubleValue(
-        raw['midnight_hour'] ?? raw['solar_midnight'],
-        fallback: 0,
+      sunrise: _requiredDoubleAny(
+        raw,
+        const ['sunrise_hour', 'sunrise'],
+        'sunrise',
+      ),
+      sunset: _requiredDoubleAny(
+        raw,
+        const ['sunset_hour', 'sunset'],
+        'sunset',
+      ),
+      noon: _requiredDoubleAny(
+        raw,
+        const ['noon_hour', 'solar_noon'],
+        'solar noon',
+      ),
+      midnight: _requiredDoubleAny(
+        raw,
+        const ['midnight_hour', 'solar_midnight'],
+        'solar midnight',
       ),
     );
   }
@@ -19106,28 +19881,35 @@ class _ExpertCurveData {
   const _ExpertCurveData(this.points);
 
   factory _ExpertCurveData.fromServer(Map<dynamic, dynamic> raw) {
-    final hours = _numberList(_pick(raw, const ['hours', 'hour']));
+    final hours = _requiredNumberList(
+      _pick(raw, const ['hours', 'hour']),
+      'curve hours',
+    );
     final bris = _numberList(
       _pick(raw, const ['bris', 'bri', 'brightness', 'brightnesses']),
     );
     final ccts = _numberList(
       _pick(raw, const ['ccts', 'cct', 'kelvin', 'kelvins', 'color_temps']),
     );
-    final generatedHours = hours.isNotEmpty
-        ? hours
-        : List<double>.generate(
-            math.min(bris.length, ccts.length),
-            (index) => bris.length <= 1 ? 0 : index * 24 / (bris.length - 1),
-          );
-    final length = math.min(
-      generatedHours.length,
-      math.min(bris.length, ccts.length),
-    );
-    if (length <= 0) return const _ExpertCurveData([]);
+    if (bris.isEmpty) {
+      throw const FormatException(
+          'removed-project curve response missing brightness values.');
+    }
+    if (ccts.isEmpty) {
+      throw const FormatException(
+          'removed-project curve response missing kelvin values.');
+    }
+    if (hours.length != bris.length || hours.length != ccts.length) {
+      throw FormatException(
+        'removed-project curve response length mismatch: '
+        '${hours.length} hours, ${bris.length} brightness values, '
+        '${ccts.length} kelvin values.',
+      );
+    }
 
     final points = <_ExpertCurvePoint>[];
-    for (int i = 0; i < length; i++) {
-      final hour = generatedHours[i].clamp(0, 24).toDouble();
+    for (int i = 0; i < hours.length; i++) {
+      final hour = hours[i].clamp(0, 24).toDouble();
       final brightness = bris[i].round().clamp(0, 100).toInt();
       final kelvin = ccts[i].round().clamp(1500, 7000).toInt();
       points.add(
@@ -19227,6 +20009,14 @@ class _ExpertCurveData {
     }
     return const [];
   }
+
+  static List<double> _requiredNumberList(Object? value, String label) {
+    final values = _numberList(value);
+    if (values.isEmpty) {
+      throw FormatException('removed-project curve response missing $label.');
+    }
+    return values;
+  }
 }
 
 class _ExpertCurvePoint {
@@ -19258,8 +20048,9 @@ class _ExpertStepSequences {
   factory _ExpertStepSequences.fromServer(Map<dynamic, dynamic> raw) {
     final source = _asMapOrNull(raw['steps']) ?? raw;
     return _ExpertStepSequences(
-      stepUp: _stepPointList(_stepListSource(source, 'step_up')),
-      stepDown: _stepPointList(_stepListSource(source, 'step_down')),
+      stepUp: _stepPointList(_stepListSource(source, 'step_up'), 'step_up'),
+      stepDown:
+          _stepPointList(_stepListSource(source, 'step_down'), 'step_down'),
     );
   }
 
@@ -19268,12 +20059,13 @@ class _ExpertStepSequences {
     return _asMapOrNull(value)?['steps'] ?? value;
   }
 
-  static List<_ExpertStepPoint> _stepPointList(Object? raw) {
-    if (raw is! Iterable) return const [];
+  static List<_ExpertStepPoint> _stepPointList(Object? raw, String label) {
+    if (raw is! Iterable) {
+      throw FormatException('removed-project step response missing $label steps.');
+    }
     return List.unmodifiable([
       for (final item in raw)
-        if (_asMapOrNull(item) != null)
-          _ExpertStepPoint.fromServer(_asMapOrNull(item)!),
+        _ExpertStepPoint.fromServer(_requiredMap(item, label)),
     ]);
   }
 }
@@ -19291,11 +20083,12 @@ class _ExpertStepPoint {
 
   factory _ExpertStepPoint.fromServer(Map<dynamic, dynamic> raw) {
     return _ExpertStepPoint(
-      hour: _normalizeHour(_doubleValue(raw['hour'], fallback: 0)),
-      brightness:
-          _intValue(raw['brightness'], fallback: 0).clamp(0, 100).toInt(),
+      hour: _normalizeHour(_requiredDouble(raw['hour'], 'step hour')),
+      brightness: _requiredInt(raw['brightness'], 'step brightness')
+          .clamp(0, 100)
+          .toInt(),
       kelvin:
-          _intValue(raw['kelvin'], fallback: 4000).clamp(1500, 7000).toInt(),
+          _requiredInt(raw['kelvin'], 'step kelvin').clamp(1500, 7000).toInt(),
     );
   }
 }
@@ -19325,6 +20118,232 @@ class _ExpertConfig {
   String stringValue(String key, {required String fallback}) {
     return _stringValue(values[key]) ?? fallback;
   }
+}
+
+const _lightPurposePreferredOrder = [
+  'Standard',
+  'Overhead',
+  'Lamp',
+  'Accent',
+  'Nightlight',
+];
+
+class _LightPurposePreset {
+  final String name;
+  final int atBright;
+  final int atDim;
+  final int? offThreshold;
+
+  const _LightPurposePreset({
+    required this.name,
+    required this.atBright,
+    required this.atDim,
+    required this.offThreshold,
+  });
+
+  int effectiveOffThreshold(int globalOffThreshold) {
+    return offThreshold ?? globalOffThreshold;
+  }
+}
+
+List<_LightPurposePreset> _lightPurposePresetsFromConfig(
+  _ExpertConfig config,
+) {
+  final presets = _strictLightPurposePresetMap(config.values['filter_presets']);
+  return [
+    for (final name in _orderedLightPurposeNames(presets.keys))
+      _LightPurposePreset(
+        name: name,
+        atBright: _strictLightPurposeInt(
+          _asMap(presets[name])['at_bright'],
+          'filter_presets.$name.at_bright',
+          min: 0,
+          max: 200,
+        ),
+        atDim: _strictLightPurposeInt(
+          _asMap(presets[name])['at_dim'],
+          'filter_presets.$name.at_dim',
+          min: 0,
+          max: 200,
+        ),
+        offThreshold: _asMap(presets[name]).containsKey('off_threshold')
+            ? _strictLightPurposeInt(
+                _asMap(presets[name])['off_threshold'],
+                'filter_presets.$name.off_threshold',
+                min: 0,
+                max: 20,
+              )
+            : null,
+      ),
+  ];
+}
+
+Map<String, Object?> _lightPurposePresetMapWithValue(
+  _ExpertConfig config,
+  String name,
+  String field,
+  int value,
+) {
+  final presets = _strictLightPurposePresetMap(config.values['filter_presets']);
+  final current = _asMap(presets[name]);
+  final nextPreset = <String, Object?>{
+    'at_dim': current['at_dim'],
+    'at_bright': current['at_bright'],
+    if (current.containsKey('off_threshold'))
+      'off_threshold': current['off_threshold'],
+    field: value,
+  };
+  return {
+    for (final entry in presets.entries)
+      entry.key: entry.key == name
+          ? Map<String, Object?>.unmodifiable(nextPreset)
+          : Map<String, Object?>.unmodifiable(
+              Map<String, Object?>.from(_asMap(entry.value)),
+            ),
+  };
+}
+
+Map<String, Object?> _strictLightPurposePresetMap(Object? raw) {
+  if (raw is! Map) {
+    throw FormatException('removed-project settings missing filter_presets object.');
+  }
+  final result = <String, Object?>{};
+  for (final entry in raw.entries) {
+    final name = entry.key is String ? (entry.key as String).trim() : '';
+    if (name.isEmpty) {
+      throw const FormatException(
+        'removed-project settings filter_presets contains an empty purpose name.',
+      );
+    }
+    if (result.containsKey(name)) {
+      throw FormatException(
+        'removed-project settings filter_presets contains duplicate purpose $name.',
+      );
+    }
+    final preset = _asMapOrNull(entry.value);
+    if (preset == null) {
+      throw FormatException(
+        'removed-project settings filter_presets.$name must be an object.',
+      );
+    }
+    final atBright = _strictLightPurposeInt(
+      preset['at_bright'],
+      'filter_presets.$name.at_bright',
+      min: 0,
+      max: 200,
+    );
+    final atDim = _strictLightPurposeInt(
+      preset['at_dim'],
+      'filter_presets.$name.at_dim',
+      min: 0,
+      max: 200,
+    );
+    final normalized = <String, Object?>{
+      'at_dim': atDim,
+      'at_bright': atBright,
+    };
+    if (preset.containsKey('off_threshold')) {
+      normalized['off_threshold'] = _strictLightPurposeInt(
+        preset['off_threshold'],
+        'filter_presets.$name.off_threshold',
+        min: 0,
+        max: 20,
+      );
+    }
+    result[name] = Map<String, Object?>.unmodifiable(normalized);
+  }
+  if (result.isEmpty) {
+    throw const FormatException(
+      'removed-project settings filter_presets must contain at least one purpose.',
+    );
+  }
+  return Map<String, Object?>.unmodifiable(result);
+}
+
+int _strictLightPurposeInt(
+  Object? value,
+  String label, {
+  required int min,
+  required int max,
+}) {
+  if (value is! int) {
+    throw FormatException('removed-project settings $label must be an integer.');
+  }
+  if (value < min || value > max) {
+    throw FormatException(
+      'removed-project settings $label must be between $min and $max.',
+    );
+  }
+  return value;
+}
+
+int _strictIntSetting(
+  Object? value,
+  String label, {
+  required int min,
+  required int max,
+}) {
+  if (value is! int) {
+    throw FormatException('removed-project settings $label must be an integer.');
+  }
+  if (value < min || value > max) {
+    throw FormatException(
+      'removed-project settings $label must be between $min and $max.',
+    );
+  }
+  return value;
+}
+
+String _strictExperimentalTickMode(Object? value) {
+  if (value is! String || !_experimentalTickModeOptions.contains(value)) {
+    throw const FormatException(
+      'removed-project settings experimental_tick_mode is not supported.',
+    );
+  }
+  return value;
+}
+
+Set<String> _decodeRhythmDefineOpenSections(List<String>? raw) {
+  if (raw == null) return <String>{};
+  final result = <String>{};
+  for (final section in raw) {
+    if (!_rhythmDefineCardSectionIds.contains(section)) {
+      throw FormatException(
+        'Stored rhythm card state contains unknown section $section.',
+      );
+    }
+    if (!result.add(section)) {
+      throw FormatException(
+        'Stored rhythm card state contains duplicate section $section.',
+      );
+    }
+  }
+  return result;
+}
+
+List<String> _encodeRhythmDefineOpenSections(Set<String> sections) {
+  final invalid = sections
+      .where((section) => !_rhythmDefineCardSectionIds.contains(section))
+      .toList();
+  if (invalid.isNotEmpty) {
+    throw FormatException(
+      'Rhythm card state contains unknown sections: ${invalid.join(', ')}.',
+    );
+  }
+  return [
+    for (final section in _rhythmDefineCardSectionOrder)
+      if (sections.contains(section)) section,
+  ];
+}
+
+List<String> _orderedLightPurposeNames(Iterable<String> names) {
+  final remaining = names.toList()..sort();
+  final ordered = <String>[];
+  for (final preferred in _lightPurposePreferredOrder) {
+    if (remaining.remove(preferred)) ordered.add(preferred);
+  }
+  ordered.addAll(remaining);
+  return ordered;
 }
 
 class _TuneStep {
@@ -19524,7 +20543,9 @@ _ExpertAreaStatus _areaStatusWithExpertScope(
   String areaId,
 ) {
   final area = _scopeAreaById(raw, areaId);
-  if (area == null) return base;
+  if (area == null) {
+    throw StateError('removed-project scope did not include area status for $areaId');
+  }
   return base.copyWith(
     brightnessMid: _scopeMidpoint(area['layer']),
     phaseMidpoint: _scopeMidpoint(area['effective']),
@@ -19532,7 +20553,9 @@ _ExpertAreaStatus _areaStatusWithExpertScope(
 }
 
 _ExpertAreaStatus _aggregateModernStatuses(List<_ExpertAreaStatus> statuses) {
-  if (statuses.isEmpty) return _areaStatusFromModernNode(const {});
+  if (statuses.isEmpty) {
+    throw StateError('Cannot aggregate Expert zone status without area data.');
+  }
 
   final brightness = _averageInt(
     statuses.map((status) => status.brightness),
@@ -19996,10 +21019,6 @@ class _ExpertAreaControlsLoad {
     required this.controls,
     required this.defaultPauseMinutes,
   }) : error = null;
-
-  const _ExpertAreaControlsLoad.unavailable(this.error)
-      : controls = const [],
-        defaultPauseMinutes = 240;
 }
 
 class _ExpertControlsRefresh {
@@ -20365,11 +21384,11 @@ class _ExpertOutdoorStatus {
   final double? luxSmoothed;
   final double? luxLearnedCeiling;
   final double? luxLearnedFloor;
-  final double sunElevation;
+  final double? sunElevation;
   final String? sensorEntity;
   final List<_ExpertWeatherGroup> weatherGroups;
-  final double conditionMultiplier;
-  final double angleFactor;
+  final double? conditionMultiplier;
+  final double? angleFactor;
 
   const _ExpertOutdoorStatus({
     required this.outdoorNormalized,
@@ -20391,15 +21410,22 @@ class _ExpertOutdoorStatus {
     final diagnostics = _asMapOrNull(raw['diagnostics']) ?? const {};
     final groups = <_ExpertWeatherGroup>[];
     final rawGroups = raw['weather_groups'];
-    if (rawGroups is Iterable) {
-      for (final item in rawGroups) {
-        final body = _asMapOrNull(item);
-        if (body != null) groups.add(_ExpertWeatherGroup.fromServer(body));
-      }
+    if (rawGroups is! Iterable) {
+      throw const FormatException(
+        'removed-project outdoor status response missing weather groups.',
+      );
     }
-    if (groups.isEmpty) groups.addAll(_modernWeatherGroups);
+    for (final item in rawGroups) {
+      final body = _requiredMap(item, 'outdoor weather group');
+      groups.add(_ExpertWeatherGroup.fromServer(body));
+    }
+    if (groups.isEmpty) {
+      throw const FormatException(
+        'removed-project outdoor status response returned no weather groups.',
+      );
+    }
 
-    final source = _stringValue(raw['source']) ?? 'none';
+    final source = _requiredString(raw['source'], 'outdoor status source');
     final weatherCondition =
         _stringValue(raw['weather_condition'] ?? diagnostics['sky_condition']);
     final override = _ExpertOutdoorOverride.fromServer(raw['override']) ??
@@ -20409,13 +21435,21 @@ class _ExpertOutdoorStatus {
                 expiresInMinutes: null,
               )
             : null);
+    final outdoorNormalized = _requiredDoubleAny(
+      raw,
+      const ['outdoor_normalized', 'outdoor_factor'],
+      'outdoor normalized intensity',
+    );
+    if (outdoorNormalized < 0 || outdoorNormalized > 1) {
+      throw const FormatException(
+        'removed-project outdoor normalized intensity must be between 0 and 1.',
+      );
+    }
     return _ExpertOutdoorStatus(
-      outdoorNormalized: _doubleValue(
-        raw['outdoor_factor'] ?? raw['outdoor_normalized'],
-        fallback: 0,
-      ),
+      outdoorNormalized: outdoorNormalized,
       source: source,
-      preferredSource: _stringValue(raw['preferred_source']) ?? source,
+      preferredSource:
+          _requiredString(raw['preferred_source'], 'outdoor preferred source'),
       override: override,
       weatherCondition: weatherCondition,
       luxSmoothed: _nullableDouble(raw['lux_smoothed'] ?? diagnostics['lux']),
@@ -20425,19 +21459,15 @@ class _ExpertOutdoorStatus {
       luxLearnedFloor: _nullableDouble(
         raw['lux_learned_floor'] ?? diagnostics['lux_learned_floor'],
       ),
-      sunElevation: _doubleValue(
-        raw['sun_elevation'] ?? diagnostics['sun_elevation_degrees'],
-        fallback: 0,
-      ),
+      sunElevation: _nullableDouble(
+          raw['sun_elevation'] ?? diagnostics['sun_elevation_degrees']),
       sensorEntity: _stringValue(raw['sensor_entity']),
       weatherGroups: groups,
-      conditionMultiplier: _doubleValue(
+      conditionMultiplier: _nullableDouble(
         raw['condition_multiplier'] ?? diagnostics['sky_multiplier'],
-        fallback: 1,
       ),
-      angleFactor: _doubleValue(
+      angleFactor: _nullableDouble(
         raw['angle_factor'] ?? diagnostics['sun_angle_factor'],
-        fallback: 0,
       ),
     );
   }
@@ -20477,9 +21507,12 @@ class _ExpertWeatherGroup {
 
   factory _ExpertWeatherGroup.fromServer(Map<dynamic, dynamic> raw) {
     return _ExpertWeatherGroup(
-      key: _stringValue(raw['key']) ?? '',
-      label: _stringValue(raw['label']) ?? '',
-      multiplier: _doubleValue(raw['multiplier'], fallback: 1),
+      key: _requiredString(raw['key'], 'outdoor weather group key'),
+      label: _requiredString(raw['label'], 'outdoor weather group label'),
+      multiplier: _requiredDouble(
+        raw['multiplier'],
+        'outdoor weather group multiplier',
+      ),
     );
   }
 }
@@ -20919,81 +21952,6 @@ class _ExpertAreaLightData {
   }
 }
 
-_ExpertAreaLightData _areaLightDataFromTopology(
-  String areaId,
-  List<RhythmTopologyNode> topologyNodes,
-) {
-  final lightNodes = topologyNodes
-      .where(
-        (node) =>
-            node.parentId == areaId &&
-            RhythmDeviceType.fromNodeKind(node.kind) == RhythmDeviceType.light,
-      )
-      .toList()
-    ..sort((left, right) => left.name.compareTo(right.name));
-
-  final rows = <_ExpertLightRow>[];
-  final sections = <_ExpertSectionOption>[];
-  final sectionAdjusts = <_ExpertSectionAdjustRow>[];
-  final participants = <_ExpertScheduleParticipant>[];
-  final sectionTunes = <_ExpertSectionTuneRow>[];
-
-  for (final node in lightNodes) {
-    final name = node.name.isEmpty ? node.id : node.name;
-    rows.add(
-      _ExpertLightRow(
-        entityId: node.id,
-        name: name,
-        purpose: 'Standard',
-        sectionId: node.id,
-        sectionName: name,
-      ),
-    );
-    sections.add(_ExpertSectionOption(id: node.id, name: name));
-    sectionAdjusts.add(
-      _ExpertSectionAdjustRow(
-        id: node.id,
-        name: name,
-        isMain: false,
-        isOn: true,
-        currentBrightness: null,
-        homeBrightness: null,
-        brightnessOverride: null,
-        autoOffAt: null,
-      ),
-    );
-    participants.add(
-      _ExpertScheduleParticipant(
-        id: node.id,
-        name: name,
-        isMain: false,
-        participatesInAutoOn: true,
-        participatesInAutoOff: true,
-      ),
-    );
-    sectionTunes.add(
-      _ExpertSectionTuneRow(
-        id: node.id,
-        name: name,
-        isMain: false,
-        balance: null,
-        sunDimming: null,
-      ),
-    );
-  }
-
-  return _ExpertAreaLightData(
-    rows: rows,
-    sections: sections,
-    sectionAdjusts: sectionAdjusts,
-    participants: participants,
-    sectionTunes: sectionTunes,
-    presets: const ['Standard'],
-    feedbackTarget: null,
-    feedbackTargetChoices: _feedbackTargetChoicesFromRows(rows, null),
-  );
-}
-
 _ExpertAreaLightData? _areaLightDataFromExpertScope(
   String areaId,
   Map<dynamic, dynamic> raw,
@@ -21052,7 +22010,7 @@ _ExpertAreaLightData? _areaLightDataFromExpertScope(
   }
 
   final presets = _uniqueOrdered([
-    'Standard',
+    ..._lightPurposePresetNamesFromScope(raw),
     for (final row in rows) row.purpose,
   ]);
 
@@ -21071,6 +22029,17 @@ _ExpertAreaLightData? _areaLightDataFromExpertScope(
       feedbackTarget,
     ),
   );
+}
+
+List<String> _lightPurposePresetNamesFromScope(Map<dynamic, dynamic> raw) {
+  final lightFilters = _asMapOrNull(raw['light_filters']);
+  if (lightFilters == null) {
+    throw const FormatException(
+      'removed-project scope response missing light_filters object.',
+    );
+  }
+  final presets = _strictLightPurposePresetMap(lightFilters['presets']);
+  return _orderedLightPurposeNames(presets.keys);
 }
 
 Map<dynamic, dynamic>? _scopeAreaById(
@@ -21517,6 +22486,25 @@ class _ExpertAutoScheduleOverride {
   }
 }
 
+class _ExpertSensitivityStep {
+  final String label;
+  final double multiplier;
+
+  const _ExpertSensitivityStep(this.label, this.multiplier);
+}
+
+const _expertSensitivitySteps = [
+  _ExpertSensitivityStep('None', 0),
+  _ExpertSensitivityStep('Minimal', 0.10),
+  _ExpertSensitivityStep('Low', 0.25),
+  _ExpertSensitivityStep('Medium', 0.50),
+  _ExpertSensitivityStep('High', 0.75),
+  _ExpertSensitivityStep('Full', 1),
+  _ExpertSensitivityStep('Amplified', 1.25),
+  _ExpertSensitivityStep('Intense', 1.50),
+  _ExpertSensitivityStep('Maximum', 2),
+];
+
 class _RhythmDefinition {
   final String sleepPattern;
   final double wakeHour;
@@ -21530,6 +22518,20 @@ class _RhythmDefinition {
   final double naturalExposure;
   final double transitionMinutes;
   final double phaseBalance;
+  final bool daylightEnabled;
+  final int daylightCct;
+  final int daylightStart;
+  final int daylightEnd;
+  final int daylightFade;
+  final double colorSensitivity;
+  final bool brightnessSensitivityEnabled;
+  final double brightnessSensitivity;
+  final bool warmNightEnabled;
+  final String warmNightMode;
+  final int warmNightTarget;
+  final int warmNightStart;
+  final int warmNightEnd;
+  final int warmNightFade;
 
   const _RhythmDefinition({
     required this.sleepPattern,
@@ -21544,6 +22546,20 @@ class _RhythmDefinition {
     required this.naturalExposure,
     required this.transitionMinutes,
     required this.phaseBalance,
+    required this.daylightEnabled,
+    required this.daylightCct,
+    required this.daylightStart,
+    required this.daylightEnd,
+    required this.daylightFade,
+    required this.colorSensitivity,
+    required this.brightnessSensitivityEnabled,
+    required this.brightnessSensitivity,
+    required this.warmNightEnabled,
+    required this.warmNightMode,
+    required this.warmNightTarget,
+    required this.warmNightStart,
+    required this.warmNightEnd,
+    required this.warmNightFade,
   });
 
   const _RhythmDefinition.defaults()
@@ -21558,7 +22574,21 @@ class _RhythmDefinition {
         daylightDimming = 0.35,
         naturalExposure = 0.55,
         transitionMinutes = 30,
-        phaseBalance = 0;
+        phaseBalance = 0,
+        daylightEnabled = true,
+        daylightCct = 5000,
+        daylightStart = 60,
+        daylightEnd = -60,
+        daylightFade = 60,
+        colorSensitivity = 1,
+        brightnessSensitivityEnabled = true,
+        brightnessSensitivity = 1,
+        warmNightEnabled = true,
+        warmNightMode = 'all',
+        warmNightTarget = 2300,
+        warmNightStart = -60,
+        warmNightEnd = 60,
+        warmNightFade = 120;
 
   _RhythmDefinition copyWith({
     String? sleepPattern,
@@ -21573,6 +22603,20 @@ class _RhythmDefinition {
     double? naturalExposure,
     double? transitionMinutes,
     double? phaseBalance,
+    bool? daylightEnabled,
+    int? daylightCct,
+    int? daylightStart,
+    int? daylightEnd,
+    int? daylightFade,
+    double? colorSensitivity,
+    bool? brightnessSensitivityEnabled,
+    double? brightnessSensitivity,
+    bool? warmNightEnabled,
+    String? warmNightMode,
+    int? warmNightTarget,
+    int? warmNightStart,
+    int? warmNightEnd,
+    int? warmNightFade,
   }) {
     return _RhythmDefinition(
       sleepPattern: sleepPattern ?? this.sleepPattern,
@@ -21587,6 +22631,22 @@ class _RhythmDefinition {
       naturalExposure: naturalExposure ?? this.naturalExposure,
       transitionMinutes: transitionMinutes ?? this.transitionMinutes,
       phaseBalance: phaseBalance ?? this.phaseBalance,
+      daylightEnabled: daylightEnabled ?? this.daylightEnabled,
+      daylightCct: daylightCct ?? this.daylightCct,
+      daylightStart: daylightStart ?? this.daylightStart,
+      daylightEnd: daylightEnd ?? this.daylightEnd,
+      daylightFade: daylightFade ?? this.daylightFade,
+      colorSensitivity: colorSensitivity ?? this.colorSensitivity,
+      brightnessSensitivityEnabled:
+          brightnessSensitivityEnabled ?? this.brightnessSensitivityEnabled,
+      brightnessSensitivity:
+          brightnessSensitivity ?? this.brightnessSensitivity,
+      warmNightEnabled: warmNightEnabled ?? this.warmNightEnabled,
+      warmNightMode: warmNightMode ?? this.warmNightMode,
+      warmNightTarget: warmNightTarget ?? this.warmNightTarget,
+      warmNightStart: warmNightStart ?? this.warmNightStart,
+      warmNightEnd: warmNightEnd ?? this.warmNightEnd,
+      warmNightFade: warmNightFade ?? this.warmNightFade,
     );
   }
 
@@ -21604,11 +22664,25 @@ class _RhythmDefinition {
         other.daylightDimming == daylightDimming &&
         other.naturalExposure == naturalExposure &&
         other.transitionMinutes == transitionMinutes &&
-        other.phaseBalance == phaseBalance;
+        other.phaseBalance == phaseBalance &&
+        other.daylightEnabled == daylightEnabled &&
+        other.daylightCct == daylightCct &&
+        other.daylightStart == daylightStart &&
+        other.daylightEnd == daylightEnd &&
+        other.daylightFade == daylightFade &&
+        other.colorSensitivity == colorSensitivity &&
+        other.brightnessSensitivityEnabled == brightnessSensitivityEnabled &&
+        other.brightnessSensitivity == brightnessSensitivity &&
+        other.warmNightEnabled == warmNightEnabled &&
+        other.warmNightMode == warmNightMode &&
+        other.warmNightTarget == warmNightTarget &&
+        other.warmNightStart == warmNightStart &&
+        other.warmNightEnd == warmNightEnd &&
+        other.warmNightFade == warmNightFade;
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
         sleepPattern,
         wakeHour,
         bedHour,
@@ -21621,7 +22695,21 @@ class _RhythmDefinition {
         naturalExposure,
         transitionMinutes,
         phaseBalance,
-      );
+        daylightEnabled,
+        daylightCct,
+        daylightStart,
+        daylightEnd,
+        daylightFade,
+        colorSensitivity,
+        brightnessSensitivityEnabled,
+        brightnessSensitivity,
+        warmNightEnabled,
+        warmNightMode,
+        warmNightTarget,
+        warmNightStart,
+        warmNightEnd,
+        warmNightFade,
+      ]);
 }
 
 class _CurveReading {
@@ -21664,7 +22752,6 @@ class _CurveReading {
 
 class _CircadianExpertClient {
   final Dio _dio;
-  final ServerSyncProvider _syncProvider;
   final Map<String, List<String>> _zoneAreaIds = {};
   final Map<String, String> _zoneIdsByName = {};
   final Map<String, String> _areaNamesById = {};
@@ -21674,9 +22761,7 @@ class _CircadianExpertClient {
   _CircadianExpertClient._({
     required String baseUrl,
     required String? authToken,
-    required ServerSyncProvider syncProvider,
   })  : baseUrlLabel = _trimTrailingSlash(baseUrl),
-        _syncProvider = syncProvider,
         _dio = Dio(
           BaseOptions(
             baseUrl: _normalizeBaseUrl(baseUrl),
@@ -21699,22 +22784,18 @@ class _CircadianExpertClient {
     return _CircadianExpertClient._(
       baseUrl: resolved.baseUrl,
       authToken: resolved.hub.token,
-      syncProvider: syncProvider,
     );
   }
 
   Future<_ZoneLoadResult> fetchZones() async {
-    final cached = _zonesFromModernRooms(_syncProvider.helloRooms);
-    try {
-      final fresh = await _fetchModernZones();
-      if (fresh.visibleZones.isNotEmpty) return _rememberZoneAreas(fresh);
-    } catch (error, stackTrace) {
-      if (cached.visibleZones.isNotEmpty) return _rememberZoneAreas(cached);
-      debugPrint('CircadianExpert: modern topology load failed: $error');
-      debugPrint('$stackTrace');
-      rethrow;
+    final fresh = await _fetchModernZones();
+    if (fresh.visibleZones.isEmpty) {
+      throw StateError(
+        'removed-project runtime scope returned zero visible zones; '
+        'expected /$_removed-projectRuntimeApi/scope to expose runtime topology.',
+      );
     }
-    return _rememberZoneAreas(cached);
+    return _rememberZoneAreas(fresh);
   }
 
   _ZoneLoadResult _rememberZoneAreas(_ZoneLoadResult result) {
@@ -21759,63 +22840,24 @@ class _CircadianExpertClient {
   }
 
   Future<Map<dynamic, dynamic>> _fetchExpertProfileConfig() async {
-    final response = await _dio.get('api/config');
+    final response = await _dio.get('$_removed-projectRuntimeApi/profile');
     return _asMap(response.data);
   }
 
   Future<_ZoneLoadResult> _fetchModernZones() async {
-    try {
-      final scopeResponse = await _dio.get('$_removed-projectRuntimeApi/scope');
-      final config = await _fetchExpertProfileConfig();
-      return _zonesFromExpertScope(
-        _asMap(scopeResponse.data),
-        _rhythmDefinitionFromExpertProfile(config),
-      );
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
-    }
-
-    final responses = await Future.wait([
-      _dio.get('api/state'),
-      _dio.get('api/topology/nodes'),
-    ]);
-    final hello = RhythmHello.fromJson(_stringMap(responses[0].data));
-    final topologyNodes = _topologyNodesFromPayload(responses[1].data);
-    return _zonesFromModernRooms(
-      _combinedModernRooms(
-        stateNodes: hello.nodes,
-        topologyNodes: topologyNodes,
-      ),
+    final scopeResponse = await _dio.get('$_removed-projectRuntimeApi/scope');
+    final config = await _fetchExpertProfileConfig();
+    return _zonesFromExpertScope(
+      _asMap(scopeResponse.data),
+      _rhythmDefinitionFromExpertProfile(config),
     );
   }
 
   Future<_ExpertServerSnapshot> fetchServerSnapshot() async {
-    Map<dynamic, dynamic>? state;
-    Map<dynamic, dynamic>? now;
-
-    try {
-      final response = await _dio.get('api/state');
-      state = _asMap(response.data);
-    } catch (error, stackTrace) {
-      debugPrint('CircadianExpert: server state load failed: $error');
-      debugPrint('$stackTrace');
-    }
-
-    try {
-      final activeProfile = _asMapOrNull(state?['active_profile']);
-      final activeProfileId = _stringValue(activeProfile?['id']) ?? 'rhythm';
-      final response = await _dio.get(
-        'api/curve/now',
-        queryParameters: {'id': activeProfileId},
-      );
-      now = _asMap(response.data);
-    } catch (error, stackTrace) {
-      debugPrint('CircadianExpert: curve-now load failed: $error');
-      debugPrint('$stackTrace');
-    }
-
+    final response = await _dio.get('$_removed-projectRuntimeApi/now');
+    final now = _asMap(response.data);
     return _ExpertServerSnapshot.fromModern(
-      state: state,
+      state: _asMapOrNull(now['state']),
       now: now,
     );
   }
@@ -21900,31 +22942,30 @@ class _CircadianExpertClient {
   }
 
   Future<_ExpertZoneSchedule> fetchZoneSchedule(String zoneName) async {
-    try {
-      final response = await _dio.get(
-        'api/light-runtimes/removed-circadian/zones/${Uri.encodeComponent(_zoneIdFor(zoneName))}/schedule',
-      );
-      final body = _asMap(response.data);
-      return _ExpertZoneSchedule(
-        overrideData: _asMapOrNull(body['override']),
-        nextTimes: _asMapOrNull(body['next_times']),
-      );
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
-      return const _ExpertZoneSchedule.unavailable(
-        'This build is missing the Expert zone schedule API.',
-      );
-    }
+    final now = DateTime.now();
+    final response = await _dio.get(
+      'api/light-runtimes/removed-circadian/zones/${Uri.encodeComponent(_zoneIdFor(zoneName))}/schedule',
+      queryParameters: {
+        'hour': now.hour + now.minute / 60,
+        'weekday': now.weekday - 1,
+        'date': _isoDate(now),
+      },
+    );
+    final body = _asMap(response.data);
+    return _ExpertZoneSchedule(
+      overrideData: _asMapOrNull(body['override']),
+      nextTimes: _asMapOrNull(body['next_times']),
+    );
   }
 
   Future<_ExpertRhythmPresetLoad> fetchRhythmPresets() async {
-    final response = await _dio.get('api/profiles');
+    final response = await _dio.get('$_removed-projectRuntimeApi/rhythm-presets');
     return _ExpertRhythmPresetLoad.fromProfiles(_asMap(response.data));
   }
 
   Future<_ExpertSunTimes> fetchSunTimes({DateTime? date}) async {
     final response = await _dio.get(
-      'api/curve/solar',
+      '$_removed-projectRuntimeApi/sun-times',
       queryParameters: {
         if (date != null) 'date': _isoDate(date),
       },
@@ -21933,14 +22974,10 @@ class _CircadianExpertClient {
   }
 
   Future<_ExpertCurveData> fetchCurveData(_RhythmDefinition definition) async {
-    final base = await _fetchExpertProfileConfig();
-    final profileId = _stringValue(base['id']) ?? 'rhythm';
-    final config = _expertProfileConfigFromDefinition(definition, base: base)
-      ..['id'] = profileId;
+    final config = _expertProfileConfigFromDefinition(definition);
     final response = await _dio.post(
-      'api/curve',
+      '$_removed-projectRuntimeApi/curve',
       queryParameters: {
-        'id': profileId,
         'samples_per_hour': 4,
       },
       data: config,
@@ -21953,14 +22990,10 @@ class _CircadianExpertClient {
     required double hour,
     int maxSteps = 8,
   }) async {
-    final base = await _fetchExpertProfileConfig();
-    final profileId = _stringValue(base['id']) ?? 'rhythm';
-    final config = _expertProfileConfigFromDefinition(definition, base: base)
-      ..['id'] = profileId;
+    final config = _expertProfileConfigFromDefinition(definition);
     final response = await _dio.post(
-      'api/curve',
+      '$_removed-projectRuntimeApi/curve',
       queryParameters: {
-        'id': profileId,
         'start_hour': _roundHundredth(hour),
         'max_steps': maxSteps,
       },
@@ -22047,47 +23080,33 @@ class _CircadianExpertClient {
     }
   }
 
-  Future<Map<dynamic, dynamic>?> _fetchAreaNow(String areaId) async {
+  Future<Map<dynamic, dynamic>> _fetchAreaNow(String areaId) async {
     final response = await _dio.get(
       _expertAreaNowPath(areaId),
     );
-    return _asMapOrNull(_asMap(response.data)['node']);
+    final node = _asMapOrNull(_asMap(response.data)['node']);
+    if (node == null) {
+      throw StateError(
+          'removed-project area now endpoint returned no node for $areaId');
+    }
+    return node;
   }
 
-  Future<_ExpertAreaStatus?> fetchAreaStatus(String areaId) async {
-    try {
-      final node = await _fetchAreaNow(areaId);
-      if (node == null) return null;
-      var status = _areaStatusFromModernNode(node);
-      try {
-        final scope =
-            await _dio.get('api/light-runtimes/removed-circadian/scope');
-        status = _areaStatusWithExpertScope(
-          status,
-          _asMap(scope.data),
-          areaId,
-        );
-      } on DioException catch (error) {
-        if (error.response?.statusCode != 404) rethrow;
-      }
-      return status;
-    } catch (error, stackTrace) {
-      debugPrint('CircadianExpert: node status load failed: $error');
-      debugPrint('$stackTrace');
-      return null;
-    }
+  Future<_ExpertAreaStatus> fetchAreaStatus(String areaId) async {
+    final node = await _fetchAreaNow(areaId);
+    final scope = await _dio.get('api/light-runtimes/removed-circadian/scope');
+    return _areaStatusWithExpertScope(
+      _areaStatusFromModernNode(node),
+      _asMap(scope.data),
+      areaId,
+    );
   }
 
   Future<_ExpertAreaSettings> fetchAreaSettings(String areaId) async {
-    try {
-      final response = await _dio.get(
-        'api/light-runtimes/removed-circadian/areas/${Uri.encodeComponent(areaId)}/settings',
-      );
-      return _ExpertAreaSettings.fromServer(_asMap(response.data));
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
-      return _ExpertAreaSettings.defaults();
-    }
+    final response = await _dio.get(
+      'api/light-runtimes/removed-circadian/areas/${Uri.encodeComponent(areaId)}/settings',
+    );
+    return _ExpertAreaSettings.fromServer(_asMap(response.data));
   }
 
   Future<_ExpertAreaHistory> fetchAreaHistory(
@@ -22110,10 +23129,13 @@ class _CircadianExpertClient {
   }
 
   Future<_ExpertAreaStatus> fetchZoneAdjust(String zoneName) async {
+    final areaIds = _zoneAreaIds[zoneName];
+    if (areaIds == null || areaIds.isEmpty) {
+      throw StateError('removed-project scope did not load areas for zone $zoneName.');
+    }
     final statuses = <_ExpertAreaStatus>[];
-    for (final areaId in _zoneAreaIds[zoneName] ?? const <String>[]) {
-      final status = await fetchAreaStatus(areaId);
-      if (status != null) statuses.add(status);
+    for (final areaId in areaIds) {
+      statuses.add(await fetchAreaStatus(areaId));
     }
     return _aggregateModernStatuses(statuses);
   }
@@ -22148,7 +23170,6 @@ class _CircadianExpertClient {
 
   Future<_ExpertHistoryEntry?> fetchAreaNow(String areaId) async {
     final node = await _fetchAreaNow(areaId);
-    if (node == null) return null;
     return _ExpertHistoryEntry.fromNow(
       _modernNowEntryFromNode(node),
     );
@@ -22163,7 +23184,11 @@ class _CircadianExpertClient {
       queryParameters: {'points': points.clamp(3, 20)},
     );
     final rawPoints = _asMap(response.data)['points'];
-    if (rawPoints is! Iterable) return const [];
+    if (rawPoints is! Iterable) {
+      throw FormatException(
+        'removed-project slider preview for $areaId returned no points array.',
+      );
+    }
     return [
       for (final rawPoint in rawPoints)
         if (rawPoint is Map)
@@ -22175,23 +23200,16 @@ class _CircadianExpertClient {
   }
 
   Future<_ExpertAreaLightData> fetchAreaLightData(String areaId) async {
-    try {
-      final response =
-          await _dio.get('api/light-runtimes/removed-circadian/scope');
-      final expert = _areaLightDataFromExpertScope(
-        areaId,
-        _asMap(response.data),
-      );
-      if (expert != null) return expert;
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
-    }
-
-    final response = await _dio.get('api/topology/nodes');
-    return _areaLightDataFromTopology(
+    final response =
+        await _dio.get('api/light-runtimes/removed-circadian/scope');
+    final expert = _areaLightDataFromExpertScope(
       areaId,
-      _topologyNodesFromPayload(response.data),
+      _asMap(response.data),
     );
+    if (expert == null) {
+      throw StateError('removed-project scope did not include light data for $areaId');
+    }
+    return expert;
   }
 
   Future<_ExpertActivityFeed> fetchActivity({
@@ -22252,31 +23270,44 @@ class _CircadianExpertClient {
     final values = _expertConfigValuesFromServer(
       await _fetchExpertProfileConfig(),
     );
-
-    try {
-      final settingsResponse = await _dio.get('api/settings');
-      values.addAll(
-        _expertSettingsValuesFromServer(_asMap(settingsResponse.data)),
-      );
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
+    final settingsResponse = await _dio.get('$_removed-projectRuntimeApi/settings');
+    values.addAll(
+      _expertSettingsValuesFromServer(_asMap(settingsResponse.data)),
+    );
+    final appSettingsResponse = await _dio.get('api/settings');
+    final appSettings = _asMap(appSettingsResponse.data);
+    if (appSettings.containsKey('auto_update')) {
+      values['auto_update'] = appSettings['auto_update'];
     }
 
     return _ExpertConfig(Map.unmodifiable(values));
   }
 
+  Future<int> fetchCardFreshnessMinutes() async {
+    final response = await _dio.get('$_removed-projectRuntimeApi/settings');
+    return _strictIntSetting(
+      _asMap(response.data)['card_freshness_minutes'],
+      'card_freshness_minutes',
+      min: 1,
+      max: 720,
+    );
+  }
+
   Future<void> saveExpertConfig(Map<String, Object?> updates) async {
     if (updates.isEmpty) return;
 
-    final settingsUpdates = <String, Object?>{};
+    final appSettingsUpdates = <String, Object?>{};
+    final runtimeSettingsUpdates = <String, Object?>{};
     final profileUpdates = <String, Object?>{};
     final unmappedKeys = <String>[];
 
     for (final entry in updates.entries) {
       final key = entry.key;
-      if (_expertSettingsKeys.contains(key)) {
+      if (key == 'auto_update') {
+        appSettingsUpdates[key] = entry.value;
+      } else if (_expertSettingsKeys.contains(key)) {
         final modernEntry = _modernExpertSettingsEntry(key, entry.value);
-        settingsUpdates[modernEntry.key] = modernEntry.value;
+        runtimeSettingsUpdates[modernEntry.key] = modernEntry.value;
       } else if (_expertProfileConfigKeys.contains(key)) {
         profileUpdates[key] = entry.value;
       } else {
@@ -22292,60 +23323,52 @@ class _CircadianExpertClient {
       );
     }
 
-    if (settingsUpdates.isNotEmpty) {
-      await _dio.put('api/settings', data: settingsUpdates);
+    if (appSettingsUpdates.isNotEmpty) {
+      await _dio.put('api/settings', data: appSettingsUpdates);
+    }
+
+    if (runtimeSettingsUpdates.isNotEmpty) {
+      await _dio.put(
+        '$_removed-projectRuntimeApi/settings',
+        data: runtimeSettingsUpdates,
+      );
     }
 
     if (profileUpdates.isNotEmpty) {
       final base = await _fetchExpertProfileConfig();
-      final next = _expertConfigValuesFromServer(base)..addAll(profileUpdates);
-      final profileId = _stringValue(base['id']) ?? 'rhythm';
-      next['id'] = profileId;
-      await _dio.put(
-        'api/config',
-        queryParameters: {
-          'id': profileId,
-          'apply': 'true',
-        },
-        data: next,
-      );
+      final request = _expertProfileUpdateRequest(base, profileUpdates);
+      await _dio.put(request.path, data: request.data);
     }
   }
 
   Future<_ExpertOutdoorStatus> fetchOutdoorStatus() async {
-    final response = await _dio.get('api/outdoor');
+    final response = await _dio.get('$_removed-projectRuntimeApi/outdoor-status');
     return _ExpertOutdoorStatus.fromServer(_asMap(response.data));
   }
 
   Future<void> refreshOutdoor() async {
-    await _dio.get('api/outdoor');
+    await _dio.post('$_removed-projectRuntimeApi/refresh-outdoor');
   }
 
   Future<void> learnBaselines() async {
-    await _dio.post(
-      'api/environment/learn-baselines',
-      data: const {'lux_samples': []},
-    );
+    await _dio.post('$_removed-projectRuntimeApi/learn-baselines');
   }
 
   Future<void> setOutdoorOverride({
     required String condition,
     required int? durationMinutes,
   }) async {
-    await _dio.put(
-      'api/outdoor/override',
+    await _dio.post(
+      '$_removed-projectRuntimeApi/outdoor-override',
       data: {
-        'condition': _modernSkyCondition(condition),
-        if (durationMinutes != null) 'expires_in_secs': durationMinutes * 60,
+        'condition': condition,
+        'duration_minutes': durationMinutes,
       },
     );
   }
 
   Future<void> clearOutdoorOverride() async {
-    await _dio.put(
-      'api/outdoor/override',
-      data: const {'clear': true},
-    );
+    await _dio.delete('$_removed-projectRuntimeApi/outdoor-override');
   }
 
   Future<void> postExpertEndpoint(String path) async {
@@ -22375,13 +23398,12 @@ class _CircadianExpertClient {
   }
 
   Future<List<String>> _momentTargetIds() async {
-    var ids = _knownMomentTargetIds();
-    if (ids.isNotEmpty) return ids;
-    try {
-      await fetchZones();
-      ids = _knownMomentTargetIds();
-    } catch (error) {
-      debugPrint('CircadianExpert: moment target refresh failed: $error');
+    await fetchZones();
+    final ids = _knownMomentTargetIds();
+    if (ids.isEmpty) {
+      throw StateError(
+        'removed-project runtime scope returned no Expert room targets for moments.',
+      );
     }
     return ids;
   }
@@ -22538,14 +23560,10 @@ class _CircadianExpertClient {
       _dio.get('$_removed-projectRuntimeApi/scope'),
     ]);
     final configRaw = Map<dynamic, dynamic>.from(_asMap(responses[4].data));
-    try {
-      final settingsResponse = await _dio.get('api/settings');
-      configRaw.addAll(
-        _expertSettingsValuesFromServer(_asMap(settingsResponse.data)),
-      );
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
-    }
+    final settingsResponse = await _dio.get('$_removed-projectRuntimeApi/settings');
+    configRaw.addAll(
+      _expertSettingsValuesFromServer(_asMap(settingsResponse.data)),
+    );
     return _ExpertSwitchesLoad.fromModern(
       bindingsRaw: _asMap(responses[0].data),
       actionsRaw: _asMap(responses[1].data),
@@ -22564,19 +23582,9 @@ class _CircadianExpertClient {
       _dio.get('api/topology/nodes'),
     ]);
     final topologyNodes = _topologyNodesFromPayload(responses[2].data);
-    var sectionIds = <String>{};
-    Map<dynamic, dynamic> scopeRaw = const {};
-    try {
-      final scope =
-          await _dio.get('api/light-runtimes/removed-circadian/scope');
-      scopeRaw = _asMap(scope.data);
-      sectionIds = _sectionIdsForAreaFromExpertScope(scopeRaw, areaId);
-    } on DioException catch (error) {
-      if (error.response?.statusCode != 404) rethrow;
-    }
-    if (sectionIds.isEmpty) {
-      sectionIds = _sectionIdsForAreaFromTopology(topologyNodes, areaId);
-    }
+    final scope = await _dio.get('api/light-runtimes/removed-circadian/scope');
+    final scopeRaw = _asMap(scope.data);
+    final sectionIds = _sectionIdsForAreaFromExpertScope(scopeRaw, areaId);
     final controls = _expertControlsFromModernBindings(
       _asMap(responses[0].data),
       topologyNodes,
@@ -23130,31 +24138,6 @@ _ExpertArea? _expertAreaFromScope(Object? rawArea) {
   );
 }
 
-_ZoneLoadResult _zonesFromModernRooms(List<RhythmRoom> rooms) {
-  final areas = rooms.map(_areaFromModernRoom).toList(growable: false);
-  if (areas.isEmpty) {
-    return const _ZoneLoadResult(
-      visibleZones: [],
-      allOrder: [],
-    );
-  }
-
-  const zoneName = 'Rhythm Topology';
-  return _ZoneLoadResult(
-    visibleZones: [
-      _ExpertZone(
-        id: zoneName,
-        name: zoneName,
-        isDefault: true,
-        areas: areas,
-        definition: _definitionFromModernRooms(rooms),
-        currentState: _aggregateModernZoneState(rooms),
-      ),
-    ],
-    allOrder: const [zoneName],
-  );
-}
-
 double? _scopeBrightnessOverride(Object? rawFields) {
   final fields = _asMapOrNull(rawFields);
   final override = _asMapOrNull(fields?['brightness_override']);
@@ -23176,91 +24159,6 @@ double? _scopeMidpoint(Object? rawFields) {
   return _nullableDouble(rawMid);
 }
 
-List<RhythmRoom> _combinedModernRooms({
-  required List<RhythmRoom> stateNodes,
-  required List<RhythmTopologyNode> topologyNodes,
-}) {
-  final stateById = <String, RhythmRoom>{
-    for (final node in stateNodes) node.id: node,
-  };
-
-  if (topologyNodes.isEmpty) {
-    final rooms = stateNodes.where((node) => node.kind.isRoom).toList();
-    rooms.sort((left, right) => left.name.compareTo(right.name));
-    return rooms;
-  }
-
-  final roomChildren = <String, List<RhythmTopologyNode>>{};
-  for (final node in topologyNodes.where((node) => node.isDevice)) {
-    final parentId = node.parentId;
-    if (parentId == null || parentId.isEmpty) continue;
-    (roomChildren[parentId] ??= []).add(node);
-  }
-
-  final rooms = <RhythmRoom>[];
-  for (final topologyRoom in topologyNodes.where((node) => node.isRoom)) {
-    final state = stateById[topologyRoom.id];
-    final devices = (roomChildren[topologyRoom.id] ?? const [])
-        .map(RhythmDevice.fromTopologyNode)
-        .toList()
-      ..sort((left, right) {
-        const order = {
-          RhythmDeviceType.light: 0,
-          RhythmDeviceType.button: 1,
-          RhythmDeviceType.motion: 2,
-        };
-        return (order[left.type] ?? 3).compareTo(order[right.type] ?? 3);
-      });
-
-    rooms.add(
-      RhythmRoom(
-        id: topologyRoom.id,
-        name: topologyRoom.name,
-        kind: topologyRoom.kind,
-        parentId: topologyRoom.parentId,
-        placement: topologyRoom.placement,
-        groupedLightId: state?.groupedLightId ?? '',
-        state: state?.state ?? RoomModeState.active,
-        transitioning: state?.transitioning ?? false,
-        rhythmEnabled: state?.rhythmEnabled ?? false,
-        disabled: state?.disabled ?? false,
-        timeOffset: state?.timeOffset ?? 0,
-        brightnessOffset: state?.brightnessOffset ?? 0,
-        hubTypes: state?.hubTypes ??
-            topologyRoom.hubRoomBindings
-                .map((binding) => binding.hubKey?['hub_type']?.toString())
-                .whereType<String>()
-                .toSet()
-                .toList(),
-        manufacturer: state?.manufacturer,
-        model: state?.model,
-        deviceIds: devices
-            .where((device) => device.type == RhythmDeviceType.light)
-            .map((device) => device.id)
-            .toList(),
-        devices: devices,
-        profileSettings: state?.profileSettings,
-        observedPower: state?.observedPower,
-        lightsOn: state?.lightsOn,
-        brightness: state?.brightness,
-        kelvin: state?.kelvin,
-        moodEnabled: state?.moodEnabled ?? false,
-        moodActive: state?.moodActive ?? false,
-        standbyEnabled: state?.standbyEnabled ?? false,
-        standbyActive: state?.standbyActive ?? false,
-        motionActive: state?.motionActive,
-        motionOwned: state?.motionOwned,
-        remainingSecs: state?.remainingSecs,
-        timeoutSecs: state?.timeoutSecs,
-        warningActive: state?.warningActive,
-      ),
-    );
-  }
-
-  rooms.sort((left, right) => left.name.compareTo(right.name));
-  return rooms;
-}
-
 List<RhythmTopologyNode> _topologyNodesFromPayload(Object? payload) {
   final rawNodes =
       payload is Iterable ? payload : _asMapOrNull(payload)?['nodes'];
@@ -23271,60 +24169,6 @@ List<RhythmTopologyNode> _topologyNodesFromPayload(Object? payload) {
       .map(RhythmTopologyNode.fromJson)
       .where((node) => node.id.isNotEmpty)
       .toList(growable: false);
-}
-
-_ExpertArea _areaFromModernRoom(RhythmRoom room) {
-  final sections = <_ExpertSectionOption>[];
-  final sectionIds = <String>{};
-  for (final light in room.lights) {
-    if (!sectionIds.add(light.id)) continue;
-    sections.add(
-      _ExpertSectionOption(
-        id: light.id,
-        name: light.displayName,
-      ),
-    );
-  }
-  for (final id in room.deviceIds) {
-    if (!sectionIds.add(id)) continue;
-    sections.add(_ExpertSectionOption(id: id, name: id));
-  }
-
-  final lightCount = room.lightCount;
-  return _ExpertArea(
-    id: room.id,
-    name: room.name.isEmpty ? room.id : room.name,
-    deviceCount: lightCount > 0 ? lightCount : room.deviceCount,
-    brightnessOffset: room.brightnessOffset.round(),
-    sections: List.unmodifiable(sections),
-    lightsOn: room.lightsOn,
-    brightness: room.brightness?.clamp(0, 100).toInt(),
-    kelvin: room.kelvin?.clamp(1500, 7000).toInt(),
-    stale: room.disabled,
-  );
-}
-
-_ExpertZoneState? _aggregateModernZoneState(List<RhythmRoom> rooms) {
-  final brightnessValues =
-      rooms.map((room) => room.brightness).whereType<int>();
-  final kelvinValues = rooms.map((room) => room.kelvin).whereType<int>();
-  if (brightnessValues.isEmpty && kelvinValues.isEmpty) return null;
-
-  final brightness =
-      _averageInt(brightnessValues, fallback: 50).clamp(0, 100).toInt();
-  return _ExpertZoneState(
-    brightness: brightness,
-    actualBrightness: brightness,
-    kelvin: _averageInt(kelvinValues, fallback: 4000).clamp(1500, 7000).toInt(),
-    minBrightness: 1,
-    maxBrightness: 100,
-    brightnessSensitivity: null,
-    frozen: rooms.any((room) => room.transitioning),
-    hasRuntimeAdjustment: rooms.any(
-      (room) =>
-          room.brightnessOffset.abs() > 0.05 || room.timeOffset.abs() > 0.05,
-    ),
-  );
 }
 
 String? _areaActionForExpertMomentAction(String action) {
@@ -23363,74 +24207,191 @@ int _averageInt(Iterable<int> values, {required int fallback}) {
   return (total / count).round();
 }
 
-_RhythmDefinition _definitionFromModernRooms(List<RhythmRoom> rooms) {
-  final active =
-      rooms.map((room) => room.profileSettings).whereType<Object>().isNotEmpty;
-  return _RhythmDefinition(
-    sleepPattern: active ? 'adult' : 'standard',
-    wakeHour: 7,
-    bedHour: 22.5,
-    minBrightness: 18,
-    maxBrightness: 92,
-    sleepBrightness: 8,
-    minKelvin: 2200,
-    maxKelvin: 5200,
-    daylightDimming: 0.25,
-    naturalExposure: 0.35,
-    transitionMinutes: 35,
-    phaseBalance: 0,
-  );
-}
-
 _RhythmDefinition _rhythmDefinitionFromExpertProfile(
     Map<dynamic, dynamic> raw) {
-  final curve = _asMapOrNull(raw['curve']) ?? const {};
-  final schedule = _asMapOrNull(curve['schedule']) ?? const {};
+  final profileId = _requiredString(raw['id'], 'expert rhythm profile id');
+  final curve = _requiredMap(raw['curve'], 'expert rhythm profile curve');
+  final curveType = _requiredString(
+    curve['type'],
+    'expert rhythm profile curve type',
+  );
+  if (curveType != 'sigmoid') {
+    throw FormatException(
+      'removed-project response included unsupported expert rhythm profile curve type $curveType.',
+    );
+  }
+  final schedule =
+      _requiredMap(curve['schedule'], 'expert rhythm profile schedule');
   final wakeHour = _normalizeHour(
-    _doubleValue(
-      _asMapOrNull(schedule['wake'])?['hour'],
-      fallback: 7,
+    _requiredDouble(
+      _requiredMap(
+          schedule['wake'], 'expert rhythm profile wake schedule')['hour'],
+      'expert rhythm profile wake hour',
     ),
   );
   final bedHour = _normalizeHour(
-    _doubleValue(
-      _asMapOrNull(schedule['bed'])?['hour'],
-      fallback: 22,
+    _requiredDouble(
+      _requiredMap(
+          schedule['bed'], 'expert rhythm profile bed schedule')['hour'],
+      'expert rhythm profile bed hour',
     ),
   );
-  final minBrightness =
-      _intValue(raw['min_brightness'], fallback: 18).clamp(1, 100).toInt();
-  final maxBrightness = math
-      .max(
-        minBrightness + 1,
-        _intValue(raw['max_brightness'], fallback: 92).clamp(1, 100).toInt(),
-      )
-      .clamp(1, 100)
-      .toInt();
-  final minKelvin = _intValue(raw['min_color_temp'], fallback: 2200)
-      .clamp(1500, 7000)
-      .toInt();
-  final maxKelvin = math
-      .max(
-        minKelvin + _expertKelvinStep,
-        _intValue(raw['max_color_temp'], fallback: 5200)
-            .clamp(1500, 7000)
-            .toInt(),
-      )
-      .clamp(1500, 7000)
-      .toInt();
+  final minBrightness = _requiredIntInRange(
+    raw['min_brightness'],
+    'expert rhythm profile min brightness',
+    min: 1,
+    max: 100,
+  );
+  final maxBrightness = _requiredIntInRange(
+    raw['max_brightness'],
+    'expert rhythm profile max brightness',
+    min: 1,
+    max: 100,
+  );
+  if (maxBrightness <= minBrightness) {
+    throw const FormatException(
+      'removed-project response max brightness must exceed min brightness.',
+    );
+  }
+  final minKelvin = _requiredIntInRange(
+    raw['min_color_temp'],
+    'expert rhythm profile min color temperature',
+    min: 1500,
+    max: 7000,
+  );
+  final maxKelvin = _requiredIntInRange(
+    raw['max_color_temp'],
+    'expert rhythm profile max color temperature',
+    min: 1500,
+    max: 7000,
+  );
+  if (maxKelvin <= minKelvin) {
+    throw const FormatException(
+      'removed-project response max color temperature must exceed min color temperature.',
+    );
+  }
   final bedBrightness = _brightnessForTargetPercent(
-    _intValue(curve['bed_brightness'], fallback: 50),
+    _requiredIntInRange(
+      curve['bed_brightness'],
+      'expert rhythm profile bed brightness',
+      min: 0,
+      max: 100,
+    ),
     minBrightness,
     maxBrightness,
   );
-  final speed = _averageInt([
-    _intValue(curve['wake_speed'], fallback: 8),
-    _intValue(curve['bed_speed'], fallback: 6),
-  ], fallback: 7);
+  _requiredIntInRange(
+    curve['wake_brightness'],
+    'expert rhythm profile wake brightness',
+    min: 0,
+    max: 100,
+  );
+  final wakeSpeed = _requiredIntInRange(
+    curve['wake_speed'],
+    'expert rhythm profile wake speed',
+    min: 1,
+    max: 12,
+  );
+  final bedSpeed = _requiredIntInRange(
+    curve['bed_speed'],
+    'expert rhythm profile bed speed',
+    min: 1,
+    max: 12,
+  );
+  final speed = _averageInt([wakeSpeed, bedSpeed], fallback: 7);
+  final ascendStart = _requiredDouble(
+    curve['ascend_start'],
+    'expert rhythm profile ascend start',
+  );
+  _requiredDouble(
+    curve['descend_start'],
+    'expert rhythm profile descend start',
+  );
+  final daylightEnabled = _requiredBool(
+    raw['daylight_enabled'],
+    'expert rhythm profile daylight enabled',
+  );
+  final daylightCct = _requiredIntInRange(
+    raw['daylight_cct'],
+    'expert rhythm profile daylight color temperature',
+    min: 500,
+    max: 7000,
+  );
+  final daylightStart = _requiredIntInRange(
+    raw['daylight_start'],
+    'expert rhythm profile daylight start',
+    min: -1440,
+    max: 1440,
+  );
+  final daylightEnd = _requiredIntInRange(
+    raw['daylight_end'],
+    'expert rhythm profile daylight end',
+    min: -1440,
+    max: 1440,
+  );
+  final daylightFade = _requiredIntInRange(
+    raw['daylight_fade'],
+    'expert rhythm profile daylight fade',
+    min: 0,
+    max: 1440,
+  );
+  final colorSensitivity = _requiredDouble(
+    raw['color_sensitivity'],
+    'expert rhythm profile color sensitivity',
+  );
+  if (colorSensitivity < 0 || colorSensitivity > 10) {
+    throw const FormatException(
+      'removed-project response color sensitivity must be between 0 and 10.',
+    );
+  }
+  final brightnessSensitivityEnabled = _requiredBool(
+    raw['brightness_sensitivity_enabled'],
+    'expert rhythm profile brightness sensitivity enabled',
+  );
+  final brightnessSensitivity = _requiredDouble(
+    raw['brightness_sensitivity'],
+    'expert rhythm profile brightness sensitivity',
+  );
+  if (brightnessSensitivity < 0 || brightnessSensitivity > 10) {
+    throw const FormatException(
+      'removed-project response brightness sensitivity must be between 0 and 10.',
+    );
+  }
+  final warmNightEnabled = _requiredBool(
+    raw['warm_night_enabled'],
+    'expert rhythm profile warm night enabled',
+  );
+  final warmNightMode = _requiredString(
+    raw['warm_night_mode'],
+    'expert rhythm profile warm night mode',
+  );
+  final warmNightTarget = _requiredIntInRange(
+    raw['warm_night_target'],
+    'expert rhythm profile warm night target',
+    min: 500,
+    max: 7000,
+  );
+  final warmNightStart = _requiredIntInRange(
+    raw['warm_night_start'],
+    'expert rhythm profile warm night start',
+    min: -1440,
+    max: 1440,
+  );
+  final warmNightEnd = _requiredIntInRange(
+    raw['warm_night_end'],
+    'expert rhythm profile warm night end',
+    min: -1440,
+    max: 1440,
+  );
+  final warmNightFade = _requiredIntInRange(
+    raw['warm_night_fade'],
+    'expert rhythm profile warm night fade',
+    min: 0,
+    max: 1440,
+  );
 
   return _RhythmDefinition(
-    sleepPattern: _stringValue(raw['id']) ?? _expertProfileId,
+    sleepPattern: profileId,
     wakeHour: wakeHour,
     bedHour: bedHour,
     minBrightness: minBrightness,
@@ -23442,9 +24403,23 @@ _RhythmDefinition _rhythmDefinitionFromExpertProfile(
     naturalExposure: 0.35,
     transitionMinutes: _transitionMinutesFromSigmoidSpeed(speed),
     phaseBalance: _phaseBalanceFromAscend(
-      _doubleValue(curve['ascend_start'], fallback: wakeHour - 3.5),
+      ascendStart,
       wakeHour,
     ),
+    daylightEnabled: daylightEnabled,
+    daylightCct: daylightCct,
+    daylightStart: daylightStart,
+    daylightEnd: daylightEnd,
+    daylightFade: daylightFade,
+    colorSensitivity: colorSensitivity,
+    brightnessSensitivityEnabled: brightnessSensitivityEnabled,
+    brightnessSensitivity: brightnessSensitivity,
+    warmNightEnabled: warmNightEnabled,
+    warmNightMode: warmNightMode,
+    warmNightTarget: warmNightTarget,
+    warmNightStart: warmNightStart,
+    warmNightEnd: warmNightEnd,
+    warmNightFade: warmNightFade,
   );
 }
 
@@ -23480,6 +24455,25 @@ Map<String, dynamic> _expertProfileConfigFromDefinition(
     ..['max_brightness'] = maxBrightness
     ..['min_color_temp'] = minKelvin
     ..['max_color_temp'] = maxKelvin
+    ..['warm_night_enabled'] = definition.warmNightEnabled
+    ..['warm_night_mode'] = definition.warmNightMode
+    ..['warm_night_target'] = definition.warmNightTarget.clamp(500, 7000)
+    ..['warm_night_start'] = definition.warmNightStart.clamp(-1440, 1440)
+    ..['warm_night_end'] = definition.warmNightEnd.clamp(-1440, 1440)
+    ..['warm_night_fade'] = definition.warmNightFade.clamp(0, 1440)
+    ..['daylight_enabled'] = definition.daylightEnabled
+    ..['daylight_cct'] = definition.daylightCct.clamp(500, 7000)
+    ..['daylight_start'] = definition.daylightStart.clamp(-1440, 1440)
+    ..['daylight_end'] = definition.daylightEnd.clamp(-1440, 1440)
+    ..['daylight_fade'] = definition.daylightFade.clamp(0, 1440)
+    ..['color_sensitivity'] = _roundHundredth(
+      definition.colorSensitivity.clamp(0, 10),
+    )
+    ..['brightness_sensitivity'] = _roundHundredth(
+      definition.brightnessSensitivity.clamp(0, 10),
+    )
+    ..['brightness_sensitivity_enabled'] =
+        definition.brightnessSensitivityEnabled
     ..['curve'] = {
       'type': 'sigmoid',
       'schedule': {
@@ -23537,6 +24531,20 @@ Map<String, Object?> expertProfileConfigFromDefinitionForTest({
   required int maxKelvin,
   required double transitionMinutes,
   required double phaseBalance,
+  bool daylightEnabled = true,
+  int daylightCct = 5000,
+  int daylightStart = 60,
+  int daylightEnd = -60,
+  int daylightFade = 60,
+  double colorSensitivity = 1,
+  bool brightnessSensitivityEnabled = true,
+  double brightnessSensitivity = 1,
+  bool warmNightEnabled = true,
+  String warmNightMode = 'all',
+  int warmNightTarget = 2300,
+  int warmNightStart = -60,
+  int warmNightEnd = 60,
+  int warmNightFade = 120,
   Map<dynamic, dynamic>? base,
 }) =>
     _expertProfileConfigFromDefinition(
@@ -23553,9 +24561,105 @@ Map<String, Object?> expertProfileConfigFromDefinitionForTest({
         naturalExposure: 0,
         transitionMinutes: transitionMinutes,
         phaseBalance: phaseBalance,
+        daylightEnabled: daylightEnabled,
+        daylightCct: daylightCct,
+        daylightStart: daylightStart,
+        daylightEnd: daylightEnd,
+        daylightFade: daylightFade,
+        colorSensitivity: colorSensitivity,
+        brightnessSensitivityEnabled: brightnessSensitivityEnabled,
+        brightnessSensitivity: brightnessSensitivity,
+        warmNightEnabled: warmNightEnabled,
+        warmNightMode: warmNightMode,
+        warmNightTarget: warmNightTarget,
+        warmNightStart: warmNightStart,
+        warmNightEnd: warmNightEnd,
+        warmNightFade: warmNightFade,
       ),
       base: base,
     );
+
+@visibleForTesting
+Map<String, Object?> expertRhythmPresetLoadSummaryForTest(
+  Map<dynamic, dynamic> raw,
+) {
+  final load = _ExpertRhythmPresetLoad.fromProfiles(raw);
+  final adult = load.presets['adult'];
+  final young = load.presets['young'];
+  return {
+    'path': '$_removed-projectRuntimeApi/rhythm-presets',
+    'names': load.names,
+    'adult_wake': adult?.wakeHour,
+    'adult_bed': adult?.bedHour,
+    'adult_ascend': adult?.ascendStart,
+    'adult_descend': adult?.descendStart,
+    'young_ascend': young?.ascendStart,
+    'young_descend': young?.descendStart,
+  };
+}
+
+@visibleForTesting
+Map<String, Object?> expertRuntimePreviewSummaryForTest({
+  required Map<dynamic, dynamic> sunTimes,
+  required Map<dynamic, dynamic> curve,
+  required Map<dynamic, dynamic> steps,
+}) {
+  final parsedSun = _ExpertSunTimes.fromServer(sunTimes);
+  final parsedCurve = _ExpertCurveData.fromServer(curve);
+  final parsedSteps = _ExpertStepSequences.fromServer(steps);
+  final firstCurve = parsedCurve.points.first;
+  return {
+    'sunrise': parsedSun.sunrise,
+    'solar_noon': parsedSun.noon,
+    'curve_count': parsedCurve.points.length,
+    'first_curve_hour': firstCurve.hour,
+    'first_curve_brightness': firstCurve.brightness,
+    'step_up_count': parsedSteps.stepUp.length,
+    'step_down_count': parsedSteps.stepDown.length,
+    'first_step_up_hour': parsedSteps.stepUp.first.hour,
+  };
+}
+
+@visibleForTesting
+Map<String, Object?> expertOutdoorStatusSummaryForTest(
+  Map<dynamic, dynamic> raw,
+) {
+  final status = _ExpertOutdoorStatus.fromServer(raw);
+  return {
+    'path': '$_removed-projectRuntimeApi/outdoor-status',
+    'refresh_path': '$_removed-projectRuntimeApi/refresh-outdoor',
+    'learn_path': '$_removed-projectRuntimeApi/learn-baselines',
+    'override_path': '$_removed-projectRuntimeApi/outdoor-override',
+    'outdoor_normalized': status.outdoorNormalized,
+    'source': status.source,
+    'preferred_source': status.preferredSource,
+    'override_condition': status.override?.condition,
+    'override_expires_in_minutes': status.override?.expiresInMinutes,
+    'weather_condition': status.weatherCondition,
+    'weather_group_count': status.weatherGroups.length,
+    'first_weather_group': status.weatherGroups.first.key,
+    'condition_multiplier': status.conditionMultiplier,
+    'angle_factor': status.angleFactor,
+    'sun_elevation': status.sunElevation,
+  };
+}
+
+@visibleForTesting
+Map<String, Object?> expertServerSnapshotSummaryForTest(
+  Map<dynamic, dynamic> raw,
+) {
+  final snapshot = _ExpertServerSnapshot.fromModern(
+    state: _asMapOrNull(raw['state']),
+    now: raw,
+  );
+  return {
+    'path': '$_removed-projectRuntimeApi/now',
+    'channel': snapshot.channel,
+    'server_hour': snapshot.serverHour,
+    'brightness': snapshot.brightness,
+    'kelvin': snapshot.kelvin,
+  };
+}
 
 @visibleForTesting
 Map<String, Object?> expertDefinitionValuesFromProfileForTest(
@@ -23573,6 +24677,20 @@ Map<String, Object?> expertDefinitionValuesFromProfileForTest(
     'max_kelvin': definition.maxKelvin,
     'transition_minutes': definition.transitionMinutes,
     'phase_balance': definition.phaseBalance,
+    'daylight_enabled': definition.daylightEnabled,
+    'daylight_cct': definition.daylightCct,
+    'daylight_start': definition.daylightStart,
+    'daylight_end': definition.daylightEnd,
+    'daylight_fade': definition.daylightFade,
+    'color_sensitivity': definition.colorSensitivity,
+    'brightness_sensitivity_enabled': definition.brightnessSensitivityEnabled,
+    'brightness_sensitivity': definition.brightnessSensitivity,
+    'warm_night_enabled': definition.warmNightEnabled,
+    'warm_night_mode': definition.warmNightMode,
+    'warm_night_target': definition.warmNightTarget,
+    'warm_night_start': definition.warmNightStart,
+    'warm_night_end': definition.warmNightEnd,
+    'warm_night_fade': definition.warmNightFade,
   };
 }
 
@@ -23816,20 +24934,6 @@ Map<String, Object?> expertSwitchmapLoadSummaryForTest({
         if (option.id != null) option.id!: option.label,
     },
   };
-}
-
-Set<String> _sectionIdsForAreaFromTopology(
-  List<RhythmTopologyNode> topologyNodes,
-  String areaId,
-) {
-  return topologyNodes
-      .where(
-        (node) =>
-            node.parentId == areaId &&
-            RhythmDeviceType.fromNodeKind(node.kind) == RhythmDeviceType.light,
-      )
-      .map((node) => node.id)
-      .toSet();
 }
 
 Set<String> _sectionIdsForAreaFromExpertScope(
@@ -25100,100 +26204,6 @@ List<_ExpertZone> _zonesWithCurrent(
   return deduped;
 }
 
-List<_ExpertZone> _demoZones() {
-  return const [
-    _ExpertZone(
-      name: 'Main floor',
-      isDefault: true,
-      areas: [
-        _ExpertArea(
-          id: 'area.kitchen',
-          name: 'Kitchen',
-          deviceCount: 5,
-          brightnessOffset: 0,
-        ),
-        _ExpertArea(
-          id: 'area.living_room',
-          name: 'Living room',
-          deviceCount: 7,
-          brightnessOffset: -4,
-        ),
-        _ExpertArea(
-          id: 'area.dining',
-          name: 'Dining',
-          deviceCount: 3,
-          brightnessOffset: 2,
-        ),
-      ],
-      definition: _RhythmDefinition.defaults(),
-    ),
-    _ExpertZone(
-      name: 'Bedrooms',
-      isDefault: false,
-      areas: [
-        _ExpertArea(
-          id: 'area.primary_bedroom',
-          name: 'Primary bedroom',
-          deviceCount: 4,
-          brightnessOffset: -12,
-        ),
-        _ExpertArea(
-          id: 'area.guest_room',
-          name: 'Guest room',
-          deviceCount: 2,
-          brightnessOffset: -8,
-        ),
-      ],
-      definition: _RhythmDefinition(
-        sleepPattern: 'early',
-        wakeHour: 5.75,
-        bedHour: 21.75,
-        minBrightness: 12,
-        maxBrightness: 76,
-        sleepBrightness: 4,
-        minKelvin: 2000,
-        maxKelvin: 4600,
-        daylightDimming: 0.42,
-        naturalExposure: 0.5,
-        transitionMinutes: 45,
-        phaseBalance: -0.2,
-      ),
-    ),
-    _ExpertZone(
-      name: 'Studio',
-      isDefault: false,
-      areas: [
-        _ExpertArea(
-          id: 'area.desk',
-          name: 'Desk',
-          deviceCount: 2,
-          brightnessOffset: 8,
-        ),
-        _ExpertArea(
-          id: 'area.work_bench',
-          name: 'Work bench',
-          deviceCount: 3,
-          brightnessOffset: 12,
-        ),
-      ],
-      definition: _RhythmDefinition(
-        sleepPattern: 'late',
-        wakeHour: 8,
-        bedHour: 0.5,
-        minBrightness: 22,
-        maxBrightness: 100,
-        sleepBrightness: 10,
-        minKelvin: 2400,
-        maxKelvin: 6000,
-        daylightDimming: 0.2,
-        naturalExposure: 0.35,
-        transitionMinutes: 25,
-        phaseBalance: 0.3,
-      ),
-    ),
-  ];
-}
-
 Map<String, Object?> _expertConfigValuesFromServer(Map<dynamic, dynamic> raw) {
   final values = <String, Object?>{};
   for (final entry in raw.entries) {
@@ -25201,6 +26211,30 @@ Map<String, Object?> _expertConfigValuesFromServer(Map<dynamic, dynamic> raw) {
     if (key != null) values[key] = entry.value;
   }
   return values;
+}
+
+({String path, Map<String, Object?> data}) _expertProfileUpdateRequest(
+  Map<dynamic, dynamic> base,
+  Map<String, Object?> profileUpdates,
+) {
+  final data = _expertConfigValuesFromServer(base)..addAll(profileUpdates);
+  data['id'] = _stringValue(base['id']) ?? _expertProfileId;
+  return (
+    path: '$_removed-projectRuntimeApi/profile',
+    data: data,
+  );
+}
+
+@visibleForTesting
+Map<String, Object?> expertProfileUpdateRequestForTest(
+  Map<dynamic, dynamic> base,
+  Map<String, Object?> profileUpdates,
+) {
+  final request = _expertProfileUpdateRequest(base, profileUpdates);
+  return {
+    'path': request.path,
+    'data': request.data,
+  };
 }
 
 Map<String, Object?> _expertSettingsValuesFromServer(
@@ -25220,7 +26254,6 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     'long_press_repeat_interval',
     'motion_blink_threshold',
     'motion_warning_time',
-    'off_threshold',
     'daily_sync_hour',
     'daily_sync_minute',
     'read_only_zha',
@@ -25240,6 +26273,7 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     'default_boost_duration_minutes',
     'default_power_off_duration_minutes',
     'rhythm_cursor_step_min',
+    'card_freshness_minutes',
     'controls_pulse_window_hours',
     'controls_recent_window_minutes',
     'activity_log_min_entries',
@@ -25248,8 +26282,47 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     'tick_repeat_after_user_action',
     'tick_repeat_after_autonomous_change',
     'periodic_refresh_interval_minutes',
+    'outdoor_brightness_source',
+    'outdoor_lux_sensor',
+    'lux_smoothing_interval',
+    'lux_learned_ceiling',
+    'lux_learned_floor',
+    'outdoor_refresh_interval',
   ]) {
     if (raw.containsKey(key)) values[key] = raw[key];
+  }
+  values['off_threshold'] = _strictLightPurposeInt(
+    raw['off_threshold'],
+    'off_threshold',
+    min: 0,
+    max: 20,
+  );
+  values['filter_presets'] = _strictLightPurposePresetMap(
+    raw['filter_presets'],
+  );
+  if (raw.containsKey('experimental_tick_mode')) {
+    values['experimental_tick_mode'] = _strictExperimentalTickMode(
+      raw['experimental_tick_mode'],
+    );
+  }
+  if (raw.containsKey('multi_area_dispatch_stagger_ms')) {
+    values['multi_area_dispatch_stagger_ms'] = _strictIntSetting(
+      raw['multi_area_dispatch_stagger_ms'],
+      'multi_area_dispatch_stagger_ms',
+      min: 0,
+      max: 500,
+    );
+  }
+  values['card_freshness_minutes'] = _strictIntSetting(
+    raw['card_freshness_minutes'],
+    'card_freshness_minutes',
+    min: 1,
+    max: 720,
+  );
+  if (raw.containsKey('weather_condition_map')) {
+    values['weather_condition_map'] = _strictWeatherConditionMap(
+      raw['weather_condition_map'],
+    );
   }
 
   for (final key in const [
@@ -25270,6 +26343,14 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     values['ct_comp_end'] = ctCompensation['end_kelvin'];
     values['ct_comp_factor'] = ctCompensation['factor'];
   }
+  for (final entry in const {
+    'ct_comp_enabled': 'ct_compensation_enabled',
+    'ct_comp_begin': 'ct_compensation_begin_kelvin',
+    'ct_comp_end': 'ct_compensation_end_kelvin',
+    'ct_comp_factor': 'ct_compensation_factor',
+  }.entries) {
+    if (raw.containsKey(entry.value)) values[entry.key] = raw[entry.value];
+  }
 
   final twoStep = _asMapOrNull(raw['two_step_turn_on']);
   if (twoStep != null) {
@@ -25278,6 +26359,17 @@ Map<String, Object?> _expertSettingsValuesFromServer(
     values['two_step_bri_threshold'] = twoStep['brightness_threshold_percent'];
     final delayMs = _nullableDouble(twoStep['delay_ms']);
     if (delayMs != null) values['two_step_delay'] = delayMs / 100;
+  }
+  for (final entry in const {
+    'two_step_enabled': 'two_step_enabled',
+    'two_step_ct_threshold': 'two_step_kelvin_threshold',
+    'two_step_bri_threshold': 'two_step_brightness_threshold',
+  }.entries) {
+    if (raw.containsKey(entry.value)) values[entry.key] = raw[entry.value];
+  }
+  final flatTwoStepDelayMs = _nullableDouble(raw['two_step_delay_ms']);
+  if (flatTwoStepDelayMs != null) {
+    values['two_step_delay'] = flatTwoStepDelayMs / 100;
   }
 
   final solarRules = _asMapOrNull(raw['solar_color_rules']);
@@ -25307,6 +26399,22 @@ Map<String, Object?> _expertSettingsValuesFromServer(
       }
     }
   }
+  for (final key in const [
+    'warm_night_enabled',
+    'warm_night_mode',
+    'warm_night_target',
+    'warm_night_start',
+    'warm_night_end',
+    'warm_night_fade',
+    'daylight_enabled',
+    'daylight_cct',
+    'daylight_start',
+    'daylight_end',
+    'daylight_fade',
+    'color_sensitivity',
+  ]) {
+    if (raw.containsKey(key)) values[key] = raw[key];
+  }
 
   return values;
 }
@@ -25316,6 +26424,36 @@ Map<String, Object?> expertSettingsValuesFromServerForTest(
   Map<dynamic, dynamic> raw,
 ) =>
     _expertSettingsValuesFromServer(raw);
+
+@visibleForTesting
+List<Map<String, Object?>> lightPurposePresetsFromConfigForTest(
+  Map<String, Object?> values,
+) =>
+    [
+      for (final preset
+          in _lightPurposePresetsFromConfig(_ExpertConfig(values)))
+        {
+          'name': preset.name,
+          'at_bright': preset.atBright,
+          'at_dim': preset.atDim,
+          'off_threshold': preset.offThreshold,
+        },
+    ];
+
+@visibleForTesting
+Map<String, Object?> lightPurposePresetMapWithValueForTest(
+  Map<String, Object?> values,
+  String name,
+  String field,
+  int value,
+) =>
+    _lightPurposePresetMapWithValue(_ExpertConfig(values), name, field, value);
+
+@visibleForTesting
+List<String> lightPurposePresetNamesFromScopeForTest(
+  Map<dynamic, dynamic> raw,
+) =>
+    _lightPurposePresetNamesFromScope(raw);
 
 @visibleForTesting
 MapEntry<String, Object?> modernExpertSettingsEntryForTest(
@@ -25352,6 +26490,10 @@ int expertDurationMinutesForTest(
 @visibleForTesting
 int expertCursorStepMinutesForTest(Map<String, Object?> values) =>
     _expertCursorStepMinutes(_ExpertConfig(values));
+
+@visibleForTesting
+int expertCardFreshnessMinutesForTest(Map<String, Object?> values) =>
+    _expertCardFreshnessMinutes(_ExpertConfig(values));
 
 @visibleForTesting
 double nudgeExpertPhaseHourForTest(
@@ -25431,12 +26573,6 @@ Map<dynamic, dynamic>? _asMapOrNull(Object? value) {
   return value is Map ? value : null;
 }
 
-Map<String, dynamic> _stringMap(Object? value) {
-  final map = _stringMapOrNull(value);
-  if (map != null) return map;
-  throw FormatException('Expected JSON object, got ${value.runtimeType}');
-}
-
 Map<String, dynamic>? _stringMapOrNull(Object? value) {
   if (value is Map<String, dynamic>) return value;
   if (value is! Map) return null;
@@ -25462,6 +26598,19 @@ String? _stringValue(Object? value) {
   return text.isEmpty ? null : text;
 }
 
+String _requiredString(Object? value, String label) {
+  final parsed = _stringValue(value);
+  if (parsed == null) {
+    throw FormatException('removed-project response missing text $label.');
+  }
+  return parsed;
+}
+
+bool _requiredBool(Object? value, String label) {
+  if (value is bool) return value;
+  throw FormatException('removed-project response missing boolean $label.');
+}
+
 int _intValue(Object? value, {required int fallback}) {
   if (value is int) return value;
   if (value is num) return value.round();
@@ -25473,6 +26622,29 @@ int? _nullableInt(Object? value) {
   if (value is int) return value;
   if (value is num) return value.round();
   return int.tryParse(value.toString());
+}
+
+int _requiredInt(Object? value, String label) {
+  final parsed = _nullableInt(value);
+  if (parsed == null) {
+    throw FormatException('removed-project response missing numeric $label.');
+  }
+  return parsed;
+}
+
+int _requiredIntInRange(
+  Object? value,
+  String label, {
+  required int min,
+  required int max,
+}) {
+  final parsed = _requiredInt(value, label);
+  if (parsed < min || parsed > max) {
+    throw FormatException(
+      'removed-project response numeric $label must be between $min and $max.',
+    );
+  }
+  return parsed;
 }
 
 String? _isoFromEpochMs(Object? value) {
@@ -25506,6 +26678,60 @@ double? _nullableDouble(Object? value) {
   if (value == null) return null;
   if (value is num) return value.toDouble();
   return double.tryParse(value.toString());
+}
+
+double _requiredDouble(Object? value, String label) {
+  final parsed = _nullableDouble(value);
+  if (parsed == null) {
+    throw FormatException('removed-project response missing numeric $label.');
+  }
+  return parsed;
+}
+
+double _requiredDoubleAny(
+  Map<dynamic, dynamic> raw,
+  List<String> keys,
+  String label,
+) {
+  for (final key in keys) {
+    final parsed = _nullableDouble(raw[key]);
+    if (parsed != null) return parsed;
+  }
+  throw FormatException('removed-project response missing numeric $label.');
+}
+
+Map<dynamic, dynamic> _requiredMap(Object? value, String label) {
+  final map = _asMapOrNull(value);
+  if (map == null) {
+    throw FormatException('removed-project response included malformed $label entry.');
+  }
+  return map;
+}
+
+Map<String, Object?> _strictWeatherConditionMap(Object? value) {
+  final raw = _asMapOrNull(value);
+  if (raw == null) {
+    throw const FormatException(
+      'removed-project settings response weather_condition_map must be an object.',
+    );
+  }
+  final map = <String, Object?>{};
+  for (final entry in raw.entries) {
+    final key = _stringValue(entry.key);
+    if (key == null) {
+      throw const FormatException(
+        'removed-project settings response weather_condition_map includes an empty key.',
+      );
+    }
+    final multiplier = _nullableDouble(entry.value);
+    if (multiplier == null || multiplier < 0 || multiplier > 1) {
+      throw FormatException(
+        'removed-project settings response weather_condition_map.$key must be between 0 and 1.',
+      );
+    }
+    map[key] = multiplier;
+  }
+  return Map.unmodifiable(map);
 }
 
 List<String> _stringList(Object? value) {
@@ -25597,21 +26823,29 @@ List<String> _durationPresetValues(
   Iterable<String> includeValues = const [],
 }) {
   final values = <String>[];
+  final hasConfiguredPresets =
+      config.values.containsKey('duration_picker_presets');
 
-  void addValue(Object? raw) {
+  void addValue(Object? raw, String label, {required bool strict}) {
     final normalized = _durationPresetValue(raw);
-    if (normalized == null || values.contains(normalized)) return;
+    if (normalized == null) {
+      if (strict) {
+        throw FormatException('removed-project settings $label is not a duration.');
+      }
+      return;
+    }
+    if (values.contains(normalized)) return;
     values.add(normalized);
   }
 
   final raw = config.values['duration_picker_presets'];
   if (raw is String) {
     for (final token in raw.split(',')) {
-      addValue(token);
+      addValue(token, 'duration_picker_presets', strict: true);
     }
   } else if (raw is Iterable) {
     for (final value in raw) {
-      addValue(value);
+      addValue(value, 'duration_picker_presets', strict: true);
     }
   } else if (raw is Map) {
     final rawValues = raw['values'];
@@ -25621,18 +26855,39 @@ List<String> _durationPresetValues(
           ? rawValues.length
           : rawLen.clamp(0, rawValues.length).toInt();
       for (final value in rawValues.take(limit)) {
-        addValue(value);
+        addValue(value, 'duration_picker_presets.values', strict: true);
       }
+    } else {
+      throw const FormatException(
+        'removed-project settings duration_picker_presets.values must be a list.',
+      );
     }
+  } else if (hasConfiguredPresets) {
+    throw const FormatException(
+      'removed-project settings duration_picker_presets must be a string, list, or object.',
+    );
   }
 
   if (values.isEmpty) {
+    if (hasConfiguredPresets) {
+      throw const FormatException(
+        'removed-project settings duration_picker_presets must contain at least one duration.',
+      );
+    }
     values.addAll(const ['5', '60', '240', '1440', '10080', '0']);
   }
   for (final value in includeValues) {
-    addValue(value);
+    addValue(value, 'included duration', strict: false);
   }
   return List.unmodifiable(values);
+}
+
+String _durationPresetCsvValue(_ExpertConfig config) {
+  final raw = config.values['duration_picker_presets'];
+  if (raw is String) return raw;
+  return _durationPresetValues(config)
+      .map((value) => value == '0' ? 'forever' : value)
+      .join(',');
 }
 
 List<String> _positiveDurationPresetValues(
@@ -25673,6 +26928,15 @@ int _expertCursorStepMinutes(_ExpertConfig config) {
       .intValue('rhythm_cursor_step_min', fallback: 5)
       .clamp(1, 60)
       .toInt();
+}
+
+int _expertCardFreshnessMinutes(_ExpertConfig config) {
+  return _strictIntSetting(
+    config.values['card_freshness_minutes'],
+    'card_freshness_minutes',
+    min: 1,
+    max: 720,
+  );
 }
 
 int _expertControlsPulseWindowHours(_ExpertConfig config) {
@@ -25745,16 +27009,83 @@ String _outdoorSourceLabel(String source) {
   };
 }
 
+String _experimentalTickModeLabel(String mode) {
+  return switch (mode) {
+    'both' => 'Both',
+    'skip' => 'Skip unchanged',
+    'bri_only' => 'Brightness only',
+    'ct_only' => 'Color only',
+    _ => _titleCase(mode),
+  };
+}
+
+String _outdoorSourceConfigValue(_ExpertConfig config) {
+  final source = config.stringValue('outdoor_brightness_source', fallback: '');
+  if (_outdoorSourceOptions.contains(source)) return source;
+  final sensor = config.stringValue('outdoor_lux_sensor', fallback: '');
+  return sensor.isNotEmpty ? 'lux' : 'weather';
+}
+
+Map<String, Object?> _weatherConditionMapFromConfig(_ExpertConfig config) {
+  final raw = config.values['weather_condition_map'];
+  if (raw == null) return const {};
+  return _strictWeatherConditionMap(raw);
+}
+
+int _weatherConditionGroupPercent(
+  _ExpertConfig config,
+  _OutdoorWeatherConfigGroup group,
+) {
+  final map = _weatherConditionMapFromConfig(config);
+  final multiplier = _nullableDouble(map[group.keys.first]);
+  if (multiplier == null) return group.defaultPercent;
+  return (multiplier * 100).round().clamp(0, 100).toInt();
+}
+
+Map<String, Object?> _weatherConditionMapWithGroupValue(
+  _ExpertConfig config,
+  _OutdoorWeatherConfigGroup group,
+  int percent,
+) {
+  final next =
+      Map<String, Object?>.from(_weatherConditionMapFromConfig(config));
+  final multiplier = percent.clamp(0, 100) / 100;
+  for (final key in group.keys) {
+    next[key] = multiplier;
+  }
+  return Map.unmodifiable(next);
+}
+
+@visibleForTesting
+Map<String, Object?> expertWeatherConditionMapWithGroupValueForTest(
+  Map<String, Object?> current,
+  String groupKey,
+  int percent,
+) {
+  final group = _outdoorWeatherConfigGroups.firstWhere(
+    (group) => group.keys.contains(groupKey),
+  );
+  return _weatherConditionMapWithGroupValue(
+    _ExpertConfig({'weather_condition_map': current}),
+    group,
+    percent,
+  );
+}
+
 String _outdoorConditionLabel(
   String condition,
   _ExpertOutdoorStatus? status,
 ) {
   final fallback = switch (condition) {
     'clear' => 'Clear',
+    'sunny' => 'Sunny',
     'partly_cloudy' => 'Partly cloudy',
     'partlycloudy' => 'Partly cloudy',
     'overcast' => 'Overcast',
     'rain' => 'Rain',
+    'rainy' => 'Rainy',
+    'pouring' => 'Pouring',
+    'fog' => 'Fog',
     'storm' => 'Storm',
     'snowy' => 'Snow',
     'lightning' => 'Storm',
@@ -25766,17 +27097,6 @@ String _outdoorConditionLabel(
     return '${group.label} ${(group.multiplier * 100).round()}%';
   }
   return fallback;
-}
-
-String _modernSkyCondition(String condition) {
-  return switch (condition) {
-    'sunny' || 'clear-night' => 'clear',
-    'partlycloudy' => 'partly_cloudy',
-    'rainy' || 'pouring' => 'rain',
-    'lightning' || 'dark' => 'storm',
-    'snowy' => 'overcast',
-    _ => condition,
-  };
 }
 
 String _outdoorOverrideDuration(double? expiresInMinutes) {
@@ -26878,6 +28198,55 @@ String _compactCoordinate(double value) {
   final fixed = value.toStringAsFixed(2);
   if (fixed == '-0.00') return '0.00';
   return fixed;
+}
+
+int _sensitivityStepIndex(double value) {
+  var closest = 0;
+  var distance = double.infinity;
+  for (var i = 0; i < _expertSensitivitySteps.length; i++) {
+    final candidate = (_expertSensitivitySteps[i].multiplier - value).abs();
+    if (candidate < distance) {
+      distance = candidate;
+      closest = i;
+    }
+  }
+  return closest;
+}
+
+double _sensitivityFromSlider(double value) {
+  final index =
+      value.round().clamp(0, _expertSensitivitySteps.length - 1).toInt();
+  return _expertSensitivitySteps[index].multiplier;
+}
+
+String _sensitivityDisplay(double value) {
+  final step = _expertSensitivitySteps[_sensitivityStepIndex(value)];
+  return '${step.multiplier.toStringAsFixed(2)}: ${step.label.toLowerCase()}';
+}
+
+String _solarOffsetLabel(int minutes, String anchor) {
+  if (minutes == 0) return 'at $anchor';
+  final formatted = _formatMinutes(minutes.abs());
+  return minutes < 0 ? '$formatted before $anchor' : '$formatted after $anchor';
+}
+
+String _skyImpactSummary(_RhythmDefinition definition) {
+  final enabled = <String>[
+    if (definition.daylightEnabled) 'Cooling',
+    if (definition.brightnessSensitivityEnabled) 'Dimming',
+    if (definition.warmNightEnabled) 'Warming',
+  ];
+  return enabled.isEmpty ? 'All off' : enabled.join(' · ');
+}
+
+String _warmNightModeLabel(String value) {
+  return switch (value) {
+    'all' => 'All night',
+    'window' => 'Window',
+    'sunset' => 'After sunset',
+    'sunrise' => 'Before sunrise',
+    _ => _titleCase(value),
+  };
 }
 
 String _titleCase(String value) {
