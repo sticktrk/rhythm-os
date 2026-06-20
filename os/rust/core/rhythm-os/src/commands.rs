@@ -1157,9 +1157,7 @@ fn semantic_lights_on_override(
 ) -> Option<bool> {
     if hard_off {
         Some(false)
-    } else if mood_active && settings.mood_scene_id.is_none() {
-        Some(true)
-    } else if soft_off {
+    } else if (mood_active && settings.mood_scene_id.is_none()) || soft_off {
         Some(true)
     } else {
         None
@@ -5611,16 +5609,20 @@ fn update_scene_brightness_for_target(
     Ok(())
 }
 
-fn update_node_mood_scene_color(
-    state: &SharedState,
-    runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
-    snapshot: &rhythm_core::NodeSnapshot,
+struct MoodSceneColorUpdate {
     rgb: Rgb,
     xy: XyColor,
     brightness: Option<u8>,
     transition_ms: Option<u32>,
     persist: bool,
+}
+
+fn update_node_mood_scene_color(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    snapshot: &rhythm_core::NodeSnapshot,
+    update: MoodSceneColorUpdate,
 ) -> Result<()> {
     let node_scene_id = node_mood_scene_id(node_id);
     let (scene_id, seed_scene, current_scene_is_node_scene) = {
@@ -5651,7 +5653,7 @@ fn update_node_mood_scene_color(
             description: None,
             source: SceneSource::User,
             light: Some(LightSceneLayer {
-                default_transition_ms: transition_ms,
+                default_transition_ms: update.transition_ms,
                 default_output: None,
                 palette: Vec::new(),
                 entries: Vec::new(),
@@ -5686,9 +5688,15 @@ fn update_node_mood_scene_color(
             seed_output.or(node_output)
         }
     };
-    let output = mood_scene_color_output(existing_output, rgb, xy, brightness, transition_ms);
+    let output = mood_scene_color_output(
+        existing_output,
+        update.rgb,
+        update.xy,
+        update.brightness,
+        update.transition_ms,
+    );
     let layer = scene.light.get_or_insert_with(|| LightSceneLayer {
-        default_transition_ms: transition_ms,
+        default_transition_ms: update.transition_ms,
         default_output: None,
         palette: Vec::new(),
         entries: Vec::new(),
@@ -5700,10 +5708,10 @@ fn update_node_mood_scene_color(
             if scope_node_ids.contains(entry.target.node_id()) {
                 entry.output = mood_scene_color_output(
                     Some(entry.output.clone()),
-                    rgb,
-                    xy,
-                    brightness,
-                    transition_ms,
+                    update.rgb,
+                    update.xy,
+                    update.brightness,
+                    update.transition_ms,
                 );
             }
         }
@@ -5727,7 +5735,7 @@ fn update_node_mood_scene_color(
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.insert(scene.id.clone(), scene);
-        if persist {
+        if update.persist {
             persist_scenes_locked(&s);
         }
     }
@@ -5766,7 +5774,7 @@ fn update_node_mood_scene_color(
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
 
-    if persist {
+    if update.persist {
         persist_rooms(state);
     }
 
@@ -5904,11 +5912,13 @@ pub fn do_set_node_color(
             &runtime,
             node_id,
             &snap,
-            update.rgb,
-            xy,
-            brightness,
-            update.transition_ms,
-            persist,
+            MoodSceneColorUpdate {
+                rgb: update.rgb,
+                xy,
+                brightness,
+                transition_ms: update.transition_ms,
+                persist,
+            },
         )?;
         return build_node_state(state, node_id).and_then(|node_state| {
             serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))

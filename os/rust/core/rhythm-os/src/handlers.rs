@@ -32,6 +32,8 @@ use crate::state::SharedState;
 use crate::topology::{InputBinding, InputBindingPreset, NodeControlKind};
 use rhythm_core::{ButtonAction, LightProfileNodeOverride, Rgb, XyColor};
 
+type ProfileOverridesPatch = Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>;
+
 fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
     if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
         return Ok(items.clone());
@@ -738,7 +740,7 @@ fn parse_timer_patch_value(
 fn parse_profile_overrides_patch_value(
     body: &serde_json::Map<String, Value>,
     field_name: &str,
-) -> Result<Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>, String> {
+) -> Result<ProfileOverridesPatch, String> {
     match body.get("profile_overrides") {
         None => Ok(None),
         Some(v) if v.is_null() => Ok(Some(None)),

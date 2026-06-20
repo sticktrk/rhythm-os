@@ -1,7 +1,7 @@
 //! Tests for the Flutter API.
 
 #[cfg(test)]
-mod tests {
+mod api_tests {
     use crate::api::{
         area_ids_match,
         calculate_lighting_with_sun_times,

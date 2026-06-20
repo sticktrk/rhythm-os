@@ -454,11 +454,9 @@ pub fn ensure_removed-project_runtime(state: &SharedState) -> Result<()> {
     let mut s = state
         .lock()
         .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-    if s.light_runtime_kind == LightRuntimeKind::removed-projectCircadian && s.light_runtime.is_none() {
-        s.light_runtime = Some(Arc::new(Mutex::new(Box::new(light_runtime))));
-        s.light_runtime_config_fingerprint = Some(fingerprint);
-    } else if s.light_runtime_kind == LightRuntimeKind::removed-projectCircadian
-        && s.light_runtime_config_fingerprint.as_deref() != Some(fingerprint.as_str())
+    if s.light_runtime_kind == LightRuntimeKind::removed-projectCircadian
+        && (s.light_runtime.is_none()
+            || s.light_runtime_config_fingerprint.as_deref() != Some(fingerprint.as_str()))
     {
         s.light_runtime = Some(Arc::new(Mutex::new(Box::new(light_runtime))));
         s.light_runtime_config_fingerprint = Some(fingerprint);

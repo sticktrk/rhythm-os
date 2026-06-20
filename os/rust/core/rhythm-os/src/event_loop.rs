@@ -3425,6 +3425,8 @@ mod tests {
         }
     }
 
+    type LightsOffCalls = Arc<Mutex<Vec<(String, Option<u32>)>>>;
+
     #[derive(Default)]
     struct RecordingRuntime {
         snapshots: Vec<RoomSnapshot>,
@@ -3432,7 +3434,7 @@ mod tests {
         dim_calls: Arc<Mutex<Vec<(String, f32)>>>,
         turn_on_calls: Arc<Mutex<Vec<String>>>,
         apply_calls: Arc<Mutex<Vec<String>>>,
-        lights_off_calls: Arc<Mutex<Vec<(String, Option<u32>)>>>,
+        lights_off_calls: LightsOffCalls,
         brightness_calls: Arc<Mutex<Vec<(String, u8)>>>,
         handle_event_turns_on: bool,
         fail_handle_event: bool,

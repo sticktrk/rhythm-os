@@ -2466,8 +2466,10 @@ mod tests {
         #[test]
         fn load_persisted_state_generates_and_reuses_server_instance_id() {
             let (storage, path) = temp_storage();
-            let mut app = crate::state::AppState::default();
-            app.storage = Some(Box::new(storage));
+            let mut app = crate::state::AppState {
+                storage: Some(Box::new(storage)),
+                ..Default::default()
+            };
 
             load_persisted_state(&mut app);
 
@@ -2480,8 +2482,10 @@ mod tests {
                 .unwrap();
             assert_eq!(persisted.server_instance_id, generated_id);
 
-            let mut restarted = crate::state::AppState::default();
-            restarted.storage = Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap()));
+            let mut restarted = crate::state::AppState {
+                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                ..Default::default()
+            };
             load_persisted_state(&mut restarted);
             assert_eq!(restarted.server_instance_id, generated_id);
 

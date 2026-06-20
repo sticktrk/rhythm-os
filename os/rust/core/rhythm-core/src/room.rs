@@ -1596,7 +1596,6 @@ mod tests {
             LightProfileNodeOverride {
                 fade_ms: Some(TimerSetting::Fixed { value: 500 }),
                 motion_timeout_secs: Some(TimerSetting::Fixed { value: 75 }),
-                ..Default::default()
             },
         );
 
