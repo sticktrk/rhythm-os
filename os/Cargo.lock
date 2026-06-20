@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-adaptive"
-version = "0.6.101-beta"
+version = "0.6.101"
 dependencies = [
  "anyhow",
  "rhythm-core",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-runtime-api"
-version = "0.6.101-beta"
+version = "0.6.101"
 dependencies = [
  "async-trait",
  "serde",

@@ -38,7 +38,6 @@ Mostly invoked by the main flows above, but usable standalone:
 | Script | Purpose |
 |--------|---------|
 | `check-rpiz-image-mode.sh` | Validate that rpiz Buildroot output matches the requested security posture (dev vs prod) |
-| `check-prd-inventories.sh` | Verify generated PRD implementation inventories for quantization, activity sources, action catalog, AxisSpec rows, settings, store lifecycle policy, and shared endpoint routes |
 | `package-server-release.sh` | Package a rhythm-server desktop release tarball for CDN publishing |
 | `package-server-updates.sh` | Package rhythm-server binaries into a static OTA feed |
 | `promote-stable.sh` | Promote a tested beta release to stable by creating the matching `-stable` tag |
