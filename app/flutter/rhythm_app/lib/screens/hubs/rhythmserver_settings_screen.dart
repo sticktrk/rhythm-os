@@ -16,7 +16,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmHubInfo,
         RhythmHubStartupRetry,
         RhythmHubStartupRetryStatus,
-        RhythmLightingRuntime,
         RhythmOtaUpdateProgress,
         RhythmOtaUpdateStage,
         RhythmRoom,
@@ -1062,8 +1061,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     children: [
                       Icon(
                         Icons.history_rounded,
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.5),
+                        color:
+                            CelestialColors.textSecondary.withValues(alpha: 0.5),
                         size: 14,
                       ),
                       const SizedBox(width: 6),
@@ -2314,7 +2313,6 @@ class _RhythmServerAdvancedSettingsScreenState
   String? _authToken;
   bool _isAuthLoading = true;
   bool _isRemoteAccessUpdating = false;
-  bool _isSettingRuntimeMode = false;
 
   bool get _hasAuthToken {
     final token = _authToken?.trim();
@@ -2467,8 +2465,6 @@ class _RhythmServerAdvancedSettingsScreenState
                       _buildRemoteAccessSection(),
                       const SizedBox(height: 16),
                     ],
-                    _buildRuntimeModeSection(),
-                    const SizedBox(height: 16),
                     _buildDisableServerSection(),
                     const SizedBox(height: 40),
                   ],
@@ -2573,186 +2569,6 @@ class _RhythmServerAdvancedSettingsScreenState
         ),
       ],
     );
-  }
-
-  Widget _buildRuntimeModeSection() {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final connected =
-        syncProvider.connectionState == RhythmConnectionState.connected;
-    final runtime = syncProvider.lightingRuntime;
-    final expertMode = runtime == RhythmLightingRuntime.removed-projectCircadian;
-    final statusColor = !connected
-        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
-        : expertMode
-            ? _warningAmber
-            : _enabledGreen;
-
-    return _buildSection(
-      title: 'RUNTIME',
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-            ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: statusColor.withValues(alpha: 0.16),
-                      ),
-                      child: Icon(
-                        Icons.tune_rounded,
-                        color: statusColor,
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Light Runtime',
-                            style: TextStyle(
-                              color: CelestialColors.textPrimary,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            connected ? _runtimeModeLabel(runtime) : 'Offline',
-                            style: TextStyle(
-                              color: statusColor,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (_isSettingRuntimeMode)
-                      SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation(statusColor),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                _buildRuntimeModeSegments(
-                  expertMode: expertMode,
-                  enabled: connected && !_isSettingRuntimeMode,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  String _runtimeModeLabel(RhythmLightingRuntime runtime) {
-    return switch (runtime) {
-      RhythmLightingRuntime.rhythmAdaptive => 'Basic',
-      RhythmLightingRuntime.removed-projectCircadian => 'Expert',
-    };
-  }
-
-  Widget _buildRuntimeModeSegments({
-    required bool expertMode,
-    required bool enabled,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundDark.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.4),
-        ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _buildRuntimeModeSegment(
-              label: 'Basic',
-              selected: !expertMode,
-              enabled: enabled,
-              onTap: () => unawaited(_setExpertMode(false)),
-            ),
-          ),
-          const SizedBox(width: 4),
-          Expanded(
-            child: _buildRuntimeModeSegment(
-              label: 'Expert',
-              selected: expertMode,
-              enabled: enabled,
-              onTap: () => unawaited(_setExpertMode(true)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRuntimeModeSegment({
-    required String label,
-    required bool selected,
-    required bool enabled,
-    required VoidCallback onTap,
-  }) {
-    final color = selected ? _teal : CelestialColors.textSecondary;
-    return InkWell(
-      borderRadius: BorderRadius.circular(8),
-      onTap: enabled && !selected ? onTap : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        height: 38,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: selected ? _teal.withValues(alpha: 0.18) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: enabled || selected
-                ? color
-                : CelestialColors.textSecondary.withValues(alpha: 0.45),
-            fontSize: 13,
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _setExpertMode(bool enabled) async {
-    if (_isSettingRuntimeMode) return;
-    setState(() => _isSettingRuntimeMode = true);
-    final success =
-        await context.read<ServerSyncProvider>().setExpertMode(enabled);
-    if (!mounted) return;
-    setState(() => _isSettingRuntimeMode = false);
-    if (!success) {
-      _showSnackBar('Could not update runtime mode');
-    }
   }
 
   Widget _buildDisableServerSection() {

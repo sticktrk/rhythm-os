@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
 import '../api_auth.dart';
+import '../json_parsing.dart';
 import '../rhythm_log_interceptor.dart';
 
 class RhythmMatterWifiStatus {
@@ -73,6 +74,87 @@ class RhythmMatterPairingResponse {
   final String? error;
 }
 
+class RhythmMatterCapturesResponse {
+  const RhythmMatterCapturesResponse({
+    required this.captures,
+    this.raw = const <String, dynamic>{},
+  });
+
+  const RhythmMatterCapturesResponse.empty()
+      : captures = const <RhythmMatterCaptureSummary>[],
+        raw = const <String, dynamic>{};
+
+  factory RhythmMatterCapturesResponse.fromJson(Map<String, dynamic> json) {
+    final captures = json['captures'];
+    return RhythmMatterCapturesResponse(
+      captures: captures is List
+          ? captures
+              .map(jsonMap)
+              .nonNulls
+              .map(RhythmMatterCaptureSummary.fromJson)
+              .toList(growable: false)
+          : const <RhythmMatterCaptureSummary>[],
+      raw: Map<String, dynamic>.from(json),
+    );
+  }
+
+  final List<RhythmMatterCaptureSummary> captures;
+  final Map<String, dynamic> raw;
+}
+
+class RhythmMatterCaptureSummary {
+  const RhythmMatterCaptureSummary({
+    required this.id,
+    this.file,
+    this.source,
+    this.capturedAtUnixMs,
+    this.vendorName,
+    this.productName,
+    this.vendorId,
+    this.productId,
+    this.nodeId,
+    this.lightEndpoint,
+    this.colorModes = const <String>[],
+    this.derivedQuirks = const <String>[],
+    this.dbMatchName,
+    this.raw = const <String, dynamic>{},
+  });
+
+  factory RhythmMatterCaptureSummary.fromJson(Map<String, dynamic> json) {
+    return RhythmMatterCaptureSummary(
+      id: json['id']?.toString() ?? '',
+      file: json['file'] as String?,
+      source: json['source']?.toString(),
+      capturedAtUnixMs: _readInt(json['captured_at_unix_ms']),
+      vendorName: json['vendor_name'] as String?,
+      productName: json['product_name'] as String?,
+      vendorId: _readInt(json['vendor_id']),
+      productId: _readInt(json['product_id']),
+      nodeId: _readInt(json['node_id']),
+      lightEndpoint: _readInt(json['light_endpoint']),
+      colorModes: _readStringList(json['color_modes']),
+      derivedQuirks: _readStringList(json['derived_quirks']),
+      dbMatchName: json['db_match_name'] as String?,
+      raw: Map<String, dynamic>.from(json),
+    );
+  }
+
+  final String id;
+  final String? file;
+  final String? source;
+  final int? capturedAtUnixMs;
+  final String? vendorName;
+  final String? productName;
+  final int? vendorId;
+  final int? productId;
+  final int? nodeId;
+  final int? lightEndpoint;
+  final List<String> colorModes;
+  final List<String> derivedQuirks;
+  final String? dbMatchName;
+  final Map<String, dynamic> raw;
+}
+
 /// Stateless API client for Matter pairing endpoints on a Rhythm server.
 class RhythmMatterApi {
   static final _log = Logger('rhythm_sdk.api');
@@ -110,6 +192,31 @@ class RhythmMatterApi {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<RhythmMatterCapturesResponse> getMatterCaptures() async {
+    try {
+      final response = await _dio.get('api/matter/captures');
+      final data = jsonMap(response.data);
+      return data == null
+          ? const RhythmMatterCapturesResponse.empty()
+          : RhythmMatterCapturesResponse.fromJson(data);
+    } catch (error) {
+      _log.warning('getMatterCaptures failed', error);
+    }
+    return const RhythmMatterCapturesResponse.empty();
+  }
+
+  Future<Map<String, dynamic>?> getMatterCapture(String id) async {
+    try {
+      final response = await _dio.get(
+        'api/matter/captures/${Uri.encodeComponent(id)}',
+      );
+      return jsonMap(response.data);
+    } catch (error) {
+      _log.warning('getMatterCapture failed', error);
+    }
+    return null;
   }
 
   Future<RhythmMatterPairingResponse> pairDevice({
@@ -165,4 +272,16 @@ class RhythmMatterApi {
       return RhythmMatterPairingResponse(error: error.toString());
     }
   }
+}
+
+int? _readInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value);
+  return null;
+}
+
+List<String> _readStringList(Object? value) {
+  if (value is! List) return const <String>[];
+  return value.map((entry) => entry.toString()).toList(growable: false);
 }

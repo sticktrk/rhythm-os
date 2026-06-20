@@ -597,6 +597,51 @@ void main() {
     });
   });
 
+  group('getCurveSolar', () {
+    test('requests solar data for the requested date', () async {
+      when(
+        () => dio.get(
+          'api/curve/solar',
+          queryParameters: any(named: 'queryParameters'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/curve/solar'),
+          statusCode: 200,
+          data: {
+            'sunrise': 6.25,
+            'sunrise_local_time': '06:15:00',
+            'sunset': 19.75,
+            'sunset_local_time': '19:45:00',
+            'solar_noon': 13.0,
+            'solar_noon_local_time': '13:00:00',
+            'solar_midnight': 1.0,
+            'solar_midnight_local_time': '01:00:00',
+            'day_length': 13.5,
+            'twilight': {
+              'dawn': {'civil': 5.75},
+              'dusk': {'civil': 20.25},
+            },
+          },
+        ),
+      );
+
+      final solar = await api.getCurveSolar(date: DateTime.utc(2026, 6, 14));
+
+      expect(solar.sunrise, 6.25);
+      expect(solar.solarNoon, 13.0);
+      expect(solar.dawn!.civil, 5.75);
+      expect(solar.dusk!.civil, 20.25);
+      final query = verify(
+        () => dio.get(
+          'api/curve/solar',
+          queryParameters: captureAny(named: 'queryParameters'),
+        ),
+      ).captured.single as Map<String, dynamic>;
+      expect(query['date'], '2026-06-14');
+    });
+  });
+
   group('getStepSequences', () {
     final previewJson = {
       'config': {

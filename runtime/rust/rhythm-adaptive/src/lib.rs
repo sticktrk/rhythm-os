@@ -1,8 +1,8 @@
-//! Rhythm adaptive lighting app runtime.
+//! Rhythm adaptive light runtime.
 //!
 //! This crate hosts Rhythm's existing adaptive lighting behavior behind the
 //! neutral `rhythm-runtime-api` contract. The heavy engine primitives still
-//! live in `rhythm-core`; this wrapper is the app-runtime boundary.
+//! live in `rhythm-core`; this wrapper is the light runtime boundary.
 
 use std::sync::Arc;
 
@@ -13,11 +13,18 @@ use rhythm_core::{
     RuntimeHandle,
 };
 use rhythm_runtime_api::{
-    LightingRuntime, RuntimeCapabilities, RuntimeError, RuntimeEvent, RuntimePlan, RuntimeResult,
-    RuntimeSnapshot,
+    LightRuntime, RuntimeCapabilities, RuntimeError, RuntimeEvent, RuntimeManifest, RuntimePlan,
+    RuntimeResult, RuntimeSnapshot,
 };
 
 pub const RUNTIME_ID: &str = "rhythm-adaptive";
+
+pub fn runtime_manifest() -> RuntimeManifest {
+    RuntimeManifest::new(RUNTIME_ID, "Rhythm Adaptive")
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .with_description("Default adaptive light runtime backed by the Rhythm core engine.")
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+}
 
 pub struct RhythmAdaptiveRuntime<C, T, S, R>
 where
@@ -71,7 +78,7 @@ where
     }
 }
 
-impl<C, T, S, R> LightingRuntime for RhythmAdaptiveRuntime<C, T, S, R>
+impl<C, T, S, R> LightRuntime for RhythmAdaptiveRuntime<C, T, S, R>
 where
     C: LightController + Send + Sync + 'static,
     T: TimeProvider + Send + Sync + 'static,
@@ -87,7 +94,11 @@ where
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::lighting_app()
+        RuntimeCapabilities::light_runtime()
+    }
+
+    fn manifest(&self) -> RuntimeManifest {
+        runtime_manifest()
     }
 
     fn handle_event(
@@ -154,10 +165,10 @@ fn map_core_runtime_error(error: CoreRuntimeError) -> RuntimeError {
     RuntimeError::Runtime(error.to_string())
 }
 
-/// `LightingRuntime` adapter over the live OS `RuntimeHandle`.
+/// `LightRuntime` adapter over the live OS `RuntimeHandle`.
 ///
-/// This is the production-facing Rhythm app-runtime boundary: the OS keeps
-/// owning hub controllers and engine state, while the app-runtime call site
+/// This is the production-facing Rhythm light runtime boundary: the OS keeps
+/// owning hub controllers and engine state, while the light runtime call site
 /// receives neutral snapshots/events and gets back neutral plans.
 pub struct RuntimeHandleAdaptiveRuntime {
     inner: Arc<dyn RuntimeHandle>,
@@ -173,7 +184,7 @@ impl RuntimeHandleAdaptiveRuntime {
     }
 }
 
-impl LightingRuntime for RuntimeHandleAdaptiveRuntime {
+impl LightRuntime for RuntimeHandleAdaptiveRuntime {
     fn name(&self) -> &str {
         RUNTIME_ID
     }
@@ -183,7 +194,11 @@ impl LightingRuntime for RuntimeHandleAdaptiveRuntime {
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities::lighting_app()
+        RuntimeCapabilities::light_runtime()
+    }
+
+    fn manifest(&self) -> RuntimeManifest {
+        runtime_manifest()
     }
 
     fn handle_event(

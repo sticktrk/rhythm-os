@@ -403,7 +403,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"$PROJECT_DIR/../scripts/bundle-macos-rhythm-os.sh\"\n";
+			shellScript = "\"$PROJECT_DIR/../../../../tools/app/scripts/bundle-macos-rhythm-os.sh\"\n";
 		};
 		548AC54DEA6F5489367D72E5 /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;

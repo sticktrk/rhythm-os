@@ -204,26 +204,6 @@ void main() {
       expect(settings.autoUpdate, isFalse);
     });
 
-    test('parses runtime-only settings_changed SSE payload', () async {
-      sseEventChunks = [
-        'event: settings_changed\n'
-            'data: {"type":"settings_changed","data":{"settings":{"lighting_runtime":"removed-circadian"}}}\n\n',
-      ];
-      sseCloseDelay = const Duration(milliseconds: 100);
-
-      final connection = RhythmConnection();
-      addTearDown(connection.dispose);
-
-      final settingsFuture = connection.settingsChangedEvents.first.timeout(
-        const Duration(seconds: 2),
-      );
-
-      await connection.connect('127.0.0.1', port: server.port);
-
-      final settings = await settingsFuture;
-      expect(settings.lightingRuntime, RhythmLightingRuntime.removed-projectCircadian);
-    });
-
     test('parses light_breaker_changed SSE payload', () async {
       sseEventChunks = [
         'event: light_breaker_changed\n'
@@ -243,6 +223,72 @@ void main() {
 
       final lightBreaker = await lightBreakerFuture;
       expect(lightBreaker.enabled, isFalse);
+    });
+
+    test('parses Rust runtime SSE events', () async {
+      sseEventChunks = [
+        'event: outdoor_changed\n'
+            'data: {"type":"outdoor_changed","data":{"outdoor":{"outdoor_factor":0.4,"source":"weather","is_fallback":false,"diagnostics":{"sun_position":0.7,"sun_elevation_degrees":25.0,"sun_angle_factor":0.7,"sky_condition":"rain","sky_multiplier":0.35}}}}\n\n',
+        'event: activity_appended\n'
+            'data: {"type":"activity_appended","data":{"activity":{"id":"act-1","node_id":"room-1","action_id":"set_brightness","source":{"raw":"webserver","kind":"app","marks_touched":true},"epoch_ms":1778058932588}}}\n\n',
+        'event: scope_node_changed\n'
+            'data: {"type":"scope_node_changed","data":{"node_id":"room-1"}}\n\n',
+        'event: pipeline_trace_available\n'
+            'data: {"type":"pipeline_trace_available","data":{"node_id":"room-1","trace":{"entries":[{"stage_id":"base_curve","phase":"render","value":"brightness","input":0.2,"output":0.4}]}}}\n\n',
+        'event: power_schedules_changed\n'
+            'data: {"type":"power_schedules_changed","data":{"schedules":{"schedules":[{"id":"wake","node_id":"room-1","action":"on"}]}}}\n\n',
+        'event: sync_required\n'
+            'data: {"reason":"last_event_id_reconnect","last_event_id":"42"}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final outdoorFuture = connection.outdoorChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+      final activityFuture = connection.activityAppendedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+      final scopeFuture = connection.scopeNodeChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+      final traceFuture = connection.pipelineTraceAvailableEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+      final schedulesFuture =
+          connection.powerSchedulesChangedEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+      final syncFuture = connection.syncRequiredEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+      final rehelloFuture = connection.newNodesDetected.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      expect(connection.runtimeApi, isA<RhythmRuntimeApi>());
+      final outdoor = await outdoorFuture;
+      final activity = await activityFuture;
+      final scopeNodeId = await scopeFuture;
+      final trace = await traceFuture;
+      final schedules = await schedulesFuture;
+      final sync = await syncFuture;
+      await rehelloFuture;
+
+      expect(outdoor.source, RhythmEnvironmentSource.weather);
+      expect(outdoor.diagnostics.skyCondition, RhythmSkyCondition.rain);
+      expect(activity.id, 'act-1');
+      expect(activity.source.kind, 'app');
+      expect(scopeNodeId, 'room-1');
+      expect(trace.nodeId, 'room-1');
+      expect(trace.trace.entries.single.stageId, 'base_curve');
+      expect(schedules.schedules.single['node_id'], 'room-1');
+      expect(sync.reason, 'last_event_id_reconnect');
+      expect(sync.lastEventId, '42');
     });
 
     test('parses input_event SSE events', () async {

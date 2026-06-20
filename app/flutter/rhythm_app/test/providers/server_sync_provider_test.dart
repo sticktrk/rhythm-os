@@ -105,9 +105,6 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   bool setLightBreakerResult = true;
   int setLightBreakerCalls = 0;
   bool? lastLightBreakerEnabled;
-  bool settingsSetResult = true;
-  int settingsSetCalls = 0;
-  RhythmLightingRuntime? lastLightingRuntime;
   final List<
       ({
         String nodeId,
@@ -223,17 +220,6 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     if (!setLightBreakerResult) return false;
     lightBreakerEnabled = enabled;
     return true;
-  }
-
-  @override
-  Future<bool> settingsSet({
-    bool? powerSave,
-    bool? autoUpdate,
-    RhythmLightingRuntime? lightingRuntime,
-  }) async {
-    settingsSetCalls++;
-    lastLightingRuntime = lightingRuntime;
-    return settingsSetResult;
   }
 
   @override
@@ -647,6 +633,34 @@ RhythmSceneDefinition _testPaletteScene(String id) => RhythmSceneDefinition(
         ],
       ),
     );
+
+RhythmSceneDefinition _testOffScene(String id) => RhythmSceneDefinition(
+      id: id,
+      name: 'Off Scene',
+      light: const RhythmLightScene(
+        defaultOutput: RhythmLightSceneOutput.off(),
+      ),
+    );
+
+RhythmSceneDefinition _testPresetOnlyScene(String id) =>
+    RhythmSceneDefinition.fromJson({
+      'id': id,
+      'name': 'Reset Scene',
+      'light': {
+        'entries': [
+          {
+            'target': {
+              'kind': 'node',
+              'node_id': 'room-1',
+            },
+            'value': {
+              'kind': 'preset',
+              'preset': 'reset',
+            },
+          },
+        ],
+      },
+    });
 
 void main() {
   group('ServerSyncProvider.pushHubCredentials', () {
@@ -1632,48 +1646,6 @@ void main() {
       expect(provider.autoUpdate, isTrue);
     });
 
-    test('settings_changed without lighting_runtime preserves runtime mode',
-        () async {
-      final provider = ServerSyncProvider(
-        connection: connection,
-        roomProvider: roomProvider,
-        homeProvider: _TestHomeProvider(const []),
-      );
-      addTearDown(provider.dispose);
-
-      connection.emitHello(
-        RhythmHello.fromJson({
-          'nodes': const <Map<String, dynamic>>[],
-          'settings': {
-            'lighting_runtime': 'removed-circadian',
-            'auto_update': true,
-          },
-          'location': const <String, dynamic>{},
-        }),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-
-      expect(provider.lightingRuntime, RhythmLightingRuntime.removed-projectCircadian);
-      expect(provider.expertMode, isTrue);
-
-      connection.emitSettingsChanged(
-        RhythmSettings.fromJson({'auto_update': false}),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-
-      expect(provider.autoUpdate, isFalse);
-      expect(provider.lightingRuntime, RhythmLightingRuntime.removed-projectCircadian);
-      expect(provider.expertMode, isTrue);
-
-      connection.emitSettingsChanged(
-        RhythmSettings.fromJson({'lighting_runtime': 'rhythm-adaptive'}),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-
-      expect(provider.lightingRuntime, RhythmLightingRuntime.rhythmAdaptive);
-      expect(provider.expertMode, isFalse);
-    });
-
     test('applies light breaker state from hello and SSE', () async {
       final provider = ServerSyncProvider(
         connection: connection,
@@ -1916,10 +1888,12 @@ void main() {
       connection.dispose();
     });
 
-    test('hides generated direct-color mood scenes from picker data', () async {
+    test('hides generated and non-lit scenes from picker data', () async {
       api.scenes = [
         _testScene('evening-glow'),
         _testScene('node-mood-scene-room-1'),
+        _testOffScene('all-off'),
+        _testPresetOnlyScene('reset-room'),
       ];
 
       final fetched = await provider.fetchScenes();
@@ -3918,86 +3892,5 @@ void main() {
     expect(api.lastDeletedRoomId, 'room-1');
     expect(connection.reconnectCalls, 1);
     expect(find.text('Deleted Kitchen'), findsOneWidget);
-  });
-
-  group('runtime mode', () {
-    test('defaults to Basic / rhythm-adaptive', () {
-      final roomProvider = RoomProvider();
-      final api = _FakeRhythmServerApi();
-      final connection = _FakeRhythmConnection(api);
-      final provider = ServerSyncProvider(
-        connection: connection,
-        roomProvider: roomProvider,
-        homeProvider: _TestHomeProvider(const []),
-      );
-      addTearDown(provider.dispose);
-      addTearDown(roomProvider.dispose);
-      addTearDown(connection.dispose);
-
-      expect(provider.lightingRuntime, RhythmLightingRuntime.rhythmAdaptive);
-      expect(provider.expertMode, isFalse);
-    });
-
-    test('Expert mode selects removed-circadian', () async {
-      final roomProvider = RoomProvider();
-      final api = _FakeRhythmServerApi();
-      final connection = _FakeRhythmConnection(api);
-      final provider = ServerSyncProvider(
-        connection: connection,
-        roomProvider: roomProvider,
-        homeProvider: _TestHomeProvider(const []),
-      );
-      addTearDown(provider.dispose);
-      addTearDown(roomProvider.dispose);
-      addTearDown(connection.dispose);
-
-      final success = await provider.setExpertMode(true);
-
-      expect(success, isTrue);
-      expect(provider.expertMode, isTrue);
-      expect(api.settingsSetCalls, 1);
-      expect(api.lastLightingRuntime, RhythmLightingRuntime.removed-projectCircadian);
-    });
-
-    test('Basic mode selects rhythm-adaptive', () async {
-      final roomProvider = RoomProvider();
-      final api = _FakeRhythmServerApi();
-      final connection = _FakeRhythmConnection(api);
-      final provider = ServerSyncProvider(
-        connection: connection,
-        roomProvider: roomProvider,
-        homeProvider: _TestHomeProvider(const []),
-      );
-      addTearDown(provider.dispose);
-      addTearDown(roomProvider.dispose);
-      addTearDown(connection.dispose);
-
-      await provider.setExpertMode(true);
-      final success = await provider.setExpertMode(false);
-
-      expect(success, isTrue);
-      expect(provider.expertMode, isFalse);
-      expect(api.lastLightingRuntime, RhythmLightingRuntime.rhythmAdaptive);
-    });
-
-    test('rolls back optimistic runtime change on failure', () async {
-      final roomProvider = RoomProvider();
-      final api = _FakeRhythmServerApi()..settingsSetResult = false;
-      final connection = _FakeRhythmConnection(api);
-      final provider = ServerSyncProvider(
-        connection: connection,
-        roomProvider: roomProvider,
-        homeProvider: _TestHomeProvider(const []),
-      );
-      addTearDown(provider.dispose);
-      addTearDown(roomProvider.dispose);
-      addTearDown(connection.dispose);
-
-      final success = await provider.setExpertMode(true);
-
-      expect(success, isFalse);
-      expect(provider.lightingRuntime, RhythmLightingRuntime.rhythmAdaptive);
-      expect(provider.expertMode, isFalse);
-    });
   });
 }

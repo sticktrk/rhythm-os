@@ -12,7 +12,6 @@ use rhythm_core::{
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
-use crate::app_runtime::{LightingRuntimeKind, SharedLightingRuntime};
 use crate::auth::StoredApiAuth;
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
@@ -22,9 +21,10 @@ use crate::factory_default_config::{
     factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
+use crate::light_runtime::{LightRuntimeKind, SharedLightRuntime};
 use crate::remote_access::RemoteAccessController;
 use crate::storage::{
-    generate_server_instance_id, Storage, StoredAppRuntimeState, StoredMotionTimerEntry,
+    generate_server_instance_id, Storage, StoredLightRuntimeState, StoredMotionTimerEntry,
 };
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
@@ -428,17 +428,17 @@ pub struct AppState {
     // ---- Storage ----
     /// Platform-specific storage backend.
     pub storage: Option<Box<dyn Storage>>,
-    /// Namespaced durable state for plan-based light app runtimes.
+    /// Namespaced durable state for plan-based light runtimes.
     ///
     /// Shape: runtime id -> node id -> app-defined key -> JSON value.
-    pub app_runtime_state: StoredAppRuntimeState,
-    /// Selected plan-based lighting behavior.
-    pub lighting_runtime_kind: LightingRuntimeKind,
-    /// Stateful selected app runtime instance, if the selected runtime needs one.
-    pub app_runtime: Option<SharedLightingRuntime>,
-    /// Fingerprint of the host-derived app runtime config loaded into
-    /// [app_runtime]. Used to rebuild stateful runtimes after topology changes.
-    pub app_runtime_config_fingerprint: Option<String>,
+    pub light_runtime_state: StoredLightRuntimeState,
+    /// Selected plan-based light runtime behavior.
+    pub light_runtime_kind: LightRuntimeKind,
+    /// Stateful selected light runtime instance, if the selected runtime needs one.
+    pub light_runtime: Option<SharedLightRuntime>,
+    /// Fingerprint of the host-derived light runtime config loaded into
+    /// [light_runtime]. Used to rebuild stateful runtimes after topology changes.
+    pub light_runtime_config_fingerprint: Option<String>,
 
     // ---- Worker ----
     /// Sender for offloading work to a background thread.
@@ -714,10 +714,10 @@ impl Default for AppState {
             api_auth: StoredApiAuth::default(),
             require_api_auth: false,
             storage: None,
-            app_runtime_state: StoredAppRuntimeState::new(),
-            lighting_runtime_kind: LightingRuntimeKind::default(),
-            app_runtime: None,
-            app_runtime_config_fingerprint: None,
+            light_runtime_state: StoredLightRuntimeState::new(),
+            light_runtime_kind: LightRuntimeKind::default(),
+            light_runtime: None,
+            light_runtime_config_fingerprint: None,
             work_tx: None,
             periodic_work_tx: None,
             pending_periodic_ticks: HashMap::new(),

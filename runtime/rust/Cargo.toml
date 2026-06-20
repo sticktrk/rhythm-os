@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.6.101"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Tim Kijewski <3043754+sticktrk@users.noreply.github.com>"]

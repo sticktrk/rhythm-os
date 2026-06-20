@@ -2,9 +2,10 @@
 //!
 //! Provides `api_routes()` for standard REST endpoints.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 
+use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -99,6 +100,23 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/config/reset", post(reset_config))
         .route("/api/location", put(put_location))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route(
+            "/api/light-runtime",
+            get(get_light_runtime).put(put_light_runtime),
+        )
+        .route("/api/light-runtimes", get(get_light_runtime_manifests))
+        .route(
+            "/api/light-runtimes/:runtime_id/manifest",
+            get(get_light_runtime_manifest),
+        )
+        .route(
+            "/api/light-runtimes/:runtime_id/*path",
+            get(light_runtime_extension_get)
+                .post(light_runtime_extension_post)
+                .put(light_runtime_extension_put)
+                .patch(light_runtime_extension_patch)
+                .delete(light_runtime_extension_delete),
+        )
         .route(
             "/api/light-breaker",
             get(get_light_breaker).put(put_light_breaker),
@@ -371,6 +389,143 @@ async fn get_settings(State(state): State<SharedState>) -> ApiResponse {
 
 async fn put_settings(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_settings(&state, &body)).await
+}
+
+async fn get_light_runtime(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_light_runtime(&state)
+}
+
+async fn put_light_runtime(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_light_runtime(&state, &body)).await
+}
+
+async fn get_light_runtime_manifests() -> ApiResponse {
+    handlers::handle_get_light_runtime_manifests()
+}
+
+async fn get_light_runtime_manifest(Path(runtime_id): Path<String>) -> ApiResponse {
+    handlers::handle_get_light_runtime_manifest(&runtime_id)
+}
+
+async fn light_runtime_extension_get(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Get,
+        path,
+        params,
+        Value::Null,
+    )
+    .await
+}
+
+async fn light_runtime_extension_post(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> ApiResponse {
+    let body = match parse_optional_json_body(body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Post,
+        path,
+        params,
+        body,
+    )
+    .await
+}
+
+async fn light_runtime_extension_put(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> ApiResponse {
+    let body = match parse_optional_json_body(body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Put,
+        path,
+        params,
+        body,
+    )
+    .await
+}
+
+async fn light_runtime_extension_patch(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> ApiResponse {
+    let body = match parse_optional_json_body(body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Patch,
+        path,
+        params,
+        body,
+    )
+    .await
+}
+
+async fn light_runtime_extension_delete(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Delete,
+        path,
+        params,
+        Value::Null,
+    )
+    .await
+}
+
+async fn light_runtime_extension(
+    state: SharedState,
+    runtime_id: String,
+    method: rhythm_runtime_api::RuntimeHttpMethod,
+    path: String,
+    params: HashMap<String, String>,
+    body: Value,
+) -> ApiResponse {
+    let query = params.into_iter().collect::<BTreeMap<_, _>>();
+    run_blocking(move || {
+        handlers::handle_light_runtime_extension(&state, &runtime_id, method, &path, query, body)
+    })
+    .await
+}
+
+fn parse_optional_json_body(body: Bytes) -> Result<Value, ApiResponse> {
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| ApiResponse::bad_request(&format!("Invalid JSON: {e}")))
 }
 
 async fn get_light_breaker(State(state): State<SharedState>) -> ApiResponse {

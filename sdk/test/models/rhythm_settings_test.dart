@@ -30,23 +30,6 @@ void main() {
       expect(settings.powerSave, isTrue);
       expect(settings.hasPowerSave, isFalse);
       expect(settings.autoUpdate, isTrue);
-      expect(settings.hasLightingRuntime, isFalse);
-      expect(settings.lightingRuntime, RhythmLightingRuntime.rhythmAdaptive);
-    });
-
-    test('parses lighting runtime and aliases', () {
-      final settings = RhythmSettings.fromJson({
-        'lighting_runtime': 'removed-circadian',
-      });
-      expect(settings.hasLightingRuntime, isTrue);
-      expect(
-        settings.lightingRuntime,
-        RhythmLightingRuntime.removed-projectCircadian,
-      );
-      expect(
-        RhythmLightingRuntime.fromString('rhythm_adaptive'),
-        RhythmLightingRuntime.rhythmAdaptive,
-      );
     });
   });
 
@@ -215,6 +198,39 @@ void main() {
       expect(mode.configs, hasLength(2));
       expect(mode.activeConfig?.activeProfileId, 'sleep');
       expect(mode.activeConfig?.idleProfileId, 'sleep_idle');
+      expect(mode.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
+    });
+
+    test('parses explicit removed-project light runtime', () {
+      final mode = RhythmModeResource.fromJson({
+        'active': 'day',
+        'light_runtime': 'removed-circadian',
+        'configs': [
+          {
+            'mode': 'day',
+            'active_profile_id': 'expert',
+          },
+        ],
+      });
+
+      expect(mode.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(mode.hasLightRuntime, isTrue);
+      expect(mode.activeConfig?.activeProfileId, 'expert');
+    });
+
+    test('infers removed-project light runtime from active day profile', () {
+      final mode = RhythmModeResource.fromJson({
+        'active': 'day',
+        'configs': [
+          {
+            'mode': 'day',
+            'active_profile_id': 'expert',
+          },
+        ],
+      });
+
+      expect(mode.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(mode.hasLightRuntime, isFalse);
     });
 
     test('preserves null idle_profile_id for synthesized fallback idle', () {

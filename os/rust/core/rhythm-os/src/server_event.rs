@@ -320,14 +320,14 @@ impl MotionTimerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_runtime::LightingRuntimeKind;
+    use crate::light_runtime::LightRuntimeKind;
 
     #[test]
     fn server_event_serializes_with_tagged_type_and_data() {
         let event = ServerEvent::SettingsChanged {
             settings: SettingsDto {
                 auto_update: true,
-                lighting_runtime: LightingRuntimeKind::default(),
+                light_runtime: LightRuntimeKind::default(),
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -531,7 +531,7 @@ mod tests {
             let _ = tx.send(ServerEvent::SettingsChanged {
                 settings: SettingsDto {
                     auto_update: true,
-                    lighting_runtime: LightingRuntimeKind::default(),
+                    light_runtime: LightRuntimeKind::default(),
                 },
             });
         }
@@ -580,7 +580,7 @@ mod tests {
         let result = tx.send(ServerEvent::SettingsChanged {
             settings: SettingsDto {
                 auto_update: true,
-                lighting_runtime: LightingRuntimeKind::default(),
+                light_runtime: LightRuntimeKind::default(),
             },
         });
         assert!(

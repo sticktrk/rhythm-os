@@ -23,13 +23,13 @@ use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, CurveModifierDto,
-    HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto, LocationDto,
-    ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, NodeStateDto, NodesPollResponse,
-    ObservedPowerDto, PreferredEndpointDto, ProfilesDto, ReviewCountsDto, ReviewEntryDto,
-    ReviewHubDto, ReviewSummaryDto, RoomPollState, RoomProfileSettingsDto, RoomRhythmState,
-    RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
+    HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto,
+    LightRuntimeDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto,
+    NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto, ProfilesDto,
+    ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
+    RoomProfileSettingsDto, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot,
+    TopologyNodeControlDto, TopologyNodeDto,
 };
-use crate::app_runtime::LightingRuntimeKind;
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
     BackupHubRegistry, BackupInstallation, BackupIntegrationFile, BackupRuntimeState,
@@ -42,6 +42,7 @@ use crate::factory_default_config::{
     factory_default_mode_config_map, factory_default_mode_transition_configs,
     factory_default_power_save, factory_default_profile_bundle, factory_default_scene_map,
 };
+use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::{
     LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput, LightScenePower,
     LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest, SceneApplyResponse,
@@ -2120,7 +2121,7 @@ fn persist_settings_locked(s: &AppState) {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
             light_breaker_enabled: s.light_breaker_enabled,
-            lighting_runtime: s.lighting_runtime_kind,
+            light_runtime: s.light_runtime_kind,
             active_mode: s.active_mode,
             last_active_mode_cause: s.last_active_mode_cause,
             last_active_mode_transition_id: s.last_active_mode_transition_id.clone(),
@@ -3274,13 +3275,23 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
         auto_update: s.auto_update,
-        lighting_runtime: s.lighting_runtime_kind,
+        light_runtime: s.light_runtime_kind,
     }
 }
 
 fn build_light_breaker_dto_inner(s: &AppState) -> LightBreakerDto {
     LightBreakerDto {
         enabled: s.light_breaker_enabled,
+    }
+}
+
+fn build_light_runtime_dto_inner(s: &AppState) -> LightRuntimeDto {
+    LightRuntimeDto {
+        runtime_id: s.light_runtime_kind,
+        available_runtime_ids: vec![
+            LightRuntimeKind::RhythmAdaptive,
+            LightRuntimeKind::removed-projectCircadian,
+        ],
     }
 }
 
@@ -3337,6 +3348,12 @@ pub fn build_light_breaker(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let dto = build_light_breaker_dto_inner(&s);
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light breaker: {}", e))
+}
+
+pub fn build_light_runtime(state: &SharedState) -> Result<String> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let dto = build_light_runtime_dto_inner(&s);
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light runtime: {}", e))
 }
 
 /// Build the current mode state and policy.
@@ -6861,16 +6878,16 @@ pub fn do_light_breaker_set(state: &SharedState, enabled: bool) -> Result<String
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize: {}", e))
 }
 
-/// Select the plan-based lighting app runtime.
-pub fn do_lighting_runtime_set(
+/// Select the plan-based light runtime.
+pub fn do_light_runtime_settings_set(
     state: &SharedState,
-    runtime_kind: LightingRuntimeKind,
+    runtime_kind: LightRuntimeKind,
 ) -> Result<String> {
     let (settings, changed, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let changed = s.lighting_runtime_kind != runtime_kind;
+        let changed = s.light_runtime_kind != runtime_kind;
         let dispatch_generation = if changed {
-            crate::app_runtime::reset_app_runtime_for_kind(&mut s, runtime_kind);
+            crate::light_runtime::reset_light_runtime_for_kind(&mut s, runtime_kind);
             Some(s.invalidate_queued_light_dispatches())
         } else {
             None
@@ -6882,7 +6899,7 @@ pub fn do_lighting_runtime_set(
     if changed {
         info!(
             target: "cmd",
-            "lighting_runtime: selected={} dispatch_generation={:?}",
+            "light_runtime: selected={} dispatch_generation={:?}",
             runtime_kind.as_str(),
             dispatch_generation
         );
@@ -6896,6 +6913,12 @@ pub fn do_lighting_runtime_set(
     );
 
     serde_json::to_string(&settings).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+/// Select the active light runtime and return the runtime selector resource.
+pub fn do_light_runtime_set(state: &SharedState, runtime_kind: LightRuntimeKind) -> Result<String> {
+    do_light_runtime_settings_set(state, runtime_kind)?;
+    build_light_runtime(state)
 }
 
 /// Update global settings (partial: only provided fields are changed).
@@ -19433,33 +19456,30 @@ mod tests {
     }
 
     #[test]
-    fn lighting_runtime_set_emits_settings_changed_payload() {
+    fn light_runtime_set_emits_settings_changed_payload() {
         let (state, _rt) = setup_state(vec![]);
         let (event_tx, mut event_rx) =
             tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
         state.lock().unwrap().event_tx = Some(event_tx);
 
         let result =
-            do_lighting_runtime_set(&state, LightingRuntimeKind::removed-projectCircadian).unwrap();
+            do_light_runtime_settings_set(&state, LightRuntimeKind::removed-projectCircadian).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["lighting_runtime"], "removed-circadian");
+        assert_eq!(parsed["light_runtime"], "removed-circadian");
         assert_eq!(
-            state.lock().unwrap().lighting_runtime_kind,
-            LightingRuntimeKind::removed-projectCircadian
+            state.lock().unwrap().light_runtime_kind,
+            LightRuntimeKind::removed-projectCircadian
         );
 
-        let mut lighting_runtime = None;
+        let mut light_runtime = None;
         while let Ok(event) = event_rx.try_recv() {
             if let crate::server_event::ServerEvent::SettingsChanged { settings } = event {
-                lighting_runtime = Some(settings.lighting_runtime);
+                light_runtime = Some(settings.light_runtime);
                 break;
             }
         }
-        assert_eq!(
-            lighting_runtime,
-            Some(LightingRuntimeKind::removed-projectCircadian)
-        );
+        assert_eq!(light_runtime, Some(LightRuntimeKind::removed-projectCircadian));
     }
 
     #[test]

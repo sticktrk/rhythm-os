@@ -5,7 +5,18 @@ import 'solar_orbit.dart' show CelestialColors;
 /// Tabs on the global bottom navigation bar.
 ///
 /// Each tab swaps the body of [AppShell] while preserving its own navigator.
-enum MainNavTab { home, light, automations, devices, settings }
+enum MainNavTab {
+  home,
+  light,
+  automations,
+  devices,
+  settings,
+  runtimeHome,
+  runtimeRhythm,
+  runtimeMoments,
+  runtimeControls,
+  runtimeSettings,
+}
 
 /// Standard 5-destination bottom navigation bar.
 ///
@@ -28,6 +39,9 @@ class MainBottomNav extends StatelessWidget {
   /// data isn't ready yet.
   final Set<MainNavTab> disabledTabs;
 
+  /// Uses the runtime shell accent while a light runtime owns navigation.
+  final bool runtimeShellActive;
+
   const MainBottomNav({
     super.key,
     required this.currentBodyTab,
@@ -40,6 +54,7 @@ class MainBottomNav extends StatelessWidget {
       MainNavTab.settings,
     ],
     this.disabledTabs = const {},
+    this.runtimeShellActive = false,
   });
 
   int get _selectedIndex {
@@ -80,6 +95,36 @@ class MainBottomNav extends StatelessWidget {
           label: 'Settings',
           enabled: enabled,
         ),
+      MainNavTab.runtimeHome => NavigationDestination(
+          icon: const Icon(Icons.home_outlined),
+          selectedIcon: const Icon(Icons.home_rounded),
+          label: 'Home',
+          enabled: enabled,
+        ),
+      MainNavTab.runtimeRhythm => NavigationDestination(
+          icon: const Icon(Icons.multiline_chart_rounded),
+          selectedIcon: const Icon(Icons.multiline_chart_rounded),
+          label: 'Rhythm',
+          enabled: enabled,
+        ),
+      MainNavTab.runtimeMoments => NavigationDestination(
+          icon: const Icon(Icons.auto_awesome_outlined),
+          selectedIcon: const Icon(Icons.auto_awesome_rounded),
+          label: 'Moments',
+          enabled: enabled,
+        ),
+      MainNavTab.runtimeControls => NavigationDestination(
+          icon: const Icon(Icons.tune_outlined),
+          selectedIcon: const Icon(Icons.tune_rounded),
+          label: 'Controls',
+          enabled: enabled,
+        ),
+      MainNavTab.runtimeSettings => NavigationDestination(
+          icon: const Icon(Icons.settings_outlined),
+          selectedIcon: const Icon(Icons.settings_rounded),
+          label: 'Settings',
+          enabled: enabled,
+        ),
     };
   }
 
@@ -99,7 +144,10 @@ class MainBottomNav extends StatelessWidget {
           shadowColor: Colors.transparent,
           elevation: 0,
           height: 64,
-          indicatorColor: CelestialColors.accentBlue.withValues(alpha: 0.18),
+          indicatorColor: (runtimeShellActive
+                  ? const Color(0xFFFEAC60)
+                  : CelestialColors.accentBlue)
+              .withValues(alpha: 0.18),
           indicatorShape: const StadiumBorder(),
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           labelTextStyle: WidgetStateProperty.resolveWith((states) {

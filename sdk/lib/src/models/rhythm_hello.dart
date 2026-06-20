@@ -23,12 +23,14 @@ class RhythmHello {
   final Map<String, dynamic> activeProfile;
   final RhythmModeResource? mode;
   final List<RhythmModeTransitionConfig> transitions;
+  final List<Map<String, dynamic>> powerSchedules;
   final List<RhythmInputBinding> inputBindings;
   final List<RhythmCurveConfig> profiles;
   final List<RhythmSceneDefinition> scenes;
   final Map<String, dynamic> location;
   final RhythmSettings? settings;
   final RhythmLightBreaker? lightBreaker;
+  final RhythmLightRuntime lightRuntime;
   final RhythmReviewSummary review;
   final int? lastTickEpochMs;
 
@@ -52,12 +54,14 @@ class RhythmHello {
     required this.activeProfile,
     this.mode,
     this.transitions = const [],
+    this.powerSchedules = const [],
     this.inputBindings = const [],
     this.profiles = const [],
     this.scenes = const [],
     required this.location,
     this.settings,
     this.lightBreaker,
+    this.lightRuntime = RhythmLightRuntime.rhythmAdaptive,
     this.review = const RhythmReviewSummary(),
     this.lastTickEpochMs,
     this.effectiveFadeMs,
@@ -83,6 +87,10 @@ class RhythmHello {
     final location = _normalizeLocation(json);
     final activeProfile = normalizeActiveProfile(json);
     final modeJson = jsonMap(json['mode']);
+    final modeResource =
+        modeJson != null ? RhythmModeResource.fromJson(modeJson) : null;
+    final settings =
+        settingsJson != null ? RhythmSettings.fromJson(settingsJson) : null;
     final capabilitiesJson = jsonMap(json['capabilities']);
     final reviewJson = jsonMap(json['review']);
     final profiles = ((json['profiles'] as List<dynamic>?) ?? const <dynamic>[])
@@ -98,6 +106,22 @@ class RhythmHello {
     final activeProfileMap = jsonMap(json['active_profile']);
     final effectiveProfile =
         jsonMap(activeProfileMap?['effective']) ?? const <String, dynamic>{};
+    final activeProfileId = activeProfile['id'] as String? ??
+        modeResource?.activeConfig?.activeProfileId;
+    final runtimeId = json['light_runtime'] as String? ??
+        json['runtime_id'] as String? ??
+        (settings?.hasLightRuntime == true
+            ? settings?.lightRuntime.id
+            : null) ??
+        (modeResource?.hasLightRuntime == true
+            ? modeResource?.lightRuntime.id
+            : null);
+    final lightRuntime = runtimeId == null
+        ? (modeResource?.lightRuntime ??
+            (activeProfileId == 'expert'
+                ? RhythmLightRuntime.removed-projectCircadian
+                : RhythmLightRuntime.rhythmAdaptive))
+        : RhythmLightRuntime.fromId(runtimeId);
     return RhythmHello(
       version: json['version'] as String? ?? '0.0.0',
       serverInstanceId: json['server_instance_id'] as String?,
@@ -120,13 +144,19 @@ class RhythmHello {
           ? null
           : RhythmCapabilities.fromJson(capabilitiesJson),
       activeProfile: activeProfile,
-      mode: modeJson != null ? RhythmModeResource.fromJson(modeJson) : null,
+      mode: modeResource,
       transitions:
           ((json['transitions'] as List<dynamic>?) ?? const <dynamic>[])
               .map(jsonMap)
               .nonNulls
               .map(RhythmModeTransitionConfig.fromJson)
               .toList(),
+      powerSchedules:
+          ((json['power_schedules'] as List<dynamic>?) ?? const <dynamic>[])
+              .map(jsonMap)
+              .nonNulls
+              .map(Map<String, dynamic>.from)
+              .toList(growable: false),
       inputBindings:
           ((json['input_bindings'] as List<dynamic>?) ?? const <dynamic>[])
               .map(jsonMap)
@@ -136,11 +166,11 @@ class RhythmHello {
       profiles: profiles,
       scenes: scenes,
       location: location,
-      settings:
-          settingsJson != null ? RhythmSettings.fromJson(settingsJson) : null,
+      settings: settings,
       lightBreaker: lightBreakerJson != null
           ? RhythmLightBreaker.fromJson(lightBreakerJson)
           : null,
+      lightRuntime: lightRuntime,
       review: reviewJson == null
           ? const RhythmReviewSummary()
           : RhythmReviewSummary.fromJson(reviewJson),

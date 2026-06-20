@@ -1,0 +1,311 @@
+{
+  "axes": [
+    {
+      "axis": "mode",
+      "combine": "replace",
+      "kinds": [
+        "home",
+        "zone",
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "not_reset"
+    },
+    {
+      "axis": "profile",
+      "combine": "replace_map_union",
+      "kinds": [
+        "home",
+        "zone",
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "not_reset"
+    },
+    {
+      "axis": "mid",
+      "combine": "replace",
+      "kinds": [
+        "zone",
+        "room"
+      ],
+      "promotion": "whole_axis",
+      "reset_behavior": "dirty_expires_at_phase_boundary_unless_frozen"
+    },
+    {
+      "axis": "freeze",
+      "combine": "replace_tri_state",
+      "kinds": [
+        "zone",
+        "room"
+      ],
+      "promotion": "frozen_at_only",
+      "reset_behavior": "dirty_conditional_reanchor_on_unfreeze"
+    },
+    {
+      "axis": "brightness_override",
+      "combine": "replace",
+      "kinds": [
+        "zone",
+        "room"
+      ],
+      "promotion": "whole_axis",
+      "reset_behavior": "dirty_decays"
+    },
+    {
+      "axis": "brightness_trim",
+      "combine": "add",
+      "kinds": [
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "dirty_decays"
+    },
+    {
+      "axis": "color_override",
+      "combine": "replace",
+      "kinds": [
+        "zone",
+        "room"
+      ],
+      "promotion": "whole_axis",
+      "reset_behavior": "dirty_decays"
+    },
+    {
+      "axis": "boost",
+      "combine": "replace",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "power_independent_expires"
+    },
+    {
+      "axis": "balance",
+      "combine": "replace",
+      "kinds": [
+        "room",
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "permanent_config"
+    },
+    {
+      "axis": "zone_sun_sensitivity",
+      "combine": "replace",
+      "kinds": [
+        "zone"
+      ],
+      "promotion": "none",
+      "reset_behavior": "permanent_config"
+    },
+    {
+      "axis": "local_sun_exposure",
+      "combine": "replace",
+      "kinds": [
+        "room",
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "permanent_config"
+    },
+    {
+      "axis": "power",
+      "combine": "replace_tri_state",
+      "kinds": [
+        "room",
+        "section",
+        "device"
+      ],
+      "promotion": "none",
+      "reset_behavior": "power_not_dirty"
+    },
+    {
+      "axis": "auto_off",
+      "combine": "replace_slot",
+      "kinds": [
+        "room",
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "auto_off_expires"
+    },
+    {
+      "axis": "power_schedule",
+      "combine": "replace",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "recurring_config"
+    },
+    {
+      "axis": "auto_on_participation",
+      "combine": "replace",
+      "kinds": [
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "permanent_config"
+    },
+    {
+      "axis": "auto_off_participation",
+      "combine": "replace",
+      "kinds": [
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "permanent_config"
+    },
+    {
+      "axis": "filter",
+      "combine": "replace",
+      "kinds": [
+        "device"
+      ],
+      "promotion": "none",
+      "reset_behavior": "permanent_config"
+    },
+    {
+      "axis": "fade",
+      "combine": "replace",
+      "kinds": [
+        "room",
+        "section"
+      ],
+      "promotion": "none",
+      "reset_behavior": "fade_clock_derived"
+    },
+    {
+      "axis": "time_offset",
+      "combine": "add",
+      "kinds": [
+        "home",
+        "zone",
+        "room",
+        "device"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "brightness_offset",
+      "combine": "add",
+      "kinds": [
+        "home",
+        "zone",
+        "room",
+        "device"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "rhythm_enabled",
+      "combine": "and",
+      "kinds": [
+        "home",
+        "zone",
+        "room",
+        "section",
+        "device"
+      ],
+      "promotion": "none",
+      "reset_behavior": "preserved_by_resets"
+    },
+    {
+      "axis": "disabled",
+      "combine": "or",
+      "kinds": [
+        "home",
+        "zone",
+        "room",
+        "section",
+        "device"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "soft_off",
+      "combine": "or",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "mood",
+      "combine": "or",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "hard_off",
+      "combine": "or",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "warning",
+      "combine": "or",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    },
+    {
+      "axis": "standby_enabled",
+      "combine": "own_only",
+      "kinds": [
+        "room"
+      ],
+      "promotion": "none",
+      "reset_behavior": "existing_runtime_axis"
+    }
+  ],
+  "generated_by": "tools/os/scripts/prd-inventory/extract_axis_specs.py",
+  "source": "rust/core/rhythm-core/src/axis.rs",
+  "summary": {
+    "axis_count": 27,
+    "combines": {
+      "add": 3,
+      "and": 1,
+      "or": 5,
+      "own_only": 1,
+      "replace": 13,
+      "replace_map_union": 1,
+      "replace_slot": 1,
+      "replace_tri_state": 2
+    },
+    "promotable_axes": 4,
+    "promotions": {
+      "frozen_at_only": 1,
+      "none": 23,
+      "whole_axis": 3
+    },
+    "reset_behaviors": {
+      "auto_off_expires": 1,
+      "dirty_conditional_reanchor_on_unfreeze": 1,
+      "dirty_decays": 3,
+      "dirty_expires_at_phase_boundary_unless_frozen": 1,
+      "existing_runtime_axis": 8,
+      "fade_clock_derived": 1,
+      "not_reset": 2,
+      "permanent_config": 6,
+      "power_independent_expires": 1,
+      "power_not_dirty": 1,
+      "preserved_by_resets": 1,
+      "recurring_config": 1
+    }
+  },
+  "version": 1
+}

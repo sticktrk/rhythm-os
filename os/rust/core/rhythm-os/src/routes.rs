@@ -126,6 +126,22 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT"],
     },
     SharedRoute {
+        path: "/api/light-runtime",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/light-runtimes",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/light-runtimes/:runtime_id/manifest",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/light-runtimes/:runtime_id/settings",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
         path: "/api/light-breaker",
         methods: &["GET", "PUT"],
     },

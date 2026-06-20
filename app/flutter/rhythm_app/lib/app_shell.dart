@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnectionState, RhythmMode;
+    show
+        RhythmConnectionState,
+        RhythmLightRuntime,
+        RhythmLightRuntimePresentation,
+        RhythmMode;
 import 'models/config_model.dart';
 import 'backend/auth/auth_user.dart';
 import 'providers/room_provider.dart';
@@ -21,6 +26,7 @@ import 'screens/settings/light_screen.dart';
 import 'screens/settings/sections/lights_devices_section.dart';
 import 'screens/settings/settings_screen.dart';
 import 'screens/sun_position_screen.dart';
+import 'features/circadian_expert/circadian_expert_screen.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
 import 'main.dart';
@@ -53,7 +59,7 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _modeActionSseHandoffGrace = Duration(seconds: 3);
 
-  static const _tabs = [
+  static const _rhythmAdaptiveTabs = [
     MainNavTab.home,
     MainNavTab.light,
     MainNavTab.automations,
@@ -61,8 +67,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     MainNavTab.settings,
   ];
 
+  static const _runtimeShellTabs = [
+    MainNavTab.runtimeHome,
+    MainNavTab.runtimeRhythm,
+    MainNavTab.runtimeMoments,
+    MainNavTab.runtimeControls,
+    MainNavTab.runtimeSettings,
+  ];
+
   int _tabIndex = 0;
-  // Keyed by tab identity (not index) so reordering [_tabs] doesn't strand
+  // Keyed by tab identity (not index) so swapping tab sets doesn't strand
   // a tab's Navigator state on the wrong screen — the initial route attached
   // to a Navigator GlobalKey survives hot reload, so per-index keys would
   // make a swap appear to "lose" screens until a full restart.
@@ -75,6 +89,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final PageController _roomPageController = PageController();
   bool _hadServerHub = false;
   bool _serverRemovalCleanupPending = false;
+  bool _runtimeShellActive = false;
+  bool _lightRuntimeSwitching = false;
   RhythmMode? _pendingModeAction;
   Timer? _pendingModeActionClearTimer;
   RoomProvider? _pendingModeActionRoomProvider;
@@ -97,7 +113,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _serverConnectGrace = Duration(seconds: 5);
   Timer? _serverConnectGraceTimer;
 
-  MainNavTab get _currentTab => _tabs[_tabIndex];
+  List<MainNavTab> get _activeTabs =>
+      _runtimeShellActive ? _runtimeShellTabs : _rhythmAdaptiveTabs;
+
+  MainNavTab get _currentTab {
+    final tabs = _activeTabs;
+    if (_tabIndex < 0 || _tabIndex >= tabs.length) return tabs.first;
+    return tabs[_tabIndex];
+  }
 
   @override
   void initState() {
@@ -196,7 +219,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   void _handleTabSelected(MainNavTab tab) {
-    final newIndex = _tabs.indexOf(tab);
+    final tabs = _activeTabs;
+    final newIndex = tabs.indexOf(tab);
     if (newIndex < 0) return;
 
     if (newIndex == _tabIndex) {
@@ -218,7 +242,140 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         MainNavTab.automations => 'automations',
         MainNavTab.devices => 'devices',
         MainNavTab.settings => 'settings',
+        MainNavTab.runtimeHome => 'runtime_home',
+        MainNavTab.runtimeRhythm => 'runtime_rhythm',
+        MainNavTab.runtimeMoments => 'runtime_moments',
+        MainNavTab.runtimeControls => 'runtime_controls',
+        MainNavTab.runtimeSettings => 'runtime_settings',
       };
+
+  void _showremoved-projectRuntimeHome() {
+    setState(() {
+      _runtimeShellActive = true;
+      _tabIndex = 0;
+      _builtTabs.add(MainNavTab.runtimeHome);
+    });
+    AnalyticsService().logScreenView(_screenNameFor(MainNavTab.runtimeHome));
+  }
+
+  void _showRhythmAdaptiveRuntimeHome() {
+    setState(() {
+      _runtimeShellActive = false;
+      _tabIndex = 0;
+      _builtTabs.add(MainNavTab.home);
+    });
+    AnalyticsService().logScreenView(_screenNameFor(MainNavTab.home));
+  }
+
+  void _syncLightRuntimeUiFromServer(
+    RhythmLightRuntime lightRuntime,
+    bool serverSynced,
+  ) {
+    if (_lightRuntimeSwitching) return;
+    if (!serverSynced && !HueServiceLocator.isDemoMode) return;
+    final shouldUseRuntimeShell = lightRuntime.usesRuntimeShell;
+    if (_runtimeShellActive == shouldUseRuntimeShell) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _runtimeShellActive == shouldUseRuntimeShell) return;
+      if (shouldUseRuntimeShell) {
+        _showremoved-projectRuntimeHome();
+      } else {
+        _showRhythmAdaptiveRuntimeHome();
+      }
+    });
+  }
+
+  Future<bool> _confirmLightRuntimeSwitch({
+    required bool toremoved-projectRuntime,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: Text(
+          toremoved-projectRuntime
+              ? 'Switch to Circadian Expert Mode?'
+              : 'Switch to Basic Mode?',
+        ),
+        content: Text(
+          toremoved-projectRuntime
+              ? 'Your Basic settings stay saved. Lights will transition to the expert sigmoid profile.'
+              : 'Your Expert settings stay saved. Lights will transition back to the Basic super-Gaussian profile.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child:
+                Text(toremoved-projectRuntime ? 'Switch to Expert' : 'Switch to Basic'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
+  void _showLightRuntimeSwitchError(bool toremoved-projectRuntime) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: Text(
+          toremoved-projectRuntime
+              ? 'Could not switch to Expert Mode.'
+              : 'Could not switch to Basic Mode.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _selectremoved-projectRuntime() async {
+    if (_runtimeShellActive || _lightRuntimeSwitching) return;
+    final confirmed = await _confirmLightRuntimeSwitch(toremoved-projectRuntime: true);
+    if (!confirmed || !mounted) return;
+
+    setState(() => _lightRuntimeSwitching = true);
+    HapticFeedback.heavyImpact();
+    try {
+      final success = await context
+          .read<ServerSyncProvider>()
+          .dispatchSetLightRuntime(RhythmLightRuntime.removed-projectCircadian);
+      if (!success) {
+        _showLightRuntimeSwitchError(true);
+        return;
+      }
+      if (mounted) _showremoved-projectRuntimeHome();
+    } finally {
+      if (mounted) {
+        setState(() => _lightRuntimeSwitching = false);
+      }
+    }
+  }
+
+  Future<void> _selectRhythmAdaptiveRuntime() async {
+    if (!_runtimeShellActive || _lightRuntimeSwitching) return;
+    final confirmed = await _confirmLightRuntimeSwitch(toremoved-projectRuntime: false);
+    if (!confirmed || !mounted) return;
+
+    setState(() => _lightRuntimeSwitching = true);
+    HapticFeedback.mediumImpact();
+    try {
+      final success = await context
+          .read<ServerSyncProvider>()
+          .dispatchSetLightRuntime(RhythmLightRuntime.rhythmAdaptive);
+      if (!success) {
+        _showLightRuntimeSwitchError(false);
+        return;
+      }
+      if (mounted) _showRhythmAdaptiveRuntimeHome();
+    } finally {
+      if (mounted) {
+        setState(() => _lightRuntimeSwitching = false);
+      }
+    }
+  }
 
   /// Intercepts the system back button:
   ///   1. pop the active tab's nested stack if possible,
@@ -233,6 +390,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     if (_tabIndex != 0) {
       setState(() => _tabIndex = 0);
+      return;
+    }
+    if (_runtimeShellActive) {
+      await _selectRhythmAdaptiveRuntime();
       return;
     }
     await SystemNavigator.pop();
@@ -254,7 +415,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         navKey.currentState?.popUntil((route) => route.isFirst);
       }
       setState(() {
-        _tabIndex = _tabs.indexOf(MainNavTab.home);
+        _runtimeShellActive = false;
+        _tabIndex = _rhythmAdaptiveTabs.indexOf(MainNavTab.home);
         _builtTabs.add(MainNavTab.home);
         _serverLostConnection = false;
       });
@@ -542,6 +704,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final serverSynced = context.select<ServerSyncProvider, bool>(
       (s) => s.hasBeenSynced,
     );
+    final lightRuntime = context.select<ServerSyncProvider, RhythmLightRuntime>(
+      (s) => s.lightRuntime,
+    );
+    _syncLightRuntimeUiFromServer(lightRuntime, serverSynced);
     final visibleTabs = _computeVisibleTabs(serverSynced: serverSynced);
     final disabledTabs = _computeDisabledTabs(serverSynced: serverSynced);
 
@@ -555,7 +721,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         if (_computeDisabledTabs(serverSynced: synced).contains(_currentTab)) {
           setState(() {
             _tabIndex = 0;
-            _builtTabs.add(_tabs[0]);
+            _builtTabs.add(_activeTabs.first);
           });
         }
       });
@@ -570,80 +736,113 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           final isVirtual = VirtualExperienceService.instance.isActive;
           final showPreHomeAccountControl =
               !isVirtual && accountControlCandidate;
-          return Scaffold(
-            backgroundColor: CelestialColors.backgroundDark,
-            body: Stack(
-              children: [
-                Column(
-                  children: [
-                    if (isVirtual)
-                      VirtualExperienceBanner(
-                        onExit: VirtualExperienceService.instance.exit,
-                      ),
-                    Expanded(
-                      // Banner already consumed the status-bar inset; the tab
-                      // screens below use SafeArea(top:true) and would otherwise
-                      // double-pad.
-                      child: MediaQuery.removePadding(
-                        context: context,
-                        removeTop: isVirtual,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: List.generate(
-                            _tabs.length,
-                            _buildTabSlot,
+          return AnimatedSwitcher(
+            duration: const Duration(milliseconds: 650),
+            switchInCurve: Curves.easeOutBack,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: _lightRuntimeFlipTransition,
+            child: Scaffold(
+              key: ValueKey<bool>(_runtimeShellActive),
+              backgroundColor: CelestialColors.backgroundDark,
+              body: Stack(
+                children: [
+                  Column(
+                    children: [
+                      if (isVirtual)
+                        VirtualExperienceBanner(
+                          onExit: VirtualExperienceService.instance.exit,
+                        ),
+                      Expanded(
+                        // Banner already consumed the status-bar inset; the tab
+                        // screens below use SafeArea(top:true) and would otherwise
+                        // double-pad.
+                        child: MediaQuery.removePadding(
+                          context: context,
+                          removeTop: isVirtual,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: List.generate(
+                              _activeTabs.length,
+                              _buildTabSlot,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
-                if (enteringHome)
-                  Positioned.fill(
-                    child: Consumer2<HomeProvider, ServerSyncProvider>(
-                      builder: (context, homeProvider, serverSync, _) {
-                        final serverHub =
-                            homeProvider.getFirstHubOfType(HubType.server);
-                        if (serverHub == null) {
-                          return const SizedBox.shrink();
-                        }
-                        return _buildHomeEntryState(
-                          serverSync: serverSync,
-                          serverHub: serverHub,
-                          homeName: homeProvider.currentHome?.name,
-                        );
-                      },
-                    ),
+                    ],
                   ),
-                if (!hideChrome)
-                  Positioned(
-                    right: 14,
-                    bottom: 14,
-                    child: _FloatingSunButton(
-                      onTap: () => SunPositionScreen.show(context),
+                  if (enteringHome)
+                    Positioned.fill(
+                      child: Consumer2<HomeProvider, ServerSyncProvider>(
+                        builder: (context, homeProvider, serverSync, _) {
+                          final serverHub =
+                              homeProvider.getFirstHubOfType(HubType.server);
+                          if (serverHub == null) {
+                            return const SizedBox.shrink();
+                          }
+                          return _buildHomeEntryState(
+                            serverSync: serverSync,
+                            serverHub: serverHub,
+                            homeName: homeProvider.currentHome?.name,
+                          );
+                        },
+                      ),
                     ),
-                  ),
-                if (showPreHomeAccountControl)
-                  Positioned(
-                    top: MediaQuery.of(context).padding.top + 8,
-                    right: 18,
-                    child: _PreHomeAccountButton(
-                      isBusy: _accountActionInProgress,
-                      onSignIn: _showPreHomeSignIn,
-                      onLogOut: _logOutFromPreHome,
+                  if (!hideChrome)
+                    Positioned(
+                      right: 14,
+                      bottom: 14,
+                      child: _FloatingSunButton(
+                        onTap: () => SunPositionScreen.show(context),
+                      ),
                     ),
-                  ),
-              ],
+                  if (showPreHomeAccountControl)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 8,
+                      right: 18,
+                      child: _PreHomeAccountButton(
+                        isBusy: _accountActionInProgress,
+                        onSignIn: _showPreHomeSignIn,
+                        onLogOut: _logOutFromPreHome,
+                      ),
+                    ),
+                ],
+              ),
+              bottomNavigationBar: hideChrome
+                  ? null
+                  : _buildBottomNav(
+                      visibleTabs: visibleTabs,
+                      disabledTabs: disabledTabs,
+                    ),
             ),
-            bottomNavigationBar: hideChrome
-                ? null
-                : _buildBottomNav(
-                    visibleTabs: visibleTabs,
-                    disabledTabs: disabledTabs,
-                  ),
           );
         },
       ),
+    );
+  }
+
+  Widget _lightRuntimeFlipTransition(
+    Widget child,
+    Animation<double> animation,
+  ) {
+    final incoming = child.key == ValueKey<bool>(_runtimeShellActive);
+    return AnimatedBuilder(
+      animation: animation,
+      child: child,
+      builder: (context, child) {
+        final turn = 1 - animation.value;
+        final angle = turn * math.pi * 0.5 * (incoming ? 1 : -1);
+        final scale = 0.94 + animation.value * 0.06;
+        return Transform(
+          alignment: Alignment.center,
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.0015)
+            ..rotateY(angle),
+          child: Transform.scale(
+            scale: scale,
+            child: child,
+          ),
+        );
+      },
     );
   }
 
@@ -651,13 +850,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// navbar shape stays stable. Tabs whose dependencies aren't met get
   /// disabled via [_computeDisabledTabs] instead of being hidden.
   List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
-    return const [
-      MainNavTab.home,
-      MainNavTab.light,
-      MainNavTab.automations,
-      MainNavTab.devices,
-      MainNavTab.settings,
-    ];
+    return _activeTabs;
   }
 
   /// Tabs to grey-out and reject taps on. Automations is disabled until the
@@ -666,13 +859,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// `hasBeenSynced` signal so the disabled state doesn't flicker on
   /// transient reconnects.
   Set<MainNavTab> _computeDisabledTabs({required bool serverSynced}) {
+    if (_runtimeShellActive) return const {};
     return {
       if (!serverSynced) MainNavTab.automations,
     };
   }
 
   Widget _buildTabSlot(int index) {
-    final tab = _tabs[index];
+    final tab = _activeTabs[index];
     final isActive = index == _tabIndex;
     return Offstage(
       offstage: !isActive,
@@ -695,7 +889,24 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       MainNavTab.automations => _buildAutomationsTab(),
       MainNavTab.devices =>
         const LightsDevicesDetailScreen(showBackButton: false),
-      MainNavTab.settings => const SettingsScreen(),
+      MainNavTab.settings => SettingsScreen(
+          onSelectremoved-projectCircadianRuntime: () {
+            unawaited(_selectremoved-projectRuntime());
+          },
+        ),
+      MainNavTab.runtimeHome => const CircadianExpertScreen(
+          showBackButton: false,
+          showToolStrip: false,
+        ),
+      MainNavTab.runtimeRhythm => const CircadianExpertRhythmScreen(),
+      MainNavTab.runtimeMoments => const CircadianExpertMomentsTabScreen(),
+      MainNavTab.runtimeControls => const CircadianExpertControlsTabScreen(),
+      MainNavTab.runtimeSettings => SettingsScreen(
+          runtimeShellActive: true,
+          onSelectRhythmAdaptiveRuntime: () {
+            unawaited(_selectRhythmAdaptiveRuntime());
+          },
+        ),
     };
   }
 
@@ -708,6 +919,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       onTabSelected: _handleTabSelected,
       tabs: visibleTabs,
       disabledTabs: disabledTabs,
+      runtimeShellActive: _runtimeShellActive,
     );
   }
 

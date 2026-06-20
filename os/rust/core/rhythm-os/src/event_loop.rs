@@ -376,7 +376,7 @@ pub fn process_button_inline(
     };
 
     let event = runtime_event_for_button(node_id, action, device_id);
-    match crate::app_runtime::run_selected_app_runtime_event(state, event) {
+    match crate::light_runtime::run_selected_light_runtime_event(state, event) {
         Ok(report) => {
             tracing::info!(
                 target: "evt",
@@ -2344,7 +2344,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 dispatch_spacing,
             );
             let event = runtime_event_for_button(&node_id, action, device_id.as_deref());
-            match crate::app_runtime::run_selected_app_runtime_event(state, event) {
+            match crate::light_runtime::run_selected_light_runtime_event(state, event) {
                 Ok(report) => {
                     tracing::info!(
                         target: "evt",
@@ -2713,7 +2713,7 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 return;
             }
             let tick_started = Instant::now();
-            let tick_result = crate::app_runtime::run_selected_app_runtime_event(
+            let tick_result = crate::light_runtime::run_selected_light_runtime_event(
                 state,
                 runtime_event_for_periodic_tick(
                     &node_id,

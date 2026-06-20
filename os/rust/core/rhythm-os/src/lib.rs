@@ -7,7 +7,6 @@
 //! transports, and HTTP servers are provided by the consuming binary crate.
 
 pub mod api_types;
-pub mod app_runtime;
 pub mod auth;
 pub mod bundle;
 pub mod button_resolve;
@@ -21,6 +20,7 @@ pub mod handlers;
 pub mod hub;
 pub mod hue_buttons;
 pub mod lifecycle;
+pub mod light_runtime;
 pub mod logging;
 pub mod mdns;
 pub mod pairing;

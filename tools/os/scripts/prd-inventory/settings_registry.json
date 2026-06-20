@@ -1,0 +1,313 @@
+{
+  "generated_by": "tools/os/scripts/prd-inventory/extract_settings_registry.py",
+  "settings": [
+    {
+      "consumed_by": "GestureDetector",
+      "default": "1.5s",
+      "key": "multi_click_speed",
+      "match": "exact",
+      "python_source": "multi_click_speed",
+      "value_kind": "duration_seconds"
+    },
+    {
+      "consumed_by": "GestureDetector",
+      "default": "true",
+      "key": "multi_click_enabled",
+      "match": "exact",
+      "python_source": "multi_click_enabled",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "hold repeat",
+      "default": "unset -> device -> fallback",
+      "key": "long_press_repeat_interval",
+      "match": "exact",
+      "python_source": "long_press_repeat_interval",
+      "value_kind": "optional_duration_seconds"
+    },
+    {
+      "consumed_by": "reach cursor",
+      "default": "45s",
+      "key": "reach_reset_timeout",
+      "match": "exact",
+      "python_source": "reach config",
+      "value_kind": "duration_seconds"
+    },
+    {
+      "consumed_by": "reach feedback",
+      "default": "true",
+      "key": "reach_feedback_enabled",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "feedback direction",
+      "default": "50",
+      "key": "reach_daytime_threshold",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "percent"
+    },
+    {
+      "consumed_by": "feedback target",
+      "default": "false",
+      "key": "feedback_restrict_to_primary",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "two-step gate",
+      "default": "false",
+      "key": "two_step_enabled",
+      "match": "exact",
+      "python_source": "strangler default",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "two-step gate",
+      "default": "200",
+      "key": "two_step_kelvin_threshold",
+      "match": "exact",
+      "python_source": "two_step_ct_threshold",
+      "value_kind": "integer"
+    },
+    {
+      "consumed_by": "two-step gate",
+      "default": "15",
+      "key": "two_step_brightness_threshold",
+      "match": "exact",
+      "python_source": "two_step_bri_threshold",
+      "value_kind": "percent"
+    },
+    {
+      "consumed_by": "two-step gate",
+      "default": "500",
+      "key": "two_step_delay_ms",
+      "match": "exact",
+      "python_source": "two_step_delay",
+      "value_kind": "duration_milliseconds"
+    },
+    {
+      "consumed_by": "freeze cue",
+      "default": "true",
+      "key": "freeze_feedback_enabled",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "freeze cue",
+      "default": "200ms",
+      "key": "freeze_hold_at_dim",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "duration_milliseconds"
+    },
+    {
+      "consumed_by": "freeze cue",
+      "default": "1000ms",
+      "key": "freeze_off_rise",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "duration_milliseconds"
+    },
+    {
+      "consumed_by": "alert bounce",
+      "default": "1000ms",
+      "key": "alert_bounce_speed",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "duration_milliseconds"
+    },
+    {
+      "consumed_by": "limit bounce",
+      "default": "true",
+      "key": "limit_bounce_enabled",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "limit bounce",
+      "default": "300ms",
+      "key": "limit_warning_speed",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "duration_milliseconds"
+    },
+    {
+      "consumed_by": "limit bounce",
+      "default": "25",
+      "key": "limit_bounce_max_percent",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "percent"
+    },
+    {
+      "consumed_by": "limit bounce",
+      "default": "13",
+      "key": "limit_bounce_min_percent",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "percent"
+    },
+    {
+      "consumed_by": "periodic dispatch",
+      "default": "parity values",
+      "key": "g11_*",
+      "match": "prefix_wildcard",
+      "python_source": "G11 settings",
+      "value_kind": "parity_value"
+    },
+    {
+      "consumed_by": "event fanout",
+      "default": "50",
+      "key": "multi_area_dispatch_stagger_ms",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "duration_milliseconds"
+    },
+    {
+      "consumed_by": "manual power actions",
+      "default": "3",
+      "key": "turn_on_transition",
+      "match": "exact",
+      "python_source": "turn_on_transition",
+      "value_kind": "duration_tenths"
+    },
+    {
+      "consumed_by": "manual power actions",
+      "default": "3",
+      "key": "turn_off_transition",
+      "match": "exact",
+      "python_source": "turn_off_transition",
+      "value_kind": "duration_tenths"
+    },
+    {
+      "consumed_by": "motion warning",
+      "default": "15",
+      "key": "motion_blink_threshold",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "percent"
+    },
+    {
+      "consumed_by": "motion warning",
+      "default": "20s",
+      "key": "motion_warning_time",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "duration_seconds"
+    },
+    {
+      "consumed_by": "provisioning",
+      "default": "bright",
+      "key": "power_recovery",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "enum"
+    },
+    {
+      "consumed_by": "ZHA sync",
+      "default": "4",
+      "key": "daily_sync_hour",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "integer"
+    },
+    {
+      "consumed_by": "ZHA sync",
+      "default": "0",
+      "key": "daily_sync_minute",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "integer"
+    },
+    {
+      "consumed_by": "ZHA lifecycle",
+      "default": "false",
+      "key": "read_only_zha",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "bool"
+    },
+    {
+      "consumed_by": "periodic dispatch",
+      "default": "both",
+      "key": "experimental_tick_mode",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "enum"
+    },
+    {
+      "consumed_by": "diagnostics",
+      "default": "none",
+      "key": "advanced_logging_until",
+      "match": "exact",
+      "python_source": "same",
+      "value_kind": "timestamp"
+    },
+    {
+      "consumed_by": "render off decision",
+      "default": "parity value",
+      "key": "off_threshold",
+      "match": "exact",
+      "python_source": "area setting",
+      "value_kind": "parity_value"
+    },
+    {
+      "consumed_by": "render CT comp",
+      "default": "parity values",
+      "key": "ct_compensation_*",
+      "match": "prefix_wildcard",
+      "python_source": "CT comp settings",
+      "value_kind": "parity_value"
+    },
+    {
+      "consumed_by": "environment",
+      "default": "Manual -> Lux -> Weather -> SunAngle",
+      "key": "environment_chain",
+      "match": "exact",
+      "python_source": "implicit source order",
+      "value_kind": "chain"
+    }
+  ],
+  "source": "rust/core/rhythm-core/src/settings.rs",
+  "stored_non_settings": [
+    {
+      "key": "lux_learned_ceiling",
+      "purpose": "learned lux ceiling",
+      "store": "environment_calibration"
+    },
+    {
+      "key": "lux_learned_floor",
+      "purpose": "learned lux floor",
+      "store": "environment_calibration"
+    }
+  ],
+  "summary": {
+    "match_kinds": {
+      "exact": 32,
+      "prefix_wildcard": 2
+    },
+    "setting_count": 34,
+    "stored_non_setting_count": 2,
+    "value_kinds": {
+      "bool": 7,
+      "chain": 1,
+      "duration_milliseconds": 6,
+      "duration_seconds": 3,
+      "duration_tenths": 2,
+      "enum": 2,
+      "integer": 3,
+      "optional_duration_seconds": 1,
+      "parity_value": 3,
+      "percent": 5,
+      "timestamp": 1
+    },
+    "wildcard_settings": 2
+  },
+  "version": 1
+}

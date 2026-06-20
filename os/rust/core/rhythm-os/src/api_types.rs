@@ -12,8 +12,8 @@ use rhythm_core::{
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-use crate::app_runtime::LightingRuntimeKind;
 use crate::canonical::triage::{TriageKind, TriageStatus};
+use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::SceneDefinition;
 use crate::topology::{DevicePlacement, HubRoomBinding, InputBinding, NodeControlKind};
 
@@ -311,7 +311,15 @@ pub struct LocationDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
     pub auto_update: bool,
-    pub lighting_runtime: LightingRuntimeKind,
+    #[serde(rename = "light_runtime")]
+    pub light_runtime: LightRuntimeKind,
+}
+
+/// Selected light runtime state in `GET/PUT /api/light-runtime`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LightRuntimeDto {
+    pub runtime_id: LightRuntimeKind,
+    pub available_runtime_ids: Vec<LightRuntimeKind>,
 }
 
 /// Global Rhythm light-breaker switch in `GET/PUT /api/light-breaker`.
@@ -895,12 +903,12 @@ mod tests {
     fn settings_dto_serializes() {
         let dto = SettingsDto {
             auto_update: true,
-            lighting_runtime: LightingRuntimeKind::default(),
+            light_runtime: LightRuntimeKind::default(),
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert!(json.get("power_save").is_none());
         assert_eq!(json["auto_update"], true);
-        assert_eq!(json["lighting_runtime"], "rhythm-adaptive");
+        assert_eq!(json["light_runtime"], "rhythm-adaptive");
         assert!(json.get("light_breaker_enabled").is_none());
         assert!(json.get("mode").is_none());
         assert!(json.get("profiles").is_none());
@@ -1180,7 +1188,7 @@ mod tests {
             },
             settings: SettingsDto {
                 auto_update: true,
-                lighting_runtime: LightingRuntimeKind::default(),
+                light_runtime: LightRuntimeKind::default(),
             },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
@@ -1292,7 +1300,7 @@ mod tests {
             },
             settings: SettingsDto {
                 auto_update: true,
-                lighting_runtime: LightingRuntimeKind::default(),
+                light_runtime: LightRuntimeKind::default(),
             },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {

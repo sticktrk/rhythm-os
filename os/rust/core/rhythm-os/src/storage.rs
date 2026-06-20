@@ -21,10 +21,10 @@ use crate::canonical::identity::HubKey;
 use crate::hub::HubCredentials;
 use crate::scenes::StoredScenes;
 
-/// Namespaced durable state for plan-based light app runtimes.
+/// Namespaced durable state for plan-based light runtimes.
 ///
 /// Shape: runtime id -> node id -> app-defined key -> JSON value.
-pub type StoredAppRuntimeState = BTreeMap<String, BTreeMap<String, BTreeMap<String, Value>>>;
+pub type StoredLightRuntimeState = BTreeMap<String, BTreeMap<String, BTreeMap<String, Value>>>;
 
 /// Abstract persistence interface.
 ///
@@ -51,10 +51,10 @@ pub trait Storage: Send + Sync {
     fn save_motion_timers(&self, _timers: &StoredMotionTimers) -> Result<()> {
         Ok(())
     }
-    fn load_app_runtime_state(&self) -> Result<Option<StoredAppRuntimeState>> {
+    fn load_light_runtime_state(&self) -> Result<Option<StoredLightRuntimeState>> {
         Ok(None)
     }
-    fn save_app_runtime_state(&self, _state: &StoredAppRuntimeState) -> Result<()> {
+    fn save_light_runtime_state(&self, _state: &StoredLightRuntimeState) -> Result<()> {
         Ok(())
     }
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>>;
@@ -336,7 +336,7 @@ pub struct StoredSettings {
     #[serde(default = "default_light_breaker_enabled")]
     pub light_breaker_enabled: bool,
     #[serde(default)]
-    pub lighting_runtime: crate::app_runtime::LightingRuntimeKind,
+    pub light_runtime: crate::light_runtime::LightRuntimeKind,
     pub active_mode: RhythmMode,
     #[serde(default)]
     pub last_active_mode_cause: ModeChangeCause,
@@ -748,29 +748,55 @@ impl Storage for FileStorage {
         self.write_atomic("motion_timers.json", data.as_bytes())
     }
 
-    fn load_app_runtime_state(&self) -> Result<Option<StoredAppRuntimeState>> {
-        let path = self.file_path("app_runtime_state.json");
-        match self.read_json::<StoredAppRuntimeState>("app_runtime_state.json") {
+    fn load_light_runtime_state(&self) -> Result<Option<StoredLightRuntimeState>> {
+        let path = self.file_path("light_runtime_state.json");
+        match self.read_json::<StoredLightRuntimeState>("light_runtime_state.json") {
             Ok(v) => Ok(Some(v)),
             Err(e) => {
                 if path.exists() {
                     warn!(
                         target: "sys",
-                        "Failed to load app runtime state {}: {}",
+                        "Failed to load light runtime state {}: {}",
                         path.display(),
                         e
                     );
                 } else {
-                    debug!(target: "sys", "No persisted app runtime state at {}", path.display());
+                    let legacy_path = self.file_path("app_runtime_state.json");
+                    match self.read_json::<StoredLightRuntimeState>("app_runtime_state.json") {
+                        Ok(v) => {
+                            info!(
+                                target: "sys",
+                                "Loaded legacy runtime state from {}; future writes use light_runtime_state.json",
+                                legacy_path.display()
+                            );
+                            return Ok(Some(v));
+                        }
+                        Err(legacy_error) => {
+                            if legacy_path.exists() {
+                                warn!(
+                                    target: "sys",
+                                    "Failed to load legacy runtime state {}: {}",
+                                    legacy_path.display(),
+                                    legacy_error
+                                );
+                            } else {
+                                debug!(
+                                    target: "sys",
+                                    "No persisted light runtime state at {}",
+                                    path.display()
+                                );
+                            }
+                        }
+                    }
                 }
                 Ok(None)
             }
         }
     }
 
-    fn save_app_runtime_state(&self, state: &StoredAppRuntimeState) -> Result<()> {
+    fn save_light_runtime_state(&self, state: &StoredLightRuntimeState) -> Result<()> {
         let data = serde_json::to_string_pretty(state)?;
-        self.write_atomic("app_runtime_state.json", data.as_bytes())
+        self.write_atomic("light_runtime_state.json", data.as_bytes())
     }
 
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
@@ -1067,7 +1093,7 @@ impl Storage for FileStorage {
             "settings.json",
             "scenes.json",
             "motion_timers.json",
-            "app_runtime_state.json",
+            "light_runtime_state.json",
             "hub_credentials.json",
             "canonical_registry.json",
             "topology.json",
@@ -1165,7 +1191,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     .or_else(|| Some(chrono::Utc::now().timestamp_millis()));
                 s.power_save = settings.power_save;
                 s.light_breaker_enabled = settings.light_breaker_enabled;
-                crate::app_runtime::reset_app_runtime_for_kind(s, settings.lighting_runtime);
+                crate::light_runtime::reset_light_runtime_for_kind(s, settings.light_runtime);
                 s.auto_update = settings.auto_update;
                 s.active_mode = settings.active_mode;
                 s.last_active_mode_cause = settings.last_active_mode_cause;
@@ -1186,7 +1212,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                         if let Err(e) = storage.save_settings(&StoredSettings {
                             power_save: s.power_save,
                             light_breaker_enabled: s.light_breaker_enabled,
-                            lighting_runtime: s.lighting_runtime_kind,
+                            light_runtime: s.light_runtime_kind,
                             active_mode: s.active_mode,
                             last_active_mode_cause: s.last_active_mode_cause,
                             last_active_mode_transition_id: s
@@ -1239,19 +1265,19 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     }
 
     if let Some(storage) = s.storage.as_ref() {
-        match storage.load_app_runtime_state() {
+        match storage.load_light_runtime_state() {
             Ok(Some(state)) => {
                 let runtime_count = state.len();
-                s.app_runtime_state = state;
+                s.light_runtime_state = state;
                 info!(
                     target: "sys",
-                    "Loaded app runtime state: {} runtimes",
+                    "Loaded light runtime state: {} runtimes",
                     runtime_count
                 );
             }
             Ok(None) => {}
             Err(e) => {
-                debug!(target: "sys", "No persisted app runtime state loaded: {}", e);
+                debug!(target: "sys", "No persisted light runtime state loaded: {}", e);
             }
         }
     }
@@ -1515,7 +1541,7 @@ mod tests {
             Ok(StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::default(),
                 last_active_mode_transition_id: None,
@@ -1791,7 +1817,7 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1824,7 +1850,7 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1863,7 +1889,7 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Sleep,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -1911,7 +1937,7 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Sleep,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -2017,7 +2043,7 @@ mod tests {
             settings: Some(StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::Manual,
                 last_active_mode_transition_id: None,
@@ -2243,7 +2269,7 @@ mod tests {
             let settings = StoredSettings {
                 power_save: true,
                 light_breaker_enabled: false,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Sleep,
                 last_active_mode_cause: ModeChangeCause::Schedule,
                 last_active_mode_transition_id: Some("sleep_to_day".into()),
@@ -2514,7 +2540,7 @@ mod tests {
                 .save_settings(&StoredSettings {
                     power_save: true,
                     light_breaker_enabled: true,
-                    lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                    light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                     active_mode: RhythmMode::Sleep,
                     last_active_mode_cause: ModeChangeCause::Manual,
                     last_active_mode_transition_id: None,
@@ -2909,7 +2935,7 @@ mod tests {
             StoredSettings {
                 power_save: false,
                 light_breaker_enabled: true,
-                lighting_runtime: crate::app_runtime::LightingRuntimeKind::default(),
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
                 active_mode: RhythmMode::Day,
                 last_active_mode_cause: ModeChangeCause::default(),
                 last_active_mode_transition_id: None,

@@ -14,14 +14,17 @@ import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
 import '../api_auth.dart';
+import '../api/rhythm_runtime_api.dart';
 import '../api/rhythm_server_api.dart';
 import '../json_parsing.dart';
 import '../models/rhythm_connection_state.dart';
+import '../models/rhythm_environment.dart';
 import '../models/rhythm_firmware.dart';
 import '../models/rhythm_hello.dart';
 import '../models/rhythm_input_event.dart';
 import '../models/rhythm_pairing.dart';
 import '../models/rhythm_room.dart';
+import '../models/rhythm_runtime.dart';
 import '../models/rhythm_settings.dart';
 import '../rhythm_log_interceptor.dart';
 
@@ -87,6 +90,17 @@ class RhythmConnection {
       StreamController<RhythmSettings>.broadcast();
   final _lightBreakerChangedController =
       StreamController<RhythmLightBreaker>.broadcast();
+  final _outdoorChangedController =
+      StreamController<RhythmEnvironmentSnapshot>.broadcast();
+  final _activityAppendedController =
+      StreamController<RhythmActivityEvent>.broadcast();
+  final _scopeNodeChangedController = StreamController<String>.broadcast();
+  final _pipelineTraceAvailableController =
+      StreamController<RhythmPipelineTraceEvent>.broadcast();
+  final _powerSchedulesChangedController =
+      StreamController<RhythmPowerSchedules>.broadcast();
+  final _syncRequiredController =
+      StreamController<RhythmSyncRequired>.broadcast();
   final _newNodesController = StreamController<void>.broadcast();
   final _triageChangedController =
       StreamController<Map<String, dynamic>>.broadcast();
@@ -153,6 +167,7 @@ class RhythmConnection {
 
   // The server API (uses the shared Dio instance).
   RhythmServerApi? _api;
+  RhythmRuntimeApi? _runtimeApi;
 
   // --------------------------------------------------------------------------
   // Public getters
@@ -172,6 +187,18 @@ class RhythmConnection {
       _settingsChangedController.stream;
   Stream<RhythmLightBreaker> get lightBreakerChangedEvents =>
       _lightBreakerChangedController.stream;
+  Stream<RhythmEnvironmentSnapshot> get outdoorChangedEvents =>
+      _outdoorChangedController.stream;
+  Stream<RhythmActivityEvent> get activityAppendedEvents =>
+      _activityAppendedController.stream;
+  Stream<String> get scopeNodeChangedEvents =>
+      _scopeNodeChangedController.stream;
+  Stream<RhythmPipelineTraceEvent> get pipelineTraceAvailableEvents =>
+      _pipelineTraceAvailableController.stream;
+  Stream<RhythmPowerSchedules> get powerSchedulesChangedEvents =>
+      _powerSchedulesChangedController.stream;
+  Stream<RhythmSyncRequired> get syncRequiredEvents =>
+      _syncRequiredController.stream;
   Stream<void> get newNodesDetected => _newNodesController.stream;
   Stream<void> get newRoomsDetected => newNodesDetected;
   Stream<Map<String, dynamic>> get triageChangedEvents =>
@@ -204,6 +231,14 @@ class RhythmConnection {
       throw StateError('Not connected. Call connect() first.');
     }
     return _api!;
+  }
+
+  /// Rust-first runtime API client. Available after [connect].
+  RhythmRuntimeApi get runtimeApi {
+    if (_runtimeApi == null) {
+      throw StateError('Not connected. Call connect() first.');
+    }
+    return _runtimeApi!;
   }
 
   // --------------------------------------------------------------------------
@@ -262,6 +297,8 @@ class RhythmConnection {
     ));
     _dio!.interceptors.add(RhythmLogInterceptor(_log));
     _api = RhythmServerApi(_dio!, onStatesReceived: _updateCacheFromStates);
+    _runtimeApi =
+        RhythmRuntimeApi(_dio!, onStatesReceived: _updateCacheFromStates);
 
     _log.config('Connecting to $host:$port');
     await _connectInternal();
@@ -305,6 +342,7 @@ class RhythmConnection {
     _dio?.close();
     _dio = null;
     _api = null;
+    _runtimeApi = null;
 
     _cachedNodeStates.clear();
     _cachedHubConnected.clear();
@@ -367,6 +405,12 @@ class RhythmConnection {
     _modeChangedController.close();
     _settingsChangedController.close();
     _lightBreakerChangedController.close();
+    _outdoorChangedController.close();
+    _activityAppendedController.close();
+    _scopeNodeChangedController.close();
+    _pipelineTraceAvailableController.close();
+    _powerSchedulesChangedController.close();
+    _syncRequiredController.close();
     _newNodesController.close();
     _triageChangedController.close();
     _connectionStateController.close();
@@ -930,8 +974,7 @@ class RhythmConnection {
           final settingsJson =
               payload['settings'] as Map<String, dynamic>? ?? payload;
           if (settingsJson.containsKey('power_save') ||
-              settingsJson.containsKey('auto_update') ||
-              settingsJson.containsKey('lighting_runtime')) {
+              settingsJson.containsKey('auto_update')) {
             _settingsChangedController.add(RhythmSettings.fromJson(
               Map<String, dynamic>.from(settingsJson),
             ));
@@ -956,9 +999,70 @@ class RhythmConnection {
           ));
           break;
 
+        case 'outdoor_changed':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final outdoorJson =
+              payload['outdoor'] as Map<String, dynamic>? ?? payload;
+          _outdoorChangedController.add(
+            RhythmEnvironmentSnapshot.fromJson(
+              Map<String, dynamic>.from(outdoorJson),
+            ),
+          );
+          break;
+
+        case 'activity_appended':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final activityJson =
+              payload['activity'] as Map<String, dynamic>? ?? payload;
+          _activityAppendedController.add(
+            RhythmActivityEvent.fromJson(
+              Map<String, dynamic>.from(activityJson),
+            ),
+          );
+          break;
+
+        case 'scope_node_changed':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final nodeId = payload['node_id']?.toString() ?? '';
+          if (nodeId.isNotEmpty) {
+            _scopeNodeChangedController.add(nodeId);
+          }
+          break;
+
+        case 'pipeline_trace_available':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _pipelineTraceAvailableController.add(
+            RhythmPipelineTraceEvent.fromJson(payload),
+          );
+          break;
+
+        case 'power_schedules_changed':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          final schedulesJson =
+              payload['schedules'] as Map<String, dynamic>? ?? payload;
+          _powerSchedulesChangedController.add(
+            RhythmPowerSchedules.fromJson(
+              Map<String, dynamic>.from(schedulesJson),
+            ),
+          );
+          break;
+
         case 'config_changed':
         case 'nodes_changed':
         case 'rooms_changed':
+          _reHelloSuppressedNodeIds.clear();
+          _newNodesController.add(null);
+          break;
+
+        case 'sync_required':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _syncRequiredController.add(RhythmSyncRequired.fromJson(payload));
           _reHelloSuppressedNodeIds.clear();
           _newNodesController.add(null);
           break;

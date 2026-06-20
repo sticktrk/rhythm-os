@@ -19,3 +19,6 @@ legacy/removed-project/
 
 # Runtime crate build output.
 runtime/rust/target/
+
+# Downloaded/extracted app bug-report debug bundles (see /triage).
+.triage/

@@ -43,50 +43,74 @@ class RhythmBundleApi {
   }
 
   Future<Map<String, dynamic>> getConfigurationBundle() async {
-    try {
-      final response = await _dio.get(
-        'api/profile-bundle',
-        options: Options(validateStatus: (_) => true),
-      );
-      _throwForUnexpectedStatus(
-        response,
-        message: 'Failed to fetch configuration bundle',
-      );
-      return _decodeJsonObject(
-        response.data,
-        errorMessage: 'Server returned an invalid configuration bundle.',
-      );
-    } on DioException catch (error) {
-      throw _wrapDioException(
-        error,
-        message: 'Failed to fetch configuration bundle',
-      );
-    }
+    return _getBundleJson(
+      'api/profile-bundle',
+      message: 'Failed to fetch configuration bundle',
+      errorMessage: 'Server returned an invalid configuration bundle.',
+    );
   }
 
   Future<Map<String, dynamic>> putConfigurationBundle(
     Map<String, dynamic> bundle,
   ) async {
-    try {
-      final response = await _dio.put(
-        'api/profile-bundle',
-        data: bundle,
-        options: Options(validateStatus: (_) => true),
-      );
-      _throwForUnexpectedStatus(
-        response,
-        message: 'Failed to save configuration bundle',
-      );
-      return _decodeJsonObject(
-        response.data,
-        errorMessage: 'Server returned an invalid configuration response.',
-      );
-    } on DioException catch (error) {
-      throw _wrapDioException(
-        error,
-        message: 'Failed to save configuration bundle',
-      );
-    }
+    return _putBundleJson(
+      'api/profile-bundle',
+      bundle,
+      message: 'Failed to save configuration bundle',
+      errorMessage: 'Server returned an invalid configuration response.',
+    );
+  }
+
+  Future<Map<String, dynamic>> getFactoryDefaultConfigurationBundle() {
+    return _getBundleJson(
+      'api/profile-bundle/factory-default',
+      message: 'Failed to fetch factory-default configuration bundle',
+      errorMessage:
+          'Server returned an invalid factory-default configuration bundle.',
+    );
+  }
+
+  Future<Map<String, dynamic>> resetConfigurationBundle() {
+    return _postBundleJson(
+      'api/profile-bundle/reset',
+      message: 'Failed to reset configuration bundle',
+      errorMessage: 'Server returned an invalid configuration reset response.',
+    );
+  }
+
+  Future<Map<String, dynamic>> getShareBundle() {
+    return _getBundleJson(
+      'api/share-bundle',
+      message: 'Failed to fetch share bundle',
+      errorMessage: 'Server returned an invalid share bundle.',
+    );
+  }
+
+  Future<Map<String, dynamic>> putShareBundle(
+    Map<String, dynamic> bundle,
+  ) {
+    return _putBundleJson(
+      'api/share-bundle',
+      bundle,
+      message: 'Failed to save share bundle',
+      errorMessage: 'Server returned an invalid share bundle response.',
+    );
+  }
+
+  Future<Map<String, dynamic>> getFactoryDefaultShareBundle() {
+    return _getBundleJson(
+      'api/share-bundle/factory-default',
+      message: 'Failed to fetch factory-default share bundle',
+      errorMessage: 'Server returned an invalid factory-default share bundle.',
+    );
+  }
+
+  Future<Map<String, dynamic>> resetShareBundle() {
+    return _postBundleJson(
+      'api/share-bundle/reset',
+      message: 'Failed to reset share bundle',
+      errorMessage: 'Server returned an invalid share reset response.',
+    );
   }
 
   Future<Map<String, dynamic>> getBackupBundle({
@@ -156,6 +180,59 @@ class RhythmBundleApi {
         error,
         message: 'Failed to restore backup bundle',
       );
+    }
+  }
+
+  Future<Map<String, dynamic>> _getBundleJson(
+    String path, {
+    required String message,
+    required String errorMessage,
+  }) async {
+    try {
+      final response = await _dio.get(
+        path,
+        options: Options(validateStatus: (_) => true),
+      );
+      _throwForUnexpectedStatus(response, message: message);
+      return _decodeJsonObject(response.data, errorMessage: errorMessage);
+    } on DioException catch (error) {
+      throw _wrapDioException(error, message: message);
+    }
+  }
+
+  Future<Map<String, dynamic>> _putBundleJson(
+    String path,
+    Map<String, dynamic> bundle, {
+    required String message,
+    required String errorMessage,
+  }) async {
+    try {
+      final response = await _dio.put(
+        path,
+        data: bundle,
+        options: Options(validateStatus: (_) => true),
+      );
+      _throwForUnexpectedStatus(response, message: message);
+      return _decodeJsonObject(response.data, errorMessage: errorMessage);
+    } on DioException catch (error) {
+      throw _wrapDioException(error, message: message);
+    }
+  }
+
+  Future<Map<String, dynamic>> _postBundleJson(
+    String path, {
+    required String message,
+    required String errorMessage,
+  }) async {
+    try {
+      final response = await _dio.post(
+        path,
+        options: Options(validateStatus: (_) => true),
+      );
+      _throwForUnexpectedStatus(response, message: message);
+      return _decodeJsonObject(response.data, errorMessage: errorMessage);
+    } on DioException catch (error) {
+      throw _wrapDioException(error, message: message);
     }
   }
 

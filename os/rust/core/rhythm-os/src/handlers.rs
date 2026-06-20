@@ -23,6 +23,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use rhythm_runtime_api::{RuntimeExtensionRequest, RuntimeExtensionResponse, RuntimeHttpMethod};
+
 use crate::api_types::{HubCredentialsResponse, NodesResponse, SyncResponse};
 use crate::commands::{self};
 use crate::logging;
@@ -215,6 +217,39 @@ fn node_time_offset_error_response(e: anyhow::Error) -> ApiResponse {
         ApiResponse::bad_request(&message)
     } else {
         ApiResponse::server_error(message)
+    }
+}
+
+fn light_runtime_error_response(e: anyhow::Error) -> ApiResponse {
+    let message = e.to_string();
+    if message.contains("unsupported runtime extension endpoint") {
+        ApiResponse::not_found(&message)
+    } else if message.contains("unknown light runtime")
+        || message.contains("invalid runtime extension request")
+    {
+        ApiResponse::bad_request(&message)
+    } else if message.contains("is not active") {
+        ApiResponse {
+            status: 409,
+            body: message,
+            content_type: "text/plain",
+        }
+    } else {
+        ApiResponse::server_error(message)
+    }
+}
+
+fn runtime_extension_api_response(response: RuntimeExtensionResponse) -> ApiResponse {
+    if response.status == 204 {
+        return ApiResponse::no_content();
+    }
+    match serde_json::to_string(&response.body) {
+        Ok(body) => ApiResponse {
+            status: response.status,
+            body,
+            content_type: "application/json",
+        },
+        Err(e) => ApiResponse::server_error(e),
     }
 }
 
@@ -1000,6 +1035,72 @@ pub fn handle_get_light_breaker(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_light_runtime(state: &SharedState) -> ApiResponse {
+    match commands::build_light_runtime(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_light_runtime(state: &SharedState, body: &Value) -> ApiResponse {
+    let runtime_id = match body.get("runtime_id") {
+        Some(Value::String(value)) => value,
+        Some(_) => return ApiResponse::bad_request("runtime_id must be a string"),
+        None => return ApiResponse::bad_request("Missing runtime_id"),
+    };
+
+    let runtime_kind = match runtime_id.parse::<crate::light_runtime::LightRuntimeKind>() {
+        Ok(kind) => kind,
+        Err(e) => return ApiResponse::bad_request(&e.to_string()),
+    };
+
+    match commands::do_light_runtime_set(state, runtime_kind) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_light_runtime_manifests() -> ApiResponse {
+    match serde_json::to_string(&json!({
+        "runtimes": crate::light_runtime::light_runtime_manifests(),
+    })) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_light_runtime_manifest(runtime_id: &str) -> ApiResponse {
+    let runtime_kind = match crate::light_runtime::parse_light_runtime_id(runtime_id) {
+        Ok(kind) => kind,
+        Err(e) => return ApiResponse::bad_request(&e.to_string()),
+    };
+    match serde_json::to_string(&crate::light_runtime::light_runtime_manifest(runtime_kind)) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_light_runtime_extension(
+    state: &SharedState,
+    runtime_id: &str,
+    method: RuntimeHttpMethod,
+    path: &str,
+    query: BTreeMap<String, String>,
+    body: Value,
+) -> ApiResponse {
+    let request = RuntimeExtensionRequest {
+        method,
+        path: format!("/{}", path.trim_start_matches('/')),
+        query,
+        body,
+    };
+
+    match crate::light_runtime::run_light_runtime_extension(state, runtime_id, request) {
+        Ok(response) => runtime_extension_api_response(response),
+        Err(e) => light_runtime_error_response(e),
+    }
+}
+
 pub fn handle_put_light_breaker(state: &SharedState, body: &Value) -> ApiResponse {
     let enabled = if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
         enabled
@@ -1042,17 +1143,14 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
     }
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
-    let lighting_runtime = match body
-        .get("lighting_runtime")
-        .or_else(|| body.get("app_runtime"))
-    {
+    let light_runtime = match body.get("light_runtime") {
         Some(Value::String(value)) => {
-            match value.parse::<crate::app_runtime::LightingRuntimeKind>() {
+            match value.parse::<crate::light_runtime::LightRuntimeKind>() {
                 Ok(kind) => Some(kind),
                 Err(e) => return ApiResponse::bad_request(&e.to_string()),
             }
         }
-        Some(_) => return ApiResponse::bad_request("lighting_runtime must be a string"),
+        Some(_) => return ApiResponse::bad_request("light_runtime must be a string"),
         None => None,
     };
 
@@ -1062,8 +1160,8 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         }
     }
 
-    match lighting_runtime {
-        Some(kind) => match commands::do_lighting_runtime_set(state, kind) {
+    match light_runtime {
+        Some(kind) => match commands::do_light_runtime_settings_set(state, kind) {
             Ok(json) => ApiResponse::json_ok(json),
             Err(e) => ApiResponse::server_error(e),
         },
@@ -4846,26 +4944,58 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert_eq!(parsed["auto_update"], false);
-        assert_eq!(parsed["lighting_runtime"], "rhythm-adaptive");
+        assert_eq!(parsed["light_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }
 
     #[test]
-    fn put_settings_updates_lighting_runtime() {
+    fn put_settings_updates_light_runtime() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"lighting_runtime": "removed-circadian"}));
+        let r = handle_put_settings(&state, &json!({"light_runtime": "removed-circadian"}));
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(parsed["lighting_runtime"], "removed-circadian");
+        assert_eq!(parsed["light_runtime"], "removed-circadian");
     }
 
     #[test]
-    fn put_settings_rejects_unknown_lighting_runtime() {
+    fn light_runtime_resource_selects_runtime() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"lighting_runtime": "unknown"}));
+
+        let r = handle_get_light_runtime(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["runtime_id"], "rhythm-adaptive");
+        assert_eq!(
+            parsed["available_runtime_ids"],
+            json!(["rhythm-adaptive", "removed-circadian"])
+        );
+
+        let r = handle_put_light_runtime(&state, &json!({"runtime_id": "removed-circadian"}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["runtime_id"], "removed-circadian");
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind,
+            crate::light_runtime::LightRuntimeKind::removed-projectCircadian
+        );
+    }
+
+    #[test]
+    fn light_runtime_resource_requires_runtime_id() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_light_runtime(&state, &json!({"mode": "expert"}));
+
         assert_eq!(r.status, 400);
-        assert!(r.body.contains("unknown lighting runtime"));
+        assert!(r.body.contains("Missing runtime_id"));
+    }
+
+    #[test]
+    fn put_settings_rejects_unknown_light_runtime() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"light_runtime": "unknown"}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("unknown light runtime"));
     }
 
     #[test]
@@ -4876,7 +5006,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert!(parsed["auto_update"].is_boolean());
-        assert_eq!(parsed["lighting_runtime"], "rhythm-adaptive");
+        assert_eq!(parsed["light_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }

@@ -9,14 +9,23 @@ abstract final class RhythmDeviceOnboardingMethod {
 
 /// Host capabilities advertised by the Rhythm server.
 class RhythmCapabilities {
+  final int? apiSchemaVersion;
+  final List<String> features;
   final List<RhythmHubCapabilities> hubs;
 
   const RhythmCapabilities({
+    this.apiSchemaVersion,
+    this.features = const [],
     this.hubs = const [],
   });
 
   factory RhythmCapabilities.fromJson(Map<String, dynamic> json) {
     return RhythmCapabilities(
+      apiSchemaVersion: jsonInt(
+        json['api_schema_version'],
+        preferredKeys: const ['api_schema_version'],
+      ),
+      features: _parseStringList(json['features']),
       hubs: ((json['hubs'] as List<dynamic>?) ?? const <dynamic>[])
           .map(jsonMap)
           .nonNulls
@@ -32,6 +41,8 @@ class RhythmCapabilities {
     }
     return null;
   }
+
+  bool supportsFeature(String feature) => features.contains(feature);
 }
 
 /// Per-hub capability metadata from `/api/state.capabilities.hubs`.
@@ -117,13 +128,7 @@ List<String> _parseDeviceOnboardingMethods(
 }) {
   final methods = <String>{};
 
-  if (rawMethods is List) {
-    for (final method in rawMethods) {
-      if (method is String && method.isNotEmpty) {
-        methods.add(method);
-      }
-    }
-  }
+  methods.addAll(_parseStringList(rawMethods));
 
   if ((legacyAddDevice['on_network_setup_code'] as bool?) == true) {
     methods.add(RhythmDeviceOnboardingMethod.matterOnNetworkSetupCode);
@@ -133,4 +138,11 @@ List<String> _parseDeviceOnboardingMethods(
   }
 
   return methods.toList(growable: false);
+}
+
+List<String> _parseStringList(Object? value) {
+  return ((value as List<dynamic>?) ?? const <dynamic>[])
+      .whereType<String>()
+      .where((value) => value.isNotEmpty)
+      .toList(growable: false);
 }

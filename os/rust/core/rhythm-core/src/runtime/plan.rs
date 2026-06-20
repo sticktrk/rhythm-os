@@ -1,7 +1,7 @@
 //! Neutral runtime-plan bridge.
 //!
 //! This module translates between Rhythm's existing engine plans and the
-//! shared `rhythm-runtime-api` contract used by external light applications.
+//! shared `rhythm-runtime-api` contract used by external light runtimes.
 
 use crate::controller::LightController;
 use crate::lighting::LightingCommand;

@@ -442,6 +442,20 @@ class CloudBackedServerApi {
     return _delegate.getMode();
   }
 
+  Future<RhythmLightRuntimeState?> getLightRuntime() {
+    return _delegate.getLightRuntime();
+  }
+
+  Future<RhythmLightRuntimeState?> setLightRuntime(
+    RhythmLightRuntime runtime, {
+    int? transitionMs,
+  }) {
+    return _delegate.setLightRuntime(
+      runtime,
+      transitionMs: transitionMs,
+    );
+  }
+
   Future<List<RhythmCurveConfig>> getProfiles() {
     return _delegate.getProfiles();
   }
@@ -453,17 +467,11 @@ class CloudBackedServerApi {
   Future<bool> settingsSet({
     bool? powerSave,
     bool? autoUpdate,
-    RhythmLightingRuntime? lightingRuntime,
   }) {
     return _delegate.settingsSet(
       powerSave: powerSave,
       autoUpdate: autoUpdate,
-      lightingRuntime: lightingRuntime,
     );
-  }
-
-  Future<bool> setLightingRuntime(RhythmLightingRuntime runtime) {
-    return _delegate.setLightingRuntime(runtime);
   }
 
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) {

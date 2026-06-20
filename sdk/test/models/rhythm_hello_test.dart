@@ -319,6 +319,18 @@ void main() {
       expect(hello.profiles.last.name, 'Day Idle');
     });
 
+    test('parses light runtime from settings', () {
+      final hello = RhythmHello.fromJson({
+        'settings': {
+          'auto_update': true,
+          'light_runtime': 'removed-circadian',
+        },
+      });
+
+      expect(hello.settings?.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(hello.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+    });
+
     test('preserves null idle_profile_id from hello mode payload', () {
       final hello = RhythmHello.fromJson({
         'mode': {
@@ -340,6 +352,50 @@ void main() {
     test('parses listen_port from int or double', () {
       expect(RhythmHello.fromJson({'listen_port': 9090}).listenPort, 9090);
       expect(RhythmHello.fromJson({'listen_port': 8080.0}).listenPort, 8080);
+    });
+
+    test('parses schema capabilities and power schedules from state snapshots',
+        () {
+      final hello = RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [
+            'node_state',
+            'legacy_rooms_projection',
+            'sse_event_ids',
+            'async_dispatch_metadata',
+          ],
+          'hubs': [
+            {
+              'type': 'matter',
+              'configurable': true,
+              'device_onboarding_methods': [
+                'matter_on_network_setup_code',
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+          ],
+        },
+        'power_schedules': [
+          {
+            'id': 'wake',
+            'node_id': 'room-1',
+            'action': 'on',
+            'slot': {
+              'kind': 'clock',
+              'time': {'hour': 7, 'minute': 30},
+            },
+          },
+        ],
+      });
+
+      expect(hello.capabilities, isNotNull);
+      expect(hello.capabilities!.apiSchemaVersion, 2);
+      expect(hello.capabilities!.supportsFeature('node_state'), isTrue);
+      expect(hello.capabilities!.supportsFeature('missing'), isFalse);
+      expect(hello.capabilities!.hub('matter')?.supportsUnpairing, isTrue);
+      expect(hello.powerSchedules.single['node_id'], 'room-1');
     });
 
     test('parses input bindings from state snapshots', () {

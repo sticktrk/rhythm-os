@@ -343,6 +343,7 @@ abstract class RhythmCurveShape {
   factory RhythmCurveShape.fromJson(Map<String, dynamic> json) {
     final type = json['type'] as String? ?? 'super-gaussian';
     return switch (type) {
+      'sigmoid' => RhythmSigmoidCurve.fromJson(json),
       'palette' => RhythmPaletteCurve.fromJson(json),
       'inherit-active' => const RhythmInheritActiveCurve(),
       'constant' => RhythmConstantCurve.fromJson(json),
@@ -454,6 +455,119 @@ class RhythmSuperGaussianCurve extends RhythmCurveShape {
       );
 }
 
+class RhythmSigmoidCurve extends RhythmCurveShape {
+  final Map<String, dynamic> schedule;
+  final double ascendStart;
+  final double descendStart;
+  final int wakeSpeed;
+  final int bedSpeed;
+  final int wakeBrightness;
+  final int bedBrightness;
+
+  const RhythmSigmoidCurve({
+    this.schedule = const {
+      'wake': {'hour': RhythmCurveConfig.defaultWakeHour},
+      'bed': {'hour': RhythmCurveConfig.defaultBedHour},
+      'alternate_days': <dynamic>[],
+    },
+    this.ascendStart = RhythmCurveConfig.defaultAscendStart,
+    this.descendStart = RhythmCurveConfig.defaultDescendStart,
+    this.wakeSpeed = RhythmCurveConfig.defaultWakeSpeed,
+    this.bedSpeed = RhythmCurveConfig.defaultBedSpeed,
+    this.wakeBrightness = RhythmCurveConfig.defaultWakeBrightness,
+    this.bedBrightness = RhythmCurveConfig.defaultBedBrightness,
+  }) : super('sigmoid');
+
+  factory RhythmSigmoidCurve.fromJson(Map<String, dynamic> json) {
+    final schedule = jsonMap(json['schedule']);
+    return RhythmSigmoidCurve(
+      schedule: schedule == null
+          ? _defaultSigmoidScheduleJson()
+          : Map<String, dynamic>.unmodifiable(schedule),
+      ascendStart: jsonDouble(
+            json['ascend_start'],
+            preferredKeys: const ['ascend_start'],
+          ) ??
+          RhythmCurveConfig.defaultAscendStart,
+      descendStart: jsonDouble(
+            json['descend_start'],
+            preferredKeys: const ['descend_start'],
+          ) ??
+          RhythmCurveConfig.defaultDescendStart,
+      wakeSpeed:
+          jsonInt(json['wake_speed'], preferredKeys: const ['wake_speed']) ??
+              RhythmCurveConfig.defaultWakeSpeed,
+      bedSpeed:
+          jsonInt(json['bed_speed'], preferredKeys: const ['bed_speed']) ??
+              RhythmCurveConfig.defaultBedSpeed,
+      wakeBrightness: jsonInt(
+            json['wake_brightness'],
+            preferredKeys: const ['wake_brightness'],
+          ) ??
+          RhythmCurveConfig.defaultWakeBrightness,
+      bedBrightness: jsonInt(
+            json['bed_brightness'],
+            preferredKeys: const ['bed_brightness'],
+          ) ??
+          RhythmCurveConfig.defaultBedBrightness,
+    );
+  }
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'schedule': schedule,
+        'ascend_start': ascendStart,
+        'descend_start': descendStart,
+        'wake_speed': wakeSpeed,
+        'bed_speed': bedSpeed,
+        'wake_brightness': wakeBrightness,
+        'bed_brightness': bedBrightness,
+      };
+
+  RhythmSigmoidCurve copyWith({
+    Map<String, dynamic>? schedule,
+    double? ascendStart,
+    double? descendStart,
+    int? wakeSpeed,
+    int? bedSpeed,
+    int? wakeBrightness,
+    int? bedBrightness,
+  }) =>
+      RhythmSigmoidCurve(
+        schedule: schedule ?? this.schedule,
+        ascendStart: ascendStart ?? this.ascendStart,
+        descendStart: descendStart ?? this.descendStart,
+        wakeSpeed: wakeSpeed ?? this.wakeSpeed,
+        bedSpeed: bedSpeed ?? this.bedSpeed,
+        wakeBrightness: wakeBrightness ?? this.wakeBrightness,
+        bedBrightness: bedBrightness ?? this.bedBrightness,
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RhythmSigmoidCurve &&
+          _deepEquals(schedule, other.schedule) &&
+          ascendStart == other.ascendStart &&
+          descendStart == other.descendStart &&
+          wakeSpeed == other.wakeSpeed &&
+          bedSpeed == other.bedSpeed &&
+          wakeBrightness == other.wakeBrightness &&
+          bedBrightness == other.bedBrightness;
+
+  @override
+  int get hashCode => Object.hash(
+        _deepHash(schedule),
+        ascendStart,
+        descendStart,
+        wakeSpeed,
+        bedSpeed,
+        wakeBrightness,
+        bedBrightness,
+      );
+}
+
 class RhythmPaletteCurve extends RhythmCurveShape {
   final List<RhythmPaletteKeyframe> keyframes;
 
@@ -559,6 +673,14 @@ class RhythmCurveConfig {
   static const double defaultWidthLeftCct = 0.95;
   static const double defaultWidthRightCct = 1.15;
   static const double defaultShapeP = 6.0;
+  static const double defaultAscendStart = 3.0;
+  static const double defaultDescendStart = 12.0;
+  static const double defaultWakeHour = 6.0;
+  static const double defaultBedHour = 22.0;
+  static const int defaultWakeSpeed = 8;
+  static const int defaultBedSpeed = 6;
+  static const int defaultWakeBrightness = 50;
+  static const int defaultBedBrightness = 50;
   static const int defaultMaxDimSteps = 12;
   static const int defaultFadeMs = 500;
   static const int defaultMotionTimeoutSecs = 600;
@@ -695,6 +817,8 @@ class RhythmCurveConfig {
       superGaussianCurve?.widthRightCct ?? defaultWidthRightCct;
   double get shapeP => superGaussianCurve?.shapeP ?? defaultShapeP;
   RhythmDirectColor? get directColor => superGaussianCurve?.directColor;
+  RhythmSigmoidCurve? get sigmoidCurve =>
+      curve is RhythmSigmoidCurve ? curve as RhythmSigmoidCurve : null;
   RhythmTimerSetting? get fadeSetting =>
       _fadeSetting ?? _timerSettingFromLegacyValue(_fadeMsLegacy);
   RhythmTimerSetting? get motionTimeoutSetting =>
@@ -861,6 +985,12 @@ RhythmTimerSetting? _timerSettingFromJson(
 
 const Object _curveConfigCopySentinel = Object();
 
+Map<String, dynamic> _defaultSigmoidScheduleJson() => const {
+      'wake': {'hour': RhythmCurveConfig.defaultWakeHour},
+      'bed': {'hour': RhythmCurveConfig.defaultBedHour},
+      'alternate_days': <dynamic>[],
+    };
+
 bool _listEquals<T>(List<T> a, List<T> b) {
   if (identical(a, b)) return true;
   if (a.length != b.length) return false;
@@ -868,4 +998,37 @@ bool _listEquals<T>(List<T> a, List<T> b) {
     if (a[i] != b[i]) return false;
   }
   return true;
+}
+
+bool _mapEquals(Map<dynamic, dynamic> a, Map<dynamic, dynamic> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (final key in a.keys) {
+    if (!b.containsKey(key) || !_deepEquals(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+bool _deepEquals(Object? a, Object? b) {
+  if (identical(a, b)) return true;
+  if (a is Map && b is Map) return _mapEquals(a, b);
+  if (a is List && b is List) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (!_deepEquals(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  return a == b;
+}
+
+int _deepHash(Object? value) {
+  if (value is Map) {
+    final keys = value.keys.map((key) => key.toString()).toList()..sort();
+    return Object.hashAll(
+      keys.map((key) => Object.hash(key, _deepHash(value[key]))),
+    );
+  }
+  if (value is List) return Object.hashAll(value.map(_deepHash));
+  return value.hashCode;
 }

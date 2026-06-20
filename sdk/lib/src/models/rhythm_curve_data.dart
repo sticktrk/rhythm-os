@@ -50,6 +50,7 @@ class RhythmSolarInfo {
   });
 
   factory RhythmSolarInfo.fromJson(Map<String, dynamic> json) {
+    final twilight = _asMap(json['twilight']);
     return RhythmSolarInfo(
       sunrise: (json['sunrise'] as num?)?.toDouble(),
       sunset: (json['sunset'] as num?)?.toDouble(),
@@ -61,12 +62,8 @@ class RhythmSolarInfo {
           0.0,
       dayLength: (json['dayLength'] as num?)?.toDouble() ??
           (json['day_length'] as num?)?.toDouble(),
-      dawn: json['dawn'] == null
-          ? null
-          : TwilightPhase.fromJson(json['dawn'] as Map<String, dynamic>),
-      dusk: json['dusk'] == null
-          ? null
-          : TwilightPhase.fromJson(json['dusk'] as Map<String, dynamic>),
+      dawn: _twilightPhaseFromJson(json['dawn'] ?? twilight?['dawn']),
+      dusk: _twilightPhaseFromJson(json['dusk'] ?? twilight?['dusk']),
     );
   }
 }
@@ -95,6 +92,11 @@ Map<String, dynamic>? _asMap(dynamic value) {
   if (value is Map<String, dynamic>) return value;
   if (value is Map) return value.cast<String, dynamic>();
   return null;
+}
+
+TwilightPhase? _twilightPhaseFromJson(dynamic value) {
+  final json = _asMap(value);
+  return json == null ? null : TwilightPhase.fromJson(json);
 }
 
 List<double> _doubleList(dynamic value) {

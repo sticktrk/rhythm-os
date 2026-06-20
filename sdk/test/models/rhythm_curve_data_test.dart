@@ -117,6 +117,22 @@ void main() {
         expect(solar.solarMidnight, 1.0);
         expect(solar.dayLength, 14.0);
       });
+
+      test('parses Rust nested twilight data', () {
+        final solar = RhythmSolarInfo.fromJson({
+          'solar_noon': 13.0,
+          'solar_midnight': 1.0,
+          'twilight': {
+            'dawn': {'civil': 5.75, 'nautical': 5.25},
+            'dusk': {'civil': 20.25, 'nautical': 20.75},
+          },
+        });
+
+        expect(solar.dawn!.civil, 5.75);
+        expect(solar.dawn!.nautical, 5.25);
+        expect(solar.dusk!.civil, 20.25);
+        expect(solar.dusk!.nautical, 20.75);
+      });
     });
   });
 

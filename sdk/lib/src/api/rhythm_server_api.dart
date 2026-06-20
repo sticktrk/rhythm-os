@@ -1214,6 +1214,41 @@ class RhythmServerApi {
     return null;
   }
 
+  /// Fetch the active light runtime.
+  Future<RhythmLightRuntimeState?> getLightRuntime() async {
+    try {
+      final response = await _dio.get('api/light-runtime');
+      return RhythmLightRuntimeState.fromJson(
+        response.data as Map<String, dynamic>,
+      );
+    } catch (e) {
+      _log.warning('getLightRuntime failed', e);
+    }
+    return null;
+  }
+
+  /// Select the active light runtime.
+  Future<RhythmLightRuntimeState?> setLightRuntime(
+    RhythmLightRuntime runtime, {
+    int? transitionMs,
+  }) async {
+    try {
+      final response = await _dio.put(
+        'api/light-runtime',
+        data: {
+          'runtime_id': runtime.id,
+          if (transitionMs != null) 'transition_ms': transitionMs,
+        },
+      );
+      return RhythmLightRuntimeState.fromJson(
+        response.data as Map<String, dynamic>,
+      );
+    } catch (e) {
+      _log.warning('setLightRuntime failed', e);
+    }
+    return null;
+  }
+
   /// Fetch the list of available profile configs.
   Future<List<RhythmCurveConfig>> getProfiles() async {
     try {
@@ -1241,12 +1276,9 @@ class RhythmServerApi {
   Future<bool> settingsSet({
     bool? powerSave,
     bool? autoUpdate,
-    RhythmLightingRuntime? lightingRuntime,
   }) async {
     final data = <String, dynamic>{
       if (autoUpdate != null) 'auto_update': autoUpdate,
-      if (lightingRuntime != null)
-        'lighting_runtime': lightingRuntime.wireValue,
     };
     if (data.isEmpty) return true;
     try {
@@ -1256,10 +1288,6 @@ class RhythmServerApi {
       _log.warning('settingsSet failed', e);
       return false;
     }
-  }
-
-  Future<bool> setLightingRuntime(RhythmLightingRuntime runtime) {
-    return settingsSet(lightingRuntime: runtime);
   }
 
   // =========================================================================

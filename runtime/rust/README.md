@@ -7,10 +7,10 @@ being merged into the production OS crates.
 
 - `rhythm-runtime-api`: neutral host/runtime contract. It defines snapshots,
   input events, periodic ticks, dispatch commands, state writes, diagnostics,
-  and the `LightingRuntime` trait.
+  and the `LightRuntime` trait.
 - `removed-circadian`: removed-project/Circadian implementation ported from the legacy
   Python add-on.
-- `rhythm-adaptive`: Rhythm's existing adaptive-lighting app runtime, hosted
+- `rhythm-adaptive`: Rhythm's existing adaptive light runtime, hosted
   behind the same neutral contract while it still reuses the production
   `rhythm-core` engine primitives.
 
@@ -34,10 +34,39 @@ Runtime crates own:
 - conversion of events into neutral `RuntimePlan` values
 - runtime-local topology semantics such as removed-project zones and sections, while
   still expressing all host effects as neutral dispatches/state writes
+- runtime-defined extension manifests for settings and advanced APIs
 
 Runtime crates must not import production OS internals. Shared functionality
 belongs in `rhythm-runtime-api` only when it is generally useful to multiple
 runtime crates.
+
+## Runtime Extensions
+
+Runtime-specific settings and advanced APIs are declared by the runtime crate
+through `LightRuntime::manifest()`. The OS host should mount those endpoints
+under the runtime namespace:
+
+```text
+/api/light-runtimes/{runtime_id}/...
+```
+
+For example, removed-project/Circadian can declare `/scope`, `/settings`, and
+`/areas/{area_id}/action`, which the host exposes as:
+
+```text
+/api/light-runtimes/removed-circadian/scope
+/api/light-runtimes/removed-circadian/settings
+/api/light-runtimes/removed-circadian/areas/{area_id}/action
+```
+
+The runtime defines the settings schema, default payload, endpoint list, and
+extension handler. The OS still owns auth, HTTP mounting, request decoding,
+persistence, dispatch application, logging, and diagnostics. Runtime extension
+handlers should return JSON plus optional neutral `RuntimePlan` values; they
+must not bypass the OS to reach hubs, storage, or controllers directly.
+
+If an extension endpoint becomes useful across runtimes, promote it into the
+core OS API instead of duplicating it under multiple runtime namespaces.
 
 ## Verification
 
