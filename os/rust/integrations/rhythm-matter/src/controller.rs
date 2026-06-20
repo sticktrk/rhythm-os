@@ -420,6 +420,13 @@ impl MatterLightController {
             let mut command_successes = 0usize;
             let mut command_failures = 0usize;
             let mut already_sent_on = false;
+            // Once a write to this device fails with a connectivity timeout,
+            // stop sending its remaining attribute commands. An unreachable
+            // device times out on every command in turn (~25s each on the CHIP
+            // stack), so a single dead group member would otherwise stall the
+            // whole dispatch for >75s. The read path (`any_lights_on_target`)
+            // already short-circuits the same way. See #169.
+            let mut unreachable = false;
 
             if needs_explicit_on {
                 if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
@@ -430,6 +437,7 @@ impl MatterLightController {
                         e
                     );
                     command_failures += 1;
+                    unreachable |= Self::looks_like_connectivity_timeout(&e);
                 } else {
                     command_successes += 1;
                     already_sent_on = true;
@@ -441,91 +449,100 @@ impl MatterLightController {
             // treat MoveToColorTemperature/MoveToColor as a level-resetting
             // state reload (observed on budget Matter-over-WiFi bulbs)
             // cannot clobber the user's requested brightness — see #51.
-            if let Some((hue, saturation)) = adapted.hue_saturation {
-                if let Err(e) = self.transport.set_hue_saturation(
-                    node_id,
-                    endpoint,
-                    hue,
-                    saturation,
-                    adapted.transition_ms,
-                ) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: hue/saturation command failed for node {}: {}",
+            if !unreachable {
+                if let Some((hue, saturation)) = adapted.hue_saturation {
+                    if let Err(e) = self.transport.set_hue_saturation(
                         node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            } else if let Some((x, y)) = adapted.xy {
-                if let Err(e) =
-                    self.transport
-                        .set_xy(node_id, endpoint, x, y, adapted.transition_ms)
-                {
-                    warn!(
-                        target: "cmd",
-                        "Matter: xy command failed for node {}: {}",
+                        endpoint,
+                        hue,
+                        saturation,
+                        adapted.transition_ms,
+                    ) {
+                        warn!(
+                            target: "cmd",
+                            "Matter: hue/saturation command failed for node {}: {}",
+                            node_id,
+                            e
+                        );
+                        command_failures += 1;
+                        unreachable |= Self::looks_like_connectivity_timeout(&e);
+                    } else {
+                        command_successes += 1;
+                    }
+                    Self::maybe_throttle(throttle_ms);
+                } else if let Some((x, y)) = adapted.xy {
+                    if let Err(e) =
+                        self.transport
+                            .set_xy(node_id, endpoint, x, y, adapted.transition_ms)
+                    {
+                        warn!(
+                            target: "cmd",
+                            "Matter: xy command failed for node {}: {}",
+                            node_id,
+                            e
+                        );
+                        command_failures += 1;
+                        unreachable |= Self::looks_like_connectivity_timeout(&e);
+                    } else {
+                        command_successes += 1;
+                    }
+                    Self::maybe_throttle(throttle_ms);
+                } else if let Some(kelvin) = adapted.kelvin {
+                    if let Err(e) = self.transport.set_color_temperature(
                         node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
+                        endpoint,
+                        kelvin,
+                        adapted.transition_ms,
+                    ) {
+                        warn!(
+                            target: "cmd",
+                            "Matter: color temperature command failed for node {}: {}",
+                            node_id,
+                            e
+                        );
+                        command_failures += 1;
+                        unreachable |= Self::looks_like_connectivity_timeout(&e);
+                    } else {
+                        command_successes += 1;
+                    }
+                    Self::maybe_throttle(throttle_ms);
                 }
-                Self::maybe_throttle(throttle_ms);
-            } else if let Some(kelvin) = adapted.kelvin {
-                if let Err(e) = self.transport.set_color_temperature(
-                    node_id,
-                    endpoint,
-                    kelvin,
-                    adapted.transition_ms,
-                ) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: color temperature command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
             }
 
-            if let Some(brightness) = adapted.brightness {
-                let level = clusters::brightness_to_level(brightness);
-                if let Err(e) =
-                    self.transport
-                        .set_brightness(node_id, endpoint, level, adapted.transition_ms)
-                {
-                    warn!(
-                        target: "cmd",
-                        "Matter: brightness command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
+            if !unreachable {
+                if let Some(brightness) = adapted.brightness {
+                    let level = clusters::brightness_to_level(brightness);
+                    if let Err(e) =
+                        self.transport
+                            .set_brightness(node_id, endpoint, level, adapted.transition_ms)
+                    {
+                        warn!(
+                            target: "cmd",
+                            "Matter: brightness command failed for node {}: {}",
+                            node_id,
+                            e
+                        );
+                        command_failures += 1;
+                        // No further writes follow for this device, so there is
+                        // nothing left to short-circuit on a timeout here.
+                    } else {
+                        command_successes += 1;
+                    }
+                    Self::maybe_throttle(throttle_ms);
+                } else if adapted.on && !already_sent_on {
+                    if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
+                        warn!(
+                            target: "cmd",
+                            "Matter: on command failed for node {}: {}",
+                            node_id,
+                            e
+                        );
+                        command_failures += 1;
+                    } else {
+                        command_successes += 1;
+                    }
+                    Self::maybe_throttle(throttle_ms);
                 }
-                Self::maybe_throttle(throttle_ms);
-            } else if adapted.on && !already_sent_on {
-                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: on command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    command_failures += 1;
-                } else {
-                    command_successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
             }
 
             if command_successes > 0 {
@@ -2634,5 +2651,191 @@ mod tests {
             .operations()
             .iter()
             .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+    }
+
+    #[test]
+    fn turn_on_stops_sending_after_connectivity_timeout() {
+        // An unreachable device whose first write times out must NOT receive
+        // its remaining attribute writes — otherwise one dead group member
+        // stalls the whole dispatch on serial CHIP timeouts (~25s each).
+        // Regression for #169 ("matter failed to load").
+        struct TimeoutTransport {
+            writes: Mutex<Vec<RecordedOperation>>,
+        }
+
+        impl MatterTransport for TimeoutTransport {
+            fn commission_light(
+                &self,
+                _request: &crate::transport::MatterCommissionRequest,
+            ) -> Result<crate::transport::CommissionedDevice> {
+                unreachable!()
+            }
+
+            fn decommission_device(&self, _node_id: u64, _force: bool) -> Result<()> {
+                Ok(())
+            }
+
+            fn list_devices(&self) -> Result<Vec<crate::transport::MatterDeviceInfo>> {
+                Ok(Vec::new())
+            }
+
+            fn probe_light(&self, _node_id: u64) -> Result<crate::transport::CommissionedDevice> {
+                unreachable!()
+            }
+
+            fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
+                self.writes
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetOnOff {
+                        node_id,
+                        endpoint,
+                        on,
+                    });
+                anyhow::bail!("setting Matter on/off: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
+            }
+
+            fn identify_light(
+                &self,
+                _node_id: u64,
+                _endpoint: u16,
+                _duration_secs: u16,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            fn set_brightness(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                level: u8,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.writes
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetBrightness {
+                        node_id,
+                        endpoint,
+                        level,
+                        transition_ms,
+                    });
+                anyhow::bail!("setting Matter brightness: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
+            }
+
+            fn set_color_temperature(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                kelvin: u16,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.writes
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetColorTemperature {
+                        node_id,
+                        endpoint,
+                        kelvin,
+                        transition_ms,
+                    });
+                anyhow::bail!("setting Matter color temperature: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
+            }
+
+            fn set_xy(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                x: f32,
+                y: f32,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.writes.lock().unwrap().push(RecordedOperation::SetXy {
+                    node_id,
+                    endpoint,
+                    x,
+                    y,
+                    transition_ms,
+                });
+                anyhow::bail!("setting Matter xy: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
+            }
+
+            fn set_hue_saturation(
+                &self,
+                node_id: u64,
+                endpoint: u16,
+                hue: u8,
+                saturation: u8,
+                transition_ms: Option<u32>,
+            ) -> Result<()> {
+                self.writes
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetHueSaturation {
+                        node_id,
+                        endpoint,
+                        hue,
+                        saturation,
+                        transition_ms,
+                    });
+                anyhow::bail!("setting Matter hue/saturation: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
+            }
+
+            fn read_on_off(&self, _node_id: u64, _endpoint: u16) -> Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let transport = Arc::new(TimeoutTransport {
+            writes: Mutex::new(Vec::new()),
+        });
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("r1", "Room", "r1", &["matter-42".to_string()]);
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("r1", vec!["matter-42".to_string()]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "test".to_string(),
+            commissioned: std::sync::Mutex::new(Vec::new()),
+            next_node_id: std::sync::atomic::AtomicU64::new(100),
+            device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                LightCapabilities::defaults_for(LightType::ExtendedColor),
+            )])),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                vec![DeviceQuirk::NeedsXyNotCt],
+            )])),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            event_tx: tx,
+        });
+        let controller = MatterLightController::new(transport.clone(), hub_data);
+
+        let result = block_on(controller.turn_on("r1", LightingCommand::new(50, 3000)));
+        assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
+
+        // Exactly one write: the first command timed out, so the fan-out must
+        // skip the device's remaining attribute writes instead of timing out
+        // on each in turn. Unpatched code records two (SetXy + SetBrightness).
+        let writes = transport.writes.lock().unwrap();
+        assert_eq!(
+            writes.len(),
+            1,
+            "expected the dispatch to stop after the first connectivity timeout, got {:?}",
+            *writes
+        );
     }
 }
