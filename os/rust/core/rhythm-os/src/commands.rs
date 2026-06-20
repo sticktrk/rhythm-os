@@ -2119,7 +2119,7 @@ fn persist_settings_locked(s: &AppState) {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
             light_breaker_enabled: s.light_breaker_enabled,
-            light_runtime: s.light_runtime_kind,
+            light_runtime: s.light_runtime_kind.clone(),
             active_mode: s.active_mode,
             last_active_mode_cause: s.last_active_mode_cause,
             last_active_mode_transition_id: s.last_active_mode_transition_id.clone(),
@@ -3273,7 +3273,7 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
         auto_update: s.auto_update,
-        light_runtime: s.light_runtime_kind,
+        light_runtime: s.light_runtime_kind.clone(),
     }
 }
 
@@ -3285,11 +3285,8 @@ fn build_light_breaker_dto_inner(s: &AppState) -> LightBreakerDto {
 
 fn build_light_runtime_dto_inner(s: &AppState) -> LightRuntimeDto {
     LightRuntimeDto {
-        runtime_id: s.light_runtime_kind,
-        available_runtime_ids: vec![
-            LightRuntimeKind::RhythmAdaptive,
-            LightRuntimeKind::removed-projectCircadian,
-        ],
+        runtime_id: s.light_runtime_kind.clone(),
+        available_runtime_ids: s.light_runtime_registry.available_runtime_ids(),
     }
 }
 
@@ -6895,9 +6892,12 @@ pub fn do_light_runtime_settings_set(
 ) -> Result<String> {
     let (settings, changed, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime_kind = s
+            .light_runtime_registry
+            .parse_runtime_kind(runtime_kind.as_str())?;
         let changed = s.light_runtime_kind != runtime_kind;
         let dispatch_generation = if changed {
-            crate::light_runtime::reset_light_runtime_for_kind(&mut s, runtime_kind);
+            crate::light_runtime::reset_light_runtime_for_kind(&mut s, runtime_kind.clone());
             Some(s.invalidate_queued_light_dispatches())
         } else {
             None
@@ -11858,6 +11858,10 @@ mod tests {
         HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightController,
         LightProfileConfig, Room, RoomSnapshot, RuntimeHandle,
     };
+    use rhythm_runtime_api::{
+        LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
+        RuntimeResult, RuntimeSnapshot,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -12442,6 +12446,7 @@ mod tests {
     ) -> (SharedState, Arc<MockRuntime>) {
         let runtime = Arc::new(MockRuntime::new(snapshots, current_hour));
         let mut app = AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let hub_type = HubType::parse("mock").unwrap();
         let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
         app.hubs.insert(
@@ -12457,6 +12462,71 @@ mod tests {
             },
         );
         (Arc::new(Mutex::new(app)), runtime)
+    }
+
+    fn install_test_light_runtime_modules(app: &mut AppState) {
+        crate::light_runtime::register_light_runtime_modules(
+            app,
+            [
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                    &["rhythm", "rhythm_adaptive"],
+                    test_rhythm_adaptive_manifest,
+                    create_test_rhythm_adaptive_runtime,
+                ),
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::removed_circadian_RUNTIME_ID,
+                    &["removed-project-circadian", "removed-project", "removed_circadian"],
+                    test_removed-project_manifest,
+                    create_test_removed-project_runtime,
+                ),
+            ],
+        )
+        .expect("test light runtime modules should register");
+    }
+
+    fn test_rhythm_adaptive_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+            "Rhythm Adaptive",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn test_removed-project_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+            "removed-project Circadian",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_test_rhythm_adaptive_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+        ))
+    }
+
+    fn create_test_removed-project_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+        ))
+    }
+
+    struct NoopTestLightRuntime(&'static str);
+
+    impl LightRuntime for NoopTestLightRuntime {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn handle_event(
+            &mut self,
+            _snapshot: &RuntimeSnapshot,
+            _event: RuntimeEvent,
+        ) -> RuntimeResult<RuntimePlan> {
+            Ok(RuntimePlan::noop())
+        }
     }
 
     fn setup_state_with_registry(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
@@ -19473,13 +19543,13 @@ mod tests {
         state.lock().unwrap().event_tx = Some(event_tx);
 
         let result =
-            do_light_runtime_settings_set(&state, LightRuntimeKind::removed-projectCircadian).unwrap();
+            do_light_runtime_settings_set(&state, LightRuntimeKind::removed_circadian()).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["light_runtime"], "removed-circadian");
         assert_eq!(
             state.lock().unwrap().light_runtime_kind,
-            LightRuntimeKind::removed-projectCircadian
+            LightRuntimeKind::removed_circadian()
         );
 
         let mut light_runtime = None;
@@ -19489,7 +19559,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(light_runtime, Some(LightRuntimeKind::removed-projectCircadian));
+        assert_eq!(light_runtime, Some(LightRuntimeKind::removed_circadian()));
     }
 
     #[test]

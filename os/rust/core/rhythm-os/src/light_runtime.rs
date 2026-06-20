@@ -5,7 +5,6 @@
 //! return a neutral plan for the host to apply.
 
 use anyhow::Result;
-use removed_circadian::removed-projectRuntime;
 use rhythm_core::{
     core_lighting_command_from_runtime, runtime_node_kind_from_light_node_kind, RuntimeHandle,
 };
@@ -14,7 +13,7 @@ use rhythm_runtime_api::{
     RuntimeExtensionRequest, RuntimeExtensionResponse, RuntimeManifest, RuntimeNode, RuntimePlan,
     RuntimeSnapshot, StateWrite,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -29,31 +28,34 @@ pub const removed_circadian_RUNTIME_ID: &str = "removed-circadian";
 
 pub type SharedLightRuntime = Arc<Mutex<Box<dyn LightRuntime>>>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum LightRuntimeKind {
-    #[serde(
-        rename = "rhythm-adaptive",
-        alias = "rhythm",
-        alias = "rhythm_adaptive"
-    )]
-    #[default]
-    RhythmAdaptive,
-    #[serde(
-        rename = "removed-circadian",
-        alias = "removed-project-circadian",
-        alias = "removed-project",
-        alias = "removed_circadian"
-    )]
-    removed-projectCircadian,
-}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LightRuntimeKind(String);
 
 impl LightRuntimeKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::RhythmAdaptive => RHYTHM_ADAPTIVE_RUNTIME_ID,
-            Self::removed-projectCircadian => removed_circadian_RUNTIME_ID,
-        }
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn new(runtime_id: impl Into<String>) -> Self {
+        Self(runtime_id.into())
+    }
+
+    fn from_canonical_id(runtime_id: &str) -> Self {
+        Self(runtime_id.to_string())
+    }
+
+    pub fn rhythm_adaptive() -> Self {
+        Self::from_canonical_id(RHYTHM_ADAPTIVE_RUNTIME_ID)
+    }
+
+    pub fn removed_circadian() -> Self {
+        Self::from_canonical_id(removed_circadian_RUNTIME_ID)
+    }
+}
+
+impl Default for LightRuntimeKind {
+    fn default() -> Self {
+        Self::from_canonical_id(RHYTHM_ADAPTIVE_RUNTIME_ID)
     }
 }
 
@@ -62,31 +64,246 @@ impl FromStr for LightRuntimeKind {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
-            RHYTHM_ADAPTIVE_RUNTIME_ID | "rhythm" | "rhythm_adaptive" => Ok(Self::RhythmAdaptive),
-            removed_circadian_RUNTIME_ID | "removed-project" | "removed_circadian" => {
-                Ok(Self::removed-projectCircadian)
+            RHYTHM_ADAPTIVE_RUNTIME_ID | "rhythm" | "rhythm_adaptive" => {
+                Ok(Self::from_canonical_id(RHYTHM_ADAPTIVE_RUNTIME_ID))
             }
-            _ => Err(anyhow::anyhow!("unknown light runtime '{}'", value)),
+            removed_circadian_RUNTIME_ID | "removed-project" | "removed_circadian" => {
+                Ok(Self::from_canonical_id(removed_circadian_RUNTIME_ID))
+            }
+            other if is_valid_runtime_id(other) => Ok(Self::new(other)),
+            _ => Err(anyhow::anyhow!("invalid light runtime id '{}'", value)),
         }
     }
 }
 
-pub fn light_runtime_manifests() -> Vec<RuntimeManifest> {
-    vec![
-        light_runtime_manifest(LightRuntimeKind::RhythmAdaptive),
-        light_runtime_manifest(LightRuntimeKind::removed-projectCircadian),
-    ]
-}
-
-pub fn light_runtime_manifest(kind: LightRuntimeKind) -> RuntimeManifest {
-    match kind {
-        LightRuntimeKind::RhythmAdaptive => rhythm_adaptive::runtime_manifest(),
-        LightRuntimeKind::removed-projectCircadian => removed_circadian::runtime_manifest(),
+impl Serialize for LightRuntimeKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 
-pub fn parse_light_runtime_id(runtime_id: &str) -> Result<LightRuntimeKind> {
-    runtime_id.parse::<LightRuntimeKind>()
+impl<'de> Deserialize<'de> for LightRuntimeKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct LightRuntimeModule {
+    pub id: &'static str,
+    pub aliases: &'static [&'static str],
+    pub manifest: fn() -> RuntimeManifest,
+    pub instance: LightRuntimeInstance,
+}
+
+impl LightRuntimeModule {
+    pub const fn ephemeral(
+        id: &'static str,
+        aliases: &'static [&'static str],
+        manifest: fn() -> RuntimeManifest,
+        create: fn(Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime>,
+    ) -> Self {
+        Self {
+            id,
+            aliases,
+            manifest,
+            instance: LightRuntimeInstance::Ephemeral { create },
+        }
+    }
+
+    pub const fn cached(
+        id: &'static str,
+        aliases: &'static [&'static str],
+        manifest: fn() -> RuntimeManifest,
+        ensure: fn(&SharedState, &LightRuntimeModule) -> Result<SharedLightRuntime>,
+    ) -> Self {
+        Self {
+            id,
+            aliases,
+            manifest,
+            instance: LightRuntimeInstance::Cached { ensure },
+        }
+    }
+
+    pub fn runtime_kind(&self) -> LightRuntimeKind {
+        LightRuntimeKind::from_canonical_id(self.id)
+    }
+
+    pub fn manifest(&self) -> RuntimeManifest {
+        (self.manifest)()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum LightRuntimeInstance {
+    Ephemeral {
+        create: fn(Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime>,
+    },
+    Cached {
+        ensure: fn(&SharedState, &LightRuntimeModule) -> Result<SharedLightRuntime>,
+    },
+}
+
+#[derive(Clone, Default)]
+pub struct LightRuntimeRegistry {
+    modules: BTreeMap<String, LightRuntimeModule>,
+    aliases: BTreeMap<String, String>,
+    order: Vec<String>,
+}
+
+impl LightRuntimeRegistry {
+    pub fn register(&mut self, module: LightRuntimeModule) -> Result<()> {
+        validate_runtime_id(module.id)?;
+        let manifest = module.manifest();
+        if manifest.id != module.id {
+            return Err(anyhow::anyhow!(
+                "light runtime module '{}' returned manifest id '{}'",
+                module.id,
+                manifest.id
+            ));
+        }
+        if self.modules.contains_key(module.id) {
+            return Err(anyhow::anyhow!(
+                "light runtime module '{}' is already registered",
+                module.id
+            ));
+        }
+
+        self.aliases
+            .insert(module.id.to_string(), module.id.to_string());
+        for alias in module.aliases {
+            validate_runtime_alias(alias)?;
+            if self.modules.contains_key(*alias) || self.aliases.contains_key(*alias) {
+                return Err(anyhow::anyhow!(
+                    "light runtime alias '{}' is already registered",
+                    alias
+                ));
+            }
+            self.aliases
+                .insert((*alias).to_string(), module.id.to_string());
+        }
+        self.modules.insert(module.id.to_string(), module);
+        self.order.push(module.id.to_string());
+        Ok(())
+    }
+
+    pub fn resolve_id<'a>(&'a self, runtime_id: &'a str) -> Option<&'a str> {
+        self.aliases
+            .get(runtime_id)
+            .map(String::as_str)
+            .or_else(|| self.modules.contains_key(runtime_id).then_some(runtime_id))
+    }
+
+    pub fn parse_runtime_kind(&self, runtime_id: &str) -> Result<LightRuntimeKind> {
+        let parsed = runtime_id.parse::<LightRuntimeKind>()?;
+        let canonical = self
+            .resolve_id(parsed.as_str())
+            .ok_or_else(|| anyhow::anyhow!("unknown light runtime '{}'", runtime_id))?;
+        Ok(LightRuntimeKind::from_canonical_id(canonical))
+    }
+
+    pub fn module_for_kind(&self, kind: &LightRuntimeKind) -> Option<LightRuntimeModule> {
+        let canonical = self.resolve_id(kind.as_str())?;
+        self.modules.get(canonical).copied()
+    }
+
+    pub fn module_for_id(&self, runtime_id: &str) -> Option<LightRuntimeModule> {
+        let canonical = self.resolve_id(runtime_id)?;
+        self.modules.get(canonical).copied()
+    }
+
+    pub fn manifests(&self) -> Vec<RuntimeManifest> {
+        self.order
+            .iter()
+            .filter_map(|runtime_id| self.modules.get(runtime_id))
+            .map(LightRuntimeModule::manifest)
+            .collect()
+    }
+
+    pub fn available_runtime_ids(&self) -> Vec<LightRuntimeKind> {
+        self.order
+            .iter()
+            .filter_map(|runtime_id| self.modules.get(runtime_id))
+            .map(LightRuntimeModule::runtime_kind)
+            .collect()
+    }
+}
+
+pub fn register_light_runtime_module(s: &mut AppState, module: LightRuntimeModule) -> Result<()> {
+    s.light_runtime_registry.register(module)
+}
+
+pub fn register_light_runtime_modules<I>(s: &mut AppState, modules: I) -> Result<()>
+where
+    I: IntoIterator<Item = LightRuntimeModule>,
+{
+    for module in modules {
+        register_light_runtime_module(s, module)?;
+    }
+    Ok(())
+}
+
+pub fn light_runtime_manifests(state: &SharedState) -> Result<Vec<RuntimeManifest>> {
+    let s = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+    Ok(s.light_runtime_registry.manifests())
+}
+
+pub fn light_runtime_manifest(state: &SharedState, runtime_id: &str) -> Result<RuntimeManifest> {
+    let s = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+    let module = s
+        .light_runtime_registry
+        .module_for_id(runtime_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown light runtime '{}'", runtime_id))?;
+    Ok(module.manifest())
+}
+
+pub fn parse_light_runtime_id(state: &SharedState, runtime_id: &str) -> Result<LightRuntimeKind> {
+    let s = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+    s.light_runtime_registry.parse_runtime_kind(runtime_id)
+}
+
+fn is_valid_runtime_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+fn validate_runtime_id(value: &str) -> Result<()> {
+    if is_valid_runtime_id(value) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("invalid light runtime id '{}'", value))
+    }
+}
+
+fn validate_runtime_alias(value: &str) -> Result<()> {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+    {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("invalid light runtime alias '{}'", value))
+    }
 }
 
 pub fn run_light_runtime_extension(
@@ -94,15 +311,21 @@ pub fn run_light_runtime_extension(
     runtime_id: &str,
     request: RuntimeExtensionRequest,
 ) -> Result<RuntimeExtensionResponse> {
-    let requested_kind = parse_light_runtime_id(runtime_id)?;
-    let (selected_kind, host_runtime) = {
+    let requested_kind = parse_light_runtime_id(state, runtime_id)?;
+    let (selected_kind, host_runtime, module) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let selected_kind = s.light_runtime_kind.clone();
+        let module = s
+            .light_runtime_registry
+            .module_for_kind(&requested_kind)
+            .ok_or_else(|| anyhow::anyhow!("unknown light runtime '{}'", runtime_id))?;
         (
-            s.light_runtime_kind,
+            selected_kind,
             s.hub_runtime()
                 .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?,
+            module,
         )
     };
 
@@ -114,42 +337,41 @@ pub fn run_light_runtime_extension(
         ));
     }
 
-    let response = match requested_kind {
-        LightRuntimeKind::RhythmAdaptive => {
-            let mut light_runtime =
-                rhythm_adaptive::RuntimeHandleAdaptiveRuntime::new(host_runtime.clone());
+    with_light_runtime_instance(
+        state,
+        module,
+        host_runtime,
+        |light_runtime, host_runtime| {
             run_light_runtime_extension_with_handle(
                 state,
-                requested_kind.as_str(),
-                host_runtime.as_ref(),
-                &mut light_runtime,
+                module.id,
+                host_runtime,
+                light_runtime,
                 request,
-            )?
+            )
+        },
+    )
+}
+
+fn with_light_runtime_instance<T>(
+    state: &SharedState,
+    module: LightRuntimeModule,
+    host_runtime: Arc<dyn RuntimeHandle>,
+    callback: impl FnOnce(&mut dyn LightRuntime, &dyn RuntimeHandle) -> Result<T>,
+) -> Result<T> {
+    match module.instance {
+        LightRuntimeInstance::Ephemeral { create } => {
+            let mut light_runtime = create(host_runtime.clone());
+            callback(light_runtime.as_mut(), host_runtime.as_ref())
         }
-        LightRuntimeKind::removed-projectCircadian => {
-            ensure_removed-project_runtime(state)?;
-            let light_runtime = {
-                let s = state
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-                s.light_runtime
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("removed-project runtime is not initialized"))?
-            };
+        LightRuntimeInstance::Cached { ensure } => {
+            let light_runtime = ensure(state, &module)?;
             let mut light_runtime = light_runtime
                 .lock()
                 .map_err(|_| anyhow::anyhow!("light runtime lock poisoned"))?;
-            run_light_runtime_extension_with_handle(
-                state,
-                requested_kind.as_str(),
-                host_runtime.as_ref(),
-                light_runtime.as_mut(),
-                request,
-            )?
+            callback(light_runtime.as_mut(), host_runtime.as_ref())
         }
-    };
-
-    Ok(response)
+    }
 }
 
 fn run_light_runtime_extension_with_handle(
@@ -306,51 +528,25 @@ pub fn run_selected_light_runtime_event(
     state: &SharedState,
     event: RuntimeEvent,
 ) -> Result<RuntimePlanApplyReport> {
-    let (kind, runtime) = {
+    let (runtime, module) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        let kind = s.light_runtime_kind.clone();
+        let module = s
+            .light_runtime_registry
+            .module_for_kind(&kind)
+            .ok_or_else(|| anyhow::anyhow!("unknown light runtime '{}'", kind.as_str()))?;
         (
-            s.light_runtime_kind,
             s.hub_runtime()
                 .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?,
+            module,
         )
     };
 
-    match kind {
-        LightRuntimeKind::RhythmAdaptive => {
-            let mut light_runtime = rhythm_adaptive::RuntimeHandleAdaptiveRuntime::new(runtime);
-            let host_runtime = light_runtime.inner().clone();
-            run_light_runtime_event_with_handle(
-                state,
-                kind.as_str(),
-                host_runtime.as_ref(),
-                &mut light_runtime,
-                event,
-            )
-        }
-        LightRuntimeKind::removed-projectCircadian => {
-            ensure_removed-project_runtime(state)?;
-            let light_runtime = {
-                let s = state
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-                s.light_runtime
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("removed-project runtime is not initialized"))?
-            };
-            let mut light_runtime = light_runtime
-                .lock()
-                .map_err(|_| anyhow::anyhow!("light runtime lock poisoned"))?;
-            run_light_runtime_event_with_handle(
-                state,
-                kind.as_str(),
-                runtime.as_ref(),
-                light_runtime.as_mut(),
-                event,
-            )
-        }
-    }
+    with_light_runtime_instance(state, module, runtime, |light_runtime, host_runtime| {
+        run_light_runtime_event_with_handle(state, module.id, host_runtime, light_runtime, event)
+    })
 }
 
 pub fn run_light_runtime_event_with_handle(
@@ -407,61 +603,6 @@ fn validate_runtime_selection(
         | RuntimeEvent::PeriodicTick(_)
         | RuntimeEvent::HostStateChanged { .. } => Ok(()),
     }
-}
-
-pub fn ensure_removed-project_runtime(state: &SharedState) -> Result<()> {
-    let (runtime, runtime_state, hour, sun_times, current_fingerprint, has_runtime) = {
-        let s = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-        if s.light_runtime_kind != LightRuntimeKind::removed-projectCircadian {
-            return Ok(());
-        }
-        let runtime = s
-            .hub_runtime()
-            .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?;
-        (
-            runtime,
-            s.light_runtime_state
-                .get(removed_circadian_RUNTIME_ID)
-                .cloned(),
-            s.hub_runtime()
-                .map(|runtime| runtime.current_hour() as f64)
-                .unwrap_or(12.0),
-            removed-project_sun_times_from_state(&s),
-            s.light_runtime_config_fingerprint.clone(),
-            s.light_runtime.is_some(),
-        )
-    };
-    let snapshot = build_runtime_snapshot(runtime.as_ref(), runtime_state.as_ref());
-    let fingerprint = removed_circadian::runtime_config_fingerprint_from_snapshot(
-        &snapshot,
-        runtime_state.as_ref(),
-    );
-    if has_runtime && current_fingerprint.as_deref() == Some(fingerprint.as_str()) {
-        return Ok(());
-    }
-
-    let mut light_runtime = removed-projectRuntime::new();
-    light_runtime.load_from_runtime_snapshot(
-        &snapshot,
-        runtime_state.as_ref(),
-        hour,
-        sun_times,
-        0.0,
-    );
-
-    let mut s = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-    if s.light_runtime_kind == LightRuntimeKind::removed-projectCircadian
-        && (s.light_runtime.is_none()
-            || s.light_runtime_config_fingerprint.as_deref() != Some(fingerprint.as_str()))
-    {
-        s.light_runtime = Some(Arc::new(Mutex::new(Box::new(light_runtime))));
-        s.light_runtime_config_fingerprint = Some(fingerprint);
-    }
-    Ok(())
 }
 
 pub fn reset_light_runtime_for_kind(s: &mut AppState, kind: LightRuntimeKind) {
@@ -581,31 +722,6 @@ fn emit_diagnostics(runtime_id: &str, diagnostics: &[rhythm_runtime_api::Runtime
     }
 }
 
-fn removed-project_sun_times_from_state(s: &AppState) -> removed_circadian::SunTimes {
-    let mut sun_times = removed_circadian::SunTimes::default();
-    let Some(lat) = s.latitude else {
-        return sun_times;
-    };
-    let Some(lon) = s.longitude else {
-        return sun_times;
-    };
-
-    let Some(tz_name) = s.timezone_name.as_deref() else {
-        sun_times.solar_noon = s.solar_noon_hour() as f64;
-        sun_times.solar_mid = (sun_times.solar_noon + 12.0) % 24.0;
-        return sun_times;
-    };
-    let tz = rhythm_core::Timezone::new(tz_name);
-    let (year, month, day, _) = tz.local_date_hour_from_utc(chrono::Utc::now().naive_utc());
-    let core = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
-    sun_times.sunrise = core.sunrise as f64;
-    sun_times.sunset = core.sunset as f64;
-    sun_times.solar_noon = s.solar_noon_hour() as f64;
-    sun_times.solar_mid = (sun_times.solar_noon + 12.0) % 24.0;
-    sun_times.outdoor_source = "host".to_string();
-    sun_times
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,7 +731,7 @@ mod tests {
         DiagnosticLevel, InputAction, LightingCommand, RuntimeDiagnostic, RuntimeInputEvent,
     };
     use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn state_writes_are_namespaced_by_runtime_and_node() {
@@ -715,7 +831,7 @@ mod tests {
         let state = make_state_with_runtime(runtime);
         {
             let mut s = state.lock().unwrap();
-            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::removed-projectCircadian);
+            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::removed_circadian());
         }
 
         let report = run_selected_light_runtime_event(
@@ -745,10 +861,10 @@ mod tests {
         let state = make_state_with_runtime(runtime.clone());
         {
             let mut s = state.lock().unwrap();
-            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::removed-projectCircadian);
+            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::removed_circadian());
         }
 
-        ensure_removed-project_runtime(&state).unwrap();
+        ensure_registered_removed-project_runtime(&state).unwrap();
         let (first_runtime, first_fingerprint) = {
             let s = state.lock().unwrap();
             (
@@ -758,7 +874,7 @@ mod tests {
         };
 
         runtime.add_node("bedroom", "Bedroom", rhythm_core::LightNodeKind::Room, None);
-        ensure_removed-project_runtime(&state).unwrap();
+        ensure_registered_removed-project_runtime(&state).unwrap();
 
         let s = state.lock().unwrap();
         let second_runtime = s.light_runtime.clone().unwrap();
@@ -835,6 +951,7 @@ mod tests {
 
     fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
         let mut app = crate::state::AppState::default();
+        register_test_light_runtime_modules(&mut app);
         let hub_type = HubType::new("test");
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
         app.hubs.insert(
@@ -850,6 +967,98 @@ mod tests {
             },
         );
         Arc::new(std::sync::Mutex::new(app))
+    }
+
+    fn register_test_light_runtime_modules(app: &mut AppState) {
+        register_light_runtime_modules(
+            app,
+            [
+                LightRuntimeModule::ephemeral(
+                    RHYTHM_ADAPTIVE_RUNTIME_ID,
+                    &["rhythm", "rhythm_adaptive"],
+                    rhythm_adaptive::runtime_manifest,
+                    create_test_rhythm_adaptive_runtime,
+                ),
+                LightRuntimeModule::cached(
+                    removed_circadian_RUNTIME_ID,
+                    &["removed-project-circadian", "removed-project", "removed_circadian"],
+                    removed_circadian::runtime_manifest,
+                    ensure_test_removed-project_runtime,
+                ),
+            ],
+        )
+        .expect("test light runtime modules should register");
+    }
+
+    fn create_test_rhythm_adaptive_runtime(
+        runtime: Arc<dyn RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(rhythm_adaptive::RuntimeHandleAdaptiveRuntime::new(runtime))
+    }
+
+    fn ensure_registered_removed-project_runtime(state: &SharedState) -> Result<SharedLightRuntime> {
+        let module = {
+            let s = state.lock().unwrap();
+            s.light_runtime_registry
+                .module_for_kind(&LightRuntimeKind::removed_circadian())
+                .unwrap()
+        };
+        let LightRuntimeInstance::Cached { ensure } = module.instance else {
+            panic!("removed-project test module should be cached");
+        };
+        ensure(state, &module)
+    }
+
+    fn ensure_test_removed-project_runtime(
+        state: &SharedState,
+        module: &LightRuntimeModule,
+    ) -> Result<SharedLightRuntime> {
+        let (runtime, runtime_state, current_fingerprint, existing_runtime) = {
+            let s = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            let runtime = s
+                .hub_runtime()
+                .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?;
+            (
+                runtime,
+                s.light_runtime_state.get(module.id).cloned(),
+                s.light_runtime_config_fingerprint.clone(),
+                s.light_runtime.clone(),
+            )
+        };
+        let snapshot = build_runtime_snapshot(runtime.as_ref(), runtime_state.as_ref());
+        let fingerprint = removed_circadian::runtime_config_fingerprint_from_snapshot(
+            &snapshot,
+            runtime_state.as_ref(),
+        );
+        if current_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+            if let Some(existing_runtime) = existing_runtime {
+                return Ok(existing_runtime);
+            }
+        }
+
+        let mut light_runtime = removed_circadian::removed-projectRuntime::new();
+        light_runtime.load_from_runtime_snapshot(
+            &snapshot,
+            runtime_state.as_ref(),
+            runtime.current_hour() as f64,
+            removed_circadian::SunTimes::default(),
+            0.0,
+        );
+        let light_runtime: SharedLightRuntime = Arc::new(Mutex::new(Box::new(light_runtime)));
+
+        let mut s = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        if s.light_runtime_kind.as_str() == module.id
+            && (s.light_runtime.is_none()
+                || s.light_runtime_config_fingerprint.as_deref() != Some(fingerprint.as_str()))
+        {
+            s.light_runtime = Some(light_runtime.clone());
+            s.light_runtime_config_fingerprint = Some(fingerprint);
+        }
+        Ok(light_runtime)
     }
 
     fn test_runtime() -> Arc<dyn RuntimeHandle> {

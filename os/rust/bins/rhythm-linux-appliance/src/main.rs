@@ -163,6 +163,7 @@ fn main() -> Result<()> {
         // Linux appliances are active platforms and should match the other
         // desktop/server-class runtimes for bootstrap behavior.
         s.platform = PlatformConfig::desktop();
+        rhythm_os_runtime_modules::install_default_light_runtime_modules(&mut s)?;
 
         rhythm_os::storage::load_persisted_state(&mut s);
 

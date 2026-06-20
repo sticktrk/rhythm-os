@@ -12,6 +12,7 @@ name = "rhythm-linux-appliance"
 [dependencies]
 rhythm-server = { path = "../rhythm-server" }
 rhythm-os = { path = "../../core/rhythm-os" }
+rhythm-os-runtime-modules = { path = "../../../../runtime/rust/rhythm-os-runtime-modules" }
 
 tokio = { workspace = true }
 axum = { workspace = true }

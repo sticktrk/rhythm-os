@@ -1212,7 +1212,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                         if let Err(e) = storage.save_settings(&StoredSettings {
                             power_save: s.power_save,
                             light_breaker_enabled: s.light_breaker_enabled,
-                            light_runtime: s.light_runtime_kind,
+                            light_runtime: s.light_runtime_kind.clone(),
                             active_mode: s.active_mode,
                             last_active_mode_cause: s.last_active_mode_cause,
                             last_active_mode_transition_id: s
@@ -2965,7 +2965,7 @@ mod tests {
 
             assert_eq!(
                 settings.light_runtime,
-                crate::light_runtime::LightRuntimeKind::RhythmAdaptive
+                crate::light_runtime::LightRuntimeKind::rhythm_adaptive()
             );
         }
 

@@ -21,7 +21,7 @@ use crate::factory_default_config::{
     factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
-use crate::light_runtime::{LightRuntimeKind, SharedLightRuntime};
+use crate::light_runtime::{LightRuntimeKind, LightRuntimeRegistry, SharedLightRuntime};
 use crate::remote_access::RemoteAccessController;
 use crate::storage::{
     generate_server_instance_id, Storage, StoredLightRuntimeState, StoredMotionTimerEntry,
@@ -432,6 +432,8 @@ pub struct AppState {
     ///
     /// Shape: runtime id -> node id -> app-defined key -> JSON value.
     pub light_runtime_state: StoredLightRuntimeState,
+    /// Registry of light runtime modules linked into this host build.
+    pub light_runtime_registry: LightRuntimeRegistry,
     /// Selected plan-based light runtime behavior.
     pub light_runtime_kind: LightRuntimeKind,
     /// Stateful selected light runtime instance, if the selected runtime needs one.
@@ -715,6 +717,7 @@ impl Default for AppState {
             require_api_auth: false,
             storage: None,
             light_runtime_state: StoredLightRuntimeState::new(),
+            light_runtime_registry: LightRuntimeRegistry::default(),
             light_runtime_kind: LightRuntimeKind::default(),
             light_runtime: None,
             light_runtime_config_fingerprint: None,

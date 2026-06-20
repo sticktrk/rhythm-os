@@ -1689,6 +1689,7 @@ dependencies = [
  "rhythm-hue",
  "rhythm-matter",
  "rhythm-os",
+ "rhythm-os-runtime-modules",
  "serde",
  "serde_json",
  "tokio",
@@ -1789,6 +1790,7 @@ dependencies = [
  "futures",
  "log",
  "rhythm-os",
+ "rhythm-os-runtime-modules",
  "rhythm-server",
  "serde",
  "serde_json",
@@ -1846,6 +1848,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-os-runtime-modules"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "removed-circadian",
+ "rhythm-adaptive",
+ "rhythm-core",
+ "rhythm-os",
+ "rhythm-runtime-api",
+]
+
+[[package]]
 name = "rhythm-profile"
 version = "0.6.102-beta"
 dependencies = [
@@ -1881,6 +1896,7 @@ dependencies = [
  "rhythm-hue",
  "rhythm-matter",
  "rhythm-os",
+ "rhythm-os-runtime-modules",
  "serde",
  "serde_json",
  "sha2",

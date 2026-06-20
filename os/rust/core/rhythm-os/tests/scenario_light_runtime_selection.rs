@@ -52,7 +52,8 @@ fn default_runtime_api_and_settings_report_rhythm_adaptive() {
         .iter()
         .any(|id| id == RHYTHM_ADAPTIVE_RUNTIME_ID));
 
-    let manifest = handlers::handle_get_light_runtime_manifest(RHYTHM_ADAPTIVE_RUNTIME_ID);
+    let manifest =
+        handlers::handle_get_light_runtime_manifest(&harness.state, RHYTHM_ADAPTIVE_RUNTIME_ID);
     assert_eq!(manifest.status, 200);
     let manifest: serde_json::Value = serde_json::from_str(&manifest.body).unwrap();
     assert_eq!(manifest["id"], RHYTHM_ADAPTIVE_RUNTIME_ID);
@@ -69,7 +70,10 @@ fn default_rhythm_adaptive_dispatches_without_stateful_runtime_instance() {
 
     {
         let state = harness.state.lock().unwrap();
-        assert_eq!(state.light_runtime_kind, LightRuntimeKind::RhythmAdaptive);
+        assert_eq!(
+            state.light_runtime_kind,
+            LightRuntimeKind::rhythm_adaptive()
+        );
         assert!(state.light_runtime.is_none());
         assert!(!state
             .light_runtime_state
@@ -88,7 +92,10 @@ fn default_rhythm_adaptive_dispatches_without_stateful_runtime_instance() {
     assert!(harness.lights_on("kitchen"));
 
     let state = harness.state.lock().unwrap();
-    assert_eq!(state.light_runtime_kind, LightRuntimeKind::RhythmAdaptive);
+    assert_eq!(
+        state.light_runtime_kind,
+        LightRuntimeKind::rhythm_adaptive()
+    );
     assert!(
         state.light_runtime.is_none(),
         "default rhythm-adaptive runtime must not allocate a cached runtime instance"
@@ -118,7 +125,10 @@ fn default_rhythm_adaptive_periodic_tick_uses_selected_runtime_path() {
     assert_eq!(report.state_write_count, 0);
     assert_eq!(spy.turn_on_count(), 1);
     let state = harness.state.lock().unwrap();
-    assert_eq!(state.light_runtime_kind, LightRuntimeKind::RhythmAdaptive);
+    assert_eq!(
+        state.light_runtime_kind,
+        LightRuntimeKind::rhythm_adaptive()
+    );
     assert!(state.light_runtime.is_none());
 }
 
@@ -140,13 +150,13 @@ fn selected_light_runtimes_share_os_host_interfaces() {
     assert_eq!(report.dispatch_count, 1);
     assert_eq!(
         harness.state.lock().unwrap().light_runtime_kind,
-        LightRuntimeKind::RhythmAdaptive
+        LightRuntimeKind::rhythm_adaptive()
     );
     assert_eq!(spy.turn_on_count(), 1);
 
     // Expert mode selects removed-project. It uses the same OS host/controller path,
     // and its private runtime state is isolated under the removed-project runtime id.
-    commands::do_light_runtime_settings_set(&harness.state, LightRuntimeKind::removed-projectCircadian)
+    commands::do_light_runtime_settings_set(&harness.state, LightRuntimeKind::removed_circadian())
         .unwrap();
     spy.reset();
 
@@ -159,7 +169,10 @@ fn selected_light_runtimes_share_os_host_interfaces() {
     assert_eq!(spy.turn_on_count(), 1);
     {
         let state = harness.state.lock().unwrap();
-        assert_eq!(state.light_runtime_kind, LightRuntimeKind::removed-projectCircadian);
+        assert_eq!(
+            state.light_runtime_kind,
+            LightRuntimeKind::removed_circadian()
+        );
         assert!(state.light_runtime.is_some());
         assert!(
             state.light_runtime_state[removed_circadian_RUNTIME_ID][&kitchen]
@@ -176,7 +189,7 @@ fn selected_light_runtimes_share_os_host_interfaces() {
 
     // Returning to Basic mode clears the cached removed-project runtime and dispatches
     // back through Rhythm's adaptive runtime against the same topology.
-    commands::do_light_runtime_settings_set(&harness.state, LightRuntimeKind::RhythmAdaptive)
+    commands::do_light_runtime_settings_set(&harness.state, LightRuntimeKind::rhythm_adaptive())
         .unwrap();
     spy.reset();
 
@@ -189,7 +202,10 @@ fn selected_light_runtimes_share_os_host_interfaces() {
     assert_eq!(report.dispatch_count, 1);
     assert_eq!(spy.turn_off_count(), 1);
     let state = harness.state.lock().unwrap();
-    assert_eq!(state.light_runtime_kind, LightRuntimeKind::RhythmAdaptive);
+    assert_eq!(
+        state.light_runtime_kind,
+        LightRuntimeKind::rhythm_adaptive()
+    );
     assert!(
         state.light_runtime.is_none(),
         "Basic mode must not retain the removed-project runtime instance"

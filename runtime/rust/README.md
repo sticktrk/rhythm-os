@@ -13,6 +13,9 @@ being merged into the production OS crates.
 - `rhythm-adaptive`: Rhythm's existing adaptive light runtime, hosted
   behind the same neutral contract while it still reuses the production
   `rhythm-core` engine primitives.
+- `rhythm-os-runtime-modules`: the default product module bundle. It links the
+  concrete runtime crates into the server/add-on/appliance builds and registers
+  them with the generic `rhythm-os` host registry.
 
 ## Boundary
 
@@ -39,6 +42,33 @@ Runtime crates own:
 Runtime crates must not import production OS internals. Shared functionality
 belongs in `rhythm-runtime-api` only when it is generally useful to multiple
 runtime crates.
+
+## Module Registration
+
+`rhythm-os` does not hard-code concrete runtime implementations. It owns a
+generic registry of `LightRuntimeModule` descriptors:
+
+- runtime id and legacy aliases
+- manifest factory
+- instance lifecycle, either ephemeral per call or cached/stateful
+
+The default server, add-on, and appliance binaries depend on
+`rhythm-os-runtime-modules` and call `install_default_light_runtime_modules()`
+during startup. That bundle currently registers:
+
+- `rhythm-adaptive`
+- `removed-circadian`
+
+To add another runtime to the default product build:
+
+1. Create a runtime crate that implements `rhythm_runtime_api::LightRuntime`.
+2. Add the crate as a dependency of `runtime/rust/rhythm-os-runtime-modules`.
+3. Add one `LightRuntimeModule` descriptor to that bundle.
+
+Do not edit `os/rust/core/rhythm-os` for a new runtime. If the runtime needs
+deeper host behavior, add an explicit host/runtime capability to
+`rhythm-runtime-api` or implement runtime-specific glue inside the module
+bundle. Avoid reaching into `rhythm-os` internals from runtime crates.
 
 ## Runtime Extensions
 
@@ -86,4 +116,11 @@ Format with:
 
 ```sh
 cargo fmt --all --manifest-path runtime/rust/Cargo.toml
+```
+
+The module bundle depends back on `rhythm-os`, so it is intentionally excluded
+from the pure runtime workspace. It is compiled through the OS workspace:
+
+```sh
+cargo check -p rhythm-server -p rhythm-addon -p rhythm-linux-appliance --manifest-path os/Cargo.toml
 ```

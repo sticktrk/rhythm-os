@@ -1,0 +1,18 @@
+[package]
+name = "rhythm-os-runtime-modules"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Tim Kijewski <3043754+sticktrk@users.noreply.github.com>"]
+description = "Default light runtime module bundle for Rhythm OS hosts"
+
+[workspace]
+
+[dependencies]
+rhythm-os = { path = "../../../os/rust/core/rhythm-os" }
+rhythm-core = { path = "../../../os/rust/core/rhythm-core" }
+rhythm-runtime-api = { path = "../rhythm-runtime-api" }
+rhythm-adaptive = { path = "../rhythm-adaptive" }
+removed-circadian = { path = "../removed-circadian" }
+anyhow = "1.0"
+chrono = "0.4"

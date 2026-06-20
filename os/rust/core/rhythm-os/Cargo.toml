@@ -10,8 +10,6 @@ rhythm-core = { path = "../rhythm-core" }
 rhythm-devices = { path = "../rhythm-devices" }
 rhythm-profile = { path = "../rhythm-profile" }
 rhythm-runtime-api = { path = "../../../../runtime/rust/rhythm-runtime-api" }
-rhythm-adaptive = { path = "../../../../runtime/rust/rhythm-adaptive" }
-removed-circadian = { path = "../../../../runtime/rust/removed-circadian" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
@@ -36,3 +34,5 @@ tower = { version = "0.4", features = ["util"] }
 rhythm-core = { path = "../rhythm-core", features = ["test-support"] }
 rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["test-support"] }
 rhythm-ha = { path = "../../integrations/rhythm-ha", features = ["test-support"] }
+rhythm-adaptive = { path = "../../../../runtime/rust/rhythm-adaptive" }
+removed-circadian = { path = "../../../../runtime/rust/removed-circadian" }

@@ -1051,7 +1051,7 @@ pub fn handle_put_light_runtime(state: &SharedState, body: &Value) -> ApiRespons
         None => return ApiResponse::bad_request("Missing runtime_id"),
     };
 
-    let runtime_kind = match runtime_id.parse::<crate::light_runtime::LightRuntimeKind>() {
+    let runtime_kind = match crate::light_runtime::parse_light_runtime_id(state, runtime_id) {
         Ok(kind) => kind,
         Err(e) => return ApiResponse::bad_request(&e.to_string()),
     };
@@ -1062,21 +1062,25 @@ pub fn handle_put_light_runtime(state: &SharedState, body: &Value) -> ApiRespons
     }
 }
 
-pub fn handle_get_light_runtime_manifests() -> ApiResponse {
+pub fn handle_get_light_runtime_manifests(state: &SharedState) -> ApiResponse {
+    let manifests = match crate::light_runtime::light_runtime_manifests(state) {
+        Ok(manifests) => manifests,
+        Err(e) => return ApiResponse::server_error(e),
+    };
     match serde_json::to_string(&json!({
-        "runtimes": crate::light_runtime::light_runtime_manifests(),
+        "runtimes": manifests,
     })) {
         Ok(body) => ApiResponse::json_ok(body),
         Err(e) => ApiResponse::server_error(e),
     }
 }
 
-pub fn handle_get_light_runtime_manifest(runtime_id: &str) -> ApiResponse {
-    let runtime_kind = match crate::light_runtime::parse_light_runtime_id(runtime_id) {
-        Ok(kind) => kind,
+pub fn handle_get_light_runtime_manifest(state: &SharedState, runtime_id: &str) -> ApiResponse {
+    let manifest = match crate::light_runtime::light_runtime_manifest(state, runtime_id) {
+        Ok(manifest) => manifest,
         Err(e) => return ApiResponse::bad_request(&e.to_string()),
     };
-    match serde_json::to_string(&crate::light_runtime::light_runtime_manifest(runtime_kind)) {
+    match serde_json::to_string(&manifest) {
         Ok(body) => ApiResponse::json_ok(body),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -1147,7 +1151,7 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
     let light_runtime = match body.get("light_runtime") {
         Some(Value::String(value)) => {
-            match value.parse::<crate::light_runtime::LightRuntimeKind>() {
+            match crate::light_runtime::parse_light_runtime_id(state, value) {
                 Ok(kind) => Some(kind),
                 Err(e) => return ApiResponse::bad_request(&e.to_string()),
             }
@@ -2690,6 +2694,10 @@ mod tests {
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_runtime_api::{
+        LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
+        RuntimeResult, RuntimeSnapshot,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -4083,6 +4091,7 @@ mod tests {
             ],
         });
         let mut app = AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let hub_type = HubType::parse("mock").unwrap();
         let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
         app.hubs.insert(
@@ -4098,6 +4107,75 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn install_test_light_runtime_modules(app: &mut AppState) {
+        crate::light_runtime::register_light_runtime_modules(
+            app,
+            [
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                    &["rhythm", "rhythm_adaptive"],
+                    test_rhythm_adaptive_manifest,
+                    create_test_rhythm_adaptive_runtime,
+                ),
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::removed_circadian_RUNTIME_ID,
+                    &["removed-project-circadian", "removed-project", "removed_circadian"],
+                    test_removed-project_manifest,
+                    create_test_removed-project_runtime,
+                ),
+            ],
+        )
+        .expect("test light runtime modules should register");
+    }
+
+    fn test_rhythm_adaptive_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+            "Rhythm Adaptive",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn test_removed-project_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+            "removed-project Circadian",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_test_rhythm_adaptive_runtime(
+        _: Arc<dyn rhythm_core::RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+        ))
+    }
+
+    fn create_test_removed-project_runtime(
+        _: Arc<dyn rhythm_core::RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+        ))
+    }
+
+    struct NoopTestLightRuntime(&'static str);
+
+    impl LightRuntime for NoopTestLightRuntime {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn handle_event(
+            &mut self,
+            _snapshot: &RuntimeSnapshot,
+            _event: RuntimeEvent,
+        ) -> RuntimeResult<RuntimePlan> {
+            Ok(RuntimePlan::noop())
+        }
     }
 
     fn handler_state_with_canonical_light_for_hub(
@@ -4979,7 +5057,7 @@ mod tests {
         assert_eq!(parsed["runtime_id"], "removed-circadian");
         assert_eq!(
             state.lock().unwrap().light_runtime_kind,
-            crate::light_runtime::LightRuntimeKind::removed-projectCircadian
+            crate::light_runtime::LightRuntimeKind::removed_circadian()
         );
     }
 

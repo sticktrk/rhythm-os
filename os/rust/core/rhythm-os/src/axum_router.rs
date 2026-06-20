@@ -402,12 +402,15 @@ async fn put_light_runtime(
     run_blocking(move || handlers::handle_put_light_runtime(&state, &body)).await
 }
 
-async fn get_light_runtime_manifests() -> ApiResponse {
-    handlers::handle_get_light_runtime_manifests()
+async fn get_light_runtime_manifests(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_light_runtime_manifests(&state)
 }
 
-async fn get_light_runtime_manifest(Path(runtime_id): Path<String>) -> ApiResponse {
-    handlers::handle_get_light_runtime_manifest(&runtime_id)
+async fn get_light_runtime_manifest(
+    State(state): State<SharedState>,
+    Path(runtime_id): Path<String>,
+) -> ApiResponse {
+    handlers::handle_get_light_runtime_manifest(&state, &runtime_id)
 }
 
 async fn light_runtime_extension_get(

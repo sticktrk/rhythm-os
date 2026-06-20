@@ -8,6 +8,9 @@ still live in `os/rust/core/rhythm-core`; this crate keeps the light runtime
 surface separate from the shared OS host so Rhythm can sit beside other light
 runtimes such as removed-project.
 
+Product builds register this runtime through `rhythm-os-runtime-modules`, the
+same module-bundle path future runtimes should use.
+
 The intended direction is:
 
 - `rhythm-os`: host concerns such as topology, hubs, dispatch, persistence,
