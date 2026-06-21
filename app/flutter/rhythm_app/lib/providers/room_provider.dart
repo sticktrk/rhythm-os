@@ -165,6 +165,9 @@ class RoomProvider extends ChangeNotifier {
   final Map<String, bool> _roomTransitioning = {};
   final Map<String, Timer> _roomTransitionTimers = {};
 
+  /// Per-room command dispatch flag from the server.
+  final Map<String, bool> _nodeDispatchPending = {};
+
   /// Per-room brightness from server (effective brightness after offsets).
   final Map<String, int> _roomBrightness = {};
 
@@ -251,9 +254,27 @@ class RoomProvider extends ChangeNotifier {
   bool isRoomTransitioning(String roomId) =>
       _roomTransitioning[roomId] ?? false;
 
+  /// Whether the server still has queued or in-flight work for this node.
+  bool isNodeDispatchPending(String nodeId) =>
+      _nodeDispatchPending[nodeId] ?? false;
+
   /// Whether any current room is inside a server-side mode transition.
   bool get anyRoomTransitioning =>
       rooms.any((room) => _roomTransitioning[room.id] ?? false);
+
+  bool _setNodeDispatchPending(String nodeId, bool pending) {
+    final current = _nodeDispatchPending[nodeId] ?? false;
+    if (pending) {
+      _nodeDispatchPending[nodeId] = true;
+      return !current;
+    }
+    if (!current) {
+      _nodeDispatchPending.remove(nodeId);
+      return false;
+    }
+    _nodeDispatchPending.remove(nodeId);
+    return true;
+  }
 
   bool _setRoomTransitioning(
     String roomId,
@@ -292,6 +313,7 @@ class RoomProvider extends ChangeNotifier {
   void _clearRoomTransitioningState(String roomId) {
     _roomTransitionTimers.remove(roomId)?.cancel();
     _roomTransitioning.remove(roomId);
+    _nodeDispatchPending.remove(roomId);
   }
 
   /// Set room state locally with a 3s optimistic lock.
@@ -667,6 +689,7 @@ class RoomProvider extends ChangeNotifier {
     required double brightnessOffset,
     required RoomModeState state,
     bool transitioning = false,
+    bool pendingDispatch = false,
     RhythmMode? mode,
     bool? lightsOn,
     int? brightness,
@@ -708,6 +731,9 @@ class RoomProvider extends ChangeNotifier {
       changed = true;
     }
     if (_setRoomTransitioning(roomId, transitioning)) {
+      changed = true;
+    }
+    if (_setNodeDispatchPending(roomId, pendingDispatch)) {
       changed = true;
     }
     if (mode != null && _roomModes[roomId] != mode) {
@@ -773,6 +799,7 @@ class RoomProvider extends ChangeNotifier {
     required double brightnessOffset,
     required RoomModeState state,
     bool transitioning = false,
+    bool pendingDispatch = false,
     RhythmMode? mode,
     bool? lightsOn,
     int? brightness,
@@ -789,6 +816,7 @@ class RoomProvider extends ChangeNotifier {
       brightnessOffset: brightnessOffset,
       state: state,
       transitioning: transitioning,
+      pendingDispatch: pendingDispatch,
       mode: mode,
       lightsOn: lightsOn,
       brightness: brightness,
@@ -968,6 +996,7 @@ class RoomProvider extends ChangeNotifier {
     _roomModes.clear();
     _cancelRoomTransitionTimers();
     _roomTransitioning.clear();
+    _nodeDispatchPending.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();
@@ -998,6 +1027,7 @@ class RoomProvider extends ChangeNotifier {
     _roomModes.clear();
     _cancelRoomTransitionTimers();
     _roomTransitioning.clear();
+    _nodeDispatchPending.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
     _roomColor.clear();

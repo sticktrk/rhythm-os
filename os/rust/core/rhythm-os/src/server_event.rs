@@ -217,6 +217,8 @@ pub struct NodeStateEvent {
     pub observed_power: ObservedPowerDto,
     /// Whether a global mode transition fade is currently in progress.
     pub transitioning: bool,
+    /// Whether light-dispatch work for this node is queued or running.
+    pub pending_dispatch: bool,
     /// Effective brightness percentage (1-100) after offsets.
     pub brightness: u8,
     /// Effective color temperature in Kelvin.
@@ -240,6 +242,7 @@ pub(crate) struct NodeStateEventParams {
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
+    pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
     pub mood_enabled: bool,
@@ -258,6 +261,7 @@ impl NodeStateEvent {
             lights_on,
             observed_power,
             transitioning,
+            pending_dispatch,
             brightness,
             kelvin,
             mood_enabled,
@@ -276,6 +280,7 @@ impl NodeStateEvent {
             lights_on,
             observed_power,
             transitioning,
+            pending_dispatch,
             brightness,
             kelvin,
             mood_enabled,

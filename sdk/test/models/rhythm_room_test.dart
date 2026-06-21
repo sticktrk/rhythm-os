@@ -153,6 +153,7 @@ void main() {
         expect(room.name, '');
         expect(room.groupedLightId, '');
         expect(room.rhythmEnabled, false);
+        expect(room.pendingDispatch, false);
         expect(room.disabled, false);
         expect(room.timeOffset, 0.0);
         expect(room.brightnessOffset, 0.0);
@@ -174,6 +175,7 @@ void main() {
           'disabled': false,
           'time_offset': 1.5,
           'brightness_offset': -10.0,
+          'pending_dispatch': true,
           'soft_off': false,
           'standby_enabled': true,
           'standby_active': false,
@@ -196,6 +198,7 @@ void main() {
             'motion_timeout_secs': 123,
           },
         });
+        expect(room.pendingDispatch, isTrue);
         expect(room.id, 'room-1');
         expect(room.name, 'Living Room');
         expect(room.groupedLightId, 'gl-1');
@@ -539,6 +542,7 @@ void main() {
           'rhythm_enabled': true,
           'time_offset': 1.0,
           'brightness_offset': -5.0,
+          'pending_dispatch': true,
           'soft_off': false,
           'standby_enabled': true,
           'standby_active': false,
@@ -557,6 +561,7 @@ void main() {
         expect(state.nodeId, 'node-42');
         expect(state.roomId, 'node-42');
         expect(state.rhythmEnabled, true);
+        expect(state.pendingDispatch, true);
         expect(state.timeOffset, 1.0);
         expect(state.brightnessOffset, -5.0);
         expect(state.softOff, false);

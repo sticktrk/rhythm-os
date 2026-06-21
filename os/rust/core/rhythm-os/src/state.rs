@@ -138,6 +138,22 @@ pub enum WorkItem {
     DeferredPersistState,
 }
 
+impl WorkItem {
+    /// Node whose visible dispatch state should stay pending while this item is queued/running.
+    pub(crate) fn pending_node_id(&self) -> Option<&str> {
+        match self {
+            WorkItem::QueuedNodeAction { node_id, .. }
+            | WorkItem::SetNodeBrightness { node_id, .. }
+            | WorkItem::SetNodeCurveModifier { node_id, .. }
+            | WorkItem::SetNodePreferences { node_id, .. }
+            | WorkItem::ApplyNodeCommand { node_id, .. }
+            | WorkItem::LightsOffRoom { node_id, .. }
+            | WorkItem::PeriodicNodeTick { node_id, .. } => Some(node_id.as_str()),
+            WorkItem::DeferredPersist { .. } | WorkItem::DeferredPersistState => None,
+        }
+    }
+}
+
 /// Latest-only periodic tick state for one schedulable light node.
 ///
 /// This stays present while a queued tick is running, not just while it is
@@ -383,6 +399,8 @@ pub struct AppState {
     pub motion_timer_restores: HashMap<String, StoredMotionTimerEntry>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
+    /// Queued or running light-dispatch work count per topology node.
+    pub pending_node_dispatches: HashMap<String, usize>,
     /// Set when a mode change wanted to apply room defaults but no runtime
     /// was available (e.g. periodic replayed a missed scheduled transition
     /// before hub bootstrap). Drained by `reconcile_runtime_from_state` once
@@ -700,6 +718,7 @@ impl Default for AppState {
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
+            pending_node_dispatches: HashMap::new(),
             pending_mode_output_apply: false,
             last_check_hour: None,
             last_check_instant: None,

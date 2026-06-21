@@ -2294,6 +2294,14 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
 /// Handles app-originated button actions, periodic room ticks,
 /// and deferred persist from inline button processing.
 pub fn process_work_item(state: &SharedState, item: WorkItem) {
+    let pending_node_id = item.pending_node_id().map(str::to_string);
+    process_work_item_inner(state, item);
+    if let Some(node_id) = pending_node_id {
+        crate::commands::clear_node_dispatch_pending(state, &node_id);
+    }
+}
+
+fn process_work_item_inner(state: &SharedState, item: WorkItem) {
     match item {
         WorkItem::QueuedNodeAction {
             command_id,

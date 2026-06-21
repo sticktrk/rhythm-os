@@ -269,6 +269,7 @@ class _RoomCardState extends State<RoomCard> {
           (int, int, int)?,
           (int, int, int)?,
           bool,
+          bool,
           bool
         )>(
       selector: (_, p) => (
@@ -283,6 +284,7 @@ class _RoomCardState extends State<RoomCard> {
         p.getMoodColor(widget.roomId),
         p.hasMotionSensor(widget.roomId),
         p.isRoomTransitioning(widget.roomId),
+        p.isNodeDispatchPending(widget.roomId),
       ),
       builder: (context, data, _) {
         final (
@@ -296,7 +298,8 @@ class _RoomCardState extends State<RoomCard> {
           serverColor,
           moodColor,
           hasSensor,
-          isTransitioning
+          isTransitioning,
+          isDispatchPending
         ) = data;
         if (room == null) return const SizedBox.shrink();
 
@@ -410,6 +413,7 @@ class _RoomCardState extends State<RoomCard> {
 
         final sliderActive =
             !isTransitioning && (mode == RoomMode.on || mode == RoomMode.mood);
+        final showActivitySpinner = isTransitioning || isDispatchPending;
         final sliderInCctMode = _cctMode && mode == RoomMode.on;
         final cctRange = _CctSideRange.fromCurveData(
           widget.curveData,
@@ -557,7 +561,7 @@ class _RoomCardState extends State<RoomCard> {
                                 height: 18,
                                 child: AnimatedSwitcher(
                                   duration: const Duration(milliseconds: 160),
-                                  child: isTransitioning
+                                  child: showActivitySpinner
                                       ? _RoomTransitionSpinner(
                                           key: const ValueKey(
                                             'room_transition_spinner',

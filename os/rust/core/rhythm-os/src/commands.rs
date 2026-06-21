@@ -1654,6 +1654,7 @@ struct NodeStateDtoBuildContext<'a> {
     motion_snapshots: &'a HashMap<String, crate::state::MotionSnapshot>,
     nodes_with_sensors: &'a HashSet<String>,
     transitioning_nodes: &'a HashSet<String>,
+    pending_dispatch_nodes: &'a HashSet<String>,
 }
 
 struct NodeStateDtoMetadata {
@@ -1864,6 +1865,7 @@ fn build_node_state_dto_from_snapshot_parts(
         lights_on: observed_power.lights_on,
         observed_power,
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
+        pending_dispatch: ctx.pending_dispatch_nodes.contains(&snap.id),
         brightness,
         kelvin,
         mood_enabled,
@@ -1900,6 +1902,7 @@ pub fn build_node_state_event(
         mood_active,
         standby_enabled,
         standby_active,
+        pending_dispatch,
     ) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
@@ -1929,6 +1932,7 @@ pub fn build_node_state_event(
             ),
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
+        let pending_dispatch = s.pending_node_dispatches.contains_key(&snap.id);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
         let mood_active = room_mood_active(
@@ -1972,6 +1976,7 @@ pub fn build_node_state_event(
             mood_active,
             standby_enabled,
             standby_active,
+            pending_dispatch,
         )
     };
     crate::server_event::NodeStateEvent::from_snapshot(
@@ -1983,6 +1988,7 @@ pub fn build_node_state_event(
             lights_on: observed_power.lights_on,
             observed_power,
             transitioning,
+            pending_dispatch,
             brightness,
             kelvin,
             mood_enabled,
@@ -2414,6 +2420,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         update_interval,
         power_save,
         review_dto,
+        pending_dispatch_nodes,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -2547,6 +2554,10 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             Duration::from_secs(s.runtime_config.update_interval_secs),
             s.power_save,
             build_review_summary_dto(&s),
+            s.pending_node_dispatches
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
         )
     };
 
@@ -2583,6 +2594,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             motion_snapshots: &motion_snapshots,
             nodes_with_sensors: &nodes_with_sensors,
             transitioning_nodes: &transitioning_nodes,
+            pending_dispatch_nodes: &pending_dispatch_nodes,
         };
         let mut nodes = Vec::with_capacity(node_snapshots.len());
         for snap in &node_snapshots {
@@ -2817,7 +2829,14 @@ fn build_hub_startup_retry_dto(retry: &crate::state::HubStartupRetryState) -> Hu
 
 /// Build a full node state for a single addressable node.
 pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateDto> {
-    let (runtime, room_observed_power, motion_snapshots, nodes_with_sensors, transitioning_nodes) = {
+    let (
+        runtime,
+        room_observed_power,
+        motion_snapshots,
+        nodes_with_sensors,
+        transitioning_nodes,
+        pending_dispatch_nodes,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -2825,6 +2844,10 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
             active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
+            s.pending_node_dispatches
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
         )
     };
 
@@ -2849,6 +2872,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
         transitioning_nodes: &transitioning_nodes,
+        pending_dispatch_nodes: &pending_dispatch_nodes,
     };
     let (placement, manufacturer, model) = node_metadata_from_topology(&s, node_id);
     Ok(build_node_state_dto_from_snapshot_parts(
@@ -2884,6 +2908,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         longitude,
         utc_offset,
         timezone_name,
+        pending_dispatch_nodes,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
@@ -2901,6 +2926,10 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
             s.longitude,
             s.utc_offset_hours,
             s.timezone_name.clone(),
+            s.pending_node_dispatches
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
         )
     };
 
@@ -2926,6 +2955,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
         transitioning_nodes: &transitioning_nodes,
+        pending_dispatch_nodes: &pending_dispatch_nodes,
     };
     let mut nodes = Vec::with_capacity(node_snapshots.len());
     for snap in &node_snapshots {
@@ -2967,6 +2997,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         topo_hub_types,
         rooms_with_sensors,
         transitioning_rooms,
+        pending_dispatch_rooms,
         power_save,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -2997,6 +3028,10 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             topology_hub_types_map(&s),
             sensor_rooms,
             active_transition_room_ids(&s.room_mode_transitions, now),
+            s.pending_node_dispatches
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>(),
             s.power_save,
         )
     };
@@ -3067,6 +3102,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 lights_on: observed_power.lights_on,
                 observed_power,
                 transitioning: transitioning_rooms.contains(&snap.id),
+                pending_dispatch: pending_dispatch_rooms.contains(&snap.id),
                 brightness: curve_brightness,
                 kelvin,
                 mood_enabled,
@@ -3161,6 +3197,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     lights_on: false,
                     observed_power: fallback_observed_power_dto(false),
                     transitioning: false,
+                    pending_dispatch: pending_dispatch_rooms.contains(&room.id),
                     brightness: curve_brightness,
                     kelvin,
                     mood_enabled,
@@ -3189,7 +3226,15 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
     let now = std::time::Instant::now();
-    let (runtime, room_observed_power, warning_active, transitioning, hub_types, power_save) = {
+    let (
+        runtime,
+        room_observed_power,
+        warning_active,
+        transitioning,
+        pending_dispatch,
+        hub_types,
+        power_save,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -3198,6 +3243,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
             room_mode_transition_active(&s.room_mode_transitions, room_id, now),
+            s.pending_node_dispatches.contains_key(room_id),
             room_hub_types_from_topology(&s, room_id),
             s.power_save,
         )
@@ -3261,6 +3307,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         lights_on: observed_power.lights_on,
         observed_power,
         transitioning,
+        pending_dispatch,
         brightness: curve_brightness,
         kelvin,
         mood_enabled,
@@ -5011,6 +5058,91 @@ pub(crate) fn emit_node_state_event_after_apply(
     }
 }
 
+fn emit_node_state_event_for_dispatch_pending_change(state: &SharedState, node_id: &str) {
+    let runtime = {
+        let Ok(s) = state.lock() else { return };
+        s.hub_runtime()
+    };
+    if let Some(runtime) = runtime {
+        emit_node_state_event_after_apply(state, &runtime, node_id);
+    }
+}
+
+pub(crate) fn mark_node_dispatch_pending(state: &SharedState, node_id: &str) {
+    let became_pending = {
+        let Ok(mut s) = state.lock() else { return };
+        let count = s
+            .pending_node_dispatches
+            .entry(node_id.to_string())
+            .or_insert(0);
+        let became_pending = *count == 0;
+        *count += 1;
+        became_pending
+    };
+    if became_pending {
+        emit_node_state_event_for_dispatch_pending_change(state, node_id);
+    }
+}
+
+pub(crate) fn clear_node_dispatch_pending(state: &SharedState, node_id: &str) {
+    let cleared = {
+        let Ok(mut s) = state.lock() else { return };
+        let Some(count) = s.pending_node_dispatches.get_mut(node_id) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+            false
+        } else {
+            s.pending_node_dispatches.remove(node_id);
+            true
+        }
+    };
+    if cleared {
+        emit_node_state_event_for_dispatch_pending_change(state, node_id);
+    }
+}
+
+pub(crate) fn try_send_work_item_with_pending(
+    state: &SharedState,
+    tx: &std::sync::mpsc::SyncSender<WorkItem>,
+    item: WorkItem,
+) -> std::result::Result<(), std::sync::mpsc::TrySendError<WorkItem>> {
+    let pending_node_id = item.pending_node_id().map(str::to_string);
+    if let Some(node_id) = pending_node_id.as_deref() {
+        mark_node_dispatch_pending(state, node_id);
+    }
+    match tx.try_send(item) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(node_id) = pending_node_id.as_deref() {
+                clear_node_dispatch_pending(state, node_id);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn send_work_item_with_pending(
+    state: &SharedState,
+    tx: &std::sync::mpsc::SyncSender<WorkItem>,
+    item: WorkItem,
+) -> std::result::Result<(), std::sync::mpsc::SendError<WorkItem>> {
+    let pending_node_id = item.pending_node_id().map(str::to_string);
+    if let Some(node_id) = pending_node_id.as_deref() {
+        mark_node_dispatch_pending(state, node_id);
+    }
+    match tx.send(item) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(node_id) = pending_node_id.as_deref() {
+                clear_node_dispatch_pending(state, node_id);
+            }
+            Err(err)
+        }
+    }
+}
+
 fn apply_room_mode_defaults(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -5312,11 +5444,12 @@ fn queue_node_dispatch_work_items(
     let item_count = work_items.len();
     let error_label = dispatch_label.to_string();
     let thread_label = error_label.clone();
+    let dispatcher_state = state.clone();
     std::thread::Builder::new()
         .name("node-dispatch".to_string())
         .spawn(move || {
             for item in work_items {
-                if tx.send(item).is_err() {
+                if send_work_item_with_pending(&dispatcher_state, &tx, item).is_err() {
                     warn!(
                         target: "cmd",
                         "{}: node dispatch worker disconnected",
@@ -6019,15 +6152,18 @@ fn dispatch_room_commands(
                     );
                     return;
                 }
-                if tx
-                    .send(crate::state::WorkItem::ApplyNodeCommand {
+                if send_work_item_with_pending(
+                    &dispatcher_state,
+                    &tx,
+                    crate::state::WorkItem::ApplyNodeCommand {
                         command_id: crate::logging::next_command_id("apply-node-command"),
                         node_id,
                         command,
                         dispatch_spacing: phase_gap,
                         dispatch_generation,
-                    })
-                    .is_err()
+                    },
+                )
+                .is_err()
                 {
                     warn!(target: "cmd", "active_mode_apply: room dispatcher disconnected");
                     return;
@@ -8016,14 +8152,18 @@ pub fn queue_node_action(
     }
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::QueuedNodeAction {
-        command_id: crate::logging::next_command_id("node-action"),
-        node_id: node_id.to_string(),
-        action,
-        device_id: None,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::QueuedNodeAction {
+            command_id: crate::logging::next_command_id("node-action"),
+            node_id: node_id.to_string(),
+            action,
+            device_id: None,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -8150,13 +8290,17 @@ pub fn queue_set_node_brightness(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::SetNodeBrightness {
-        command_id: crate::logging::next_command_id("node-brightness"),
-        node_id: node_id.to_string(),
-        brightness,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::SetNodeBrightness {
+            command_id: crate::logging::next_command_id("node-brightness"),
+            node_id: node_id.to_string(),
+            brightness,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -8275,13 +8419,17 @@ pub fn queue_set_node_curve_modifier(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::SetNodeCurveModifier {
-        command_id: crate::logging::next_command_id("node-curve"),
-        node_id: node_id.to_string(),
-        modifier,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::SetNodeCurveModifier {
+            command_id: crate::logging::next_command_id("node-curve"),
+            node_id: node_id.to_string(),
+            modifier,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -10017,17 +10165,21 @@ pub fn queue_node_preferences_set(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::SetNodePreferences {
-        command_id: crate::logging::next_command_id("node-preferences"),
-        node_id: node_id.to_string(),
-        rhythm_enabled,
-        disabled,
-        standby_enabled,
-        target_state,
-        room_profile,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::SetNodePreferences {
+            command_id: crate::logging::next_command_id("node-preferences"),
+            node_id: node_id.to_string(),
+            rhythm_enabled,
+            disabled,
+            standby_enabled,
+            target_state,
+            room_profile,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -16350,6 +16502,22 @@ mod tests {
     }
 
     #[test]
+    fn build_room_rhythm_state_marks_pending_dispatch() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert("r1".into(), 1);
+
+        let room_state = build_room_rhythm_state(&state, "r1").unwrap();
+        let json = serde_json::to_value(&room_state).unwrap();
+
+        assert!(room_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+    }
+
+    #[test]
     fn build_room_rhythm_state_ignores_expired_mode_transition() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         state.lock().unwrap().room_mode_transitions.insert(
@@ -18321,8 +18489,25 @@ mod tests {
         assert!(parsed["profiles"].is_array());
         assert!(parsed["nodes"].is_array());
         assert!(parsed["nodes"][0]["transitioning"].is_boolean());
+        assert!(parsed["nodes"][0]["pending_dispatch"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn build_node_state_marks_pending_dispatch() {
+        let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert("r1".into(), 1);
+
+        let node_state = build_node_state(&state, "r1").unwrap();
+        let json = serde_json::to_value(&node_state).unwrap();
+
+        assert!(node_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
     }
 
     #[test]

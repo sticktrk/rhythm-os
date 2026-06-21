@@ -79,6 +79,7 @@ pub struct RoomRhythmState {
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
+    pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
     pub mood_enabled: bool,
@@ -472,6 +473,7 @@ pub struct NodeStateDto {
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
+    pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
     pub mood_enabled: bool,
@@ -681,6 +683,7 @@ mod tests {
                 source: Some("periodic".into()),
             },
             transitioning: true,
+            pending_dispatch: false,
             brightness: 80,
             kelvin: 4000,
             mood_enabled: false,
@@ -724,6 +727,7 @@ mod tests {
                 source: Some("periodic".into()),
             },
             transitioning: true,
+            pending_dispatch: true,
             brightness: 80,
             kelvin: 4000,
             mood_enabled: false,
@@ -752,6 +756,7 @@ mod tests {
         assert_eq!(json["mood_active"], false);
         assert_eq!(json["standby_enabled"], false);
         assert_eq!(json["standby_active"], false);
+        assert_eq!(json["pending_dispatch"], true);
         assert_eq!(json["curve_modifier"]["time_offset_minutes"], 5.0);
         assert_eq!(json["curve_modifier"]["brightness_offset"], -10.0);
         assert_eq!(json["curve_modifier"]["brightness"], 80);
@@ -779,6 +784,7 @@ mod tests {
         );
         assert_eq!(json["observed_power"]["source"], "periodic");
         assert_eq!(json["transitioning"], true);
+        assert_eq!(json["pending_dispatch"], false);
         assert_eq!(json["brightness"], 80);
         assert_eq!(json["kelvin"], 4000);
         assert_eq!(json["profile_settings"]["mood_enabled"], false);

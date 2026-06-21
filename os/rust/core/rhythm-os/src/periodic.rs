@@ -580,15 +580,19 @@ pub(crate) fn enqueue_periodic_tick(
         return true;
     }
 
-    match tx.try_send(WorkItem::PeriodicNodeTick {
-        command_id: tick.command_id.to_string(),
-        node_id: tick.node_id.to_string(),
-        settings_node_id: tick.settings_node_id.to_string(),
-        current_hour: tick.current_hour,
-        emit_parent_node_id: tick.emit_parent_node_id.map(str::to_string),
-        dispatch_spacing: tick.dispatch_spacing,
-        dispatch_generation: tick.dispatch_generation,
-    }) {
+    match crate::commands::try_send_work_item_with_pending(
+        state,
+        tx,
+        WorkItem::PeriodicNodeTick {
+            command_id: tick.command_id.to_string(),
+            node_id: tick.node_id.to_string(),
+            settings_node_id: tick.settings_node_id.to_string(),
+            current_hour: tick.current_hour,
+            emit_parent_node_id: tick.emit_parent_node_id.map(str::to_string),
+            dispatch_spacing: tick.dispatch_spacing,
+            dispatch_generation: tick.dispatch_generation,
+        },
+    ) {
         Ok(()) => true,
         Err(_) => {
             if let Ok(mut s) = state.lock() {

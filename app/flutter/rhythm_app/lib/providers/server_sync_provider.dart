@@ -648,6 +648,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
+      pendingDispatch: previous.pendingDispatch,
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -776,6 +777,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
+      pendingDispatch: previous.pendingDispatch,
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -1818,6 +1820,7 @@ class ServerSyncProvider extends ChangeNotifier {
             brightnessOffset: sr.brightnessOffset,
             state: sr.state,
             transitioning: sr.transitioning,
+            pendingDispatch: sr.pendingDispatch,
             lightsOn: sr.lightsOn,
             brightness: sr.brightness,
             kelvin: sr.kelvin,
@@ -1862,6 +1865,7 @@ class ServerSyncProvider extends ChangeNotifier {
         brightnessOffset: state.brightnessOffset,
         state: state.state,
         transitioning: state.transitioning,
+        pendingDispatch: state.pendingDispatch,
         mode: state.mode,
         lightsOn: state.lightsOn,
         brightness: state.brightness,
@@ -3276,6 +3280,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: state.state,
       transitioning: state.transitioning,
+      pendingDispatch: state.pendingDispatch,
       rhythmEnabled: state.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: state.timeOffset,
@@ -3323,6 +3328,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
+      pendingDispatch: previous.pendingDispatch,
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -3367,6 +3373,7 @@ class ServerSyncProvider extends ChangeNotifier {
         left.placement != right.placement ||
         left.state != right.state ||
         left.transitioning != right.transitioning ||
+        left.pendingDispatch != right.pendingDispatch ||
         left.rhythmEnabled != right.rhythmEnabled ||
         left.disabled != right.disabled ||
         left.timeOffset != right.timeOffset ||
@@ -3439,6 +3446,7 @@ class ServerSyncProvider extends ChangeNotifier {
         groupedLightId: state?.groupedLightId ?? '',
         state: state?.state ?? RoomModeState.active,
         transitioning: state?.transitioning ?? false,
+        pendingDispatch: state?.pendingDispatch ?? false,
         rhythmEnabled: state?.rhythmEnabled ?? false,
         disabled: state?.disabled ?? false,
         timeOffset: state?.timeOffset ?? 0,

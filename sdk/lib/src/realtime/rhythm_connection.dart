@@ -35,6 +35,7 @@ class _CachedNodeState {
   final double brightnessOffset;
   final RoomModeState state;
   final bool transitioning;
+  final bool pendingDispatch;
   final RhythmMode? mode;
   final bool? powerFresh;
   final String? powerSource;
@@ -54,6 +55,7 @@ class _CachedNodeState {
     required this.brightnessOffset,
     required this.state,
     this.transitioning = false,
+    this.pendingDispatch = false,
     this.mode,
     this.powerFresh,
     this.powerSource,
@@ -450,6 +452,7 @@ class RhythmConnection {
           brightnessOffset: node.brightnessOffset,
           state: node.state,
           transitioning: node.transitioning,
+          pendingDispatch: node.pendingDispatch,
           powerFresh: node.powerFresh,
           powerSource: node.powerSource,
           lightsOn: node.lightsOn,
@@ -580,6 +583,7 @@ class RhythmConnection {
             cached.brightnessOffset != nodeState.brightnessOffset ||
             cached.state != nodeState.state ||
             cached.transitioning != nodeState.transitioning ||
+            cached.pendingDispatch != nodeState.pendingDispatch ||
             cached.lightsOn != nodeState.lightsOn ||
             cached.powerFresh != nextPowerFresh ||
             cached.powerSource != nextPowerSource ||
@@ -600,6 +604,7 @@ class RhythmConnection {
             brightnessOffset: nodeState.brightnessOffset,
             state: nodeState.state,
             transitioning: nodeState.transitioning,
+            pendingDispatch: nodeState.pendingDispatch,
             mode: nodeState.mode,
             powerFresh: nextPowerFresh,
             powerSource: nextPowerSource,
@@ -654,6 +659,7 @@ class RhythmConnection {
             brightnessOffset: entry.value.brightnessOffset,
             state: entry.value.state,
             transitioning: entry.value.transitioning,
+            pendingDispatch: entry.value.pendingDispatch,
             mode: entry.value.mode,
             powerFresh: entry.value.powerFresh,
             powerSource: entry.value.powerSource,
@@ -832,6 +838,7 @@ class RhythmConnection {
               brightnessOffset: nodeState.brightnessOffset,
               state: nodeState.state,
               transitioning: nodeState.transitioning,
+              pendingDispatch: nodeState.pendingDispatch,
               mode: nodeState.mode,
               powerFresh: nodeState.powerFresh ?? existing?.powerFresh,
               powerSource: nodeState.powerSource ?? existing?.powerSource,
@@ -884,6 +891,7 @@ class RhythmConnection {
                 brightnessOffset: cached.brightnessOffset,
                 state: cached.state,
                 transitioning: cached.transitioning,
+                pendingDispatch: cached.pendingDispatch,
                 mode: cached.mode,
                 powerFresh: cached.powerFresh,
                 powerSource: cached.powerSource,
@@ -919,6 +927,7 @@ class RhythmConnection {
                 brightnessOffset: entry.value.brightnessOffset,
                 state: entry.value.state,
                 transitioning: entry.value.transitioning,
+                pendingDispatch: entry.value.pendingDispatch,
                 mode: entry.value.mode,
                 lightsOn: entry.value.lightsOn,
                 brightness: entry.value.brightness,
@@ -1189,6 +1198,7 @@ class RhythmConnection {
         brightnessOffset: state.brightnessOffset,
         state: state.state,
         transitioning: state.transitioning,
+        pendingDispatch: state.pendingDispatch,
         mode: state.mode ?? existing?.mode,
         powerFresh: state.powerFresh ?? existing?.powerFresh,
         powerSource: state.powerSource ?? existing?.powerSource,
