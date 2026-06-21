@@ -1147,6 +1147,9 @@ pub fn emit_server_event(state: &SharedState, event: crate::server_event::Server
 pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::RoomManager {
     let mut rooms = rhythm_core::room::RoomManager::new();
     for snap in runtime.engine_all_node_snapshots() {
+        if crate::topology::is_internal_light_node_id(&snap.id) {
+            continue;
+        }
         let room =
             rooms.get_or_create_node(&snap.id, &snap.name, snap.kind, snap.parent_id.clone());
         room.rhythm_enabled = snap.rhythm_enabled;
@@ -1389,11 +1392,29 @@ mod tests {
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
+                RoomSnapshot {
+                    id: "__rhythm_light_node__|room=kitchen|kind=group|hub=hue@bridge|source=hue-room".into(),
+                    name: "Kitchen".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
+                    hard_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
+                },
             ],
         };
 
         let rooms = rooms_from_engine(&runtime);
         assert_eq!(rooms.iter().count(), 3);
+        assert!(rooms
+            .get("__rhythm_light_node__|room=kitchen|kind=group|hub=hue@bridge|source=hue-room")
+            .is_none());
 
         let kitchen = rooms.get("kitchen").unwrap();
         assert_eq!(kitchen.name, "Kitchen");

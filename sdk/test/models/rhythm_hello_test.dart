@@ -329,6 +329,16 @@ void main() {
 
       expect(hello.settings?.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
       expect(hello.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(hello.hasLightRuntime, isTrue);
+    });
+
+    test('marks fallback light runtime as non-authoritative', () {
+      final hello = RhythmHello.fromJson({
+        'mode': {'active': 'day'},
+      });
+
+      expect(hello.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
+      expect(hello.hasLightRuntime, isFalse);
     });
 
     test('preserves null idle_profile_id from hello mode payload', () {

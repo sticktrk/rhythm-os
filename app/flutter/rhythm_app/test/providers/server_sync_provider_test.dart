@@ -105,6 +105,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   bool setLightBreakerResult = true;
   int setLightBreakerCalls = 0;
   bool? lastLightBreakerEnabled;
+  int setLightRuntimeCalls = 0;
+  RhythmLightRuntime? lastSetLightRuntime;
+  int? lastSetLightRuntimeTransitionMs;
+  RhythmLightRuntimeInitialApply? lightRuntimeInitialApply;
   final List<
       ({
         String nodeId,
@@ -220,6 +224,21 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     if (!setLightBreakerResult) return false;
     lightBreakerEnabled = enabled;
     return true;
+  }
+
+  @override
+  Future<RhythmLightRuntimeState?> setLightRuntime(
+    RhythmLightRuntime runtime, {
+    int? transitionMs,
+  }) async {
+    setLightRuntimeCalls++;
+    lastSetLightRuntime = runtime;
+    lastSetLightRuntimeTransitionMs = transitionMs;
+    return RhythmLightRuntimeState(
+      runtime: runtime,
+      availableRuntimes: RhythmLightRuntime.values,
+      initialApply: lightRuntimeInitialApply,
+    );
   }
 
   @override
@@ -1569,6 +1588,150 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(provider.activeMode, RhythmMode.sleep);
+    });
+
+    test('runtime selection survives incremental hello without runtime fields',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'light_runtime': 'removed-circadian',
+          'mode': {
+            'active': 'day',
+            'light_runtime': 'removed-circadian',
+          },
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'mode': {'active': 'day'},
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+    });
+
+    test('runtime switch waits for initial apply pacing metadata', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      api.lightRuntimeInitialApply = const RhythmLightRuntimeInitialApply(
+        queued: true,
+        dispatchCount: 2,
+        dispatchSpacingMs: 500,
+        estimatedDispatchMs: 1500,
+      );
+
+      var completed = false;
+      final future = provider
+          .dispatchSetLightRuntime(
+        RhythmLightRuntime.removed-projectCircadian,
+        transitionMs: 4321,
+      )
+          .then((value) {
+        completed = true;
+        return value;
+      });
+
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(api.setLightRuntimeCalls, 1);
+      expect(api.lastSetLightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(api.lastSetLightRuntimeTransitionMs, 4321);
+      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(completed, isFalse);
+
+      await Future<void>.delayed(const Duration(milliseconds: 2600));
+
+      expect(await future, isTrue);
+      expect(completed, isTrue);
+    });
+
+    test('mode_changed without runtime keeps current light runtime', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'light_runtime': 'removed-circadian',
+          'mode': {
+            'active': 'day',
+            'light_runtime': 'removed-circadian',
+          },
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      connection.emitModeChanged(
+        RhythmModeResource.fromJson({
+          'active': 'sleep',
+          'cause': 'manual',
+          'transition_id': 'day_to_sleep',
+          'epoch_ms': 1778058932588,
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.activeMode, RhythmMode.sleep);
+      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+    });
+
+    test('infers legacy runtime selection from day profile while asleep',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'mode': {
+            'active': 'sleep',
+            'configs': [
+              {
+                'mode': 'day',
+                'active_profile_id': 'expert',
+              },
+              {
+                'mode': 'sleep',
+                'active_profile_id': 'sleep',
+              },
+            ],
+          },
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.activeMode, RhythmMode.sleep);
+      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
     });
 
     test('preserves active mode across transient reconnect after hello',

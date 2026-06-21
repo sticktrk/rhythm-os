@@ -752,7 +752,10 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         let all_rooms: Vec<rhythm_core::NodeSnapshot> = s
             .hub_runtime()
             .map(|rt| rt.engine_all_effective_node_snapshots())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|node| !crate::topology::is_internal_light_node_id(&node.id))
+            .collect();
         let mut warning_skipped = 0usize;
         let mut transition_skipped = 0usize;
         let mut rhythm_disabled_skipped = 0usize;

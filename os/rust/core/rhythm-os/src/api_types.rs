@@ -320,6 +320,19 @@ pub struct SettingsDto {
 pub struct LightRuntimeDto {
     pub runtime_id: LightRuntimeKind,
     pub available_runtime_ids: Vec<LightRuntimeKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_apply: Option<LightRuntimeInitialApplyDto>,
+}
+
+/// Host-side first apply after switching light runtimes.
+#[derive(Debug, Clone, Serialize)]
+pub struct LightRuntimeInitialApplyDto {
+    pub queued: bool,
+    pub dispatch_count: usize,
+    pub dispatch_spacing_ms: u64,
+    pub estimated_dispatch_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Global Rhythm light-breaker switch in `GET/PUT /api/light-breaker`.

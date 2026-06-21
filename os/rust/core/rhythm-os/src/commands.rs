@@ -19,14 +19,15 @@ use rhythm_core::{
     ModeTransitionConfig, ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb,
     RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
 };
+use rhythm_runtime_api::{RuntimeEvent, TickContext};
 use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, CurveModifierDto,
     HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto,
-    LightRuntimeDto, LocationDto, ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto,
-    NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto, ProfilesDto,
-    ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
+    LightRuntimeDto, LightRuntimeInitialApplyDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
+    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto,
+    ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
     RoomProfileSettingsDto, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot,
     TopologyNodeControlDto, TopologyNodeDto,
 };
@@ -2534,6 +2535,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     } else {
         bootstrap_node_snapshots_from_state(state)
     };
+    node_snapshots.retain(|snap| !crate::topology::is_internal_light_node_id(&snap.id));
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
     active_profile_effective.rhythm_interval_secs = crate::periodic::effective_cycle_duration(
@@ -3287,6 +3289,7 @@ fn build_light_runtime_dto_inner(s: &AppState) -> LightRuntimeDto {
     LightRuntimeDto {
         runtime_id: s.light_runtime_kind.clone(),
         available_runtime_ids: s.light_runtime_registry.available_runtime_ids(),
+        initial_apply: None,
     }
 }
 
@@ -4695,6 +4698,9 @@ fn restore_backup_room_manager(
 ) -> Result<()> {
     let mut normalized_rooms = rhythm_core::RoomManager::new();
     for room in rooms.iter().cloned().map(normalize_legacy_soft_off_room) {
+        if crate::topology::is_internal_light_node_id(&room.id) {
+            continue;
+        }
         normalized_rooms.add_room(room);
     }
     let needs_runtime = {
@@ -6927,8 +6933,170 @@ pub fn do_light_runtime_settings_set(
 
 /// Select the active light runtime and return the runtime selector resource.
 pub fn do_light_runtime_set(state: &SharedState, runtime_kind: LightRuntimeKind) -> Result<String> {
-    do_light_runtime_settings_set(state, runtime_kind)?;
-    build_light_runtime(state)
+    let (resolved_kind, changed) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let resolved_kind = s
+            .light_runtime_registry
+            .parse_runtime_kind(runtime_kind.as_str())?;
+        let changed = s.light_runtime_kind != resolved_kind;
+        (resolved_kind, changed)
+    };
+
+    do_light_runtime_settings_set(state, resolved_kind)?;
+    let initial_apply = changed.then(|| queue_light_runtime_initial_apply(state));
+
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut dto = build_light_runtime_dto_inner(&s);
+    dto.initial_apply = initial_apply;
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light runtime: {}", e))
+}
+
+fn queue_light_runtime_initial_apply(state: &SharedState) -> LightRuntimeInitialApplyDto {
+    match try_queue_light_runtime_initial_apply(state, default_http_batch_dispatch_spacing()) {
+        Ok(apply) => apply,
+        Err(error) => {
+            warn!(
+                target: "cmd",
+                "light_runtime: initial apply was not queued: {}",
+                error
+            );
+            LightRuntimeInitialApplyDto {
+                queued: false,
+                dispatch_count: 0,
+                dispatch_spacing_ms: 0,
+                estimated_dispatch_ms: 0,
+                error: Some(error.to_string()),
+            }
+        }
+    }
+}
+
+fn try_queue_light_runtime_initial_apply(
+    state: &SharedState,
+    dispatch_spacing: Duration,
+) -> Result<LightRuntimeInitialApplyDto> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?
+    };
+    let mut node_snapshots = runtime.engine_all_effective_node_snapshots();
+    node_snapshots.retain(|snap| !crate::topology::is_internal_light_node_id(&snap.id));
+    let (dispatch_tx, dispatch_generation, dispatch_nodes) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()),
+            s.light_dispatch_generation,
+            crate::periodic::periodic_dispatch_nodes_from_state(&s, &node_snapshots),
+        )
+    };
+    let dispatch_count = dispatch_nodes.len();
+    let dispatch_spacing_ms = dispatch_spacing.as_millis() as u64;
+    let estimated_dispatch_ms =
+        estimated_dispatch_duration(dispatch_count, dispatch_spacing).as_millis() as u64;
+    if dispatch_count == 0 {
+        return Ok(LightRuntimeInitialApplyDto {
+            queued: false,
+            dispatch_count,
+            dispatch_spacing_ms,
+            estimated_dispatch_ms,
+            error: None,
+        });
+    }
+
+    let command_id = crate::logging::next_command_id("runtime-initial-apply");
+    let current_hour = runtime.current_hour();
+    let mut last_node_index_by_emit_target = HashMap::new();
+    for (idx, node) in dispatch_nodes.iter().enumerate() {
+        last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
+    }
+
+    if let Some(tx) = dispatch_tx {
+        for (idx, node) in dispatch_nodes.iter().enumerate() {
+            let emit_parent_node_id = last_node_index_by_emit_target
+                .get(&node.emit_node_id)
+                .is_some_and(|last_idx| *last_idx == idx)
+                .then_some(node.emit_node_id.as_str())
+                .filter(|emit_id| *emit_id != node.settings_node_id);
+            if !crate::periodic::enqueue_periodic_tick(
+                state,
+                &tx,
+                crate::periodic::PeriodicTickEnqueue {
+                    command_id: &command_id,
+                    node_id: &node.node_id,
+                    settings_node_id: &node.settings_node_id,
+                    dispatch_generation,
+                    current_hour,
+                    emit_parent_node_id,
+                    dispatch_spacing,
+                },
+            ) {
+                return Err(anyhow::anyhow!("Node dispatch queue full"));
+            }
+        }
+        return Ok(LightRuntimeInitialApplyDto {
+            queued: true,
+            dispatch_count,
+            dispatch_spacing_ms,
+            estimated_dispatch_ms,
+            error: None,
+        });
+    }
+
+    for (idx, node) in dispatch_nodes.iter().enumerate() {
+        crate::light_runtime::run_selected_light_runtime_event(
+            state,
+            runtime_event_for_light_runtime_initial_apply(
+                &node.node_id,
+                &node.settings_node_id,
+                current_hour,
+                &command_id,
+            ),
+        )?;
+        crate::periodic::post_tick_node(state, &runtime, &node.settings_node_id);
+        let emit_parent_node_id = last_node_index_by_emit_target
+            .get(&node.emit_node_id)
+            .is_some_and(|last_idx| *last_idx == idx)
+            .then_some(node.emit_node_id.as_str())
+            .filter(|emit_id| *emit_id != node.settings_node_id);
+        if let Some(emit_parent_node_id) = emit_parent_node_id {
+            crate::periodic::post_tick_node(state, &runtime, emit_parent_node_id);
+        }
+    }
+
+    Ok(LightRuntimeInitialApplyDto {
+        queued: false,
+        dispatch_count,
+        dispatch_spacing_ms,
+        estimated_dispatch_ms,
+        error: None,
+    })
+}
+
+fn runtime_event_for_light_runtime_initial_apply(
+    node_id: &str,
+    settings_node_id: &str,
+    current_hour: f32,
+    command_id: &str,
+) -> RuntimeEvent {
+    RuntimeEvent::PeriodicTick(TickContext {
+        node_id: node_id.to_string(),
+        hour: current_hour as f64,
+        epoch_ms: Some(current_epoch_ms().min(i64::MAX as u64) as i64),
+        metadata: [
+            (
+                "source_node_id".to_string(),
+                serde_json::json!(settings_node_id),
+            ),
+            ("command_id".to_string(), serde_json::json!(command_id)),
+            (
+                "reason".to_string(),
+                serde_json::json!("light_runtime_initial_apply"),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    })
 }
 
 /// Update global settings (partial: only provided fields are changed).
@@ -10036,6 +10204,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             .map(|rooms| {
                 rooms
                     .iter()
+                    .filter(|room| !crate::topology::is_internal_light_node_id(&room.id))
                     .map(|room| (room.id.clone(), room.clone()))
                     .collect()
             })
@@ -10047,6 +10216,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             runtime
                 .engine_all_room_snapshots()
                 .into_iter()
+                .filter(|snap| !crate::topology::is_internal_light_node_id(&snap.id))
                 .map(|snap| (snap.id.clone(), snap))
                 .collect()
         })
@@ -10057,6 +10227,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             runtime
                 .engine_all_node_snapshots()
                 .into_iter()
+                .filter(|snap| !crate::topology::is_internal_light_node_id(&snap.id))
                 .map(|snap| (snap.id.clone(), snap))
                 .collect()
         })
@@ -19619,6 +19790,34 @@ mod tests {
             state.lock().unwrap().light_runtime_kind.as_str(),
             COMMAND_EXTERNAL_RUNTIME_ID
         );
+    }
+
+    #[test]
+    fn light_runtime_set_queues_initial_apply_ticks() {
+        let (state, _rt) = setup_state(vec![
+            make_snapshot("r1", false, false),
+            make_snapshot("r2", false, false),
+        ]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().periodic_work_tx = Some(tx);
+
+        let selected = do_light_runtime_set(&state, LightRuntimeKind::removed_circadian()).unwrap();
+        let selected: serde_json::Value = serde_json::from_str(&selected).unwrap();
+
+        assert_eq!(selected["runtime_id"], "removed-circadian");
+        assert_eq!(selected["initial_apply"]["queued"], true);
+        assert_eq!(selected["initial_apply"]["dispatch_count"], 2);
+        assert_eq!(selected["initial_apply"]["dispatch_spacing_ms"], 500);
+        assert_eq!(selected["initial_apply"]["estimated_dispatch_ms"], 500);
+
+        let queued_node_ids: Vec<String> = rx
+            .try_iter()
+            .map(|item| match item {
+                WorkItem::PeriodicNodeTick { node_id, .. } => node_id,
+                _ => panic!("unexpected work item"),
+            })
+            .collect();
+        assert_eq!(queued_node_ids, vec!["r1".to_string(), "r2".to_string()]);
     }
 
     #[test]

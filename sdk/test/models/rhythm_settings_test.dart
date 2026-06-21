@@ -33,6 +33,33 @@ void main() {
     });
   });
 
+  group('RhythmLightRuntimeState', () {
+    test('parses initial apply metadata', () {
+      final state = RhythmLightRuntimeState.fromJson({
+        'runtime_id': 'removed-circadian',
+        'available_runtime_ids': ['rhythm-adaptive', 'removed-circadian'],
+        'initial_apply': {
+          'queued': true,
+          'dispatch_count': 4,
+          'dispatch_spacing_ms': 500,
+          'estimated_dispatch_ms': 1500,
+        },
+      });
+
+      expect(state.runtime, RhythmLightRuntime.removed-projectCircadian);
+      expect(state.initialApply?.queued, isTrue);
+      expect(state.initialApply?.dispatchCount, 4);
+      expect(state.initialApply?.estimatedDuration,
+          const Duration(milliseconds: 1500));
+      expect(state.toJson()['initial_apply'], {
+        'queued': true,
+        'dispatch_count': 4,
+        'dispatch_spacing_ms': 500,
+        'estimated_dispatch_ms': 1500,
+      });
+    });
+  });
+
   group('RhythmModeTransitionConfig', () {
     test('parses saved transitions with trigger objects', () {
       final transition = RhythmModeTransitionConfig.fromJson({

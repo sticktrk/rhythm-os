@@ -135,6 +135,50 @@ void main() {
     });
   });
 
+  group('expert controls refresh mapping', () {
+    test('uses runtime extension path and preserves omitted pause state', () {
+      final summary = expertControlsRefreshSummaryForTest(
+        inactive: true,
+        inactiveUntil: '2026-06-20T22:31:57.000Z',
+        raw: {
+          'last_actions': {
+            'motion-1': {
+              'action': 'motion_on_only',
+              'canonical_action': 'motion_on_only',
+              'epoch_ms': 1781990400000,
+            },
+          },
+        },
+      );
+
+      expect(summary['path'],
+          'api/light-runtimes/removed-circadian/controls/refresh');
+      expect(summary['inactive'], true);
+      expect(summary['inactive_until'], '2026-06-20T22:31:57.000Z');
+      expect(summary['status'], 'inactive');
+      expect(summary['last_action'], 'motion_on_only');
+      expect(summary['last_action_time'], '2026-06-20T21:20:00.000Z');
+    });
+
+    test('applies pause states when the runtime refresh payload has them', () {
+      final summary = expertControlsRefreshSummaryForTest(
+        inactive: false,
+        raw: {
+          'pause_states': {
+            'motion-1': {
+              'inactive': true,
+              'inactive_until': '2026-06-20T22:31:57.000Z',
+            },
+          },
+        },
+      );
+
+      expect(summary['inactive'], true);
+      expect(summary['inactive_until'], '2026-06-20T22:31:57.000Z');
+      expect(summary['status'], 'inactive');
+    });
+  });
+
   group('expert settings server mapping', () {
     test('maps modern solar settings into removed-project expert UI keys', () {
       final values = expertSettingsValuesFromServerForTest(_runtimeSettings({

@@ -1654,7 +1654,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _autoUpdate = settings?.autoUpdate ?? true;
     _lightBreakerEnabled = hello.lightBreaker?.enabled ?? true;
-    _lightRuntime = hello.lightRuntime;
+    _lightRuntime = _authoritativeLightRuntimeFromHello(hello) ?? _lightRuntime;
     _activeMode = hello.mode?.active;
     _modeTransitions = [...hello.transitions];
     _inputBindings = [...hello.inputBindings];
@@ -1912,7 +1912,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final previous = _activeMode;
     final previousLightRuntime = _lightRuntime;
     _activeMode = mode.active;
-    _lightRuntime = mode.lightRuntime;
+    _lightRuntime = _authoritativeLightRuntimeFromMode(mode) ?? _lightRuntime;
     if (mode.configs.isNotEmpty) {
       _modeConfigs = [...mode.configs];
       _activeProfileId = mode.activeConfig?.activeProfileId;
@@ -2503,6 +2503,8 @@ class ServerSyncProvider extends ChangeNotifier {
       return false;
     }
 
+    await _waitForLightRuntimeInitialApply(response.initialApply);
+
     _lightRuntime = response.runtime;
     _activeMode = RhythmMode.day;
     final activeProfileId = _activeProfileIdForLightRuntime(response.runtime);
@@ -2513,8 +2515,59 @@ class ServerSyncProvider extends ChangeNotifier {
     return true;
   }
 
+  Future<void> _waitForLightRuntimeInitialApply(
+    RhythmLightRuntimeInitialApply? initialApply,
+  ) async {
+    if (initialApply == null ||
+        initialApply.dispatchCount <= 0 ||
+        initialApply.error != null) {
+      return;
+    }
+    final waitMs =
+        (initialApply.estimatedDispatchMs + 1000).clamp(2500, 15000).toInt();
+    await Future<void>.delayed(Duration(milliseconds: waitMs));
+  }
+
   String _activeProfileIdForLightRuntime(RhythmLightRuntime runtime) =>
       runtime == RhythmLightRuntime.removed-projectCircadian ? 'expert' : 'rhythm';
+
+  RhythmLightRuntime? _authoritativeLightRuntimeFromHello(RhythmHello hello) {
+    if (hello.hasLightRuntime) return hello.lightRuntime;
+    if (hello.settings?.hasLightRuntime == true) {
+      return hello.settings!.lightRuntime;
+    }
+    final modeRuntime = hello.mode == null
+        ? null
+        : _authoritativeLightRuntimeFromMode(hello.mode!);
+    if (modeRuntime != null) return modeRuntime;
+    return _lightRuntimeFromLegacyDayProfileId(
+      hello.activeProfile['id'] as String?,
+    );
+  }
+
+  RhythmLightRuntime? _authoritativeLightRuntimeFromMode(
+    RhythmModeResource mode,
+  ) {
+    if (mode.hasLightRuntime) return mode.lightRuntime;
+
+    // Older servers expressed the runtime choice through the Day profile.
+    // Active mode can be Sleep while the selected light runtime is still
+    // removed-project, so prefer the Day config over the currently active config.
+    return _lightRuntimeFromLegacyDayProfileId(
+          mode.configFor(RhythmMode.day)?.activeProfileId,
+        ) ??
+        _lightRuntimeFromLegacyDayProfileId(
+          mode.activeConfig?.activeProfileId,
+        );
+  }
+
+  RhythmLightRuntime? _lightRuntimeFromLegacyDayProfileId(String? profileId) {
+    return switch (profileId) {
+      'expert' => RhythmLightRuntime.removed-projectCircadian,
+      'rhythm' => RhythmLightRuntime.rhythmAdaptive,
+      _ => null,
+    };
+  }
 
   Future<void> _refreshAfterLightRuntimeSwitch() async {
     if (HueServiceLocator.isDemoMode) {
@@ -3135,7 +3188,9 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _autoUpdate = settings?.autoUpdate ?? true;
     _lightBreakerEnabled = lightBreaker?.enabled ?? true;
-    _lightRuntime = mode?.lightRuntime ?? RhythmLightRuntime.rhythmAdaptive;
+    _lightRuntime = mode == null
+        ? _lightRuntime
+        : _authoritativeLightRuntimeFromMode(mode) ?? _lightRuntime;
     _activeMode = mode?.active;
     _activeProfileId = mode?.activeConfig?.activeProfileId;
     _modeTransitions = await DemoServerApi.instance.getTransitions();

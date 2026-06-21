@@ -31,6 +31,7 @@ class RhythmHello {
   final RhythmSettings? settings;
   final RhythmLightBreaker? lightBreaker;
   final RhythmLightRuntime lightRuntime;
+  final bool hasLightRuntime;
   final RhythmReviewSummary review;
   final int? lastTickEpochMs;
 
@@ -62,6 +63,7 @@ class RhythmHello {
     this.settings,
     this.lightBreaker,
     this.lightRuntime = RhythmLightRuntime.rhythmAdaptive,
+    this.hasLightRuntime = false,
     this.review = const RhythmReviewSummary(),
     this.lastTickEpochMs,
     this.effectiveFadeMs,
@@ -171,6 +173,7 @@ class RhythmHello {
           ? RhythmLightBreaker.fromJson(lightBreakerJson)
           : null,
       lightRuntime: lightRuntime,
+      hasLightRuntime: runtimeId != null,
       review: reviewJson == null
           ? const RhythmReviewSummary()
           : RhythmReviewSummary.fromJson(reviewJson),

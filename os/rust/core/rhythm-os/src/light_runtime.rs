@@ -420,7 +420,11 @@ pub fn build_runtime_snapshot(
 ) -> RuntimeSnapshot {
     let mut snapshot = RuntimeSnapshot::default();
 
-    for node in runtime.engine_all_effective_node_snapshots() {
+    for node in runtime
+        .engine_all_effective_node_snapshots()
+        .into_iter()
+        .filter(|node| !crate::topology::is_internal_light_node_id(&node.id))
+    {
         let kind = runtime_node_kind_from_light_node_kind(node.kind);
         let node_state = runtime_state
             .and_then(|state| state.get(&node.id))
@@ -660,6 +664,9 @@ fn update_host_node_after_dispatch(
     node_id: &str,
     lights_on: bool,
 ) {
+    if crate::topology::is_internal_light_node_id(node_id) {
+        return;
+    }
     let runtime = state
         .lock()
         .ok()
@@ -754,6 +761,26 @@ mod tests {
             store["removed-project"]["kitchen"]["removed-project_area_runtime_state"],
             json!({ "is_on": true })
         );
+    }
+
+    #[test]
+    fn build_runtime_snapshot_excludes_internal_light_nodes() {
+        let runtime = test_runtime();
+        runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
+        runtime.add_node(
+            "__rhythm_light_node__|room=kitchen|kind=group|hub=hue@bridge|source=hue-room",
+            "Kitchen",
+            rhythm_core::LightNodeKind::Room,
+            None,
+        );
+
+        let snapshot = build_runtime_snapshot(runtime.as_ref(), None);
+        let ids: Vec<_> = snapshot.nodes.iter().map(|node| node.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["kitchen"]);
+        assert!(!snapshot.state.contains_key(
+            "__rhythm_light_node__|room=kitchen|kind=group|hub=hue@bridge|source=hue-room"
+        ));
     }
 
     #[test]

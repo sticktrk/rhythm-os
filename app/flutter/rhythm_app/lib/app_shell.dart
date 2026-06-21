@@ -44,6 +44,8 @@ import 'widgets/main_bottom_nav.dart';
 import 'widgets/solar_orbit.dart';
 import 'widgets/virtual_experience_banner.dart';
 
+const _removed-projectAccent = Color(0xFFFEAC60);
+
 /// Main app shell.
 ///
 /// Persistent 5-tab bottom navigation bar with an [IndexedStack] body.  Each
@@ -91,6 +93,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   bool _serverRemovalCleanupPending = false;
   bool _runtimeShellActive = false;
   bool _lightRuntimeSwitching = false;
+  bool? _lightRuntimeSwitchTarget;
   RhythmMode? _pendingModeAction;
   Timer? _pendingModeActionClearTimer;
   RoomProvider? _pendingModeActionRoomProvider;
@@ -336,7 +339,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final confirmed = await _confirmLightRuntimeSwitch(toremoved-projectRuntime: true);
     if (!confirmed || !mounted) return;
 
-    setState(() => _lightRuntimeSwitching = true);
+    setState(() {
+      _lightRuntimeSwitching = true;
+      _lightRuntimeSwitchTarget = true;
+    });
     HapticFeedback.heavyImpact();
     try {
       final success = await context
@@ -349,7 +355,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       if (mounted) _showremoved-projectRuntimeHome();
     } finally {
       if (mounted) {
-        setState(() => _lightRuntimeSwitching = false);
+        setState(() {
+          _lightRuntimeSwitching = false;
+          _lightRuntimeSwitchTarget = null;
+        });
       }
     }
   }
@@ -359,7 +368,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final confirmed = await _confirmLightRuntimeSwitch(toremoved-projectRuntime: false);
     if (!confirmed || !mounted) return;
 
-    setState(() => _lightRuntimeSwitching = true);
+    setState(() {
+      _lightRuntimeSwitching = true;
+      _lightRuntimeSwitchTarget = false;
+    });
     HapticFeedback.mediumImpact();
     try {
       final success = await context
@@ -372,7 +384,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       if (mounted) _showRhythmAdaptiveRuntimeHome();
     } finally {
       if (mounted) {
-        setState(() => _lightRuntimeSwitching = false);
+        setState(() {
+          _lightRuntimeSwitching = false;
+          _lightRuntimeSwitchTarget = null;
+        });
       }
     }
   }
@@ -805,6 +820,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         onLogOut: _logOutFromPreHome,
                       ),
                     ),
+                  if (_lightRuntimeSwitching)
+                    Positioned.fill(
+                      child: _LightRuntimeSwitchOverlay(
+                        toremoved-projectRuntime:
+                            _lightRuntimeSwitchTarget ?? !_runtimeShellActive,
+                      ),
+                    ),
                 ],
               ),
               bottomNavigationBar: hideChrome
@@ -1144,6 +1166,82 @@ class _TabNavigator extends StatelessWidget {
       key: navigatorKey,
       onGenerateRoute: (settings) =>
           MaterialPageRoute(builder: builder, settings: settings),
+    );
+  }
+}
+
+class _LightRuntimeSwitchOverlay extends StatelessWidget {
+  final bool toremoved-projectRuntime;
+
+  const _LightRuntimeSwitchOverlay({required this.toremoved-projectRuntime});
+
+  @override
+  Widget build(BuildContext context) {
+    final title =
+        toremoved-projectRuntime ? 'Applying Expert profile' : 'Applying Basic profile';
+    return AbsorbPointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.90),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _PulsingIcon(
+                    icon: toremoved-projectRuntime
+                        ? Icons.auto_awesome_rounded
+                        : Icons.lightbulb_rounded,
+                    color: toremoved-projectRuntime
+                        ? _removed-projectAccent
+                        : CelestialColors.accentBlue,
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Syncing lights',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.78),
+                      fontSize: 15,
+                      height: 1.45,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.4,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        (toremoved-projectRuntime
+                                ? _removed-projectAccent
+                                : CelestialColors.accentBlue)
+                            .withValues(alpha: 0.86),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

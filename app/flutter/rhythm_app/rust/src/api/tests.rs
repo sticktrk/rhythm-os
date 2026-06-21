@@ -56,10 +56,16 @@ mod api_tests {
         assert!(result.brightness[noon_index] > 90);
         assert!(result.kelvin[noon_index] >= CurveConfigDto::default().max_color_temp - 100);
 
-        // At midnight (index 0), brightness should be low and color warm
-        assert!(result.brightness[0] < 10);
-        // Min color temp is 1200K from defaults, so kelvin should be close to that
-        assert!(result.kelvin[0] <= CurveConfigDto::default().min_color_temp + 100);
+        // The solar-centered curve should reach the configured night floor
+        // within the 24h sample. Clock midnight is not always solar midnight.
+        assert!(result
+            .brightness
+            .iter()
+            .any(|brightness| *brightness <= CurveConfigDto::default().min_brightness + 1));
+        assert!(result
+            .kelvin
+            .iter()
+            .any(|kelvin| *kelvin <= CurveConfigDto::default().min_color_temp + 100));
     }
 
     #[test]

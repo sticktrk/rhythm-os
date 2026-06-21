@@ -44,10 +44,12 @@ RhythmLightRuntime _lightRuntimeFromLegacyProfileId(String? profileId) {
 class RhythmLightRuntimeState {
   final RhythmLightRuntime runtime;
   final List<RhythmLightRuntime> availableRuntimes;
+  final RhythmLightRuntimeInitialApply? initialApply;
 
   const RhythmLightRuntimeState({
     required this.runtime,
     this.availableRuntimes = const [],
+    this.initialApply,
   });
 
   factory RhythmLightRuntimeState.fromJson(Map<String, dynamic> json) {
@@ -59,6 +61,11 @@ class RhythmLightRuntimeState {
               const <dynamic>[])
           .map((value) => RhythmLightRuntime.fromId(value as String?))
           .toList(growable: false),
+      initialApply: json['initial_apply'] is Map
+          ? RhythmLightRuntimeInitialApply.fromJson(
+              Map<String, dynamic>.from(json['initial_apply'] as Map),
+            )
+          : null,
     );
   }
 
@@ -71,6 +78,45 @@ class RhythmLightRuntimeState {
         if (availableRuntimes.isNotEmpty)
           'available_runtime_ids':
               availableRuntimes.map((runtime) => runtime.id).toList(),
+        if (initialApply != null) 'initial_apply': initialApply!.toJson(),
+      };
+}
+
+class RhythmLightRuntimeInitialApply {
+  final bool queued;
+  final int dispatchCount;
+  final int dispatchSpacingMs;
+  final int estimatedDispatchMs;
+  final String? error;
+
+  const RhythmLightRuntimeInitialApply({
+    required this.queued,
+    required this.dispatchCount,
+    required this.dispatchSpacingMs,
+    required this.estimatedDispatchMs,
+    this.error,
+  });
+
+  factory RhythmLightRuntimeInitialApply.fromJson(Map<String, dynamic> json) {
+    return RhythmLightRuntimeInitialApply(
+      queued: json['queued'] as bool? ?? false,
+      dispatchCount: (json['dispatch_count'] as num?)?.toInt() ?? 0,
+      dispatchSpacingMs: (json['dispatch_spacing_ms'] as num?)?.toInt() ?? 0,
+      estimatedDispatchMs:
+          (json['estimated_dispatch_ms'] as num?)?.toInt() ?? 0,
+      error: json['error'] as String?,
+    );
+  }
+
+  Duration get estimatedDuration =>
+      Duration(milliseconds: estimatedDispatchMs.clamp(0, 60000).toInt());
+
+  Map<String, dynamic> toJson() => {
+        'queued': queued,
+        'dispatch_count': dispatchCount,
+        'dispatch_spacing_ms': dispatchSpacingMs,
+        'estimated_dispatch_ms': estimatedDispatchMs,
+        if (error != null) 'error': error,
       };
 }
 

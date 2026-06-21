@@ -21131,12 +21131,6 @@ class _ExpertSwitchesLoad {
             status: status,
           );
         }
-      } else if (next.inactive) {
-        next = next.copyWith(
-          inactive: false,
-          inactiveUntil: null,
-          status: next.status == 'inactive' ? 'active' : next.status,
-        );
       }
 
       if (!identical(next, control)) changed = true;
@@ -23762,7 +23756,7 @@ class _CircadianExpertClient {
   }
 
   Future<_ExpertControlsRefresh> fetchControlsRefresh() async {
-    final response = await _dio.get('api/controls/refresh');
+    final response = await _dio.get('$_removed-projectRuntimeApi/controls/refresh');
     return _ExpertControlsRefresh.fromServer(_asMap(response.data));
   }
 
@@ -24797,6 +24791,58 @@ Map<String, Object?> expertOutdoorStatusSummaryForTest(
     'condition_multiplier': status.conditionMultiplier,
     'angle_factor': status.angleFactor,
     'sun_elevation': status.sunElevation,
+  };
+}
+
+@visibleForTesting
+Map<String, Object?> expertControlsRefreshSummaryForTest({
+  required bool inactive,
+  String? inactiveUntil,
+  required Map<dynamic, dynamic> raw,
+}) {
+  final control = _ExpertControl(
+    id: 'control-1',
+    name: 'Hall Motion',
+    category: 'motion_sensor',
+    status: inactive ? 'inactive' : 'active',
+    type: 'motion',
+    typeName: 'Motion',
+    deviceId: 'motion-1',
+    areaId: 'hall',
+    areaName: 'Hall',
+    manufacturer: null,
+    model: null,
+    integration: 'modern_topology',
+    supported: true,
+    inactive: inactive,
+    inactiveUntil: inactiveUntil,
+    stale: false,
+    batteryLevel: null,
+    illuminance: null,
+    lastAction: null,
+    scopes: const [],
+    binarySensors: const [],
+    magicButtons: const {},
+    rawBinding: null,
+  );
+  final load = _ExpertSwitchesLoad(
+    controls: [control],
+    types: const {},
+    moments: const [],
+    defaultPauseMinutes: 240,
+    refreshIntervalSeconds: 3,
+    controlsPulseWindowHours: 6,
+    controlsRecentWindowMinutes: 5,
+  ).withRefresh(_ExpertControlsRefresh.fromServer(raw));
+  final updated = load.controls.single;
+  return {
+    'path': '$_removed-projectRuntimeApi/controls/refresh',
+    'inactive': updated.inactive,
+    'inactive_until': updated.inactiveUntil,
+    'status': updated.status,
+    'last_action': _stringValue(updated.lastAction?['canonical_action']) ??
+        _stringValue(updated.lastAction?['action']),
+    'last_action_time': updated.lastActionTime?.toUtc().toIso8601String(),
   };
 }
 
