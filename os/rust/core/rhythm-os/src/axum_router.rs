@@ -1635,6 +1635,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_state_authoritative_query_queues_refresh_when_worker_configured() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
+                hard_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
+            }],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[("room1", true)]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().work_tx = Some(tx);
+        let app = api_routes().with_state(state.clone());
+
+        let request = Request::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/state?authoritative=true")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let room = room_state_json(&body, "room1");
+        assert_eq!(room["lights_on"].as_bool(), Some(true));
+        assert_eq!(room["observed_power"]["source"].as_str(), Some("command"));
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+            crate::state::WorkItem::RefreshObservedPower { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn set_sleep_profile_runs_on_handler_thread() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {

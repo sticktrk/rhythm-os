@@ -526,8 +526,15 @@ pub fn handle_health() -> ApiResponse {
 
 pub fn handle_get_state_with_options(state: &SharedState, authoritative: bool) -> ApiResponse {
     if authoritative {
-        if let Err(e) = commands::refresh_observed_power_authoritatively(state) {
-            return ApiResponse::server_error(e);
+        match commands::queue_observed_power_authoritative_refresh(state) {
+            Ok(commands::ObservedPowerRefreshSchedule::Queued)
+            | Ok(commands::ObservedPowerRefreshSchedule::Dropped) => {}
+            Ok(commands::ObservedPowerRefreshSchedule::NoQueue) => {
+                if let Err(e) = commands::refresh_observed_power_authoritatively(state) {
+                    return ApiResponse::server_error(e);
+                }
+            }
+            Err(e) => return ApiResponse::server_error(e),
         }
     }
 
@@ -1852,7 +1859,6 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
         Err(e) => return ApiResponse::bad_request(&e),
     };
 
-    let batch = items.len() > 1;
     let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
@@ -1868,37 +1874,20 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
         updates.push((node_id, modifier));
     }
 
-    if batch {
-        let mut results = Vec::with_capacity(updates.len());
-        for (node_id, _) in &updates {
-            match commands::build_node_state(state, node_id) {
-                Ok(node) => results.push(node),
-                Err(e) => return ApiResponse::server_error(e),
-            }
-        }
-        if let Err(e) = commands::queue_set_node_curve_modifier_batch(
-            state,
-            updates.clone(),
-            persist,
-            dispatch_spacing,
-        ) {
-            return ApiResponse::server_error(e);
-        }
-        return nodes_response(results, batch, dispatch_spacing);
-    }
-
-    let mut results = Vec::new();
-    for (node_id, modifier) in &updates {
-        if let Err(e) = commands::do_set_node_curve_modifier(state, node_id, *modifier, persist) {
-            return ApiResponse::server_error(e);
-        }
+    let mut results = Vec::with_capacity(updates.len());
+    for (node_id, _) in &updates {
         match commands::build_node_state(state, node_id) {
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
     }
+    if let Err(e) =
+        commands::queue_set_node_curve_modifier_batch(state, updates, persist, dispatch_spacing)
+    {
+        return ApiResponse::server_error(e);
+    }
 
-    nodes_response(results, batch, dispatch_spacing)
+    nodes_response(results, true, dispatch_spacing)
 }
 
 /// Set node color. `scope=mood` updates this node's Mood profile and enters Mood.
@@ -3611,6 +3600,25 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["queued"], true);
         assert_eq!(parsed["dispatch_spacing_ms"], 250);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodeCurveModifier { .. }
+        ));
+    }
+
+    #[test]
+    fn node_curve_single_queued() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_set_node_curve(
+            &state,
+            &json!({"node_id": "room1", "brightness": 50}),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_count"], 1);
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodeCurveModifier { .. }
