@@ -1679,6 +1679,31 @@ fn node_state_dto_metadata(s: &AppState, node_id: &str) -> NodeStateDtoMetadata 
     }
 }
 
+fn parent_node_id_for_pending_dispatch(s: &AppState, node_id: &str) -> Option<String> {
+    s.topology
+        .get_device_node(node_id)
+        .and_then(|node| node.parent_id.clone())
+        .filter(|parent_id| parent_id != node_id)
+}
+
+fn pending_dispatch_node_ids(s: &AppState) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for node_id in s.pending_node_dispatches.keys() {
+        ids.insert(node_id.clone());
+        if let Some(parent_id) = parent_node_id_for_pending_dispatch(s, node_id) {
+            ids.insert(parent_id);
+        }
+    }
+    ids
+}
+
+fn node_has_pending_dispatch(s: &AppState, node_id: &str) -> bool {
+    s.pending_node_dispatches.contains_key(node_id)
+        || s.pending_node_dispatches.keys().any(|pending_id| {
+            parent_node_id_for_pending_dispatch(s, pending_id).as_deref() == Some(node_id)
+        })
+}
+
 fn scene_entry_targets_display_room(s: &AppState, entry_node_id: &str, room_id: &str) -> bool {
     if entry_node_id == room_id {
         return true;
@@ -1932,7 +1957,7 @@ pub fn build_node_state_event(
             ),
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
-        let pending_dispatch = s.pending_node_dispatches.contains_key(&snap.id);
+        let pending_dispatch = node_has_pending_dispatch(&s, &snap.id);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
         let mood_active = room_mood_active(
@@ -2554,10 +2579,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             Duration::from_secs(s.runtime_config.update_interval_secs),
             s.power_save,
             build_review_summary_dto(&s),
-            s.pending_node_dispatches
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>(),
+            pending_dispatch_node_ids(&s),
         )
     };
 
@@ -2844,10 +2866,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
             active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
-            s.pending_node_dispatches
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>(),
+            pending_dispatch_node_ids(&s),
         )
     };
 
@@ -2926,10 +2945,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
             s.longitude,
             s.utc_offset_hours,
             s.timezone_name.clone(),
-            s.pending_node_dispatches
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>(),
+            pending_dispatch_node_ids(&s),
         )
     };
 
@@ -3028,10 +3044,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             topology_hub_types_map(&s),
             sensor_rooms,
             active_transition_room_ids(&s.room_mode_transitions, now),
-            s.pending_node_dispatches
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>(),
+            pending_dispatch_node_ids(&s),
             s.power_save,
         )
     };
@@ -3243,7 +3256,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
             room_mode_transition_active(&s.room_mode_transitions, room_id, now),
-            s.pending_node_dispatches.contains_key(room_id),
+            node_has_pending_dispatch(&s, room_id),
             room_hub_types_from_topology(&s, room_id),
             s.power_save,
         )
@@ -16518,6 +16531,22 @@ mod tests {
     }
 
     #[test]
+    fn build_room_rhythm_state_marks_pending_child_dispatch() {
+        let (state, _rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert(device_id, 1);
+
+        let room_state = build_room_rhythm_state(&state, "room1").unwrap();
+        let json = serde_json::to_value(&room_state).unwrap();
+
+        assert!(room_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+    }
+
+    #[test]
     fn build_room_rhythm_state_ignores_expired_mode_transition() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         state.lock().unwrap().room_mode_transitions.insert(
@@ -16612,6 +16641,26 @@ mod tests {
         let event = build_node_state_event(&state, &snap);
 
         assert!(event.lights_on);
+    }
+
+    #[test]
+    fn build_node_state_event_marks_parent_pending_for_child_dispatch() {
+        let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert(device_id, 1);
+
+        let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
+            rt.engine_room_snapshot("room1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snap);
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert!(event.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+        assert!(!event.transitioning);
     }
 
     #[test]
@@ -18508,6 +18557,23 @@ mod tests {
 
         assert!(node_state.pending_dispatch);
         assert_eq!(json["pending_dispatch"], true);
+    }
+
+    #[test]
+    fn build_node_state_marks_parent_pending_for_child_dispatch() {
+        let (state, _rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert(device_id, 1);
+
+        let node_state = build_node_state(&state, "room1").unwrap();
+        let json = serde_json::to_value(&node_state).unwrap();
+
+        assert!(node_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+        assert!(!node_state.transitioning);
     }
 
     #[test]
