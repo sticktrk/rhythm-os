@@ -29,3 +29,6 @@ uuid = "1"
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17.4", default-features = false, features = ["bluetoothd"] }
 dbus = { version = "0.9.10", features = ["vendored"] }
+
+[dev-dependencies]
+tower = { workspace = true }
