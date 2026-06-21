@@ -19,6 +19,14 @@ use crate::transport::{
     DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
 
+/// How long a single device probe may run during hub bootstrap before we give
+/// up and fall back to basic device info. Reachable devices respond in well
+/// under a second; an unreachable one would otherwise block the connect path on
+/// a ~35s CHIP timeout, delaying the whole Matter integration from loading.
+/// The on-demand probe in `device_metadata` fills in real capabilities later
+/// once the device becomes reachable. See #169.
+const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Connect to the local Matter fabric.
 pub fn connect_matter(
     state: &SharedState,
@@ -27,8 +35,13 @@ pub fn connect_matter(
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let commissioned = transport.list_devices().unwrap_or_default();
     let cloud_profiles = crate::cloud_profiles::load_or_sync_for_state(state);
-    let initial_metadata =
-        load_initial_device_metadata(state, &transport, &commissioned, &cloud_profiles);
+    let initial_metadata = load_initial_device_metadata(
+        state,
+        &transport,
+        &commissioned,
+        &cloud_profiles,
+        CONNECT_PROBE_TIMEOUT,
+    );
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -119,11 +132,40 @@ struct InitialDeviceMetadata {
     subscription_targets: Vec<MatterSubscriptionTarget>,
 }
 
+/// Probe a node but give up after `timeout`, so a single unreachable device
+/// cannot stall the whole hub bootstrap on a serial ~35s CHIP timeout. The
+/// probe runs on a detached thread; on timeout we return an error and let the
+/// caller fall back to basic device info (and the on-demand probe in
+/// `device_metadata` recover real capabilities later). See #169.
+fn probe_light_with_deadline(
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    timeout: Duration,
+) -> Result<crate::transport::CommissionedDevice> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let probe_transport = transport.clone();
+    std::thread::Builder::new()
+        .name(format!("matter-probe-{node_id}"))
+        .spawn(move || {
+            let _ = tx.send(probe_transport.probe_light(node_id));
+        })?;
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "probe timed out after {}ms (node {} unreachable)",
+            timeout.as_millis(),
+            node_id
+        )),
+    }
+}
+
 fn load_initial_device_metadata(
     state: &SharedState,
     transport: &Arc<dyn MatterTransport>,
     commissioned: &[MatterDeviceInfo],
     cloud_profiles: &crate::cloud_profiles::CloudMatterProfileCatalog,
+    probe_timeout: Duration,
 ) -> InitialDeviceMetadata {
     let mut device_caps = HashMap::new();
     let mut device_quirks = HashMap::new();
@@ -131,7 +173,7 @@ fn load_initial_device_metadata(
     let local_overrides = crate::local_quirks::load_overrides_for_state(state);
 
     for info in commissioned {
-        match transport.probe_light(info.node_id) {
+        match probe_light_with_deadline(transport, info.node_id, probe_timeout) {
             Ok(device) => {
                 let device_id = format_device_id(device.node_id, device.light_endpoint);
                 subscription_targets.push(MatterSubscriptionTarget {
@@ -274,6 +316,7 @@ mod tests {
     struct FakeMatterTransport {
         devices: Vec<MatterDeviceInfo>,
         probe_failures: HashMap<u64, String>,
+        probe_delays: HashMap<u64, Duration>,
         subscribe_calls: AtomicUsize,
     }
 
@@ -282,8 +325,16 @@ mod tests {
             Self {
                 devices,
                 probe_failures,
+                probe_delays: HashMap::new(),
                 subscribe_calls: AtomicUsize::new(0),
             }
+        }
+
+        /// Make `probe_light` for `node_id` block for `delay`, emulating an
+        /// unreachable device that only fails after the CHIP timeout.
+        fn with_probe_delay(mut self, node_id: u64, delay: Duration) -> Self {
+            self.probe_delays.insert(node_id, delay);
+            self
         }
     }
 
@@ -304,6 +355,9 @@ mod tests {
         }
 
         fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+            if let Some(delay) = self.probe_delays.get(&node_id) {
+                std::thread::sleep(*delay);
+            }
             if let Some(error) = self.probe_failures.get(&node_id) {
                 anyhow::bail!("{}", error);
             }
@@ -529,5 +583,45 @@ mod tests {
             1
         );
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
+    }
+
+    #[test]
+    fn load_initial_device_metadata_bounds_unreachable_probe() {
+        // A device that hangs (unreachable) must not block the connect path:
+        // the probe is bounded by a deadline and the device falls back to basic
+        // info, so Matter still loads promptly. Regression for #169.
+        let state = shared_state("probe-deadline");
+        let transport: Arc<dyn MatterTransport> = Arc::new(
+            FakeMatterTransport::new(vec![device_info(10), device_info(12)], HashMap::new())
+                .with_probe_delay(12, Duration::from_secs(5)),
+        );
+        let commissioned = transport.list_devices().unwrap();
+        let cloud = crate::cloud_profiles::CloudMatterProfileCatalog::default();
+
+        let started = std::time::Instant::now();
+        let metadata = load_initial_device_metadata(
+            &state,
+            &transport,
+            &commissioned,
+            &cloud,
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+
+        // Unpatched code probes serially with no deadline and would block ~5s
+        // on node 12. With the deadline it returns in ~200ms.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bootstrap probe blocked on unreachable device: {:?}",
+            elapsed
+        );
+        // Reachable device pre-warmed; unreachable device deferred to the
+        // on-demand probe but still gets a subscription target (endpoint 1).
+        assert!(metadata.device_caps.contains_key("matter-10-2"));
+        assert!(!metadata.device_caps.contains_key("matter-12-2"));
+        assert!(metadata
+            .subscription_targets
+            .iter()
+            .any(|target| target.node_id == 12 && target.endpoint == 1));
     }
 }

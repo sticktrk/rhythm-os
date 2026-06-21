@@ -2334,22 +2334,80 @@ pub fn do_input_binding_delete(state: &SharedState, binding_id: &str) -> Result<
 // State snapshots (for GET endpoints)
 // ============================================================================
 
-pub fn refresh_observed_power_authoritatively(state: &SharedState) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedPowerRefreshSchedule {
+    Queued,
+    NoQueue,
+    Dropped,
+}
+
+pub fn queue_observed_power_authoritative_refresh(
+    state: &SharedState,
+) -> Result<ObservedPowerRefreshSchedule> {
+    let tx = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.work_tx.clone()
+    };
+    let Some(tx) = tx else {
+        return Ok(ObservedPowerRefreshSchedule::NoQueue);
+    };
+
+    let command_id = crate::logging::next_command_id("auth-refresh");
+    match tx.try_send(WorkItem::RefreshObservedPower { command_id }) {
+        Ok(()) => Ok(ObservedPowerRefreshSchedule::Queued),
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            warn!(
+                target: "cmd",
+                "Authoritative observed-power refresh skipped: worker queue full"
+            );
+            Ok(ObservedPowerRefreshSchedule::Dropped)
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            warn!(
+                target: "cmd",
+                "Authoritative observed-power refresh skipped: worker disconnected"
+            );
+            Ok(ObservedPowerRefreshSchedule::Dropped)
+        }
+    }
+}
+
+pub fn refresh_observed_power_authoritatively(
+    state: &SharedState,
+) -> Result<Vec<rhythm_core::RoomSnapshot>> {
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
     };
 
     let Some(runtime) = runtime else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
-    refresh_all_lights_on_cache_for_runtime(
+    let snapshots = refresh_all_lights_on_cache_for_runtime(
         state,
         &runtime,
         ObservedPowerSource::AuthoritativeRefresh,
     );
-    Ok(())
+    Ok(snapshots)
+}
+
+pub fn refresh_observed_power_authoritatively_and_emit(state: &SharedState) -> Result<usize> {
+    let snapshots = refresh_observed_power_authoritatively(state)?;
+    let events: Vec<_> = snapshots
+        .into_iter()
+        .filter(|snap| snap.kind.is_light_addressable())
+        .map(rhythm_core::NodeSnapshot::from_room_snapshot)
+        .map(|snap| build_node_state_event(state, &snap))
+        .collect();
+    let event_count = events.len();
+    if !events.is_empty() {
+        crate::state::emit_server_event(
+            state,
+            crate::server_event::ServerEvent::NodeState { nodes: events },
+        );
+    }
+    Ok(event_count)
 }
 
 /// Build a full state snapshot.

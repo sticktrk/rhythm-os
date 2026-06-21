@@ -2448,6 +2448,31 @@ pub fn process_work_item(state: &SharedState, item: WorkItem) {
                 );
             }
         }
+        WorkItem::RefreshObservedPower { command_id } => {
+            let started = Instant::now();
+            match crate::commands::refresh_observed_power_authoritatively_and_emit(state) {
+                Ok(event_count) => {
+                    tracing::info!(
+                        target: "cmd",
+                        event = "authoritative_observed_power_refreshed",
+                        command_id = %command_id,
+                        event_count,
+                        latency_ms = started.elapsed().as_millis(),
+                        "Worker refreshed observed power"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "cmd",
+                        event = "authoritative_observed_power_refresh_failed",
+                        command_id = %command_id,
+                        latency_ms = started.elapsed().as_millis(),
+                        error = %e,
+                        "Worker observed-power refresh failed"
+                    );
+                }
+            }
+        }
         WorkItem::SetNodePreferences {
             command_id,
             node_id,

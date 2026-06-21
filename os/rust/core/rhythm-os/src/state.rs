@@ -83,6 +83,8 @@ pub enum WorkItem {
         dispatch_spacing: Duration,
         persist_after: bool,
     },
+    /// Refresh observed light power through live hub reads on the worker.
+    RefreshObservedPower { command_id: String },
     /// Apply node preference changes through the dispatch worker.
     SetNodePreferences {
         command_id: String,
