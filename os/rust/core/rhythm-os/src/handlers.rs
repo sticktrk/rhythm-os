@@ -528,15 +528,8 @@ pub fn handle_health() -> ApiResponse {
 
 pub fn handle_get_state_with_options(state: &SharedState, authoritative: bool) -> ApiResponse {
     if authoritative {
-        match commands::queue_observed_power_authoritative_refresh(state) {
-            Ok(commands::ObservedPowerRefreshSchedule::Queued)
-            | Ok(commands::ObservedPowerRefreshSchedule::Dropped) => {}
-            Ok(commands::ObservedPowerRefreshSchedule::NoQueue) => {
-                if let Err(e) = commands::refresh_observed_power_authoritatively(state) {
-                    return ApiResponse::server_error(e);
-                }
-            }
-            Err(e) => return ApiResponse::server_error(e),
+        if let Err(e) = commands::refresh_observed_power_authoritatively(state) {
+            return ApiResponse::server_error(e);
         }
     }
 

@@ -1638,7 +1638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_state_authoritative_query_queues_refresh_when_worker_configured() {
+    async fn get_state_authoritative_query_refreshes_inline_when_worker_configured() {
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
             calls: Arc::new(Mutex::new(Vec::new())),
             snapshots: vec![RoomSnapshot {
@@ -1675,11 +1675,25 @@ mod tests {
         )
         .unwrap();
         let room = room_state_json(&body, "room1");
-        assert_eq!(room["lights_on"].as_bool(), Some(true));
-        assert_eq!(room["observed_power"]["source"].as_str(), Some("command"));
+        assert_eq!(room["lights_on"].as_bool(), Some(false));
+        assert_eq!(room["observed_power"]["lights_on"].as_bool(), Some(false));
+        assert_eq!(
+            room["observed_power"]["source"].as_str(),
+            Some("authoritative_refresh")
+        );
+        assert_eq!(room["observed_power"]["fresh"].as_bool(), Some(true));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .room_observed_power
+                .get("room1")
+                .map(|observed| observed.lights_on),
+            Some(false)
+        );
         assert!(matches!(
-            rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
-            crate::state::WorkItem::RefreshObservedPower { .. }
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
         ));
     }
 

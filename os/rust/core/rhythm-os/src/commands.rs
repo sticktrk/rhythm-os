@@ -2334,44 +2334,6 @@ pub fn do_input_binding_delete(state: &SharedState, binding_id: &str) -> Result<
 // State snapshots (for GET endpoints)
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObservedPowerRefreshSchedule {
-    Queued,
-    NoQueue,
-    Dropped,
-}
-
-pub fn queue_observed_power_authoritative_refresh(
-    state: &SharedState,
-) -> Result<ObservedPowerRefreshSchedule> {
-    let tx = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.work_tx.clone()
-    };
-    let Some(tx) = tx else {
-        return Ok(ObservedPowerRefreshSchedule::NoQueue);
-    };
-
-    let command_id = crate::logging::next_command_id("auth-refresh");
-    match tx.try_send(WorkItem::RefreshObservedPower { command_id }) {
-        Ok(()) => Ok(ObservedPowerRefreshSchedule::Queued),
-        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-            warn!(
-                target: "cmd",
-                "Authoritative observed-power refresh skipped: worker queue full"
-            );
-            Ok(ObservedPowerRefreshSchedule::Dropped)
-        }
-        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-            warn!(
-                target: "cmd",
-                "Authoritative observed-power refresh skipped: worker disconnected"
-            );
-            Ok(ObservedPowerRefreshSchedule::Dropped)
-        }
-    }
-}
-
 pub fn refresh_observed_power_authoritatively(
     state: &SharedState,
 ) -> Result<Vec<rhythm_core::RoomSnapshot>> {

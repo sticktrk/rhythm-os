@@ -32,7 +32,29 @@ const CHIP_EXAMPLE_STORAGE_EXT: &str = "ini";
 const CHIPD_LOGFILE_ENV: &str = "RHYTHM_MATTER_LOGFILE";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
+const RPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 const BLE_RECOVERY_COOLDOWN: Duration = Duration::from_secs(3);
+
+fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
+    match request {
+        ChipRpcRequest::SetOnOff { .. }
+        | ChipRpcRequest::SetGroupOnOff { .. }
+        | ChipRpcRequest::IdentifyGroup { .. }
+        | ChipRpcRequest::SetGroupBrightness { .. }
+        | ChipRpcRequest::SetGroupColorTemperature { .. }
+        | ChipRpcRequest::SetGroupXy { .. }
+        | ChipRpcRequest::SetGroupHueSaturation { .. }
+        | ChipRpcRequest::IdentifyLight { .. }
+        | ChipRpcRequest::SetBrightness { .. }
+        | ChipRpcRequest::RunLevelCommand { .. }
+        | ChipRpcRequest::SetColorTemperature { .. }
+        | ChipRpcRequest::SetXy { .. }
+        | ChipRpcRequest::SetHueSaturation { .. }
+        | ChipRpcRequest::ReadOnOff { .. }
+        | ChipRpcRequest::ReadLightState { .. } => RPC_CONTROL_TIMEOUT,
+        _ => RPC_TIMEOUT,
+    }
+}
 
 struct SidecarConfig {
     command: PathBuf,
@@ -288,14 +310,15 @@ impl ChipTransport {
             id: request_id,
             request,
         };
+        let rpc_timeout = rpc_timeout_for_request(&envelope.request);
 
         let mut stream = UnixStream::connect(&self.socket_path)
             .with_context(|| format!("connecting to {}", self.socket_path.display()))?;
         stream
-            .set_read_timeout(Some(RPC_TIMEOUT))
+            .set_read_timeout(Some(rpc_timeout))
             .context("setting CHIP RPC read timeout")?;
         stream
-            .set_write_timeout(Some(RPC_TIMEOUT))
+            .set_write_timeout(Some(rpc_timeout))
             .context("setting CHIP RPC write timeout")?;
 
         serde_json::to_writer(&mut stream, &envelope).with_context(|| {
@@ -1108,6 +1131,56 @@ mod tests {
                 password: "secret".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn control_and_read_requests_use_short_rpc_timeout() {
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::SetOnOff {
+                node_id: 42,
+                endpoint: 1,
+                on: true,
+            }),
+            RPC_CONTROL_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::SetBrightness {
+                node_id: 42,
+                endpoint: 1,
+                level: 128,
+                transition_ms: None,
+            }),
+            RPC_CONTROL_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::ReadOnOff {
+                node_id: 42,
+                endpoint: 1,
+            }),
+            RPC_CONTROL_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn commissioning_and_probe_requests_keep_long_rpc_timeout() {
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::CommissionLight(ble_commission_request())),
+            RPC_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::ProbeLight { node_id: 42 }),
+            RPC_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::InitController(ChipInitControllerRequest {
+                fabric_id: "test".to_string(),
+                operational_fabric_id: 1,
+                ipk_hex: "00".repeat(16),
+                storage_path: "/tmp/rhythm-test".to_string(),
+                ble_controller: None,
+            },)),
+            RPC_TIMEOUT
+        );
     }
 
     fn commissioned_test_device(node_id: u64) -> CommissionedDevice {

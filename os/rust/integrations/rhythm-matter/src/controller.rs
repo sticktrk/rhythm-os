@@ -332,13 +332,13 @@ impl MatterLightController {
         }
     }
 
-    fn clear_on_off_read_backoff(&self, node_id: u64, endpoint: u16) {
+    fn clear_connectivity_backoff(&self, node_id: u64, endpoint: u16) {
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.remove(&(node_id, endpoint));
         }
     }
 
-    fn mark_on_off_read_failed(&self, node_id: u64, endpoint: u16) {
+    fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16) {
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.insert(
                 (node_id, endpoint),
@@ -349,12 +349,12 @@ impl MatterLightController {
         }
     }
 
-    fn read_on_off_with_backoff(&self, node_id: u64, endpoint: u16) -> Result<MatterOnOffRead> {
+    fn connectivity_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
         let now = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             match backoff.get(&(node_id, endpoint)).copied() {
                 Some(entry) if entry.suppress_until > now => {
-                    return Ok(MatterOnOffRead::Suppressed);
+                    return true;
                 }
                 Some(_) => {
                     backoff.remove(&(node_id, endpoint));
@@ -362,18 +362,38 @@ impl MatterLightController {
                 None => {}
             }
         }
+        false
+    }
+
+    fn note_connectivity_failure(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        error: &anyhow::Error,
+    ) -> bool {
+        let connectivity_timeout = Self::looks_like_connectivity_timeout(error);
+        if connectivity_timeout {
+            self.mark_connectivity_failed(node_id, endpoint);
+        }
+        connectivity_timeout
+    }
+
+    fn read_on_off_with_backoff(&self, node_id: u64, endpoint: u16) -> Result<MatterOnOffRead> {
+        if self.connectivity_backoff_active(node_id, endpoint) {
+            return Ok(MatterOnOffRead::Suppressed);
+        }
 
         match self.transport.read_on_off(node_id, endpoint) {
             Ok(true) => {
-                self.clear_on_off_read_backoff(node_id, endpoint);
+                self.clear_connectivity_backoff(node_id, endpoint);
                 Ok(MatterOnOffRead::On)
             }
             Ok(false) => {
-                self.clear_on_off_read_backoff(node_id, endpoint);
+                self.clear_connectivity_backoff(node_id, endpoint);
                 Ok(MatterOnOffRead::Off)
             }
             Err(e) => {
-                self.mark_on_off_read_failed(node_id, endpoint);
+                self.note_connectivity_failure(node_id, endpoint, &e);
                 Err(e)
             }
         }
@@ -404,6 +424,18 @@ impl MatterLightController {
                 failed_devices += 1;
                 continue;
             };
+            if self.connectivity_backoff_active(node_id, endpoint) {
+                tracing::debug!(
+                    target: "cmd",
+                    event = "matter_command_backoff_skip",
+                    node_id,
+                    endpoint,
+                    backoff_secs = MATTER_ON_OFF_READ_BACKOFF.as_secs(),
+                    "Matter write skipped while endpoint is in connectivity backoff"
+                );
+                failed_devices += 1;
+                continue;
+            }
 
             let (caps, quirks) = self.device_metadata(device_id, node_id);
             let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
@@ -437,7 +469,7 @@ impl MatterLightController {
                         e
                     );
                     command_failures += 1;
-                    unreachable |= Self::looks_like_connectivity_timeout(&e);
+                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
                 } else {
                     command_successes += 1;
                     already_sent_on = true;
@@ -465,7 +497,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        unreachable |= Self::looks_like_connectivity_timeout(&e);
+                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
                     } else {
                         command_successes += 1;
                     }
@@ -482,7 +514,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        unreachable |= Self::looks_like_connectivity_timeout(&e);
+                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
                     } else {
                         command_successes += 1;
                     }
@@ -501,7 +533,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        unreachable |= Self::looks_like_connectivity_timeout(&e);
+                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
                     } else {
                         command_successes += 1;
                     }
@@ -512,10 +544,12 @@ impl MatterLightController {
             if !unreachable {
                 if let Some(brightness) = adapted.brightness {
                     let level = clusters::brightness_to_level(brightness);
-                    if let Err(e) =
-                        self.transport
-                            .set_brightness(node_id, endpoint, level, adapted.transition_ms)
-                    {
+                    if let Err(e) = self.transport.set_brightness(
+                        node_id,
+                        endpoint,
+                        level,
+                        adapted.transition_ms,
+                    ) {
                         warn!(
                             target: "cmd",
                             "Matter: brightness command failed for node {}: {}",
@@ -523,8 +557,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        // No further writes follow for this device, so there is
-                        // nothing left to short-circuit on a timeout here.
+                        self.note_connectivity_failure(node_id, endpoint, &e);
                     } else {
                         command_successes += 1;
                     }
@@ -538,6 +571,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
+                        self.note_connectivity_failure(node_id, endpoint, &e);
                     } else {
                         command_successes += 1;
                     }
@@ -546,7 +580,7 @@ impl MatterLightController {
             }
 
             if command_successes > 0 {
-                self.clear_on_off_read_backoff(node_id, endpoint);
+                self.clear_connectivity_backoff(node_id, endpoint);
             }
 
             match (command_successes, command_failures) {
@@ -899,13 +933,26 @@ impl MatterLightController {
                 failed_devices += 1;
                 continue;
             };
+            if self.connectivity_backoff_active(node_id, endpoint) {
+                tracing::debug!(
+                    target: "cmd",
+                    event = "matter_command_backoff_skip",
+                    node_id,
+                    endpoint,
+                    backoff_secs = MATTER_ON_OFF_READ_BACKOFF.as_secs(),
+                    "Matter off skipped while endpoint is in connectivity backoff"
+                );
+                failed_devices += 1;
+                continue;
+            }
 
             if let Err(e) = self.transport.set_on_off(node_id, endpoint, false) {
                 warn!(target: "cmd", "Matter: off command failed for node {}: {}", node_id, e);
+                self.note_connectivity_failure(node_id, endpoint, &e);
                 failed_devices += 1;
             } else {
                 successful_devices += 1;
-                self.clear_on_off_read_backoff(node_id, endpoint);
+                self.clear_connectivity_backoff(node_id, endpoint);
             }
         }
 
@@ -2660,7 +2707,7 @@ mod tests {
         // stalls the whole dispatch on serial CHIP timeouts (~25s each).
         // Regression for #169 ("matter failed to load").
         struct TimeoutTransport {
-            writes: Mutex<Vec<RecordedOperation>>,
+            operations: Mutex<Vec<RecordedOperation>>,
         }
 
         impl MatterTransport for TimeoutTransport {
@@ -2684,7 +2731,7 @@ mod tests {
             }
 
             fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
-                self.writes
+                self.operations
                     .lock()
                     .unwrap()
                     .push(RecordedOperation::SetOnOff {
@@ -2711,7 +2758,7 @@ mod tests {
                 level: u8,
                 transition_ms: Option<u32>,
             ) -> Result<()> {
-                self.writes
+                self.operations
                     .lock()
                     .unwrap()
                     .push(RecordedOperation::SetBrightness {
@@ -2730,7 +2777,7 @@ mod tests {
                 kelvin: u16,
                 transition_ms: Option<u32>,
             ) -> Result<()> {
-                self.writes
+                self.operations
                     .lock()
                     .unwrap()
                     .push(RecordedOperation::SetColorTemperature {
@@ -2750,14 +2797,19 @@ mod tests {
                 y: f32,
                 transition_ms: Option<u32>,
             ) -> Result<()> {
-                self.writes.lock().unwrap().push(RecordedOperation::SetXy {
-                    node_id,
-                    endpoint,
-                    x,
-                    y,
-                    transition_ms,
-                });
-                anyhow::bail!("setting Matter xy: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::SetXy {
+                        node_id,
+                        endpoint,
+                        x,
+                        y,
+                        transition_ms,
+                    });
+                anyhow::bail!(
+                    "setting Matter xy: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout"
+                )
             }
 
             fn set_hue_saturation(
@@ -2768,7 +2820,7 @@ mod tests {
                 saturation: u8,
                 transition_ms: Option<u32>,
             ) -> Result<()> {
-                self.writes
+                self.operations
                     .lock()
                     .unwrap()
                     .push(RecordedOperation::SetHueSaturation {
@@ -2781,13 +2833,17 @@ mod tests {
                 anyhow::bail!("setting Matter hue/saturation: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout")
             }
 
-            fn read_on_off(&self, _node_id: u64, _endpoint: u16) -> Result<bool> {
+            fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(RecordedOperation::ReadOnOff { node_id, endpoint });
                 Ok(false)
             }
         }
 
         let transport = Arc::new(TimeoutTransport {
-            writes: Mutex::new(Vec::new()),
+            operations: Mutex::new(Vec::new()),
         });
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
@@ -2830,12 +2886,33 @@ mod tests {
         // Exactly one write: the first command timed out, so the fan-out must
         // skip the device's remaining attribute writes instead of timing out
         // on each in turn. Unpatched code records two (SetXy + SetBrightness).
-        let writes = transport.writes.lock().unwrap();
+        let writes = transport.operations.lock().unwrap().clone();
         assert_eq!(
             writes.len(),
             1,
             "expected the dispatch to stop after the first connectivity timeout, got {:?}",
-            *writes
+            writes
+        );
+        assert!(
+            !block_on(controller.any_lights_on("r1")).unwrap(),
+            "backed-off endpoint should report no observed power"
+        );
+        let operations_after_read = transport.operations.lock().unwrap().clone();
+        assert_eq!(
+            operations_after_read.len(),
+            1,
+            "read after write timeout should be suppressed while endpoint is in backoff, got {:?}",
+            operations_after_read
+        );
+
+        let retry = block_on(controller.turn_on("r1", LightingCommand::new(50, 3000)));
+        assert!(matches!(retry, Err(LightControlError::CommandFailed(_))));
+        let operations_after_retry = transport.operations.lock().unwrap().clone();
+        assert_eq!(
+            operations_after_retry.len(),
+            1,
+            "write retry should be skipped while endpoint is in backoff, got {:?}",
+            operations_after_retry
         );
     }
 }
