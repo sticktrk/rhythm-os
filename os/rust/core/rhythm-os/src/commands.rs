@@ -12489,6 +12489,17 @@ mod tests {
         fn turn_on_calls(&self) -> Vec<String> {
             self.turn_on_calls.lock().unwrap().clone()
         }
+
+        fn wait_for_turn_on_calls(&self, expected: usize) -> Vec<String> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let calls = self.turn_on_calls();
+                if calls.len() >= expected || std::time::Instant::now() >= deadline {
+                    return calls;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -22379,7 +22390,7 @@ mod tests {
         )
         .expect("turn_on should succeed");
 
-        let calls = recording.turn_on_calls();
+        let calls = recording.wait_for_turn_on_calls(1);
         assert_eq!(
             calls.len(),
             1,
