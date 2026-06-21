@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/widgets/first_run_explainer.dart';
 import 'package:rhythm_app/widgets/room_card.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -195,6 +196,14 @@ double _timeOffsetMinutesForEffectiveHour(double targetHour) {
 }
 
 void main() {
+  setUp(() {
+    // Most tests exercise Mood mechanics directly; treat the one-time
+    // explainer as already seen so it doesn't intercept the first tap. The
+    // gating itself is covered by a dedicated test below.
+    FirstRunExplainer.seenReader = (_) => true;
+    FirstRunExplainer.seenWriter = (_) async {};
+  });
+
   testWidgets('shows and clears a spinner while the room is transitioning',
       (tester) async {
     final roomProvider = RoomProvider();
@@ -412,7 +421,71 @@ void main() {
     expect(call.profileSettings, {'mood_enabled': true});
   });
 
-  testWidgets('standby uses on segment and disabled brightness slider',
+  testWidgets('first Mood tap shows the explainer and defers the mode change',
+      (tester) async {
+    // Pretend the explainer has never been seen for this test only.
+    var marked = false;
+    FirstRunExplainer.seenReader = (_) => false;
+    FirstRunExplainer.seenWriter = (_) async {
+      marked = true;
+    };
+
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Mood'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // The explainer is presented and marked seen…
+    expect(find.text('Meet Mood'), findsOneWidget);
+    expect(marked, isTrue);
+    // …and the mode change is deferred until the user acts on it.
+    expect(roomProvider.getRoomState('room-1'), isNot(RoomModeState.mood));
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+  });
+
+  testWidgets('standby state shows Off/On segments and disables the slider',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -442,7 +515,7 @@ void main() {
 
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
-    final serverSync = ServerSyncProvider(
+    final serverSync = _StandbyServerSyncProvider(
       connection: connection,
       roomProvider: roomProvider,
       homeProvider: homeProvider,
@@ -468,8 +541,11 @@ void main() {
       ),
     );
 
-    expect(find.text('Standby'), findsOneWidget);
-    expect(find.text('On'), findsNothing);
+    // Once in standby the middle button reverts to "Off" (tap to step fully
+    // off); the brightness slider stays locked.
+    expect(find.text('Standby'), findsNothing);
+    expect(find.text('Off'), findsOneWidget);
+    expect(find.text('On'), findsOneWidget);
     final slider = tester.widget<Slider>(find.byType(Slider));
     expect(slider.value, 1);
     expect(slider.onChanged, isNull);
@@ -481,7 +557,8 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
     expect(connection.api.nodePreferenceCalls, isEmpty);
 
-    await tester.tap(find.text('Standby'));
+    // Tapping On returns the room to its active state.
+    await tester.tap(find.text('On'));
     await tester.pump();
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
@@ -492,7 +569,7 @@ void main() {
     expect(call.state, RoomModeState.active);
   });
 
-  testWidgets('selected on segment enters standby when enabled',
+  testWidgets('off state offers Standby and entering it dispatches standby',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -504,7 +581,7 @@ void main() {
         deviceIds: ['light-1'],
         rhythmEnabled: true,
         disabled: false,
-        lightsOn: true,
+        lightsOn: false,
         timeOffsetMinutes: 0,
         brightnessOffset: 0,
       ),
@@ -514,8 +591,8 @@ void main() {
       rhythmEnabled: true,
       timeOffset: 0,
       brightnessOffset: 0,
-      state: RoomModeState.active,
-      lightsOn: true,
+      state: RoomModeState.hardOff,
+      lightsOn: false,
       brightness: 42,
       kelvin: 2700,
     );
@@ -548,7 +625,11 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('On'));
+    // The off state surfaces Standby in place of the Off label.
+    expect(find.text('Standby'), findsOneWidget);
+    expect(find.text('Off'), findsNothing);
+
+    await tester.tap(find.text('Standby'));
     await tester.pump();
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
