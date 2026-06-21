@@ -166,6 +166,22 @@ void main() {
         expect(room.kelvin, isNull);
       });
 
+      test('normalizes explicit null pending dispatch constructor value', () {
+        final room = Function.apply(RhythmRoom.new, const [], {
+          #id: 'room-1',
+          #name: 'Kitchen',
+          #groupedLightId: 'group-1',
+          #state: RoomModeState.active,
+          #pendingDispatch: null,
+          #rhythmEnabled: true,
+          #disabled: false,
+          #timeOffset: 0.0,
+          #brightnessOffset: 0.0,
+        }) as RhythmRoom;
+
+        expect(room.pendingDispatch, isFalse);
+      });
+
       test('parses all fields from populated JSON', () {
         final room = RhythmRoom.fromJson({
           'id': 'room-1',
@@ -536,6 +552,19 @@ void main() {
 
   group('RhythmRoomState', () {
     group('fromJson', () {
+      test('normalizes explicit null pending dispatch constructor value', () {
+        final state = Function.apply(RhythmRoomState.new, const [], {
+          #nodeId: 'node-42',
+          #state: RoomModeState.active,
+          #pendingDispatch: null,
+          #rhythmEnabled: true,
+          #timeOffset: 0.0,
+          #brightnessOffset: 0.0,
+        }) as RhythmRoomState;
+
+        expect(state.pendingDispatch, isFalse);
+      });
+
       test('parses node_id field', () {
         final state = RhythmRoomState.fromJson({
           'node_id': 'node-42',

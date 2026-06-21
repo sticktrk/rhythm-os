@@ -452,7 +452,7 @@ class RhythmConnection {
           brightnessOffset: node.brightnessOffset,
           state: node.state,
           transitioning: node.transitioning,
-          pendingDispatch: node.pendingDispatch,
+          pendingDispatch: _pendingDispatchForRoom(node),
           powerFresh: node.powerFresh,
           powerSource: node.powerSource,
           lightsOn: node.lightsOn,
@@ -583,7 +583,7 @@ class RhythmConnection {
             cached.brightnessOffset != nodeState.brightnessOffset ||
             cached.state != nodeState.state ||
             cached.transitioning != nodeState.transitioning ||
-            cached.pendingDispatch != nodeState.pendingDispatch ||
+            cached.pendingDispatch != _pendingDispatchForState(nodeState) ||
             cached.lightsOn != nodeState.lightsOn ||
             cached.powerFresh != nextPowerFresh ||
             cached.powerSource != nextPowerSource ||
@@ -604,7 +604,7 @@ class RhythmConnection {
             brightnessOffset: nodeState.brightnessOffset,
             state: nodeState.state,
             transitioning: nodeState.transitioning,
-            pendingDispatch: nodeState.pendingDispatch,
+            pendingDispatch: _pendingDispatchForState(nodeState),
             mode: nodeState.mode,
             powerFresh: nextPowerFresh,
             powerSource: nextPowerSource,
@@ -838,7 +838,7 @@ class RhythmConnection {
               brightnessOffset: nodeState.brightnessOffset,
               state: nodeState.state,
               transitioning: nodeState.transitioning,
-              pendingDispatch: nodeState.pendingDispatch,
+              pendingDispatch: _pendingDispatchForState(nodeState),
               mode: nodeState.mode,
               powerFresh: nodeState.powerFresh ?? existing?.powerFresh,
               powerSource: nodeState.powerSource ?? existing?.powerSource,
@@ -1198,7 +1198,7 @@ class RhythmConnection {
         brightnessOffset: state.brightnessOffset,
         state: state.state,
         transitioning: state.transitioning,
-        pendingDispatch: state.pendingDispatch,
+        pendingDispatch: _pendingDispatchForState(state),
         mode: state.mode ?? existing?.mode,
         powerFresh: state.powerFresh ?? existing?.powerFresh,
         powerSource: state.powerSource ?? existing?.powerSource,
@@ -1236,5 +1236,21 @@ class RhythmConnection {
     }
     final scheme = useSsl ? 'https' : 'http';
     return '$scheme://$host:$port/';
+  }
+
+  static bool _pendingDispatchForRoom(RhythmRoom room) {
+    try {
+      return room.pendingDispatch;
+    } on TypeError {
+      return false;
+    }
+  }
+
+  static bool _pendingDispatchForState(RhythmRoomState state) {
+    try {
+      return state.pendingDispatch;
+    } on TypeError {
+      return false;
+    }
   }
 }

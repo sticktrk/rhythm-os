@@ -648,7 +648,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
-      pendingDispatch: previous.pendingDispatch,
+      pendingDispatch: _pendingDispatchForNode(previous),
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -777,7 +777,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
-      pendingDispatch: previous.pendingDispatch,
+      pendingDispatch: _pendingDispatchForNode(previous),
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -1820,7 +1820,7 @@ class ServerSyncProvider extends ChangeNotifier {
             brightnessOffset: sr.brightnessOffset,
             state: sr.state,
             transitioning: sr.transitioning,
-            pendingDispatch: sr.pendingDispatch,
+            pendingDispatch: _pendingDispatchForNode(sr),
             lightsOn: sr.lightsOn,
             brightness: sr.brightness,
             kelvin: sr.kelvin,
@@ -1865,7 +1865,7 @@ class ServerSyncProvider extends ChangeNotifier {
         brightnessOffset: state.brightnessOffset,
         state: state.state,
         transitioning: state.transitioning,
-        pendingDispatch: state.pendingDispatch,
+        pendingDispatch: _pendingDispatchForState(state),
         mode: state.mode,
         lightsOn: state.lightsOn,
         brightness: state.brightness,
@@ -3280,7 +3280,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: state.state,
       transitioning: state.transitioning,
-      pendingDispatch: state.pendingDispatch,
+      pendingDispatch: _pendingDispatchForState(state),
       rhythmEnabled: state.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: state.timeOffset,
@@ -3328,7 +3328,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
-      pendingDispatch: previous.pendingDispatch,
+      pendingDispatch: _pendingDispatchForNode(previous),
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -3373,7 +3373,7 @@ class ServerSyncProvider extends ChangeNotifier {
         left.placement != right.placement ||
         left.state != right.state ||
         left.transitioning != right.transitioning ||
-        left.pendingDispatch != right.pendingDispatch ||
+        _pendingDispatchForNode(left) != _pendingDispatchForNode(right) ||
         left.rhythmEnabled != right.rhythmEnabled ||
         left.disabled != right.disabled ||
         left.timeOffset != right.timeOffset ||
@@ -3403,6 +3403,23 @@ class ServerSyncProvider extends ChangeNotifier {
       if (left[i] != right[i]) return false;
     }
     return true;
+  }
+
+  bool _pendingDispatchForNode(RhythmRoom? node) {
+    if (node == null) return false;
+    try {
+      return node.pendingDispatch;
+    } on TypeError {
+      return false;
+    }
+  }
+
+  bool _pendingDispatchForState(RhythmRoomState state) {
+    try {
+      return state.pendingDispatch;
+    } on TypeError {
+      return false;
+    }
   }
 
   List<RhythmRoom> _buildRoomSummaries() {
@@ -3446,7 +3463,7 @@ class ServerSyncProvider extends ChangeNotifier {
         groupedLightId: state?.groupedLightId ?? '',
         state: state?.state ?? RoomModeState.active,
         transitioning: state?.transitioning ?? false,
-        pendingDispatch: state?.pendingDispatch ?? false,
+        pendingDispatch: _pendingDispatchForNode(state),
         rhythmEnabled: state?.rhythmEnabled ?? false,
         disabled: state?.disabled ?? false,
         timeOffset: state?.timeOffset ?? 0,

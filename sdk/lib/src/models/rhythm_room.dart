@@ -458,7 +458,7 @@ class RhythmRoom {
     required this.groupedLightId,
     required this.state,
     this.transitioning = false,
-    this.pendingDispatch = false,
+    bool? pendingDispatch,
     required this.rhythmEnabled,
     required this.disabled,
     required this.timeOffset,
@@ -484,6 +484,7 @@ class RhythmRoom {
     this.timeoutSecs,
     this.warningActive,
   })  : assert(profileSettings == null || roomProfile == null),
+        pendingDispatch = pendingDispatch ?? false,
         profileSettings = profileSettings ?? roomProfile;
 
   bool get hasMotionSensor =>
@@ -750,7 +751,7 @@ class RhythmRoomState {
     this.mode,
     required this.state,
     this.transitioning = false,
-    this.pendingDispatch = false,
+    bool? pendingDispatch,
     required this.rhythmEnabled,
     required this.timeOffset,
     required this.brightnessOffset,
@@ -779,6 +780,7 @@ class RhythmRoomState {
     this.warningActive,
     this.tick = false,
   })  : assert(profileSettings == null || roomProfile == null),
+        pendingDispatch = pendingDispatch ?? false,
         profileSettings = profileSettings ?? roomProfile;
 
   String get roomId => nodeId;
