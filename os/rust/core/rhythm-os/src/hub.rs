@@ -767,6 +767,18 @@ fn finish_bootstrapped_hubs<'a>(
         .unwrap_or(true);
 
     for candidate in newly_connected {
+        crate::commands::register_hub_with_composite(state, &candidate.key);
+    }
+
+    if let Err(error) = crate::commands::reconcile_runtime_from_state(state) {
+        warn!(
+            target: "sys",
+            "Startup runtime reconciliation failed after hub connect: {}",
+            error
+        );
+    }
+
+    for candidate in newly_connected {
         if let Err(error) =
             crate::room_sync::sync_from_hub_for_key(state, &candidate.key, discover_devices)
         {
@@ -1235,6 +1247,86 @@ mod tests {
         }
     }
 
+    static BOOTSTRAP_DISCOVERY_SAW_RUNTIME: AtomicBool = AtomicBool::new(false);
+
+    struct RuntimeRequiredBeforeDiscovery {
+        state: SharedState,
+    }
+
+    impl HubDiscovery for RuntimeRequiredBeforeDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            let has_runtime = self
+                .state
+                .lock()
+                .map(|state| state.hub_runtime().is_some())
+                .unwrap_or(false);
+            assert!(
+                has_runtime,
+                "startup sync began before runtime reconciliation"
+            );
+            BOOTSTRAP_DISCOVERY_SAW_RUNTIME.store(true, Ordering::Relaxed);
+            Ok(Vec::new())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct RuntimeBeforeSyncIntegration;
+
+    impl ExternalLightHubIntegration for RuntimeBeforeSyncIntegration {
+        fn hub_type(&self) -> &'static str {
+            "hue"
+        }
+
+        fn provider(&self) -> &'static dyn HubProvider {
+            &MOCK_HUE_PROVIDER
+        }
+
+        fn connect_and_start(
+            &self,
+            state: SharedState,
+            key: &HubKey,
+        ) -> Result<Receiver<HubEvent>> {
+            let (_tx, rx) = mpsc::channel();
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            s.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: HubType::new("hue"),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: Some(Arc::new(RuntimeRequiredBeforeDiscovery {
+                        state: state.clone(),
+                    })),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(key, false);
+            Ok(rx)
+        }
+
+        fn ensure_runtime(&self, state: &SharedState) -> Result<()> {
+            crate::lifecycle::ensure_composite_runtime(state, RUNTIME_BEFORE_SYNC_INTEGRATIONS)
+        }
+
+        fn create_controller(
+            &self,
+            _state: &SharedState,
+            _key: &HubKey,
+        ) -> Result<Arc<dyn rhythm_core::HubLightController>> {
+            Ok(Arc::new(rhythm_core::NoOpController::new()))
+        }
+    }
+
+    static RUNTIME_BEFORE_SYNC_INTEGRATION: RuntimeBeforeSyncIntegration =
+        RuntimeBeforeSyncIntegration;
+    static RUNTIME_BEFORE_SYNC_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
+        &[&RUNTIME_BEFORE_SYNC_INTEGRATION];
+
     struct MockBootstrapClock {
         now_instant: Instant,
         now_epoch_ms: i64,
@@ -1642,6 +1734,34 @@ mod tests {
         assert_eq!(integration.post_connect_calls(), 0);
         assert_eq!(state.lock().unwrap().pending_hub_event_rxs.len(), 0);
         assert!(clock.sleeps.is_empty());
+    }
+
+    #[test]
+    fn stored_hub_bootstrap_reconciles_runtime_before_startup_sync() {
+        BOOTSTRAP_DISCOVERY_SAW_RUNTIME.store(false, Ordering::Relaxed);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+        let callbacks = integration_callbacks(RUNTIME_BEFORE_SYNC_INTEGRATIONS);
+
+        {
+            let mut s = state.lock().unwrap();
+            s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn.clone());
+            s.register_controller_fn = Some(callbacks.register_controller_fn.clone());
+            s.hub_credentials.insert(
+                key.clone(),
+                HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+            );
+            s.topology
+                .insert_room(crate::topology::TopologyRoom::new("room-1", "Room 1"));
+        }
+
+        let mut clock = MockBootstrapClock::new();
+        bootstrap_stored_hubs_until_settled(&state, RUNTIME_BEFORE_SYNC_INTEGRATIONS, &mut clock);
+
+        let s = state.lock().unwrap();
+        assert!(s.hub_runtime().is_some());
+        assert_eq!(s.pending_hub_event_rxs.len(), 1);
+        assert!(BOOTSTRAP_DISCOVERY_SAW_RUNTIME.load(Ordering::Relaxed));
     }
 
     #[test]
