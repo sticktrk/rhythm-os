@@ -1499,6 +1499,15 @@ impl RoomTopologyStore {
             .map(|link| link.target_id.as_str())
     }
 
+    /// Find all explicit control targets for a source node and control kind.
+    pub fn explicit_control_targets(&self, source_id: &str, kind: &NodeControlKind) -> Vec<&str> {
+        self.control_links
+            .iter()
+            .filter(|link| link.source_id == source_id && &link.kind == kind)
+            .map(|link| link.target_id.as_str())
+            .collect()
+    }
+
     /// Resolve the effective target for a source node and control kind.
     ///
     /// Explicit topology links win. If no override exists, device nodes inherit
@@ -1517,6 +1526,31 @@ impl RoomTopologyStore {
             .and_then(|node| node.parent_id.clone())
     }
 
+    /// Resolve every effective target for a source node and control kind.
+    ///
+    /// Explicit topology links win. If no override exists, device nodes inherit
+    /// their parent room as the single default control target.
+    pub fn effective_control_targets(
+        &self,
+        source_id: &str,
+        kind: &NodeControlKind,
+    ) -> Vec<String> {
+        let explicit_targets = self.explicit_control_targets(source_id, kind);
+        if !explicit_targets.is_empty() {
+            let mut targets: Vec<String> =
+                explicit_targets.into_iter().map(str::to_string).collect();
+            targets.sort();
+            targets.dedup();
+            return targets;
+        }
+
+        self.device_nodes
+            .get(source_id)
+            .and_then(|node| node.parent_id.clone())
+            .into_iter()
+            .collect()
+    }
+
     /// Set or clear an explicit control target override.
     pub fn set_control_target(
         &mut self,
@@ -1524,10 +1558,21 @@ impl RoomTopologyStore {
         kind: NodeControlKind,
         target_id: Option<&str>,
     ) -> bool {
+        let targets: Vec<&str> = target_id.into_iter().collect();
+        self.set_control_targets(source_id, kind, &targets)
+    }
+
+    /// Set or clear explicit control target overrides.
+    pub fn set_control_targets(
+        &mut self,
+        source_id: &str,
+        kind: NodeControlKind,
+        target_ids: &[&str],
+    ) -> bool {
         if !self.has_public_node(source_id) {
             return false;
         }
-        if let Some(target_id) = target_id {
+        for target_id in target_ids {
             if !self.has_public_node(target_id) {
                 return false;
             }
@@ -1536,11 +1581,15 @@ impl RoomTopologyStore {
         self.control_links
             .retain(|link| !(link.source_id == source_id && link.kind == kind));
 
-        if let Some(target_id) = target_id {
+        let mut target_ids = target_ids.to_vec();
+        target_ids.sort();
+        target_ids.dedup();
+
+        for target_id in target_ids {
             self.control_links.push(NodeControlLink {
                 source_id: source_id.to_string(),
                 target_id: target_id.to_string(),
-                kind,
+                kind: kind.clone(),
             });
         }
 
@@ -1609,8 +1658,8 @@ impl RoomTopologyStore {
         let mut controls = Vec::new();
         for kind in kinds {
             let explicit = self.explicit_control_target(source_id, &kind).is_some();
-            if let Some(target_id) = self.effective_control_target(source_id, &kind) {
-                controls.push((kind, target_id, !explicit));
+            for target_id in self.effective_control_targets(source_id, &kind) {
+                controls.push((kind.clone(), target_id, !explicit));
             }
         }
 
@@ -1639,7 +1688,7 @@ impl RoomTopologyStore {
                 continue;
             }
 
-            if let Some(target_id) = self.effective_control_target(&node.id, kind) {
+            for target_id in self.effective_control_targets(&node.id, kind) {
                 targets.insert(target_id);
             }
         }
@@ -3207,6 +3256,50 @@ mod tests {
         assert_eq!(
             store.effective_node_controls(&sensor_id, &registry),
             vec![(NodeControlKind::Motion, target_room_id.clone(), false)]
+        );
+    }
+
+    #[test]
+    fn motion_device_controls_can_target_multiple_rooms() {
+        let mut store = RoomTopologyStore::new();
+        let source_room_id = store.create_room("Office");
+        let hall_id = store.create_room("Hall");
+        let stairs_id = store.create_room("Stairs");
+        let mut registry = CanonicalRegistry::new();
+
+        let sensor_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "motion-1",
+                "office-native",
+                "Office",
+                "Office Motion",
+                DeviceType::Motion,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&source_room_id, &sensor_id));
+        assert!(store.set_control_targets(
+            &sensor_id,
+            NodeControlKind::Motion,
+            &[hall_id.as_str(), stairs_id.as_str()],
+        ));
+
+        let mut controls = store.effective_node_controls(&sensor_id, &registry);
+        controls.sort_by(|left, right| left.1.cmp(&right.1));
+        let mut expected_controls = vec![
+            (NodeControlKind::Motion, hall_id.clone(), false),
+            (NodeControlKind::Motion, stairs_id.clone(), false),
+        ];
+        expected_controls.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(controls, expected_controls);
+        assert_eq!(
+            store
+                .effective_control_targets_for_kind(&NodeControlKind::Motion, &registry)
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [hall_id, stairs_id].into_iter().collect()
         );
     }
 

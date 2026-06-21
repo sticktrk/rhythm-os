@@ -792,6 +792,44 @@ class DemoServerApi extends RhythmServerApi {
   Future<List<RhythmTopologyNode>> getTopologyNodes() async => topologyNodes;
 
   @override
+  Future<bool> setTopologyNodeControlTargets({
+    required String nodeId,
+    required String controlKind,
+    required List<String> targetIds,
+  }) async {
+    ensureSeeded();
+    final node = _topologyNodes[nodeId];
+    if (node == null || targetIds.any((id) => !_topologyNodes.containsKey(id))) {
+      return false;
+    }
+
+    final normalizedTargetIds = targetIds.toSet().toList()..sort();
+    final existingControls = (node['controls'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((control) => control.cast<String, dynamic>())
+        .where((control) => control['kind'] != controlKind)
+        .toList();
+    final parentId = node['parent_id'] as String?;
+    node['controls'] = [
+      ...existingControls,
+      for (final targetId in normalizedTargetIds)
+        {
+          'kind': controlKind,
+          'target_id': targetId,
+          'inherited': false,
+        },
+      if (normalizedTargetIds.isEmpty && parentId != null)
+        {
+          'kind': controlKind,
+          'target_id': parentId,
+          'inherited': true,
+        },
+    ];
+    _changes.add(null);
+    return true;
+  }
+
+  @override
   Future<List<RhythmInputBinding>> getInputBindings() async {
     ensureSeeded();
     return _inputBindings.values.toList(growable: false);

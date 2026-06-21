@@ -2425,6 +2425,18 @@ pub(crate) fn resolve_node_control_target_for_source(
     s.topology.effective_control_target(source_node_id, kind)
 }
 
+/// Resolve an already-known source node to every effective topology control target.
+pub(crate) fn resolve_node_control_targets_for_source(
+    state: &SharedState,
+    source_node_id: &str,
+    kind: &NodeControlKind,
+) -> Vec<String> {
+    let Ok(s) = state.lock() else {
+        return Vec::new();
+    };
+    s.topology.effective_control_targets(source_node_id, kind)
+}
+
 /// Return the high-level binding action for a physical button event, if one is configured.
 pub(crate) fn matching_button_input_binding_action(
     state: &SharedState,
@@ -11983,10 +11995,26 @@ pub fn do_topology_set_control_target(
     kind: NodeControlKind,
     target_id: Option<&str>,
 ) -> Result<()> {
-    let resolved_source_id = resolve_node_id(state, source_id);
-    let resolved_target_id = target_id.map(|id| resolve_node_id(state, id));
+    let target_ids: Vec<&str> = target_id.into_iter().collect();
+    do_topology_set_control_targets(state, source_id, kind, &target_ids)
+}
 
-    let (old_target, new_target) = {
+/// Set or clear explicit topology control targets for a source node.
+pub fn do_topology_set_control_targets(
+    state: &SharedState,
+    source_id: &str,
+    kind: NodeControlKind,
+    target_ids: &[&str],
+) -> Result<()> {
+    let resolved_source_id = resolve_node_id(state, source_id);
+    let mut resolved_target_ids: Vec<String> = target_ids
+        .iter()
+        .map(|id| resolve_node_id(state, id))
+        .collect();
+    resolved_target_ids.sort();
+    resolved_target_ids.dedup();
+
+    let (old_targets, new_targets) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         if !s.topology.has_public_node(&resolved_source_id) {
             return Err(anyhow::anyhow!(
@@ -11994,33 +12022,33 @@ pub fn do_topology_set_control_target(
                 resolved_source_id
             ));
         }
-        if let Some(ref target_id) = resolved_target_id {
+        for target_id in &resolved_target_ids {
             if !s.topology.has_public_node(target_id) {
                 return Err(anyhow::anyhow!("Target node '{}' not found", target_id));
             }
         }
 
-        let old_target = s
+        let old_targets: HashSet<String> = s
             .topology
-            .effective_control_target(&resolved_source_id, &kind);
-        s.topology.set_control_target(
-            &resolved_source_id,
-            kind.clone(),
-            resolved_target_id.as_deref(),
-        );
-        let new_target = s
+            .effective_control_targets(&resolved_source_id, &kind)
+            .into_iter()
+            .collect();
+        let resolved_target_refs: Vec<&str> =
+            resolved_target_ids.iter().map(String::as_str).collect();
+        s.topology
+            .set_control_targets(&resolved_source_id, kind.clone(), &resolved_target_refs);
+        let new_targets: HashSet<String> = s
             .topology
-            .effective_control_target(&resolved_source_id, &kind);
+            .effective_control_targets(&resolved_source_id, &kind)
+            .into_iter()
+            .collect();
         persist_topology(&s);
-        (old_target, new_target)
+        (old_targets, new_targets)
     };
 
     if kind == NodeControlKind::Motion {
-        if let Some(old_target) = old_target.as_deref() {
-            queue_motion_timer_clear(state, old_target);
-        }
-        if let Some(new_target) = new_target.as_deref() {
-            queue_motion_timer_clear(state, new_target);
+        for target in old_targets.union(&new_targets) {
+            queue_motion_timer_clear(state, target);
         }
     }
 

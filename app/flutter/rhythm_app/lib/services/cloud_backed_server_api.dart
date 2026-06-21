@@ -531,6 +531,18 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<bool> setTopologyNodeControlTargets({
+    required String nodeId,
+    required String controlKind,
+    required List<String> targetIds,
+  }) {
+    return _delegate.setTopologyNodeControlTargets(
+      nodeId: nodeId,
+      controlKind: controlKind,
+      targetIds: targetIds,
+    );
+  }
+
   Future<bool> resolveTriageMerge(String entryId, String canonicalId) {
     return _delegate.resolveTriageMerge(entryId, canonicalId);
   }

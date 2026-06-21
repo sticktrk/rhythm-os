@@ -1079,6 +1079,21 @@ class ServerSyncProvider extends ChangeNotifier {
     return controlForSourceNode(sourceNodeId, controlKind)?.targetId;
   }
 
+  List<String> controlTargetNodeIds({
+    required String sourceNodeId,
+    required String controlKind,
+  }) {
+    final targetIds = controlsForSourceNode(sourceNodeId)
+        .where((control) => control.kind == controlKind)
+        .map((control) => control.targetId)
+        .whereType<String>()
+        .where((targetId) => targetId.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+    return targetIds;
+  }
+
   List<RhythmTopologyNode> controlSourceNodesForTarget({
     required String targetNodeId,
     String? controlKind,
@@ -2044,7 +2059,7 @@ class ServerSyncProvider extends ChangeNotifier {
         if (data != null) _onTriageChanged(data);
       });
     }
-    _refreshTopologyNodes();
+    unawaited(_refreshTopologyNodes());
 
     final homeEntryCompleter = _homeEntryRefreshHelloCompleter;
     if (_homeEntryRefreshAwaitingHello &&
@@ -3631,20 +3646,18 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  void _refreshTopologyNodes() {
+  Future<void> _refreshTopologyNodes() async {
     if (HueServiceLocator.isDemoMode) {
-      unawaited(_refreshDemoState());
+      await _refreshDemoState();
       return;
     }
     if (!_connection.connected) return;
-    unawaited(() async {
-      final topologyNodes = await api.getTopologyNodes();
-      if (topologyNodes.isEmpty && _topologyNodes.isNotEmpty) return;
-      _topologyNodes = topologyNodes;
-      _helloRooms = _buildRoomSummaries();
-      _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
-      if (hasListeners) notifyListeners();
-    }());
+    final topologyNodes = await api.getTopologyNodes();
+    if (topologyNodes.isEmpty && _topologyNodes.isNotEmpty) return;
+    _topologyNodes = topologyNodes;
+    _helloRooms = _buildRoomSummaries();
+    _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+    if (hasListeners) notifyListeners();
   }
 
   Future<bool> setNodeControlTarget({
@@ -3659,7 +3672,30 @@ class ServerSyncProvider extends ChangeNotifier {
       targetId: targetNodeId,
     );
     if (success) {
-      _refreshTopologyNodes();
+      await _refreshTopologyNodes();
+    }
+    return success;
+  }
+
+  Future<bool> setNodeControlTargets({
+    required String sourceNodeId,
+    required String controlKind,
+    required Iterable<String> targetNodeIds,
+  }) async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final normalizedTargetNodeIds = targetNodeIds
+        .map((targetId) => targetId.trim())
+        .where((targetId) => targetId.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+    final success = await api.setTopologyNodeControlTargets(
+      nodeId: sourceNodeId,
+      controlKind: controlKind,
+      targetIds: normalizedTargetNodeIds,
+    );
+    if (success) {
+      await _refreshTopologyNodes();
     }
     return success;
   }
