@@ -244,6 +244,43 @@ void main() {
       expect(find.text('All clear'), findsOneWidget);
     });
 
+    testWidgets('assign room picker only lists room nodes', (tester) async {
+      api.triageEntries = [_unassignedDeviceEntry()];
+      await roomProvider.addRoom(const RoomDto(
+        id: 'node-desk-bulb',
+        name: 'Desk Bulb Node',
+        source: RoomSourceDto.matter,
+        deviceIds: ['node-desk-bulb'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+        kind: RoomNodeKind.lightDevice,
+        parentId: 'room-kitchen',
+      ));
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Assign Room'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Kitchen'), findsOneWidget);
+      expect(find.text('Desk Bulb Node'), findsNothing);
+
+      await tester.tap(find.text('Kitchen'));
+      await tester.pumpAndSettle();
+
+      expect(api.resolveTriageRoomCalls, 1);
+      expect(connection.reconnectCalls, 1);
+    });
+
     testWidgets(
         'can create a room inline before assigning an unassigned device',
         (tester) async {

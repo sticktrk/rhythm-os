@@ -742,7 +742,8 @@ class _TriageScreenState extends State<TriageScreen> {
   }
 
   Future<String?> _selectRoomId() async {
-    final rooms = context.read<RoomProvider>().rooms;
+    final rooms =
+        context.read<RoomProvider>().rooms.where((room) => room.kind.isRoom);
     return showRoomPickerSheet(
       context,
       title: 'Assign to Room',
