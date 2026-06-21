@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "removed-circadian"
-version = "0.6.101"
+version = "0.6.109-beta"
 dependencies = [
  "rhythm-runtime-api",
  "serde",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-adaptive"
-version = "0.6.101"
+version = "0.6.109-beta"
 dependencies = [
  "anyhow",
  "rhythm-core",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-core"
-version = "0.6.104-beta"
+version = "0.6.109-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-profile"
-version = "0.6.104-beta"
+version = "0.6.109-beta"
 dependencies = [
  "libm",
  "serde",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-runtime-api"
-version = "0.6.101"
+version = "0.6.109-beta"
 dependencies = [
  "async-trait",
  "serde",
