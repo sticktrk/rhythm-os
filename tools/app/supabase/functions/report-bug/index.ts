@@ -8,11 +8,11 @@ import {
 } from '../_shared/auth.ts'
 
 // Required secrets:
-// - GITHUB_ISSUES_REPO: owner/repo
 // - GITHUB_ISSUES_TOKEN: fine-grained token with issue write access
 // Optional secrets:
 // - SB_PUBLISHABLE_KEY: preferred Supabase public key for Auth claims
 // - SB_SECRET_KEY: preferred Supabase elevated key for admin operations
+// - GITHUB_ISSUES_REPO: owner/repo, defaults to sticktrk/cross
 // - GITHUB_ISSUES_LABELS: comma-separated labels
 // - GITHUB_ISSUES_ASSIGNEES: comma-separated GitHub usernames
 // - DEBUG_BUNDLE_SIGNED_URL_EXPIRES_SECONDS: default 604800, max 2592000
@@ -50,6 +50,12 @@ type SignedBundleLink = {
 }
 
 const bucketName = 'support-debug-bundles'
+const defaultGitHubIssuesRepo = 'sticktrk/cross'
+const legacyGitHubIssuesRepos = new Set([
+  'sticktrk/rhythm-app',
+  'sticktrk/rhythm-app-flutter',
+  'sticktrk/rhythm-os',
+])
 const defaultSignedUrlExpiresIn = 60 * 60 * 24 * 7
 
 Deno.serve(async (req) => {
@@ -111,11 +117,11 @@ async function handleRequest(
     })
   }
 
-  const githubRepo = Deno.env.get('GITHUB_ISSUES_REPO')?.trim()
+  const githubRepo = readGitHubIssuesRepo()
   const githubToken = Deno.env.get('GITHUB_ISSUES_TOKEN')?.trim()
-  if (!githubRepo || !githubToken) {
+  if (!githubToken) {
     const message =
-      'GitHub issue creation is not configured. Set GITHUB_ISSUES_REPO and GITHUB_ISSUES_TOKEN.'
+      'GitHub issue creation is not configured. Set GITHUB_ISSUES_TOKEN.'
     await markGitHubIssueError(adminClient, submission.id, message, 'received')
     return jsonResponse({
       issue_created: false,
@@ -181,6 +187,17 @@ async function handleRequest(
       500,
     )
   }
+}
+
+function readGitHubIssuesRepo(): string {
+  const configured = Deno.env.get('GITHUB_ISSUES_REPO')?.trim()
+  if (!configured) return defaultGitHubIssuesRepo
+
+  if (legacyGitHubIssuesRepos.has(configured.toLowerCase())) {
+    return defaultGitHubIssuesRepo
+  }
+
+  return configured
 }
 
 async function createSignedBundleLink(
