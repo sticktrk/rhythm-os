@@ -1048,7 +1048,7 @@ pub struct Room {
     /// Direct brightness offset (for dim_up/dim_down)
     pub brightness_offset: f32,
 
-    /// Whether this room is in Standby, the opt-in 1% inherited-color soft-off state.
+    /// Whether this room is in Standby, using the mode's idle profile.
     #[cfg_attr(feature = "serde", serde(default))]
     pub soft_off: bool,
 
@@ -1596,7 +1596,6 @@ mod tests {
             LightProfileNodeOverride {
                 fade_ms: Some(TimerSetting::Fixed { value: 500 }),
                 motion_timeout_secs: Some(TimerSetting::Fixed { value: 75 }),
-                ..Default::default()
             },
         );
 

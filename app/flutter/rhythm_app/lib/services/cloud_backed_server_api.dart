@@ -442,6 +442,20 @@ class CloudBackedServerApi {
     return _delegate.getMode();
   }
 
+  Future<RhythmLightRuntimeState?> getLightRuntime() {
+    return _delegate.getLightRuntime();
+  }
+
+  Future<RhythmLightRuntimeState?> setLightRuntime(
+    RhythmLightRuntime runtime, {
+    int? transitionMs,
+  }) {
+    return _delegate.setLightRuntime(
+      runtime,
+      transitionMs: transitionMs,
+    );
+  }
+
   Future<List<RhythmCurveConfig>> getProfiles() {
     return _delegate.getProfiles();
   }

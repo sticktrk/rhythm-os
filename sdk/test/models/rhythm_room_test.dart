@@ -153,6 +153,7 @@ void main() {
         expect(room.name, '');
         expect(room.groupedLightId, '');
         expect(room.rhythmEnabled, false);
+        expect(room.pendingDispatch, false);
         expect(room.disabled, false);
         expect(room.timeOffset, 0.0);
         expect(room.brightnessOffset, 0.0);
@@ -165,6 +166,22 @@ void main() {
         expect(room.kelvin, isNull);
       });
 
+      test('normalizes explicit null pending dispatch constructor value', () {
+        final room = Function.apply(RhythmRoom.new, const [], {
+          #id: 'room-1',
+          #name: 'Kitchen',
+          #groupedLightId: 'group-1',
+          #state: RoomModeState.active,
+          #pendingDispatch: null,
+          #rhythmEnabled: true,
+          #disabled: false,
+          #timeOffset: 0.0,
+          #brightnessOffset: 0.0,
+        }) as RhythmRoom;
+
+        expect(room.pendingDispatch, isFalse);
+      });
+
       test('parses all fields from populated JSON', () {
         final room = RhythmRoom.fromJson({
           'id': 'room-1',
@@ -174,6 +191,7 @@ void main() {
           'disabled': false,
           'time_offset': 1.5,
           'brightness_offset': -10.0,
+          'pending_dispatch': true,
           'soft_off': false,
           'standby_enabled': true,
           'standby_active': false,
@@ -196,6 +214,7 @@ void main() {
             'motion_timeout_secs': 123,
           },
         });
+        expect(room.pendingDispatch, isTrue);
         expect(room.id, 'room-1');
         expect(room.name, 'Living Room');
         expect(room.groupedLightId, 'gl-1');
@@ -533,12 +552,26 @@ void main() {
 
   group('RhythmRoomState', () {
     group('fromJson', () {
+      test('normalizes explicit null pending dispatch constructor value', () {
+        final state = Function.apply(RhythmRoomState.new, const [], {
+          #nodeId: 'node-42',
+          #state: RoomModeState.active,
+          #pendingDispatch: null,
+          #rhythmEnabled: true,
+          #timeOffset: 0.0,
+          #brightnessOffset: 0.0,
+        }) as RhythmRoomState;
+
+        expect(state.pendingDispatch, isFalse);
+      });
+
       test('parses node_id field', () {
         final state = RhythmRoomState.fromJson({
           'node_id': 'node-42',
           'rhythm_enabled': true,
           'time_offset': 1.0,
           'brightness_offset': -5.0,
+          'pending_dispatch': true,
           'soft_off': false,
           'standby_enabled': true,
           'standby_active': false,
@@ -557,6 +590,7 @@ void main() {
         expect(state.nodeId, 'node-42');
         expect(state.roomId, 'node-42');
         expect(state.rhythmEnabled, true);
+        expect(state.pendingDispatch, true);
         expect(state.timeOffset, 1.0);
         expect(state.brightnessOffset, -5.0);
         expect(state.softOff, false);

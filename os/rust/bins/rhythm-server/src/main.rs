@@ -87,6 +87,7 @@ fn main() -> Result<()> {
         s.listen_port = Some(args.port);
         s.data_dir = data_dir.clone();
         s.storage = Some(Box::new(file_storage));
+        rhythm_os_runtime_modules::install_default_light_runtime_modules(&mut s)?;
 
         // Load persisted state
         rhythm_os::storage::load_persisted_state(&mut s);

@@ -1051,6 +1051,11 @@ class HomeProvider extends ChangeNotifier {
 
     // Load homes from local storage
     _loadHomes();
+    final userId = currentUserId;
+    if (userId != null) {
+      await _removeHomesNotAccessibleToSignedInUser(userId);
+      _loadHomes();
+    }
     debugPrint('HomeProvider.onUserSignIn: Loaded ${_homes.length} homes');
 
     // Restore any cloud home that already has a paired server hub. A fresh
@@ -1058,7 +1063,7 @@ class HomeProvider extends ChangeNotifier {
     // a Home is now created when they pair a device (see `addServerHubInNewHome`
     // / AddHomeFlow, which also captures the location), so we no longer
     // fabricate an empty "My Home" placeholder here.
-    if (_homes.isEmpty && currentUserId != null) {
+    if (_homes.isEmpty && userId != null) {
       await _restoreAccountHomeIfAvailable();
     }
 
@@ -1066,6 +1071,31 @@ class HomeProvider extends ChangeNotifier {
         'HomeProvider.onUserSignIn: Complete. currentHome=${_currentHome?.id}');
     _scheduleAccountCloudSync('user_sign_in');
     notifyListeners();
+  }
+
+  Future<void> _removeHomesNotAccessibleToSignedInUser(String userId) async {
+    final staleHomes = _repository
+        .getAllHomes()
+        .where(
+          (home) => !accountHomeCanSyncForUserForTesting(
+            home: home,
+            userId: userId,
+          ),
+        )
+        .toList(growable: false);
+    if (staleHomes.isEmpty) return;
+
+    for (final home in staleHomes) {
+      await _repository.deleteHome(home.id);
+    }
+    if (staleHomes.any((home) => home.id == _currentHome?.id)) {
+      _currentHome = null;
+      _currentHomeHubs = [];
+    }
+    debugPrint(
+      'HomeProvider.onUserSignIn: removed ${staleHomes.length} '
+      'local Home(s) outside the signed-in account',
+    );
   }
 
   Future<bool> _restoreAccountHomeIfAvailable() async {

@@ -165,8 +165,7 @@ fn provision_loop<S, C, P>(
     P: FnMut(&WifiCredentials),
 {
     loop {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut run_service_once));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut run_service_once));
         match outcome {
             Ok(Ok(creds)) => {
                 on_credentials(&creds);
@@ -979,18 +978,15 @@ mod tests {
 
     #[test]
     fn panic_message_extracts_str_and_string_payloads() {
-        let static_payload =
-            std::panic::catch_unwind(|| panic!("static payload")).unwrap_err();
+        let static_payload = std::panic::catch_unwind(|| panic!("static payload")).unwrap_err();
         assert_eq!(panic_message(static_payload.as_ref()), "static payload");
 
-        let string_payload = std::panic::catch_unwind(|| {
-            std::panic::panic_any(format!("formatted {}", 42))
-        })
-        .unwrap_err();
+        let string_payload =
+            std::panic::catch_unwind(|| std::panic::panic_any(format!("formatted {}", 42)))
+                .unwrap_err();
         assert_eq!(panic_message(string_payload.as_ref()), "formatted 42");
 
-        let opaque_payload =
-            std::panic::catch_unwind(|| std::panic::panic_any(7_u64)).unwrap_err();
+        let opaque_payload = std::panic::catch_unwind(|| std::panic::panic_any(7_u64)).unwrap_err();
         assert_eq!(
             panic_message(opaque_payload.as_ref()),
             "non-string panic payload"

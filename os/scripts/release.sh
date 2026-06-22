@@ -25,7 +25,14 @@ PROMOTE_STABLE=false
 PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
-WORKSPACE_VERSION_FILES=("Cargo.toml" "Cargo.lock" "install/rpiz/builder-image.lock")
+WORKSPACE_VERSION_FILES=(
+    "Cargo.toml"
+    "Cargo.lock"
+    "../runtime/rust/Cargo.toml"
+    "../runtime/rust/Cargo.lock"
+    "../runtime/rust/rhythm-os-runtime-modules/Cargo.toml"
+    "install/rpiz/builder-image.lock"
+)
 BUILDER_LOCK_FILE="install/rpiz/builder-image.lock"
 SERVER_RELEASES_TO_KEEP=5
 
@@ -417,6 +424,7 @@ upload_rpiz_feed() {
 update_workspace_version_files() {
     local new_version="$1"
     local current_version="$2"
+    local runtime_root="$PROJECT_ROOT/../runtime/rust"
 
     if [ "$current_version" != "$new_version" ]; then
         NEW_VERSION="$new_version" perl -0pi -e '
@@ -424,15 +432,39 @@ update_workspace_version_files() {
         ' "$PROJECT_ROOT/Cargo.toml"
     fi
 
+    if [ -f "$runtime_root/Cargo.toml" ]; then
+        NEW_VERSION="$new_version" perl -0pi -e '
+            s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
+        ' "$runtime_root/Cargo.toml"
+    fi
+
+    if [ -f "$runtime_root/rhythm-os-runtime-modules/Cargo.toml" ]; then
+        NEW_VERSION="$new_version" perl -0pi -e '
+            s/(\[package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
+        ' "$runtime_root/rhythm-os-runtime-modules/Cargo.toml"
+    fi
+
     NEW_VERSION="$new_version" perl -0pi -e '
         s{(\[\[package\]\]\n.*?)(?=\n\[\[package\]\]\n|\z)}{
             my $block = $1;
-            if ($block =~ /^name = "rhythm-[^"]+"$/m && $block !~ /^source = /m) {
+            if ($block !~ /^source = /m) {
                 $block =~ s/^version = "[^"]+"/version = "$ENV{NEW_VERSION}"/m;
             }
             $block;
         }gse;
     ' "$PROJECT_ROOT/Cargo.lock"
+
+    if [ -f "$runtime_root/Cargo.lock" ]; then
+        NEW_VERSION="$new_version" perl -0pi -e '
+            s{(\[\[package\]\]\n.*?)(?=\n\[\[package\]\]\n|\z)}{
+                my $block = $1;
+                if ($block !~ /^source = /m) {
+                    $block =~ s/^version = "[^"]+"/version = "$ENV{NEW_VERSION}"/m;
+                }
+                $block;
+            }gse;
+        ' "$runtime_root/Cargo.lock"
+    fi
 }
 
 commit_release_version_update() {

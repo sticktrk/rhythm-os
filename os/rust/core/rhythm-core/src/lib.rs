@@ -96,10 +96,14 @@ pub use timezone::{default_timezone, lookup_timezone, Timezone, DEFAULT_TIMEZONE
 
 // Runtime re-exports
 pub use runtime::{
-    ButtonAction, DeviceRegistry, InputEvent, MockTimeProvider, NoOpRoomStateStore, NoOpScheduler,
-    NodeSnapshot, RestoredNodeState, RestoredRoomState, RhythmRuntime, RoomConfig, RoomSnapshot,
-    RoomStateStore, RuntimeConfig, RuntimeError, RuntimeHandle, RuntimeResult, ScheduleHandle,
-    Scheduler, SimpleDeviceRegistry, StorageError, StorageResult, TimeProvider, ZhaEventArgs,
+    button_action_from_runtime_input, core_lighting_command_from_runtime,
+    runtime_input_from_button_action, runtime_lighting_command_from_core,
+    runtime_node_kind_from_light_node_kind, ButtonAction, DeviceRegistry, InputEvent,
+    MockTimeProvider, NoOpRoomStateStore, NoOpScheduler, NodeSnapshot, RestoredNodeState,
+    RestoredRoomState, RhythmDispatchRecord, RhythmInputPlanOutcome, RhythmPeriodicPlanOutcome,
+    RhythmRuntime, RoomConfig, RoomSnapshot, RoomStateStore, RuntimeConfig, RuntimeError,
+    RuntimeHandle, RuntimeResult, ScheduleHandle, Scheduler, SimpleDeviceRegistry, StorageError,
+    StorageResult, TimeProvider, ZhaEventArgs,
 };
 
 #[cfg(feature = "serde")]

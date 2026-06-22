@@ -150,13 +150,75 @@ fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCrede
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
     use rhythm_os::state::AppState;
     use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
 
     #[test]
     fn create_router_builds_standard_and_wifi_routes() {
         let state = Arc::new(Mutex::new(AppState::default()));
         let provisioning = ProvisioningManager::new("test-version", state.clone());
         let _router = create_router(state, provisioning);
+    }
+
+    #[tokio::test]
+    async fn debug_bundle_route_returns_download_attachment() {
+        let data_dir = unique_test_dir("debug-bundle-rpiz");
+        std::fs::create_dir_all(data_dir.join("log")).unwrap();
+        std::fs::write(data_dir.join("log").join("rhythm-server.log"), b"rpiz-log").unwrap();
+
+        let state = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut state = state.lock().unwrap();
+            state.firmware_version = "1.2.3";
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+            state.data_dir = data_dir.display().to_string();
+        }
+        let provisioning = ProvisioningManager::new("test-version", state.clone());
+
+        let response = create_router(state, provisioning)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/diag/debug-bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/gzip")
+        );
+        assert!(response
+            .headers()
+            .get("content-disposition")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value.starts_with("attachment; filename=\"rhythm-debug-bundle-rpiz-")
+                    && value.ends_with(".tar.gz\"")
+            }));
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(!body.is_empty());
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rhythm-rpiz-{}-{}", name, nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

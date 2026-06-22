@@ -20,9 +20,11 @@ export 'src/models/rhythm_hello.dart';
 export 'src/models/rhythm_hub_info.dart';
 export 'src/models/rhythm_input_binding.dart';
 export 'src/models/rhythm_input_event.dart';
+export 'src/models/rhythm_environment.dart';
 export 'src/models/rhythm_pairing.dart';
 export 'src/models/rhythm_review.dart';
 export 'src/models/rhythm_room.dart';
+export 'src/models/rhythm_runtime.dart';
 export 'src/models/rhythm_scene.dart';
 export 'src/models/rhythm_settings.dart';
 export 'src/models/rhythm_step_sequences.dart';
@@ -39,6 +41,7 @@ export 'src/api/rhythm_diagnostics_api.dart';
 export 'src/api/rhythm_matter_api.dart';
 export 'src/api/rhythm_ota_api.dart';
 export 'src/api/rhythm_remote_access_api.dart';
+export 'src/api/rhythm_runtime_api.dart';
 export 'src/api/rhythm_server_api.dart';
 
 // Logging

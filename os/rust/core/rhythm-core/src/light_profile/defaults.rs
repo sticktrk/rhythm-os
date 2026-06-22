@@ -78,8 +78,8 @@ pub fn default_sleep_profile() -> LightProfileConfig {
 
 /// Create the default day idle (soft-off) profile config.
 ///
-/// Day idle inherits the active profile's current color while
-/// forcing output to 1% brightness. Saving an explicit idle palette replaces
+/// Day idle defaults to inheriting the active profile's current color at 1%
+/// brightness. Saving an explicit idle palette, including direct color, replaces
 /// this fallback behavior.
 pub fn default_day_idle_profile() -> LightProfileConfig {
     inherit_active_idle_profile(DAY_IDLE_PROFILE_ID, DAY_IDLE_PROFILE_NAME)
@@ -110,7 +110,7 @@ pub fn is_builtin_state_profile_id(id: &str) -> bool {
 ///
 /// Idle-state profiles always use a single absolute brightness value via
 /// `min_brightness == max_brightness`. When generic profile defaults leak into
-/// these configs during editing, coerce them back to the idle default of 1%.
+/// these configs during editing, coerce them back to the built-in idle default.
 pub fn normalize_builtin_state_profile_config(config: &mut LightProfileConfig) {
     if !is_builtin_state_profile_id(&config.id) {
         return;

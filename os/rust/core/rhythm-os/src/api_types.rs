@@ -13,6 +13,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use crate::canonical::triage::{TriageKind, TriageStatus};
+use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::SceneDefinition;
 use crate::topology::{DevicePlacement, HubRoomBinding, InputBinding, NodeControlKind};
 
@@ -78,6 +79,7 @@ pub struct RoomRhythmState {
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
+    pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
     pub mood_enabled: bool,
@@ -310,6 +312,28 @@ pub struct LocationDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
     pub auto_update: bool,
+    #[serde(rename = "light_runtime")]
+    pub light_runtime: LightRuntimeKind,
+}
+
+/// Selected light runtime state in `GET/PUT /api/light-runtime`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LightRuntimeDto {
+    pub runtime_id: LightRuntimeKind,
+    pub available_runtime_ids: Vec<LightRuntimeKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_apply: Option<LightRuntimeInitialApplyDto>,
+}
+
+/// Host-side first apply after switching light runtimes.
+#[derive(Debug, Clone, Serialize)]
+pub struct LightRuntimeInitialApplyDto {
+    pub queued: bool,
+    pub dispatch_count: usize,
+    pub dispatch_spacing_ms: u64,
+    pub estimated_dispatch_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Global Rhythm light-breaker switch in `GET/PUT /api/light-breaker`.
@@ -449,6 +473,7 @@ pub struct NodeStateDto {
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
+    pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
     pub mood_enabled: bool,
@@ -658,6 +683,7 @@ mod tests {
                 source: Some("periodic".into()),
             },
             transitioning: true,
+            pending_dispatch: false,
             brightness: 80,
             kelvin: 4000,
             mood_enabled: false,
@@ -701,6 +727,7 @@ mod tests {
                 source: Some("periodic".into()),
             },
             transitioning: true,
+            pending_dispatch: true,
             brightness: 80,
             kelvin: 4000,
             mood_enabled: false,
@@ -729,6 +756,7 @@ mod tests {
         assert_eq!(json["mood_active"], false);
         assert_eq!(json["standby_enabled"], false);
         assert_eq!(json["standby_active"], false);
+        assert_eq!(json["pending_dispatch"], true);
         assert_eq!(json["curve_modifier"]["time_offset_minutes"], 5.0);
         assert_eq!(json["curve_modifier"]["brightness_offset"], -10.0);
         assert_eq!(json["curve_modifier"]["brightness"], 80);
@@ -756,6 +784,7 @@ mod tests {
         );
         assert_eq!(json["observed_power"]["source"], "periodic");
         assert_eq!(json["transitioning"], true);
+        assert_eq!(json["pending_dispatch"], false);
         assert_eq!(json["brightness"], 80);
         assert_eq!(json["kelvin"], 4000);
         assert_eq!(json["profile_settings"]["mood_enabled"], false);
@@ -891,10 +920,14 @@ mod tests {
 
     #[test]
     fn settings_dto_serializes() {
-        let dto = SettingsDto { auto_update: true };
+        let dto = SettingsDto {
+            auto_update: true,
+            light_runtime: LightRuntimeKind::default(),
+        };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert!(json.get("power_save").is_none());
         assert_eq!(json["auto_update"], true);
+        assert_eq!(json["light_runtime"], "rhythm-adaptive");
         assert!(json.get("light_breaker_enabled").is_none());
         assert!(json.get("mode").is_none());
         assert!(json.get("profiles").is_none());
@@ -1172,7 +1205,10 @@ mod tests {
                 timezone_name: None,
                 twilight: None,
             },
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                light_runtime: LightRuntimeKind::default(),
+            },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,
@@ -1281,7 +1317,10 @@ mod tests {
                     },
                 }),
             },
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                light_runtime: LightRuntimeKind::default(),
+            },
             light_breaker: LightBreakerDto { enabled: true },
             mode: ModeSettingsDto {
                 active: rhythm_core::RhythmMode::Day,

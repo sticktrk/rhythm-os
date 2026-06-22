@@ -96,6 +96,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   int getCurveDataCallCount = 0;
   int triggerTransitionCallCount = 0;
   String? lastTriggeredTransitionId;
+  RhythmLightRuntime selectedLightRuntime = RhythmLightRuntime.rhythmAdaptive;
   List<RhythmModeTransitionConfig> transitions = const [];
   Completer<bool>? triggerTransitionCompleter;
 
@@ -105,18 +106,34 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   @override
   Future<RhythmModeResource?> getMode() async {
     getModeCallCount++;
-    return const RhythmModeResource(
+    final lightRuntime = selectedLightRuntime;
+    final dayProfileId = lightRuntime.defaultDayProfileId;
+    return RhythmModeResource(
       active: RhythmMode.day,
+      lightRuntime: lightRuntime,
+      hasLightRuntime: true,
       configs: [
         RhythmModeConfig(
           mode: RhythmMode.day,
-          activeProfileId: 'rhythm',
+          activeProfileId: dayProfileId,
         ),
-        RhythmModeConfig(
+        const RhythmModeConfig(
           mode: RhythmMode.sleep,
           activeProfileId: 'sleep',
         ),
       ],
+    );
+  }
+
+  @override
+  Future<RhythmLightRuntimeState?> setLightRuntime(
+    RhythmLightRuntime runtime, {
+    int? transitionMs,
+  }) async {
+    selectedLightRuntime = runtime;
+    return RhythmLightRuntimeState(
+      runtime: runtime,
+      availableRuntimes: RhythmLightRuntime.values,
     );
   }
 
@@ -200,6 +217,8 @@ class _TestRhythmConnection extends RhythmConnection {
   final RhythmServerApi _api;
   RhythmConnectionState _connectionState;
   bool _disposed = false;
+  int reconnectCallCount = 0;
+  bool? lastReconnectAuthoritative;
 
   final _helloController = StreamController<RhythmHello>.broadcast();
   final _connectionStateController =
@@ -264,7 +283,10 @@ class _TestRhythmConnection extends RhythmConnection {
   }) async {}
 
   @override
-  Future<void> reconnect({bool authoritative = false}) async {}
+  Future<void> reconnect({bool authoritative = false}) async {
+    reconnectCallCount++;
+    lastReconnectAuthoritative = authoritative;
+  }
 
   @override
   void disconnect() {
@@ -376,6 +398,7 @@ Future<void> _pumpAppShell(
   RoomPageProvider? roomPageProvider,
   MockRhythmApi? api,
   Size surfaceSize = const Size(390, 844),
+  bool tickerModeEnabled = false,
 }) async {
   await tester.binding.setSurfaceSize(surfaceSize);
 
@@ -412,10 +435,10 @@ Future<void> _pumpAppShell(
         Provider<RhythmApi>.value(value: api ?? MockRhythmApi()),
         Provider<RhythmConnection>.value(value: serverSync.connection),
       ],
-      child: const MaterialApp(
+      child: MaterialApp(
         home: TickerMode(
-          enabled: false,
-          child: AppShell(),
+          enabled: tickerModeEnabled,
+          child: const AppShell(),
         ),
       ),
     ),
@@ -791,6 +814,62 @@ void main() {
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
+  testWidgets('app resume refresh keeps synced Home on the room grid',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final home = Home.create(
+      id: 'home-1',
+      name: 'Kitchen',
+      ownerId: 'user-1',
+    );
+    final hub = _serverHub(remote: true).copyWith(
+      token: 'owner-token',
+      homeId: home.id,
+    );
+    final homeProvider = _FakeHomeProvider([hub], currentHome: home);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      endpointReachability: (_, __) async => false,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await serverSync.retryActiveServerConnection(
+      assumeLanReachable: true,
+      assumeSavedAuth: true,
+    );
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Kitchen'), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(serverSync.hasHomeEntryRefreshGate, isFalse);
+    expect(connection.reconnectCallCount, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
+    expect(find.text('Waiting to Retry...'), findsNothing);
+    expect(find.byType(ServerDisconnectedScreen), findsNothing);
+    expect(find.text('Kitchen'), findsOneWidget);
+  });
+
   testWidgets(
       'shows setup loading while a server with cached rooms is still connecting',
       (tester) async {
@@ -898,6 +977,132 @@ void main() {
     expect(find.text('Sleep'), findsOneWidget);
     expect(api.getModeCallCount, 2);
     expect(api.getProfilesCallCount, 2);
+  });
+
+  testWidgets('refreshes default state when leaving expert mode',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+      tickerModeEnabled: true,
+    );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.tap(find.text('Settings').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.tap(find.text('Circadian Expert Mode'));
+    await tester.pump();
+    await tester.tap(find.text('Switch to Expert'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 700));
+    await tester.pump(const Duration(milliseconds: 700));
+
+    final reconnectsBeforeExit = connection.reconnectCallCount;
+    await tester.tap(find.text('Settings').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.tap(find.text('Basic Mode'));
+    await tester.pump();
+    await tester.tap(find.text('Switch to Basic'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 700));
+    await tester.pump(const Duration(milliseconds: 700));
+
+    expect(connection.reconnectCallCount, reconnectsBeforeExit + 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
+    expect(find.text('Kitchen'), findsOneWidget);
+  });
+
+  testWidgets('keeps expert shell after reconnect hello omits runtime',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+      tickerModeEnabled: true,
+    );
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['matter'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'light_runtime': 'removed-circadian',
+        'mode': {
+          'active': 'day',
+          'light_runtime': 'removed-circadian',
+        },
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump(const Duration(milliseconds: 700));
+    await tester.pump(const Duration(milliseconds: 700));
+
+    expect(find.text('Rhythm'), findsOneWidget);
+    expect(find.text('Light'), findsNothing);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'mode': {'active': 'day'},
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump(const Duration(milliseconds: 700));
+    await tester.pump(const Duration(milliseconds: 700));
+
+    expect(find.text('Rhythm'), findsOneWidget);
+    expect(find.text('Light'), findsNothing);
   });
 
   testWidgets('mode toggle disables immediately while transition is pending',

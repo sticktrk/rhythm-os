@@ -241,6 +241,7 @@ pub fn generate_curve_data_with_sun_times(
 ///
 /// This matches the server preview semantics while allowing the caller to
 /// choose the sampling density for live graph updates.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_curve_data_high_res_with_sun_times(
     config: CurveConfigDto,
     latitude: f64,
@@ -264,6 +265,7 @@ pub fn generate_curve_data_high_res_with_sun_times(
 }
 
 /// Calculate lighting values for a specific hour using full solar context.
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_lighting_with_sun_times(
     config: CurveConfigDto,
     latitude: f64,
@@ -287,6 +289,7 @@ pub fn calculate_lighting_with_sun_times(
 }
 
 /// Calculate step sequences using full solar context.
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_step_sequences_with_sun_times(
     config: CurveConfigDto,
     latitude: f64,

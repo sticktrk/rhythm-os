@@ -16,3 +16,9 @@ app/.dartServer/
 # Local legacy/reference checkout. This repo is still maintained upstream and
 # should not be absorbed into the CROSS monorepo until legacy support settles.
 legacy/removed-project/
+
+# Runtime crate build output.
+runtime/rust/target/
+
+# Downloaded/extracted app bug-report debug bundles (see /triage).
+.triage/

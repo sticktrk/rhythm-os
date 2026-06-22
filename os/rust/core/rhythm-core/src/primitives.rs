@@ -1709,7 +1709,7 @@ impl<C: LightController> RhythmEngine<C> {
         }
     }
 
-    /// Render and enter Standby, the opt-in 1% inherited-color soft-off state.
+    /// Render and enter Standby using the active mode's idle profile.
     pub async fn soft_off_tick(
         &mut self,
         room_id: &str,

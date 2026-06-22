@@ -788,6 +788,53 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // light runtime
+  // ---------------------------------------------------------------------------
+  group('light runtime', () {
+    test('getLightRuntime parses selected runtime', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/light-runtime'),
+            statusCode: 200,
+            data: {
+              'runtime_id': 'removed-circadian',
+              'available_runtime_ids': ['rhythm-adaptive', 'removed-circadian'],
+            },
+          ));
+
+      final state = await api.getLightRuntime();
+
+      expect(state, isNotNull);
+      expect(state!.runtime, RhythmLightRuntime.removed-projectCircadian);
+      expect(state.usesRuntimeShell, isTrue);
+      verify(() => dio.get('api/light-runtime')).called(1);
+    });
+
+    test('setLightRuntime sends runtime_id to /api/light-runtime', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/light-runtime'),
+                statusCode: 200,
+                data: {'runtime_id': 'removed-circadian'},
+              ));
+
+      final state = await api.setLightRuntime(
+        RhythmLightRuntime.removed-projectCircadian,
+        transitionMs: 3000,
+      );
+
+      expect(state?.runtime, RhythmLightRuntime.removed-projectCircadian);
+      final captured = verify(() => dio.put(
+            'api/light-runtime',
+            data: captureAny(named: 'data'),
+          )).captured.single;
+      expect(captured, {
+        'runtime_id': 'removed-circadian',
+        'transition_ms': 3000,
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // settingsSet
   // ---------------------------------------------------------------------------
   group('settingsSet', () {

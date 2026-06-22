@@ -56,6 +56,7 @@ class DemoServerApi extends RhythmServerApi {
   bool _autoUpdate = true;
   bool _lightBreakerEnabled = true;
   RhythmMode _activeMode = RhythmMode.day;
+  RhythmLightRuntime _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
 
   Stream<void> get changes => _changes.stream;
 
@@ -93,6 +94,7 @@ class DemoServerApi extends RhythmServerApi {
     _autoUpdate = true;
     _lightBreakerEnabled = true;
     _activeMode = RhythmMode.day;
+    _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
     _nextRoomOrdinal = 5;
     _nodeStates.clear();
     _topologyNodes.clear();
@@ -623,6 +625,7 @@ class DemoServerApi extends RhythmServerApi {
     return RhythmSettings.fromJson({
       'power_save': _powerSave,
       'auto_update': _autoUpdate,
+      'light_runtime': _lightRuntime.id,
     });
   }
 
@@ -663,10 +666,44 @@ class DemoServerApi extends RhythmServerApi {
   @override
   Future<RhythmModeResource?> getMode() async {
     ensureSeeded();
+    final dayProfileId = _lightRuntime == RhythmLightRuntime.removed-projectCircadian
+        ? 'expert'
+        : 'rhythm';
     return RhythmModeResource.fromJson({
       'active': _activeMode.wireValue,
-      'configs': const [],
+      'light_runtime': _lightRuntime.id,
+      'configs': [
+        {
+          'mode': 'day',
+          'active_profile_id': dayProfileId,
+        },
+        {
+          'mode': 'sleep',
+          'active_profile_id': 'sleep',
+        },
+      ],
     });
+  }
+
+  @override
+  Future<RhythmLightRuntimeState?> getLightRuntime() async {
+    ensureSeeded();
+    return RhythmLightRuntimeState(
+      runtime: _lightRuntime,
+      availableRuntimes: RhythmLightRuntime.values,
+    );
+  }
+
+  @override
+  Future<RhythmLightRuntimeState?> setLightRuntime(
+    RhythmLightRuntime runtime, {
+    int? transitionMs,
+  }) async {
+    ensureSeeded();
+    _lightRuntime = runtime;
+    _activeMode = RhythmMode.day;
+    _changes.add(null);
+    return getLightRuntime();
   }
 
   @override

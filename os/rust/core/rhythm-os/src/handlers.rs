@@ -23,12 +23,16 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use rhythm_runtime_api::{RuntimeExtensionRequest, RuntimeExtensionResponse, RuntimeHttpMethod};
+
 use crate::api_types::{HubCredentialsResponse, NodesResponse, SyncResponse};
 use crate::commands::{self};
 use crate::logging;
 use crate::state::SharedState;
 use crate::topology::{InputBinding, InputBindingPreset, NodeControlKind};
 use rhythm_core::{ButtonAction, LightProfileNodeOverride, Rgb, XyColor};
+
+type ProfileOverridesPatch = Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>;
 
 fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
     if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
@@ -215,6 +219,39 @@ fn node_time_offset_error_response(e: anyhow::Error) -> ApiResponse {
         ApiResponse::bad_request(&message)
     } else {
         ApiResponse::server_error(message)
+    }
+}
+
+fn light_runtime_error_response(e: anyhow::Error) -> ApiResponse {
+    let message = e.to_string();
+    if message.contains("unsupported runtime extension endpoint") {
+        ApiResponse::not_found(&message)
+    } else if message.contains("unknown light runtime")
+        || message.contains("invalid runtime extension request")
+    {
+        ApiResponse::bad_request(&message)
+    } else if message.contains("is not active") {
+        ApiResponse {
+            status: 409,
+            body: message,
+            content_type: "text/plain",
+        }
+    } else {
+        ApiResponse::server_error(message)
+    }
+}
+
+fn runtime_extension_api_response(response: RuntimeExtensionResponse) -> ApiResponse {
+    if response.status == 204 {
+        return ApiResponse::no_content();
+    }
+    match serde_json::to_string(&response.body) {
+        Ok(body) => ApiResponse {
+            status: response.status,
+            body,
+            content_type: "application/json",
+        },
+        Err(e) => ApiResponse::server_error(e),
     }
 }
 
@@ -703,7 +740,7 @@ fn parse_timer_patch_value(
 fn parse_profile_overrides_patch_value(
     body: &serde_json::Map<String, Value>,
     field_name: &str,
-) -> Result<Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>, String> {
+) -> Result<ProfileOverridesPatch, String> {
     match body.get("profile_overrides") {
         None => Ok(None),
         Some(v) if v.is_null() => Ok(Some(None)),
@@ -1000,6 +1037,76 @@ pub fn handle_get_light_breaker(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_light_runtime(state: &SharedState) -> ApiResponse {
+    match commands::build_light_runtime(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_put_light_runtime(state: &SharedState, body: &Value) -> ApiResponse {
+    let runtime_id = match body.get("runtime_id") {
+        Some(Value::String(value)) => value,
+        Some(_) => return ApiResponse::bad_request("runtime_id must be a string"),
+        None => return ApiResponse::bad_request("Missing runtime_id"),
+    };
+
+    let runtime_kind = match crate::light_runtime::parse_light_runtime_id(state, runtime_id) {
+        Ok(kind) => kind,
+        Err(e) => return ApiResponse::bad_request(&e.to_string()),
+    };
+
+    match commands::do_light_runtime_set(state, runtime_kind) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_light_runtime_manifests(state: &SharedState) -> ApiResponse {
+    let manifests = match crate::light_runtime::light_runtime_manifests(state) {
+        Ok(manifests) => manifests,
+        Err(e) => return ApiResponse::server_error(e),
+    };
+    match serde_json::to_string(&json!({
+        "runtimes": manifests,
+    })) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_light_runtime_manifest(state: &SharedState, runtime_id: &str) -> ApiResponse {
+    let manifest = match crate::light_runtime::light_runtime_manifest(state, runtime_id) {
+        Ok(manifest) => manifest,
+        Err(e) => return ApiResponse::bad_request(&e.to_string()),
+    };
+    match serde_json::to_string(&manifest) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_light_runtime_extension(
+    state: &SharedState,
+    runtime_id: &str,
+    method: RuntimeHttpMethod,
+    path: &str,
+    query: BTreeMap<String, String>,
+    body: Value,
+) -> ApiResponse {
+    let request = RuntimeExtensionRequest {
+        method,
+        path: format!("/{}", path.trim_start_matches('/')),
+        query,
+        body,
+    };
+
+    match crate::light_runtime::run_light_runtime_extension(state, runtime_id, request) {
+        Ok(response) => runtime_extension_api_response(response),
+        Err(e) => light_runtime_error_response(e),
+    }
+}
+
 pub fn handle_put_light_breaker(state: &SharedState, body: &Value) -> ApiResponse {
     let enabled = if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
         enabled
@@ -1042,10 +1149,32 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
     }
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
+    let light_runtime = match body.get("light_runtime") {
+        Some(Value::String(value)) => {
+            match crate::light_runtime::parse_light_runtime_id(state, value) {
+                Ok(kind) => Some(kind),
+                Err(e) => return ApiResponse::bad_request(&e.to_string()),
+            }
+        }
+        Some(_) => return ApiResponse::bad_request("light_runtime must be a string"),
+        None => None,
+    };
 
-    match commands::do_settings_set(state, None, None, None, None, auto_update) {
-        Ok(json) => ApiResponse::json_ok(json),
-        Err(e) => ApiResponse::server_error(e),
+    if auto_update.is_some() {
+        if let Err(e) = commands::do_settings_set(state, None, None, None, None, auto_update) {
+            return ApiResponse::server_error(e);
+        }
+    }
+
+    match light_runtime {
+        Some(kind) => match commands::do_light_runtime_settings_set(state, kind) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::server_error(e),
+        },
+        None => match commands::build_settings(state) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(e) => ApiResponse::server_error(e),
+        },
     }
 }
 
@@ -1729,7 +1858,6 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
         Err(e) => return ApiResponse::bad_request(&e),
     };
 
-    let batch = items.len() > 1;
     let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
@@ -1745,37 +1873,20 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
         updates.push((node_id, modifier));
     }
 
-    if batch {
-        let mut results = Vec::with_capacity(updates.len());
-        for (node_id, _) in &updates {
-            match commands::build_node_state(state, node_id) {
-                Ok(node) => results.push(node),
-                Err(e) => return ApiResponse::server_error(e),
-            }
-        }
-        if let Err(e) = commands::queue_set_node_curve_modifier_batch(
-            state,
-            updates.clone(),
-            persist,
-            dispatch_spacing,
-        ) {
-            return ApiResponse::server_error(e);
-        }
-        return nodes_response(results, batch, dispatch_spacing);
-    }
-
-    let mut results = Vec::new();
-    for (node_id, modifier) in &updates {
-        if let Err(e) = commands::do_set_node_curve_modifier(state, node_id, *modifier, persist) {
-            return ApiResponse::server_error(e);
-        }
+    let mut results = Vec::with_capacity(updates.len());
+    for (node_id, _) in &updates {
         match commands::build_node_state(state, node_id) {
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
     }
+    if let Err(e) =
+        commands::queue_set_node_curve_modifier_batch(state, updates, persist, dispatch_spacing)
+    {
+        return ApiResponse::server_error(e);
+    }
 
-    nodes_response(results, batch, dispatch_spacing)
+    nodes_response(results, true, dispatch_spacing)
 }
 
 /// Set node color. `scope=mood` updates this node's Mood profile and enters Mood.
@@ -2565,6 +2676,10 @@ mod tests {
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_runtime_api::{
+        LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
+        RuntimeResult, RuntimeSnapshot,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3495,6 +3610,25 @@ mod tests {
     }
 
     #[test]
+    fn node_curve_single_queued() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let r = handle_set_node_curve(
+            &state,
+            &json!({"node_id": "room1", "brightness": 50}),
+            false,
+        );
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_count"], 1);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodeCurveModifier { .. }
+        ));
+    }
+
+    #[test]
     fn node_time_offset_batch_supported() {
         let state = handler_state_with_runtime();
         state.lock().unwrap().room_observed_power.insert(
@@ -3958,6 +4092,7 @@ mod tests {
             ],
         });
         let mut app = AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let hub_type = HubType::parse("mock").unwrap();
         let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
         app.hubs.insert(
@@ -3973,6 +4108,103 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn install_test_light_runtime_modules(app: &mut AppState) {
+        crate::light_runtime::register_light_runtime_modules(
+            app,
+            [
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                    &["rhythm", "rhythm_adaptive"],
+                    test_rhythm_adaptive_manifest,
+                    create_test_rhythm_adaptive_runtime,
+                ),
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::removed_circadian_RUNTIME_ID,
+                    &["removed-project-circadian", "removed-project", "removed_circadian"],
+                    test_removed-project_manifest,
+                    create_test_removed-project_runtime,
+                ),
+            ],
+        )
+        .expect("test light runtime modules should register");
+    }
+
+    fn test_rhythm_adaptive_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+            "Rhythm Adaptive",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn test_removed-project_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+            "removed-project Circadian",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_test_rhythm_adaptive_runtime(
+        _: Arc<dyn rhythm_core::RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+        ))
+    }
+
+    fn create_test_removed-project_runtime(
+        _: Arc<dyn rhythm_core::RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+        ))
+    }
+
+    const HANDLER_EXTERNAL_RUNTIME_ID: &str = "handler-lab";
+    const HANDLER_EXTERNAL_RUNTIME_ALIAS: &str = "handler_lab";
+
+    fn register_external_handler_light_runtime_module(state: &SharedState) {
+        let mut s = state.lock().unwrap();
+        crate::light_runtime::register_light_runtime_module(
+            &mut s,
+            crate::light_runtime::LightRuntimeModule::ephemeral(
+                HANDLER_EXTERNAL_RUNTIME_ID,
+                &[HANDLER_EXTERNAL_RUNTIME_ALIAS],
+                handler_external_runtime_manifest,
+                create_handler_external_runtime,
+            ),
+        )
+        .expect("external handler test runtime should register");
+    }
+
+    fn handler_external_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(HANDLER_EXTERNAL_RUNTIME_ID, "Handler Lab")
+            .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_handler_external_runtime(
+        _: Arc<dyn rhythm_core::RuntimeHandle>,
+    ) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(HANDLER_EXTERNAL_RUNTIME_ID))
+    }
+
+    struct NoopTestLightRuntime(&'static str);
+
+    impl LightRuntime for NoopTestLightRuntime {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn handle_event(
+            &mut self,
+            _snapshot: &RuntimeSnapshot,
+            _event: RuntimeEvent,
+        ) -> RuntimeResult<RuntimePlan> {
+            Ok(RuntimePlan::noop())
+        }
     }
 
     fn handler_state_with_canonical_light_for_hub(
@@ -4821,8 +5053,109 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert_eq!(parsed["auto_update"], false);
+        assert_eq!(parsed["light_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_settings_updates_light_runtime() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"light_runtime": "removed-circadian"}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["light_runtime"], "removed-circadian");
+    }
+
+    #[test]
+    fn light_runtime_resource_selects_runtime() {
+        let state = handler_state_with_runtime();
+
+        let r = handle_get_light_runtime(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["runtime_id"], "rhythm-adaptive");
+        assert_eq!(
+            parsed["available_runtime_ids"],
+            json!(["rhythm-adaptive", "removed-circadian"])
+        );
+
+        let r = handle_put_light_runtime(&state, &json!({"runtime_id": "removed-circadian"}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["runtime_id"], "removed-circadian");
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind,
+            crate::light_runtime::LightRuntimeKind::removed_circadian()
+        );
+    }
+
+    #[test]
+    fn light_runtime_handlers_expose_and_select_external_registered_module_by_alias() {
+        let state = handler_state_with_runtime();
+        register_external_handler_light_runtime_module(&state);
+
+        let r = handle_get_light_runtime_manifests(&state);
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert!(parsed["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|manifest| manifest["id"] == HANDLER_EXTERNAL_RUNTIME_ID));
+
+        let r = handle_get_light_runtime_manifest(&state, HANDLER_EXTERNAL_RUNTIME_ALIAS);
+        assert_eq!(r.status, 200);
+        let manifest: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(manifest["id"], HANDLER_EXTERNAL_RUNTIME_ID);
+        assert_eq!(manifest["name"], "Handler Lab");
+
+        let r = handle_put_light_runtime(
+            &state,
+            &json!({"runtime_id": HANDLER_EXTERNAL_RUNTIME_ALIAS}),
+        );
+        assert_eq!(r.status, 200);
+        let selected: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(selected["runtime_id"], HANDLER_EXTERNAL_RUNTIME_ID);
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind.as_str(),
+            HANDLER_EXTERNAL_RUNTIME_ID
+        );
+
+        let r = handle_put_settings(
+            &state,
+            &json!({"light_runtime": HANDLER_EXTERNAL_RUNTIME_ALIAS}),
+        );
+        assert_eq!(r.status, 200);
+        let settings: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(settings["light_runtime"], HANDLER_EXTERNAL_RUNTIME_ID);
+    }
+
+    #[test]
+    fn light_runtime_manifest_rejects_unknown_runtime() {
+        let state = handler_state_with_runtime();
+
+        let r = handle_get_light_runtime_manifest(&state, "not-registered");
+
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("unknown light runtime"));
+    }
+
+    #[test]
+    fn light_runtime_resource_requires_runtime_id() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_light_runtime(&state, &json!({"mode": "expert"}));
+
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("Missing runtime_id"));
+    }
+
+    #[test]
+    fn put_settings_rejects_unknown_light_runtime() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"light_runtime": "unknown"}));
+        assert_eq!(r.status, 400);
+        assert!(r.body.contains("unknown light runtime"));
     }
 
     #[test]
@@ -4833,6 +5166,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert!(parsed["auto_update"].is_boolean());
+        assert_eq!(parsed["light_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
     }

@@ -580,15 +580,19 @@ pub(crate) fn enqueue_periodic_tick(
         return true;
     }
 
-    match tx.try_send(WorkItem::PeriodicNodeTick {
-        command_id: tick.command_id.to_string(),
-        node_id: tick.node_id.to_string(),
-        settings_node_id: tick.settings_node_id.to_string(),
-        current_hour: tick.current_hour,
-        emit_parent_node_id: tick.emit_parent_node_id.map(str::to_string),
-        dispatch_spacing: tick.dispatch_spacing,
-        dispatch_generation: tick.dispatch_generation,
-    }) {
+    match crate::commands::try_send_work_item_with_pending(
+        state,
+        tx,
+        WorkItem::PeriodicNodeTick {
+            command_id: tick.command_id.to_string(),
+            node_id: tick.node_id.to_string(),
+            settings_node_id: tick.settings_node_id.to_string(),
+            current_hour: tick.current_hour,
+            emit_parent_node_id: tick.emit_parent_node_id.map(str::to_string),
+            dispatch_spacing: tick.dispatch_spacing,
+            dispatch_generation: tick.dispatch_generation,
+        },
+    ) {
         Ok(()) => true,
         Err(_) => {
             if let Ok(mut s) = state.lock() {
@@ -752,7 +756,10 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         let all_rooms: Vec<rhythm_core::NodeSnapshot> = s
             .hub_runtime()
             .map(|rt| rt.engine_all_effective_node_snapshots())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|node| !crate::topology::is_internal_light_node_id(&node.id))
+            .collect();
         let mut warning_skipped = 0usize;
         let mut transition_skipped = 0usize;
         let mut rhythm_disabled_skipped = 0usize;

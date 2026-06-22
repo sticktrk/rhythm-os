@@ -2,9 +2,10 @@
 //!
 //! Provides `api_routes()` for standard REST endpoints.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 
+use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -99,6 +100,23 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/config/reset", post(reset_config))
         .route("/api/location", put(put_location))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route(
+            "/api/light-runtime",
+            get(get_light_runtime).put(put_light_runtime),
+        )
+        .route("/api/light-runtimes", get(get_light_runtime_manifests))
+        .route(
+            "/api/light-runtimes/:runtime_id/manifest",
+            get(get_light_runtime_manifest),
+        )
+        .route(
+            "/api/light-runtimes/:runtime_id/*path",
+            get(light_runtime_extension_get)
+                .post(light_runtime_extension_post)
+                .put(light_runtime_extension_put)
+                .patch(light_runtime_extension_patch)
+                .delete(light_runtime_extension_delete),
+        )
         .route(
             "/api/light-breaker",
             get(get_light_breaker).put(put_light_breaker),
@@ -371,6 +389,146 @@ async fn get_settings(State(state): State<SharedState>) -> ApiResponse {
 
 async fn put_settings(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {
     run_blocking(move || handlers::handle_put_settings(&state, &body)).await
+}
+
+async fn get_light_runtime(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_light_runtime(&state)
+}
+
+async fn put_light_runtime(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_light_runtime(&state, &body)).await
+}
+
+async fn get_light_runtime_manifests(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_light_runtime_manifests(&state)
+}
+
+async fn get_light_runtime_manifest(
+    State(state): State<SharedState>,
+    Path(runtime_id): Path<String>,
+) -> ApiResponse {
+    handlers::handle_get_light_runtime_manifest(&state, &runtime_id)
+}
+
+async fn light_runtime_extension_get(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Get,
+        path,
+        params,
+        Value::Null,
+    )
+    .await
+}
+
+async fn light_runtime_extension_post(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> ApiResponse {
+    let body = match parse_optional_json_body(body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Post,
+        path,
+        params,
+        body,
+    )
+    .await
+}
+
+async fn light_runtime_extension_put(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> ApiResponse {
+    let body = match parse_optional_json_body(body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Put,
+        path,
+        params,
+        body,
+    )
+    .await
+}
+
+async fn light_runtime_extension_patch(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> ApiResponse {
+    let body = match parse_optional_json_body(body) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Patch,
+        path,
+        params,
+        body,
+    )
+    .await
+}
+
+async fn light_runtime_extension_delete(
+    State(state): State<SharedState>,
+    Path((runtime_id, path)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    light_runtime_extension(
+        state,
+        runtime_id,
+        rhythm_runtime_api::RuntimeHttpMethod::Delete,
+        path,
+        params,
+        Value::Null,
+    )
+    .await
+}
+
+async fn light_runtime_extension(
+    state: SharedState,
+    runtime_id: String,
+    method: rhythm_runtime_api::RuntimeHttpMethod,
+    path: String,
+    params: HashMap<String, String>,
+    body: Value,
+) -> ApiResponse {
+    let query = params.into_iter().collect::<BTreeMap<_, _>>();
+    run_blocking(move || {
+        handlers::handle_light_runtime_extension(&state, &runtime_id, method, &path, query, body)
+    })
+    .await
+}
+
+fn parse_optional_json_body(body: Bytes) -> Result<Value, ApiResponse> {
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| ApiResponse::bad_request(&format!("Invalid JSON: {e}")))
 }
 
 async fn get_light_breaker(State(state): State<SharedState>) -> ApiResponse {
@@ -1477,6 +1635,66 @@ mod tests {
                 .map(|observed| observed.lights_on),
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn get_state_authoritative_query_refreshes_inline_when_worker_configured() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(ThreadRecordingRuntime {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            snapshots: vec![RoomSnapshot {
+                id: "room1".into(),
+                name: "Room 1".into(),
+                kind: rhythm_core::LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
+                hard_off: false,
+                profile_settings: rhythm_core::RoomProfileSettings::default(),
+            }],
+            current_hour: 12.0,
+        });
+        let state = test_state_with_runtime(runtime, &[("room1", true)]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().work_tx = Some(tx);
+        let app = api_routes().with_state(state.clone());
+
+        let request = Request::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/state?authoritative=true")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let room = room_state_json(&body, "room1");
+        assert_eq!(room["lights_on"].as_bool(), Some(false));
+        assert_eq!(room["observed_power"]["lights_on"].as_bool(), Some(false));
+        assert_eq!(
+            room["observed_power"]["source"].as_str(),
+            Some("authoritative_refresh")
+        );
+        assert_eq!(room["observed_power"]["fresh"].as_bool(), Some(true));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .room_observed_power
+                .get("room1")
+                .map(|observed| observed.lights_on),
+            Some(false)
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

@@ -21,8 +21,11 @@ use crate::factory_default_config::{
     factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent};
+use crate::light_runtime::{LightRuntimeKind, LightRuntimeRegistry, SharedLightRuntime};
 use crate::remote_access::RemoteAccessController;
-use crate::storage::{generate_server_instance_id, Storage, StoredMotionTimerEntry};
+use crate::storage::{
+    generate_server_instance_id, Storage, StoredLightRuntimeState, StoredMotionTimerEntry,
+};
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
 /// Ephemeral startup-bootstrap retry state for one configured hub.
@@ -133,6 +136,22 @@ pub enum WorkItem {
     /// registry too, so this runs the full `persist_state` on the worker
     /// thread (16KB stack) instead of the HTTP handler stack (12KB).
     DeferredPersistState,
+}
+
+impl WorkItem {
+    /// Node whose visible dispatch state should stay pending while this item is queued/running.
+    pub(crate) fn pending_node_id(&self) -> Option<&str> {
+        match self {
+            WorkItem::QueuedNodeAction { node_id, .. }
+            | WorkItem::SetNodeBrightness { node_id, .. }
+            | WorkItem::SetNodeCurveModifier { node_id, .. }
+            | WorkItem::SetNodePreferences { node_id, .. }
+            | WorkItem::ApplyNodeCommand { node_id, .. }
+            | WorkItem::LightsOffRoom { node_id, .. }
+            | WorkItem::PeriodicNodeTick { node_id, .. } => Some(node_id.as_str()),
+            WorkItem::DeferredPersist { .. } | WorkItem::DeferredPersistState => None,
+        }
+    }
 }
 
 /// Latest-only periodic tick state for one schedulable light node.
@@ -380,6 +399,8 @@ pub struct AppState {
     pub motion_timer_restores: HashMap<String, StoredMotionTimerEntry>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
+    /// Queued or running light-dispatch work count per topology node.
+    pub pending_node_dispatches: HashMap<String, usize>,
     /// Set when a mode change wanted to apply room defaults but no runtime
     /// was available (e.g. periodic replayed a missed scheduled transition
     /// before hub bootstrap). Drained by `reconcile_runtime_from_state` once
@@ -425,6 +446,19 @@ pub struct AppState {
     // ---- Storage ----
     /// Platform-specific storage backend.
     pub storage: Option<Box<dyn Storage>>,
+    /// Namespaced durable state for plan-based light runtimes.
+    ///
+    /// Shape: runtime id -> node id -> app-defined key -> JSON value.
+    pub light_runtime_state: StoredLightRuntimeState,
+    /// Registry of light runtime modules linked into this host build.
+    pub light_runtime_registry: LightRuntimeRegistry,
+    /// Selected plan-based light runtime behavior.
+    pub light_runtime_kind: LightRuntimeKind,
+    /// Stateful selected light runtime instance, if the selected runtime needs one.
+    pub light_runtime: Option<SharedLightRuntime>,
+    /// Fingerprint of the host-derived light runtime config loaded into
+    /// [light_runtime]. Used to rebuild stateful runtimes after topology changes.
+    pub light_runtime_config_fingerprint: Option<String>,
 
     // ---- Worker ----
     /// Sender for offloading work to a background thread.
@@ -684,6 +718,7 @@ impl Default for AppState {
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
+            pending_node_dispatches: HashMap::new(),
             pending_mode_output_apply: false,
             last_check_hour: None,
             last_check_instant: None,
@@ -700,6 +735,11 @@ impl Default for AppState {
             api_auth: StoredApiAuth::default(),
             require_api_auth: false,
             storage: None,
+            light_runtime_state: StoredLightRuntimeState::new(),
+            light_runtime_registry: LightRuntimeRegistry::default(),
+            light_runtime_kind: LightRuntimeKind::default(),
+            light_runtime: None,
+            light_runtime_config_fingerprint: None,
             work_tx: None,
             periodic_work_tx: None,
             pending_periodic_ticks: HashMap::new(),
@@ -1126,6 +1166,9 @@ pub fn emit_server_event(state: &SharedState, event: crate::server_event::Server
 pub fn rooms_from_engine(runtime: &dyn RuntimeHandle) -> rhythm_core::room::RoomManager {
     let mut rooms = rhythm_core::room::RoomManager::new();
     for snap in runtime.engine_all_node_snapshots() {
+        if crate::topology::is_internal_light_node_id(&snap.id) {
+            continue;
+        }
         let room =
             rooms.get_or_create_node(&snap.id, &snap.name, snap.kind, snap.parent_id.clone());
         room.rhythm_enabled = snap.rhythm_enabled;
@@ -1368,11 +1411,29 @@ mod tests {
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
+                RoomSnapshot {
+                    id: "__rhythm_light_node__|room=kitchen|kind=group|hub=hue@bridge|source=hue-room".into(),
+                    name: "Kitchen".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
+                    hard_off: false,
+                    profile_settings: rhythm_core::RoomProfileSettings::default(),
+                },
             ],
         };
 
         let rooms = rooms_from_engine(&runtime);
         assert_eq!(rooms.iter().count(), 3);
+        assert!(rooms
+            .get("__rhythm_light_node__|room=kitchen|kind=group|hub=hue@bridge|source=hue-room")
+            .is_none());
 
         let kitchen = rooms.get("kitchen").unwrap();
         assert_eq!(kitchen.name, "Kitchen");

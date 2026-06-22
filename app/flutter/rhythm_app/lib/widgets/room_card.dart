@@ -9,6 +9,7 @@ import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
 import 'device_detail_sheet.dart';
+import 'first_run_explainer.dart';
 import 'mood_sheet.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -56,9 +57,63 @@ class _RoomCardState extends State<RoomCard> {
     return mode.name;
   }
 
+  /// Persistence id for the one-time "what is Mood?" explainer.
+  static const String _moodExplainerId = 'mood';
+
   /// Handle three-state mode transitions. Driven by the segmented toggle:
   /// each segment is a tap target, plus horizontal drag for fluency.
   void _onModeChanged(RoomMode newMode) {
+    // The very first time someone reaches for Mood, introduce the concept
+    // before acting on it — then drop them straight into the picker.
+    if (newMode == RoomMode.mood &&
+        !FirstRunExplainer.hasSeen(_moodExplainerId)) {
+      _introduceMood();
+      return;
+    }
+    _applyModeChange(newMode);
+  }
+
+  /// Show the one-time Mood explainer, then switch the room to Mood and open
+  /// the scene/color picker so the user can act on what they just learned.
+  Future<void> _introduceMood() async {
+    HapticFeedback.lightImpact();
+    await FirstRunExplainer.maybeShow(
+      context,
+      id: _moodExplainerId,
+      eyebrow: 'NEW',
+      title: 'Meet Mood',
+      subtitle: 'A calm, hand-picked light that stays exactly how you set it.',
+      icon: Icons.spa_rounded,
+      accent: const Color(0xFFFFB23E),
+      ctaLabel: 'Choose a Mood',
+      points: const [
+        ExplainerPoint(
+          icon: Icons.palette_rounded,
+          title: 'Pick a scene or a color',
+          body: 'Choose one of the saved scenes, or set a single fixed '
+              'color for your lights — whatever fits the moment.',
+        ),
+        ExplainerPoint(
+          icon: Icons.lock_outline_rounded,
+          title: 'It stays put',
+          body: "While Mood is on, your lights hold steady — they won't drift "
+              'with the day’s natural rhythm.',
+        ),
+        ExplainerPoint(
+          icon: Icons.bookmark_added_rounded,
+          title: 'Saved for next time',
+          body: 'Your most recent Mood is always remembered, ready to switch '
+              'back to whenever you like.',
+        ),
+      ],
+    );
+    if (!mounted) return;
+    _applyModeChange(RoomMode.mood);
+    if (!mounted) return;
+    _showMoodScenePicker();
+  }
+
+  void _applyModeChange(RoomMode newMode) {
     final roomProvider = context.read<RoomProvider>();
     final room = roomProvider.getRoom(widget.roomId);
     if (room == null) return;
@@ -269,6 +324,7 @@ class _RoomCardState extends State<RoomCard> {
           (int, int, int)?,
           (int, int, int)?,
           bool,
+          bool,
           bool
         )>(
       selector: (_, p) => (
@@ -283,6 +339,7 @@ class _RoomCardState extends State<RoomCard> {
         p.getMoodColor(widget.roomId),
         p.hasMotionSensor(widget.roomId),
         p.isRoomTransitioning(widget.roomId),
+        p.isNodeDispatchPending(widget.roomId),
       ),
       builder: (context, data, _) {
         final (
@@ -296,7 +353,8 @@ class _RoomCardState extends State<RoomCard> {
           serverColor,
           moodColor,
           hasSensor,
-          isTransitioning
+          isTransitioning,
+          isDispatchPending
         ) = data;
         if (room == null) return const SizedBox.shrink();
 
@@ -410,6 +468,7 @@ class _RoomCardState extends State<RoomCard> {
 
         final sliderActive =
             !isTransitioning && (mode == RoomMode.on || mode == RoomMode.mood);
+        final showActivitySpinner = isTransitioning || isDispatchPending;
         final sliderInCctMode = _cctMode && mode == RoomMode.on;
         final cctRange = _CctSideRange.fromCurveData(
           widget.curveData,
@@ -557,7 +616,7 @@ class _RoomCardState extends State<RoomCard> {
                                 height: 18,
                                 child: AnimatedSwitcher(
                                   duration: const Duration(milliseconds: 160),
-                                  child: isTransitioning
+                                  child: showActivitySpinner
                                       ? _RoomTransitionSpinner(
                                           key: const ValueKey(
                                             'room_transition_spinner',

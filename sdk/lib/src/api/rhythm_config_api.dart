@@ -107,6 +107,24 @@ class RhythmConfigApi {
     }
   }
 
+  /// Get solar times and twilight data for a date.
+  Future<RhythmSolarInfo> getCurveSolar({DateTime? date}) async {
+    try {
+      final response = await _dio.get(
+        'api/curve/solar',
+        queryParameters:
+            date == null ? null : <String, dynamic>{'date': _formatDate(date)},
+      );
+      return RhythmSolarInfo.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw RhythmApiException(
+        'Failed to get curve solar data',
+        statusCode: e.response?.statusCode,
+        cause: e,
+      );
+    }
+  }
+
   /// Get dimming steps for the active profile.
   Future<RhythmStepSequences> getStepSequences({
     required double hour,

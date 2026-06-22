@@ -120,6 +120,58 @@ void main() {
       final params = capturedBody!['params'] as Map<String, dynamic>;
       expect(params.containsKey('session_id'), isFalse);
     });
+
+    test('reads Matter capture summaries and full capture JSON', () async {
+      server = await _FakeMatterServer.start(
+        capturesPayload: {
+          'captures': [
+            {
+              'id': 'matter-102',
+              'file': 'matter-102.json',
+              'source': 'on_demand_probe',
+              'captured_at_unix_ms': 200,
+              'vendor_name': 'Shenzen',
+              'product_name': 'Bulb',
+              'vendor_id': 4921,
+              'product_id': 171,
+              'node_id': 102,
+              'light_endpoint': 1,
+              'color_modes': ['xy', 'color_temperature'],
+              'derived_quirks': ['needs_explicit_on'],
+              'db_match_name': 'Known Bulb',
+            },
+          ],
+        },
+        capturePayloads: {
+          'matter-102': {
+            'device_id': 'matter-102',
+            'source': 'pair',
+            'commissioned': {
+              'vendor_id': 4921,
+              'product_id': 171,
+            },
+          },
+        },
+      );
+      api = RhythmMatterApi(baseUrl: 'http://127.0.0.1:${server!.port}');
+
+      final captures = await api!.getMatterCaptures();
+      final capture = await api!.getMatterCapture('matter-102');
+
+      expect(captures.captures, hasLength(1));
+      expect(captures.captures.single.id, 'matter-102');
+      expect(captures.captures.single.vendorId, 4921);
+      expect(captures.captures.single.colorModes, [
+        'xy',
+        'color_temperature',
+      ]);
+      expect(captures.captures.single.derivedQuirks, ['needs_explicit_on']);
+      expect(capture!['device_id'], 'matter-102');
+      expect(
+        (capture['commissioned'] as Map<String, dynamic>)['vendor_id'],
+        4921,
+      );
+    });
   });
 }
 
@@ -128,23 +180,32 @@ class _FakeMatterServer {
     required HttpServer server,
     this.wifiPayload,
     this.pairHandler,
+    this.capturesPayload,
+    this.capturePayloads = const <String, Map<String, dynamic>>{},
   }) : _server = server;
 
   final HttpServer _server;
   final Map<String, dynamic>? wifiPayload;
   final Future<void> Function(HttpRequest request)? pairHandler;
+  final Map<String, dynamic>? capturesPayload;
+  final Map<String, Map<String, dynamic>> capturePayloads;
 
   int get port => _server.port;
 
   static Future<_FakeMatterServer> start({
     Map<String, dynamic>? wifiPayload,
     Future<void> Function(HttpRequest request)? pairHandler,
+    Map<String, dynamic>? capturesPayload,
+    Map<String, Map<String, dynamic>> capturePayloads =
+        const <String, Map<String, dynamic>>{},
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeMatterServer._(
       server: server,
       wifiPayload: wifiPayload,
       pairHandler: pairHandler,
+      capturesPayload: capturesPayload,
+      capturePayloads: capturePayloads,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -181,6 +242,29 @@ class _FakeMatterServer {
           'model': 'Product',
         },
       });
+      return;
+    }
+
+    if (request.method == 'GET' && request.uri.path == '/api/matter/captures') {
+      await _writeJson(
+        request.response,
+        capturesPayload ?? const {'captures': []},
+      );
+      return;
+    }
+
+    if (request.method == 'GET' &&
+        request.uri.pathSegments.length == 4 &&
+        request.uri.pathSegments[0] == 'api' &&
+        request.uri.pathSegments[1] == 'matter' &&
+        request.uri.pathSegments[2] == 'captures') {
+      final capture = capturePayloads[request.uri.pathSegments[3]];
+      if (capture == null) {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      await _writeJson(request.response, capture);
       return;
     }
 

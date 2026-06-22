@@ -68,7 +68,7 @@ impl StoredRemoteAccessConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteAccessConfigStatus {
     pub enabled: bool,
     pub configured: bool,
@@ -79,19 +79,6 @@ pub struct RemoteAccessConfigStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_name: Option<String>,
     pub updated_at_epoch_ms: u64,
-}
-
-impl Default for RemoteAccessConfigStatus {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            configured: false,
-            hostname: None,
-            tunnel_id: None,
-            tunnel_name: None,
-            updated_at_epoch_ms: 0,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

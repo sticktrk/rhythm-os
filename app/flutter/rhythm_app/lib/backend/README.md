@@ -99,7 +99,7 @@ await BackendProvider.instance.analytics.logEvent('button_click');
 2. Run the schema migration:
    ```bash
    # In Supabase SQL Editor, run:
-   cat supabase/schema.sql
+   ls ../../../tools/app/supabase/migrations
    ```
 
 3. Configure Google OAuth (optional):

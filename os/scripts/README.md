@@ -9,7 +9,8 @@ This directory contains all build and deployment scripts for Rhythm OS.
 ./scripts/run-dev.sh                    # Build and run addon locally
 
 # Triage
-./scripts/triage.sh [issue-number]      # Download and summarize app bug-report debug bundle
+../tools/triage-bug.sh [issue-number]   # Download and summarize app bug-report debug bundle
+../tools/triage-features.sh [issue-number]  # Summarize a feature issue for implementation
 
 # Build individual components
 ./scripts/build-server.sh               # Build the server
@@ -44,7 +45,10 @@ Mostly invoked by the main flows above, but usable standalone:
 | `prune-server-releases.sh` | Prune old versioned release directories from the dl.rhythm.lighting server repo |
 | `push-rpiz-dev.sh` | Fast dev loop: cross-compile the appliance binary, scp it to a device, respawn init |
 | `resolve-version.sh` | Resolve the current version for a shipped Rhythm artifact from Git tags |
-| `triage.sh` / `triage-bug.sh` | Compatibility entrypoints for bug-report triage (the real script lives at the workspace root) |
+
+Triage scripts are intentionally not duplicated under `os/scripts`. Use the
+canonical CROSS root entrypoints: `../tools/triage-bug.sh` and
+`../tools/triage-features.sh`.
 
 ---
 
@@ -251,7 +255,7 @@ upload the OTA feed directly instead of going through GitHub Actions.
 
 **Behavior:**
 - Requires a clean tracked worktree before tagging.
-- Updates the workspace version in `Cargo.toml` before tagging and mechanically syncs only local workspace package versions in `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
+- Updates the workspace version in `Cargo.toml`, the sibling runtime manifests, and mechanically syncs only local path package versions in `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
 - The GitHub Actions CI workflow turns that tag into a GitHub release with the rpiz OTA tarball. `*-beta` tags publish `rpiz/manifest.json`; `*-stable` tags publish `rpiz-stable/manifest.json`.

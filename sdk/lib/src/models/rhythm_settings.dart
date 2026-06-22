@@ -1,6 +1,125 @@
 import 'rhythm_curve_config.dart';
 import 'rhythm_room.dart' show RhythmMode;
 
+const rhythmAdaptiveLightRuntimeId = 'rhythm-adaptive';
+const removed-projectCircadianLightRuntimeId = 'removed-circadian';
+
+enum RhythmLightRuntime {
+  rhythmAdaptive,
+  removed-projectCircadian;
+
+  String get id => switch (this) {
+        RhythmLightRuntime.rhythmAdaptive => rhythmAdaptiveLightRuntimeId,
+        RhythmLightRuntime.removed-projectCircadian => removed-projectCircadianLightRuntimeId,
+      };
+
+  static RhythmLightRuntime fromId(String? value) => switch (value) {
+        removed-projectCircadianLightRuntimeId ||
+        'removed-project-circadian' ||
+        'removed-circadian' =>
+          RhythmLightRuntime.removed-projectCircadian,
+        rhythmAdaptiveLightRuntimeId ||
+        'rhythm' ||
+        'rhythm_adaptive' =>
+          RhythmLightRuntime.rhythmAdaptive,
+        _ => RhythmLightRuntime.rhythmAdaptive,
+      };
+}
+
+extension RhythmLightRuntimePresentation on RhythmLightRuntime {
+  bool get usesRuntimeShell => this == RhythmLightRuntime.removed-projectCircadian;
+
+  String get defaultDayProfileId => switch (this) {
+        RhythmLightRuntime.removed-projectCircadian => 'expert',
+        RhythmLightRuntime.rhythmAdaptive => 'rhythm',
+      };
+}
+
+RhythmLightRuntime _lightRuntimeFromLegacyProfileId(String? profileId) {
+  return profileId == 'expert'
+      ? RhythmLightRuntime.removed-projectCircadian
+      : RhythmLightRuntime.rhythmAdaptive;
+}
+
+class RhythmLightRuntimeState {
+  final RhythmLightRuntime runtime;
+  final List<RhythmLightRuntime> availableRuntimes;
+  final RhythmLightRuntimeInitialApply? initialApply;
+
+  const RhythmLightRuntimeState({
+    required this.runtime,
+    this.availableRuntimes = const [],
+    this.initialApply,
+  });
+
+  factory RhythmLightRuntimeState.fromJson(Map<String, dynamic> json) {
+    final runtimeId =
+        json['runtime_id'] as String? ?? json['light_runtime'] as String?;
+    return RhythmLightRuntimeState(
+      runtime: RhythmLightRuntime.fromId(runtimeId),
+      availableRuntimes: ((json['available_runtime_ids'] as List<dynamic>?) ??
+              const <dynamic>[])
+          .map((value) => RhythmLightRuntime.fromId(value as String?))
+          .toList(growable: false),
+      initialApply: json['initial_apply'] is Map
+          ? RhythmLightRuntimeInitialApply.fromJson(
+              Map<String, dynamic>.from(json['initial_apply'] as Map),
+            )
+          : null,
+    );
+  }
+
+  String get runtimeId => runtime.id;
+
+  bool get usesRuntimeShell => runtime.usesRuntimeShell;
+
+  Map<String, dynamic> toJson() => {
+        'runtime_id': runtime.id,
+        if (availableRuntimes.isNotEmpty)
+          'available_runtime_ids':
+              availableRuntimes.map((runtime) => runtime.id).toList(),
+        if (initialApply != null) 'initial_apply': initialApply!.toJson(),
+      };
+}
+
+class RhythmLightRuntimeInitialApply {
+  final bool queued;
+  final int dispatchCount;
+  final int dispatchSpacingMs;
+  final int estimatedDispatchMs;
+  final String? error;
+
+  const RhythmLightRuntimeInitialApply({
+    required this.queued,
+    required this.dispatchCount,
+    required this.dispatchSpacingMs,
+    required this.estimatedDispatchMs,
+    this.error,
+  });
+
+  factory RhythmLightRuntimeInitialApply.fromJson(Map<String, dynamic> json) {
+    return RhythmLightRuntimeInitialApply(
+      queued: json['queued'] as bool? ?? false,
+      dispatchCount: (json['dispatch_count'] as num?)?.toInt() ?? 0,
+      dispatchSpacingMs: (json['dispatch_spacing_ms'] as num?)?.toInt() ?? 0,
+      estimatedDispatchMs:
+          (json['estimated_dispatch_ms'] as num?)?.toInt() ?? 0,
+      error: json['error'] as String?,
+    );
+  }
+
+  Duration get estimatedDuration =>
+      Duration(milliseconds: estimatedDispatchMs.clamp(0, 60000).toInt());
+
+  Map<String, dynamic> toJson() => {
+        'queued': queued,
+        'dispatch_count': dispatchCount,
+        'dispatch_spacing_ms': dispatchSpacingMs,
+        'estimated_dispatch_ms': estimatedDispatchMs,
+        if (error != null) 'error': error,
+      };
+}
+
 class RoomDefault {
   final String roomId;
   final String state; // "active", "idle", "hard_off"
@@ -329,24 +448,46 @@ class RhythmModeLastChange {
 
 class RhythmModeResource {
   final RhythmMode active;
+  final RhythmLightRuntime lightRuntime;
+  final bool hasLightRuntime;
   final RhythmModeLastChange? lastChange;
   final List<RhythmModeConfig> configs;
 
   const RhythmModeResource({
     required this.active,
+    this.lightRuntime = RhythmLightRuntime.rhythmAdaptive,
+    this.hasLightRuntime = false,
     this.lastChange,
     this.configs = const [],
   });
 
   factory RhythmModeResource.fromJson(Map<String, dynamic> json) {
+    final active =
+        RhythmMode.fromString(json['active'] as String?) ?? RhythmMode.day;
     final lastChangeJson = json['last_change'];
     final hasFlatLastChange = json.containsKey('cause') ||
         json.containsKey('transition_id') ||
         json.containsKey('epoch_ms') ||
         json.containsKey('utc_ms');
+    final configs = ((json['configs'] as List<dynamic>?) ?? const <dynamic>[])
+        .map((e) => RhythmModeConfig.fromJson(e as Map<String, dynamic>))
+        .toList();
+    RhythmModeConfig? activeConfig;
+    for (final config in configs) {
+      if (config.mode == active) {
+        activeConfig = config;
+        break;
+      }
+    }
+    final runtimeId =
+        json['light_runtime'] as String? ?? json['runtime_id'] as String?;
+    final lightRuntime = runtimeId == null
+        ? _lightRuntimeFromLegacyProfileId(activeConfig?.activeProfileId)
+        : RhythmLightRuntime.fromId(runtimeId);
     return RhythmModeResource(
-      active:
-          RhythmMode.fromString(json['active'] as String?) ?? RhythmMode.day,
+      active: active,
+      lightRuntime: lightRuntime,
+      hasLightRuntime: runtimeId != null,
       lastChange: lastChangeJson is Map<String, dynamic>
           ? RhythmModeLastChange.fromJson(
               lastChangeJson,
@@ -354,9 +495,7 @@ class RhythmModeResource {
           : hasFlatLastChange
               ? RhythmModeLastChange.fromJson(json)
               : null,
-      configs: ((json['configs'] as List<dynamic>?) ?? const <dynamic>[])
-          .map((e) => RhythmModeConfig.fromJson(e as Map<String, dynamic>))
-          .toList(),
+      configs: configs,
     );
   }
 
@@ -379,19 +518,26 @@ class RhythmSettings {
   final bool powerSave;
   final bool hasPowerSave;
   final bool autoUpdate;
+  final RhythmLightRuntime lightRuntime;
+  final bool hasLightRuntime;
 
   const RhythmSettings({
     required this.powerSave,
     this.hasPowerSave = true,
     this.autoUpdate = true,
+    this.lightRuntime = RhythmLightRuntime.rhythmAdaptive,
+    this.hasLightRuntime = false,
   });
 
   factory RhythmSettings.fromJson(Map<String, dynamic> json) {
     final hasPowerSave = json.containsKey('power_save');
+    final runtimeId = json['light_runtime'] as String?;
     return RhythmSettings(
       powerSave: hasPowerSave ? json['power_save'] as bool? ?? true : true,
       hasPowerSave: hasPowerSave,
       autoUpdate: json['auto_update'] as bool? ?? true,
+      lightRuntime: RhythmLightRuntime.fromId(runtimeId),
+      hasLightRuntime: runtimeId != null,
     );
   }
 }

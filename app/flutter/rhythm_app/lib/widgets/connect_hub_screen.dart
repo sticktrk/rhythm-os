@@ -32,6 +32,7 @@ import '../screens/settings/dialogs/sign_in_modal.dart';
 import '../screens/hubs/add_home_flow.dart';
 import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
+import '../screens/hubs/rhythmserver_settings_screen.dart';
 import '../services/account_cloud_sync_service.dart';
 import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
@@ -106,6 +107,16 @@ Set<String> rhythmHomeIdsRepresentedByForTesting({
       snapshot: snapshot,
       localHomes: localHomes,
       cloudHomes: cloudHomes,
+    );
+
+@visibleForTesting
+Hub rhythmDetachedServerHubForTesting({
+  required DiscoveredHub server,
+  String? authToken,
+}) =>
+    _detachedServerHubForDiscoveredServer(
+      server,
+      authToken: authToken,
     );
 
 List<AccountHomeServerHubs> _mergeHomeEntries({
@@ -374,6 +385,25 @@ String _displayNameForDiscoveredServer(DiscoveredHub server) {
     return 'Rhythm Box';
   }
   return name;
+}
+
+Hub _detachedServerHubForDiscoveredServer(
+  DiscoveredHub server, {
+  String? authToken,
+}) {
+  final endpointKey = _rhythmServerEndpointKey(server.address, server.port);
+  return Hub.create(
+    id: 'detached-$endpointKey',
+    homeId: 'detached-home',
+    type: HubType.server,
+    name: _displayNameForDiscoveredServer(server),
+    endpoint: HubEndpoint(
+      host: server.address,
+      port: server.port,
+      useSsl: false,
+    ),
+    token: authToken,
+  ).copyWith(pendingSync: false);
 }
 
 class _HomeNameCancelledException implements Exception {
@@ -1342,6 +1372,84 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         _connectErrorMessage = 'Could not reach this Box';
       });
     }
+  }
+
+  Future<void> _openDiscoveredDevice(DiscoveredHub hub) async {
+    AnalyticsService().logRhythmServerDiscoveredConnect(hub.address);
+    if (!kIsWeb) HapticFeedback.selectionClick();
+    final endpointKey = _discoveredEndpointKey(hub);
+    setState(() {
+      _isConnecting = true;
+      _connectingEndpoint = endpointKey;
+      _connectError = null;
+      _connectErrorMessage = null;
+    });
+
+    String? authToken;
+    try {
+      authToken = await _resolveAuthTokenForDiscoveredHub(hub);
+    } on _AuthTokenRequiredException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectingEndpoint = null;
+        _connectError = endpointKey;
+        _connectErrorMessage = error.message;
+      });
+      return;
+    } catch (error) {
+      debugPrint('Auth resolution failed for ${hub.address}: $error');
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectingEndpoint = null;
+        _connectError = endpointKey;
+        _connectErrorMessage = 'Could not authorize this Box';
+      });
+      return;
+    }
+
+    final client = RhythmDiagnosticsApi(
+      host: hub.address,
+      port: hub.port,
+      authToken: authToken,
+    );
+    final isHealthy = await client.healthCheck();
+
+    if (!mounted) return;
+
+    if (!isHealthy) {
+      setState(() {
+        _isConnecting = false;
+        _connectingEndpoint = null;
+        _connectError = endpointKey;
+        _connectErrorMessage = 'Could not reach this Box';
+      });
+      return;
+    }
+
+    await RecentServersService.instance.record(
+      name: _displayNameForDiscoveredServer(hub),
+      host: hub.address,
+      port: hub.port,
+      token: authToken,
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _isConnecting = false;
+      _connectingEndpoint = null;
+    });
+
+    await RhythmServerSettingsScreen.show(
+      context,
+      hub: _detachedServerHubForDiscoveredServer(
+        hub,
+        authToken: authToken,
+      ),
+      headerTitleOverride: _displayNameForDiscoveredServer(hub),
+      homeManaged: false,
+    );
   }
 
   Future<Hub?> _persistDiscoveredServerHub(
@@ -2832,8 +2940,8 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     final isBusy = _connectingEndpoint == endpointKey;
     final b = _breathe.value;
 
-    // Reuse the connect path: the recent entry behaves exactly like a
-    // discovered hub, just sourced from local storage instead of mDNS.
+    // Reuse the discovered-hub shape; the recent entry is sourced from local
+    // storage instead of mDNS.
     final hub = DiscoveredHub(
       host: server.host,
       port: server.port,
@@ -2867,7 +2975,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     return GestureDetector(
-      onTap: _isConnecting ? null : () => _connectToDevice(hub),
+      onTap: _isConnecting ? null : () => _openDiscoveredDevice(hub),
       onLongPress: () => _confirmForgetRecent(server),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -2977,12 +3085,40 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 ),
               )
             else
-              Icon(
-                Icons.arrow_forward_rounded,
-                color: _teal.withValues(alpha: isOnline ? 0.7 : 0.4),
-                size: 18,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildSetUpHomeButton(hub),
+                  const SizedBox(width: 2),
+                  Icon(
+                    Icons.arrow_forward_rounded,
+                    color: _teal.withValues(alpha: isOnline ? 0.7 : 0.4),
+                    size: 18,
+                  ),
+                ],
               ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSetUpHomeButton(DiscoveredHub hub) {
+    return Tooltip(
+      message: 'Set up Home',
+      child: SizedBox(
+        width: 32,
+        height: 32,
+        child: IconButton(
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+          splashRadius: 18,
+          icon: Icon(
+            Icons.add_home_rounded,
+            color: _teal.withValues(alpha: 0.72),
+            size: 18,
+          ),
+          onPressed: _isConnecting ? null : () => _connectToDevice(hub),
         ),
       ),
     );
@@ -3031,7 +3167,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     final b = _breathe.value;
 
     return GestureDetector(
-      onTap: _isConnecting ? null : () => _connectToDevice(hub),
+      onTap: _isConnecting ? null : () => _openDiscoveredDevice(hub),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
@@ -3145,10 +3281,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 ),
               )
             else
-              Icon(
-                Icons.arrow_forward_rounded,
-                color: _teal.withValues(alpha: 0.6),
-                size: 18,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildSetUpHomeButton(hub),
+                  const SizedBox(width: 2),
+                  Icon(
+                    Icons.arrow_forward_rounded,
+                    color: _teal.withValues(alpha: 0.6),
+                    size: 18,
+                  ),
+                ],
               ),
           ],
         ),

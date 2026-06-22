@@ -2,7 +2,7 @@ name: rhythm_app
 description: Rhythm Lighting - Adaptive lighting curve configuration app
 publish_to: 'none'
 
-version: 2.0.36+1
+version: 4.0.101+1
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -17,7 +17,7 @@ dependencies:
 
   # Rhythm SDK for server communication
   rhythm_sdk:
-    path: ../../../rhythm_sdk
+    path: ../../../sdk
 
   # State management
   provider: ^6.1.1

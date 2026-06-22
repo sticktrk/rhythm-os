@@ -31,8 +31,9 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use log::warn;
@@ -44,6 +45,63 @@ use crate::lighting::LightingCommand;
 use crate::room::Room;
 
 const DISPATCH_WARN_MS: u128 = 1000;
+const DEFAULT_HUB_QUEUE_CAPACITY: usize = 16;
+
+/// Whether a command caller waits for the hub transport to complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HubDispatchCompletion {
+    /// Wait for the hub controller to finish the command.
+    Wait,
+    /// Return after the hub worker accepts the command.
+    Enqueue,
+}
+
+/// Per-hub command queue policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubDispatchPolicy {
+    /// Maximum pending commands held for this hub.
+    pub queue_capacity: usize,
+    /// Completion behavior exposed to callers after enqueue.
+    pub completion: HubDispatchCompletion,
+    /// Whether this hub type needs burst pacing before dispatch.
+    pub requires_staggering: bool,
+    /// Worker-local minimum spacing between commands.
+    pub min_dispatch_spacing: Duration,
+}
+
+impl HubDispatchPolicy {
+    /// Build the default policy for a registered hub key.
+    pub fn for_hub_key(hub_key: &str) -> Self {
+        match hub_type_from_key(hub_key) {
+            "matter" => Self {
+                queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
+                completion: HubDispatchCompletion::Enqueue,
+                requires_staggering: false,
+                min_dispatch_spacing: Duration::ZERO,
+            },
+            "hue" => Self {
+                queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
+                completion: HubDispatchCompletion::Wait,
+                requires_staggering: true,
+                min_dispatch_spacing: Duration::ZERO,
+            },
+            _ => Self {
+                queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
+                completion: HubDispatchCompletion::Wait,
+                requires_staggering: false,
+                min_dispatch_spacing: Duration::ZERO,
+            },
+        }
+    }
+}
+
+/// Public metadata describing a registered hub command queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubDispatchMetadata {
+    pub hub_key: String,
+    pub hub_type: String,
+    pub policy: HubDispatchPolicy,
+}
 
 pub(crate) fn format_node_log_label(node_id: &str, node_name: Option<&str>) -> String {
     match node_name
@@ -60,60 +118,222 @@ fn sync_block_on<F: std::future::Future>(f: F) -> F::Output {
     futures::executor::block_on(f)
 }
 
-/// Dispatch an operation to all hub targets in parallel on OS threads.
-///
-/// Uses `std::thread::scope` so each hub runs on its own thread — a slow hub
-/// (e.g. Matter with 10s connect timeout) doesn't block fast hubs (Hue, HA).
-/// Works from any context (tokio runtime, std::thread, etc.).
-///
-/// For single targets, runs inline without spawning a thread.
-fn dispatch_parallel<F>(
-    targets: &[(String, Arc<dyn HubLightController>, HubDispatchTarget)],
-    op: F,
-) -> bool
-where
-    F: Fn(Arc<dyn HubLightController>, &HubDispatchTarget) -> LightControlResult<()> + Sync + Send,
-{
-    if targets.len() <= 1 {
-        // Single target — no thread overhead needed
-        if let Some((key, controller, target)) = targets.first() {
-            match op(controller.clone(), target) {
-                Ok(()) => return true,
-                Err(e) => {
-                    warn!(target: "composite", "hub {} failed: {}", key, e);
-                    return false;
-                }
-            }
+fn hub_type_from_key(hub_key: &str) -> &str {
+    hub_key
+        .split_once('@')
+        .map_or(hub_key, |(hub_type, _)| hub_type)
+}
+
+fn hub_worker_thread_name(hub_key: &str) -> String {
+    let sanitized: String = hub_key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("hub-dispatch-{sanitized}")
+}
+
+enum HubDispatchJob {
+    TurnOn {
+        target: HubDispatchTarget,
+        command: LightingCommand,
+        result_tx: Option<mpsc::Sender<LightControlResult<()>>>,
+    },
+    TurnOff {
+        target: HubDispatchTarget,
+        transition_ms: Option<u32>,
+        result_tx: Option<mpsc::Sender<LightControlResult<()>>>,
+    },
+}
+
+enum HubDispatchReceipt {
+    Enqueued,
+    Waiting(Receiver<LightControlResult<()>>),
+}
+
+impl HubDispatchReceipt {
+    fn wait(self, hub_key: &str) -> LightControlResult<()> {
+        match self {
+            Self::Enqueued => Ok(()),
+            Self::Waiting(rx) => rx.recv().unwrap_or_else(|_| {
+                Err(LightControlError::Internal(format!(
+                    "Hub {} dispatch worker stopped before returning a result",
+                    hub_key
+                )))
+            }),
         }
-        return false;
+    }
+}
+
+struct HubDispatchWorker {
+    key: String,
+    hub_type: String,
+    controller: Arc<dyn HubLightController>,
+    policy: HubDispatchPolicy,
+    tx: SyncSender<HubDispatchJob>,
+}
+
+impl HubDispatchWorker {
+    fn new(key: &str, controller: Arc<dyn HubLightController>, policy: HubDispatchPolicy) -> Self {
+        let (tx, rx) = mpsc::sync_channel(policy.queue_capacity);
+        let worker_key = key.to_string();
+        let thread_controller = controller.clone();
+        let thread_policy = policy.clone();
+        std::thread::Builder::new()
+            .name(hub_worker_thread_name(key))
+            .spawn(move || {
+                run_hub_dispatch_worker(worker_key, thread_controller, thread_policy, rx);
+            })
+            .expect("failed to spawn hub dispatch worker");
+
+        Self {
+            key: key.to_string(),
+            hub_type: hub_type_from_key(key).to_string(),
+            controller,
+            policy,
+            tx,
+        }
     }
 
-    std::thread::scope(|s| {
-        let op = &op;
-        let handles: Vec<_> = targets
-            .iter()
-            .map(|(key, controller, target)| {
-                let controller = controller.clone();
-                let target = target.clone();
-                let key = key.as_str();
-                s.spawn(move || (key, op(controller, &target)))
-            })
-            .collect();
+    fn metadata(&self) -> HubDispatchMetadata {
+        HubDispatchMetadata {
+            hub_key: self.key.clone(),
+            hub_type: self.hub_type.clone(),
+            policy: self.policy.clone(),
+        }
+    }
 
-        let mut any_ok = false;
-        for handle in handles {
-            match handle.join() {
-                Ok((_, Ok(()))) => any_ok = true,
-                Ok((key, Err(e))) => {
-                    warn!(target: "composite", "hub {} failed: {}", key, e);
-                }
-                Err(_) => {
-                    warn!(target: "composite", "hub dispatch thread panicked");
-                }
+    fn enqueue_turn_on(
+        &self,
+        target: HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<HubDispatchReceipt> {
+        let (result_tx, receipt) = self.result_channel();
+        self.try_send(
+            HubDispatchJob::TurnOn {
+                target,
+                command,
+                result_tx,
+            },
+            receipt,
+        )
+    }
+
+    fn enqueue_turn_off(
+        &self,
+        target: HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<HubDispatchReceipt> {
+        let (result_tx, receipt) = self.result_channel();
+        self.try_send(
+            HubDispatchJob::TurnOff {
+                target,
+                transition_ms,
+                result_tx,
+            },
+            receipt,
+        )
+    }
+
+    fn result_channel(
+        &self,
+    ) -> (
+        Option<mpsc::Sender<LightControlResult<()>>>,
+        HubDispatchReceipt,
+    ) {
+        match self.policy.completion {
+            HubDispatchCompletion::Wait => {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), HubDispatchReceipt::Waiting(rx))
+            }
+            HubDispatchCompletion::Enqueue => (None, HubDispatchReceipt::Enqueued),
+        }
+    }
+
+    fn try_send(
+        &self,
+        job: HubDispatchJob,
+        receipt: HubDispatchReceipt,
+    ) -> LightControlResult<HubDispatchReceipt> {
+        match self.tx.try_send(job) {
+            Ok(()) => Ok(receipt),
+            Err(TrySendError::Full(_)) => Err(LightControlError::CommandFailed(format!(
+                "Hub {} dispatch queue is full",
+                self.key
+            ))),
+            Err(TrySendError::Disconnected(_)) => Err(LightControlError::ConnectionError(format!(
+                "Hub {} dispatch worker is not running",
+                self.key
+            ))),
+        }
+    }
+}
+
+fn run_hub_dispatch_worker(
+    hub_key: String,
+    controller: Arc<dyn HubLightController>,
+    policy: HubDispatchPolicy,
+    rx: Receiver<HubDispatchJob>,
+) {
+    let mut next_dispatch_at: Option<Instant> = None;
+    while let Ok(job) = rx.recv() {
+        if let Some(deadline) = next_dispatch_at {
+            let now = Instant::now();
+            if deadline > now {
+                std::thread::sleep(deadline - now);
             }
         }
-        any_ok
-    })
+
+        let started = Instant::now();
+        let (target_label, result_tx, result) = match job {
+            HubDispatchJob::TurnOn {
+                target,
+                command,
+                result_tx,
+            } => {
+                let target_label = target.label();
+                let result = sync_block_on(controller.turn_on_target(&target, command));
+                (target_label, result_tx, result)
+            }
+            HubDispatchJob::TurnOff {
+                target,
+                transition_ms,
+                result_tx,
+            } => {
+                let target_label = target.label();
+                let result = sync_block_on(controller.turn_off_target(&target, transition_ms));
+                (target_label, result_tx, result)
+            }
+        };
+
+        let latency_ms = started.elapsed().as_millis();
+        if let Err(e) = &result {
+            warn!(
+                target: "composite",
+                "hub {} dispatch to '{}' failed after {}ms: {}",
+                hub_key,
+                target_label,
+                latency_ms,
+                e
+            );
+        } else if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "hub_dispatch_slow",
+                hub = %hub_key,
+                target = %target_label,
+                latency_ms,
+                "Hub dispatch slow"
+            );
+        }
+
+        if let Some(result_tx) = result_tx {
+            let _ = result_tx.send(result);
+        }
+
+        if policy.min_dispatch_spacing > Duration::ZERO {
+            next_dispatch_at = Some(Instant::now() + policy.min_dispatch_spacing);
+        }
+    }
 }
 
 /// A composite light controller that fans out commands to per-hub controllers.
@@ -121,8 +341,8 @@ where
 /// Interior mutability via [`RwLock`] allows adding/removing controllers
 /// and updating the routing table while the engine is running.
 pub struct CompositeController {
-    /// Per-hub controllers keyed by hub identifier (e.g., "hue@192.168.1.5").
-    controllers: RwLock<HashMap<String, Arc<dyn HubLightController>>>,
+    /// Per-hub dispatch workers keyed by hub identifier (e.g., "hue@192.168.1.5").
+    controllers: RwLock<HashMap<String, Arc<HubDispatchWorker>>>,
     /// Room routing: topology_room_id → list of (hub_key, dispatch target) pairs.
     routing: RwLock<HashMap<String, Vec<(String, HubDispatchTarget)>>>,
     /// Human-readable node labels for logs keyed by public/synthetic node ID.
@@ -141,8 +361,21 @@ impl CompositeController {
 
     /// Register a per-hub controller. Replaces any existing controller for this key.
     pub fn register_controller(&self, key: &str, controller: Arc<dyn HubLightController>) {
+        self.register_controller_with_policy(key, controller, HubDispatchPolicy::for_hub_key(key));
+    }
+
+    /// Register a per-hub controller with an explicit dispatch policy.
+    pub fn register_controller_with_policy(
+        &self,
+        key: &str,
+        controller: Arc<dyn HubLightController>,
+        policy: HubDispatchPolicy,
+    ) {
         if let Ok(mut controllers) = self.controllers.write() {
-            controllers.insert(key.to_string(), controller);
+            controllers.insert(
+                key.to_string(),
+                Arc::new(HubDispatchWorker::new(key, controller, policy)),
+            );
         }
     }
 
@@ -177,13 +410,29 @@ impl CompositeController {
         self.controllers.read().map(|c| c.len()).unwrap_or(0)
     }
 
+    /// Metadata for registered hub command queues.
+    pub fn hub_dispatch_metadata(&self) -> Vec<HubDispatchMetadata> {
+        let mut metadata: Vec<_> = self
+            .controllers
+            .read()
+            .map(|controllers| {
+                controllers
+                    .values()
+                    .map(|worker| worker.metadata())
+                    .collect()
+            })
+            .unwrap_or_default();
+        metadata.sort_by(|a, b| a.hub_key.cmp(&b.hub_key));
+        metadata
+    }
+
     /// Get controller targets for a room from the routing table.
     ///
-    /// Returns (hub_key, controller, target) triples.
+    /// Returns (hub_key, worker, target) triples.
     fn controllers_for_room(
         &self,
         room_id: &str,
-    ) -> Vec<(String, Arc<dyn HubLightController>, HubDispatchTarget)> {
+    ) -> Vec<(String, Arc<HubDispatchWorker>, HubDispatchTarget)> {
         let targets = self
             .routing
             .read()
@@ -201,7 +450,7 @@ impl CompositeController {
                 .filter_map(|(hub_key, target)| {
                     controllers
                         .get(hub_key)
-                        .map(|c| (hub_key.clone(), c.clone(), target.clone()))
+                        .map(|worker| (hub_key.clone(), worker.clone(), target.clone()))
                 })
                 .collect()
         } else {
@@ -233,7 +482,7 @@ impl CompositeController {
         hub_key: &str,
         target: HubDispatchTarget,
     ) -> LightControlResult<()> {
-        let controller = self
+        let worker = self
             .controllers
             .read()
             .ok()
@@ -245,7 +494,7 @@ impl CompositeController {
                 ))
             })?;
 
-        controller.flash_target(&target).await
+        worker.controller.flash_target(&target).await
     }
 }
 
@@ -270,28 +519,29 @@ impl LightController for CompositeController {
         let node_label = self.node_log_label(room_id);
         let started = Instant::now();
 
-        let result = if targets.len() == 1 {
-            let (key, controller, target) = &targets[0];
-            controller
-                .turn_on_target(target, command)
-                .await
-                .map_err(|e| {
-                    warn!(target: "composite", "hub {} failed: {}", key, e);
-                    e
-                })
-        } else {
-            let any_ok = dispatch_parallel(&targets, |controller, target| {
-                sync_block_on(controller.turn_on_target(target, command.clone()))
-            });
-
-            if any_ok {
-                Ok(())
-            } else {
-                Err(LightControlError::CommandFailed(format!(
-                    "All controllers failed for node {}",
-                    node_label
-                )))
+        let mut receipts = Vec::with_capacity(targets.len());
+        for (key, worker, target) in &targets {
+            match worker.enqueue_turn_on(target.clone(), command.clone()) {
+                Ok(receipt) => receipts.push((key.clone(), receipt)),
+                Err(e) => warn!(target: "composite", "hub {} failed: {}", key, e),
             }
+        }
+
+        let mut any_ok = false;
+        for (key, receipt) in receipts {
+            match receipt.wait(&key) {
+                Ok(()) => any_ok = true,
+                Err(e) => warn!(target: "composite", "hub {} failed: {}", key, e),
+            }
+        }
+
+        let result = if any_ok {
+            Ok(())
+        } else {
+            Err(LightControlError::CommandFailed(format!(
+                "All controllers failed for node {}",
+                node_label
+            )))
         };
 
         let latency_ms = started.elapsed().as_millis();
@@ -342,28 +592,29 @@ impl LightController for CompositeController {
         let node_label = self.node_log_label(room_id);
         let started = Instant::now();
 
-        let result = if targets.len() == 1 {
-            let (key, controller, target) = &targets[0];
-            controller
-                .turn_off_target(target, transition_ms)
-                .await
-                .map_err(|e| {
-                    warn!(target: "composite", "hub {} failed: {}", key, e);
-                    e
-                })
-        } else {
-            let any_ok = dispatch_parallel(&targets, |controller, target| {
-                sync_block_on(controller.turn_off_target(target, transition_ms))
-            });
-
-            if any_ok {
-                Ok(())
-            } else {
-                Err(LightControlError::CommandFailed(format!(
-                    "All controllers failed for node {}",
-                    node_label
-                )))
+        let mut receipts = Vec::with_capacity(targets.len());
+        for (key, worker, target) in &targets {
+            match worker.enqueue_turn_off(target.clone(), transition_ms) {
+                Ok(receipt) => receipts.push((key.clone(), receipt)),
+                Err(e) => warn!(target: "composite", "hub {} failed: {}", key, e),
             }
+        }
+
+        let mut any_ok = false;
+        for (key, receipt) in receipts {
+            match receipt.wait(&key) {
+                Ok(()) => any_ok = true,
+                Err(e) => warn!(target: "composite", "hub {} failed: {}", key, e),
+            }
+        }
+
+        let result = if any_ok {
+            Ok(())
+        } else {
+            Err(LightControlError::CommandFailed(format!(
+                "All controllers failed for node {}",
+                node_label
+            )))
         };
 
         let latency_ms = started.elapsed().as_millis();
@@ -405,7 +656,7 @@ impl LightController for CompositeController {
         let all_controllers: Vec<Arc<dyn HubLightController>> = self
             .controllers
             .read()
-            .map(|c| c.values().cloned().collect())
+            .map(|c| c.values().map(|worker| worker.controller.clone()).collect())
             .unwrap_or_default();
 
         let mut rooms = Vec::new();
@@ -426,7 +677,7 @@ impl LightController for CompositeController {
         let all_controllers: Vec<Arc<dyn HubLightController>> = self
             .controllers
             .read()
-            .map(|c| c.values().cloned().collect())
+            .map(|c| c.values().map(|worker| worker.controller.clone()).collect())
             .unwrap_or_default();
 
         for controller in &all_controllers {
@@ -447,8 +698,8 @@ impl LightController for CompositeController {
             )));
         }
 
-        for (key, controller, target) in &targets {
-            match controller.any_lights_on_target(target).await {
+        for (key, worker, target) in &targets {
+            match worker.controller.any_lights_on_target(target).await {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
                 Err(e) => {
@@ -473,8 +724,8 @@ impl LightController for CompositeController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
 
     /// Mock controller that records calls and can be configured to fail.
     struct MockController {
@@ -484,6 +735,89 @@ mod tests {
         turn_off_calls: Mutex<Vec<(String, Option<u32>)>>,
         lights_on: AtomicBool,
         rooms: Mutex<Vec<Room>>,
+    }
+
+    struct BlockingController {
+        turn_on_calls: AtomicUsize,
+        started: (Mutex<bool>, Condvar),
+        release: (Mutex<bool>, Condvar),
+    }
+
+    impl BlockingController {
+        fn new() -> Self {
+            Self {
+                turn_on_calls: AtomicUsize::new(0),
+                started: (Mutex::new(false), Condvar::new()),
+                release: (Mutex::new(false), Condvar::new()),
+            }
+        }
+
+        fn wait_started(&self) {
+            let (lock, cvar) = &self.started;
+            let mut started = lock.lock().unwrap();
+            while !*started {
+                started = cvar.wait(started).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            let (lock, cvar) = &self.release;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+
+        fn turn_on_count(&self) -> usize {
+            self.turn_on_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl HubLightController for BlockingController {
+        async fn turn_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+            _command: LightingCommand,
+        ) -> LightControlResult<()> {
+            self.turn_on_calls.fetch_add(1, Ordering::SeqCst);
+            {
+                let (lock, cvar) = &self.started;
+                *lock.lock().unwrap() = true;
+                cvar.notify_all();
+            }
+            let (lock, cvar) = &self.release;
+            let mut release = lock.lock().unwrap();
+            while !*release {
+                release = cvar.wait(release).unwrap();
+            }
+            Ok(())
+        }
+
+        async fn turn_off_target(
+            &self,
+            _target: &HubDispatchTarget,
+            _transition_ms: Option<u32>,
+        ) -> LightControlResult<()> {
+            Ok(())
+        }
+
+        async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+            Ok(Vec::new())
+        }
+
+        async fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn any_lights_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+        ) -> LightControlResult<bool> {
+            Ok(false)
+        }
+
+        fn name(&self) -> &str {
+            "blocking"
+        }
     }
 
     impl MockController {
@@ -612,6 +946,59 @@ mod tests {
     }
 
     #[test]
+    fn hub_dispatch_metadata_exposes_policy_by_hub_type() {
+        let composite = CompositeController::new();
+        composite.register_controller("hue@192.168.1.5", Arc::new(MockController::new("hue")));
+        composite.register_controller("matter@local", Arc::new(MockController::new("matter")));
+        composite.register_controller(
+            "homeassistant@ha.local",
+            Arc::new(MockController::new("ha")),
+        );
+
+        let metadata = composite.hub_dispatch_metadata();
+        let hue = metadata
+            .iter()
+            .find(|entry| entry.hub_key == "hue@192.168.1.5")
+            .unwrap();
+        let matter = metadata
+            .iter()
+            .find(|entry| entry.hub_key == "matter@local")
+            .unwrap();
+        let home_assistant = metadata
+            .iter()
+            .find(|entry| entry.hub_key == "homeassistant@ha.local")
+            .unwrap();
+
+        assert_eq!(hue.policy.completion, HubDispatchCompletion::Wait);
+        assert!(hue.policy.requires_staggering);
+        assert_eq!(matter.policy.completion, HubDispatchCompletion::Enqueue);
+        assert!(!matter.policy.requires_staggering);
+        assert_eq!(
+            home_assistant.policy.completion,
+            HubDispatchCompletion::Wait
+        );
+        assert!(!home_assistant.policy.requires_staggering);
+    }
+
+    #[test]
+    fn register_controller_with_policy_uses_explicit_policy() {
+        let composite = CompositeController::new();
+        let policy = HubDispatchPolicy {
+            queue_capacity: 4,
+            completion: HubDispatchCompletion::Wait,
+            requires_staggering: true,
+            min_dispatch_spacing: Duration::from_millis(250),
+        };
+        composite.register_controller_with_policy(
+            "custom@hub",
+            Arc::new(MockController::new("custom")),
+            policy.clone(),
+        );
+
+        assert_eq!(composite.hub_dispatch_metadata()[0].policy, policy);
+    }
+
+    #[test]
     fn remove_controller() {
         let composite = CompositeController::new();
         composite.register_controller("hub_a", Arc::new(MockController::new("a")));
@@ -696,6 +1083,37 @@ mod tests {
         composite.turn_on("hallway", cmd).await.unwrap();
         assert_eq!(mock_a.turn_on_count(), 1);
         assert_eq!(mock_b.turn_on_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn matter_turn_on_returns_after_enqueue() {
+        let blocking = Arc::new(BlockingController::new());
+        let composite = CompositeController::new();
+        composite.register_controller("matter@local", blocking.clone());
+        composite.update_routing(HashMap::from([(
+            "room1".to_string(),
+            vec![(
+                "matter@local".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "room1".to_string(),
+                    control_id: "room1".to_string(),
+                },
+            )],
+        )]));
+
+        let started = Instant::now();
+        composite
+            .turn_on("room1", LightingCommand::new(80, 4000))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "Matter dispatch waited for worker completion"
+        );
+
+        blocking.wait_started();
+        assert_eq!(blocking.turn_on_count(), 1);
+        blocking.release();
     }
 
     // ── any_lights_on OR semantics ───────────────────────────────────

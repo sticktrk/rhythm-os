@@ -81,6 +81,129 @@ void main() {
     });
   });
 
+  group('factory default and share bundles', () {
+    test('uses profile-bundle aliases for factory default and reset', () async {
+      when(
+        () => dio.get(
+          any(),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions:
+              RequestOptions(path: 'api/profile-bundle/factory-default'),
+          statusCode: 200,
+          data: {'kind': 'profile_bundle', 'factory': true},
+        ),
+      );
+      when(
+        () => dio.post(
+          any(),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/profile-bundle/reset'),
+          statusCode: 200,
+          data: {'kind': 'profile_bundle', 'reset': true},
+        ),
+      );
+
+      final factoryDefault = await api.getFactoryDefaultConfigurationBundle();
+      final reset = await api.resetConfigurationBundle();
+
+      expect(factoryDefault, {'kind': 'profile_bundle', 'factory': true});
+      expect(reset, {'kind': 'profile_bundle', 'reset': true});
+      verify(
+        () => dio.get(
+          'api/profile-bundle/factory-default',
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+      verify(
+        () => dio.post(
+          'api/profile-bundle/reset',
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+    });
+
+    test('uses share-bundle aliases for portable sharing', () async {
+      when(
+        () => dio.get(
+          any(),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/share-bundle'),
+          statusCode: 200,
+          data: {'kind': 'profile_bundle'},
+        ),
+      );
+      when(
+        () => dio.put(
+          any(),
+          data: any(named: 'data'),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/share-bundle'),
+          statusCode: 200,
+          data: {'kind': 'profile_bundle', 'saved': true},
+        ),
+      );
+      when(
+        () => dio.post(
+          any(),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/share-bundle/reset'),
+          statusCode: 200,
+          data: {'kind': 'profile_bundle', 'reset': true},
+        ),
+      );
+
+      final current = await api.getShareBundle();
+      final factoryDefault = await api.getFactoryDefaultShareBundle();
+      final saved = await api.putShareBundle({'kind': 'profile_bundle'});
+      final reset = await api.resetShareBundle();
+
+      expect(current, {'kind': 'profile_bundle'});
+      expect(factoryDefault, {'kind': 'profile_bundle'});
+      expect(saved, {'kind': 'profile_bundle', 'saved': true});
+      expect(reset, {'kind': 'profile_bundle', 'reset': true});
+      verify(
+        () => dio.get(
+          'api/share-bundle',
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+      verify(
+        () => dio.get(
+          'api/share-bundle/factory-default',
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+      verify(
+        () => dio.put(
+          'api/share-bundle',
+          data: {'kind': 'profile_bundle'},
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+      verify(
+        () => dio.post(
+          'api/share-bundle/reset',
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+    });
+  });
+
   group('fetchBackupJson', () {
     test('requests plain text with include_secrets when requested', () async {
       late http.Request request;

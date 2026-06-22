@@ -163,6 +163,7 @@ fn main() -> Result<()> {
         // Linux appliances are active platforms and should match the other
         // desktop/server-class runtimes for bootstrap behavior.
         s.platform = PlatformConfig::desktop();
+        rhythm_os_runtime_modules::install_default_light_runtime_modules(&mut s)?;
 
         rhythm_os::storage::load_persisted_state(&mut s);
 
@@ -615,12 +616,14 @@ async fn run_server(
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
     let server = http_server::create_router(state.clone(), provisioning);
-    let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| {
-        format!(
-            "Failed to bind to {} — is another process using this port?",
-            addr
-        )
-    })?;
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to bind to {} — is another process using this port?",
+                addr
+            )
+        })?;
     info!(target: "sys", "Rhythm Linux Appliance listening on http://{}", addr);
 
     // The listener is up: give the (possibly freshly updated) build its
@@ -1163,8 +1166,9 @@ mod tests {
     fn boot_success_health_waits_when_gate_heartbeat_is_stale() {
         let state = test_state();
         let heartbeat = idle_heartbeat();
-        heartbeat
-            .set_beat_at(Instant::now() - super::PERIODIC_GATE_STALE_AFTER - Duration::from_secs(1));
+        heartbeat.set_beat_at(
+            Instant::now() - super::PERIODIC_GATE_STALE_AFTER - Duration::from_secs(1),
+        );
 
         assert_eq!(
             boot_success_health(&state, &heartbeat),

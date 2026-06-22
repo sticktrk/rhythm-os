@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmApiException;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmApiException, RhythmDebugBundle;
 
 import '../providers/server_sync_provider.dart';
 import '../services/debug_bundle_submission_service.dart';
@@ -9,6 +10,7 @@ import '../services/server_endpoint_resolver.dart';
 import 'solar_orbit.dart';
 
 const Color _teal = Color(0xFF26C6DA);
+const Duration _serverDebugBundleReceiveTimeout = Duration(minutes: 5);
 
 /// Public dialog that prompts the user for a bug summary.
 ///
@@ -120,6 +122,9 @@ class _ReportBugPromptDialogState extends State<ReportBugPromptDialog> {
 Future<void> showReportBugFlow(
   BuildContext context, {
   Hub? serverHub,
+  bool localServerOnly = false,
+  String? serverVersionOverride,
+  String? serverPlatformContextOverride,
 }) async {
   final summary = await showDialog<String>(
     context: context,
@@ -133,22 +138,55 @@ Future<void> showReportBugFlow(
     final DebugBundleSubmission submission;
     if (serverHub != null) {
       final syncProvider = context.read<ServerSyncProvider>();
-      final serverVersion = syncProvider.firmwareVersion == '0.0.0'
+      final rawServerVersion =
+          serverVersionOverride ?? syncProvider.firmwareVersion;
+      final serverVersion = rawServerVersion == '0.0.0'
           ? 'Unknown'
-          : _formatVersion(syncProvider.firmwareVersion);
-      final resolved = await ServerEndpointResolver.resolve(
-        serverHub,
-        syncProvider: syncProvider,
+          : _formatVersion(rawServerVersion);
+      final serverPlatformContext =
+          serverPlatformContextOverride ?? syncProvider.serverPlatformContext;
+      final resolved = localServerOnly
+          ? ServerEndpointResolver.local(serverHub)
+          : await ServerEndpointResolver.resolve(
+              serverHub,
+              syncProvider: syncProvider,
+            );
+      final client = resolved.diagnosticsApi(
+        debugBundleReceiveTimeout: _serverDebugBundleReceiveTimeout,
       );
-      final client = resolved.diagnosticsApi();
-      final bundle = await client.downloadDebugBundle();
-      submission = await DebugBundleSubmissionService.instance.submit(
-        serverHub: serverHub,
-        bundle: bundle,
-        serverVersion: serverVersion,
-        serverPlatformContext: syncProvider.serverPlatformContext,
-        summary: summary,
-      );
+      RhythmDebugBundle? bundle;
+      String? bundleFailure;
+      try {
+        bundle = await client.downloadDebugBundle();
+        bundleFailure = null;
+      } catch (error) {
+        bundleFailure = _formatDebugBundleFailure(error);
+        debugPrint(
+          'ReportBugFlow: server debug bundle download failed from '
+          '${resolved.baseUrl}: $bundleFailure',
+        );
+      }
+
+      if (bundle != null) {
+        submission = await DebugBundleSubmissionService.instance.submit(
+          serverHub: serverHub,
+          bundle: bundle,
+          serverVersion: serverVersion,
+          serverPlatformContext: serverPlatformContext,
+          summary: summary,
+        );
+      } else {
+        submission = await DebugBundleSubmissionService.instance.submitTextOnly(
+          summary: _summaryWithDebugBundleFailure(
+            summary: summary,
+            endpoint: resolved.baseUrl,
+            detail: bundleFailure,
+          ),
+          serverHub: serverHub,
+          serverVersion: serverVersion,
+          serverPlatformContext: serverPlatformContext,
+        );
+      }
     } else {
       submission = await DebugBundleSubmissionService.instance.submitTextOnly(
         summary: summary,
@@ -261,4 +299,47 @@ String _formatVersion(String version) {
   return version.startsWith('v') || version.startsWith('V')
       ? version
       : 'v$version';
+}
+
+String _formatDebugBundleFailure(Object error) {
+  if (error is RhythmApiException) {
+    final detail = error.serverMessage?.trim();
+    final status = error.statusCode;
+    if (detail != null && detail.isNotEmpty) {
+      return status == null
+          ? '${error.message}: $detail'
+          : '${error.message} (HTTP $status): $detail';
+    }
+    return status == null ? error.message : '${error.message} (HTTP $status)';
+  }
+  return error.toString();
+}
+
+@visibleForTesting
+String summaryWithDebugBundleFailureForTesting({
+  required String summary,
+  required String endpoint,
+  required String? detail,
+}) {
+  return _summaryWithDebugBundleFailure(
+    summary: summary,
+    endpoint: endpoint,
+    detail: detail,
+  );
+}
+
+String _summaryWithDebugBundleFailure({
+  required String summary,
+  required String endpoint,
+  required String? detail,
+}) {
+  final trimmedSummary = summary.trim();
+  final lines = <String>[
+    if (trimmedSummary.isNotEmpty) trimmedSummary,
+    if (trimmedSummary.isNotEmpty) '',
+    'Server debug bundle download failed before upload.',
+    'Endpoint: $endpoint',
+    if (detail != null && detail.trim().isNotEmpty) 'Error: ${detail.trim()}',
+  ];
+  return lines.join('\n');
 }

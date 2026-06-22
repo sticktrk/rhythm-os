@@ -16,6 +16,7 @@ void main() {
       });
 
       expect(room.transitioning, isFalse);
+      expect(room.pendingDispatch, isFalse);
       expect(room.state, RoomModeState.active);
     });
 
@@ -24,6 +25,7 @@ void main() {
         'id': 'living_room',
         'state': 'active',
         'transitioning': true,
+        'pending_dispatch': true,
         'rhythm_enabled': true,
         'time_offset': 0,
         'brightness_offset': 0,
@@ -34,6 +36,7 @@ void main() {
 
       expect(state.roomId, equals('living_room'));
       expect(state.transitioning, isTrue);
+      expect(state.pendingDispatch, isTrue);
       expect(state.state, RoomModeState.active);
     });
   });

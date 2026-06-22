@@ -221,6 +221,37 @@ void main() {
         expect(config.motionTimeoutSecs, isNull);
         expect(config.rhythmIntervalSecs, 60);
       });
+
+      test('parses sigmoid curve fields', () {
+        final config = RhythmCurveConfig.fromJson({
+          'id': 'expert',
+          'name': 'Expert',
+          'curve': {
+            'type': 'sigmoid',
+            'schedule': {
+              'wake': {'hour': 7.0, 'offset_minutes': 15},
+              'bed': {'hour': 22.5},
+              'alternate_days': [],
+            },
+            'ascend_start': 3.5,
+            'descend_start': 12.5,
+            'wake_speed': 9,
+            'bed_speed': 5,
+            'wake_brightness': 45,
+            'bed_brightness': 55,
+          },
+        });
+
+        expect(config.curve, isA<RhythmSigmoidCurve>());
+        final curve = config.sigmoidCurve!;
+        expect(curve.schedule['wake'], {'hour': 7.0, 'offset_minutes': 15});
+        expect(curve.ascendStart, 3.5);
+        expect(curve.descendStart, 12.5);
+        expect(curve.wakeSpeed, 9);
+        expect(curve.bedSpeed, 5);
+        expect(curve.wakeBrightness, 45);
+        expect(curve.bedBrightness, 55);
+      });
     });
 
     group('toJson', () {
@@ -278,6 +309,30 @@ void main() {
         );
         final roundTripped = RhythmCurveConfig.fromJson(original.toJson());
         expect(roundTripped, original);
+      });
+
+      test('round-trips a sigmoid curve', () {
+        const original = RhythmCurveConfig(
+          id: 'expert',
+          name: 'Expert',
+          curve: RhythmSigmoidCurve(
+            schedule: {
+              'wake': {'hour': 6.0},
+              'bed': {'hour': 22.0},
+              'alternate_days': <dynamic>[],
+            },
+            ascendStart: 3.0,
+            descendStart: 12.0,
+            wakeSpeed: 8,
+            bedSpeed: 6,
+            wakeBrightness: 50,
+            bedBrightness: 50,
+          ),
+        );
+
+        final roundTripped = RhythmCurveConfig.fromJson(original.toJson());
+        expect(roundTripped, original);
+        expect(roundTripped.sigmoidCurve, isNotNull);
       });
     });
 

@@ -424,6 +424,7 @@ class RhythmRoom {
   final String groupedLightId;
   final RoomModeState state;
   final bool transitioning;
+  final bool pendingDispatch;
   final bool rhythmEnabled;
   final bool disabled;
   final double timeOffset;
@@ -457,6 +458,7 @@ class RhythmRoom {
     required this.groupedLightId,
     required this.state,
     this.transitioning = false,
+    bool? pendingDispatch,
     required this.rhythmEnabled,
     required this.disabled,
     required this.timeOffset,
@@ -482,6 +484,7 @@ class RhythmRoom {
     this.timeoutSecs,
     this.warningActive,
   })  : assert(profileSettings == null || roomProfile == null),
+        pendingDispatch = pendingDispatch ?? false,
         profileSettings = profileSettings ?? roomProfile;
 
   bool get hasMotionSensor =>
@@ -568,6 +571,7 @@ class RhythmRoom {
       groupedLightId: json['grouped_light_id'] as String? ?? '',
       state: state,
       transitioning: json['transitioning'] as bool? ?? false,
+      pendingDispatch: json['pending_dispatch'] as bool? ?? false,
       rhythmEnabled: json['rhythm_enabled'] as bool? ?? false,
       disabled: json['disabled'] as bool? ?? false,
       timeOffset: jsonDouble(json['time_offset'],
@@ -714,6 +718,7 @@ class RhythmRoomState {
   final RhythmMode? mode;
   final RoomModeState state;
   final bool transitioning;
+  final bool pendingDispatch;
   final bool rhythmEnabled;
   final double timeOffset;
   final double brightnessOffset;
@@ -746,6 +751,7 @@ class RhythmRoomState {
     this.mode,
     required this.state,
     this.transitioning = false,
+    bool? pendingDispatch,
     required this.rhythmEnabled,
     required this.timeOffset,
     required this.brightnessOffset,
@@ -774,6 +780,7 @@ class RhythmRoomState {
     this.warningActive,
     this.tick = false,
   })  : assert(profileSettings == null || roomProfile == null),
+        pendingDispatch = pendingDispatch ?? false,
         profileSettings = profileSettings ?? roomProfile;
 
   String get roomId => nodeId;
@@ -814,6 +821,7 @@ class RhythmRoomState {
       mode: RhythmMode.fromString(json['mode'] as String?),
       state: state,
       transitioning: json['transitioning'] as bool? ?? false,
+      pendingDispatch: json['pending_dispatch'] as bool? ?? false,
       rhythmEnabled: json['rhythm_enabled'] as bool? ?? false,
       timeOffset: jsonDouble(json['time_offset'],
               preferredKeys: const ['time_offset']) ??

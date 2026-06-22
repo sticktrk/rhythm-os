@@ -1,7 +1,7 @@
 /// Captures tutorial screenshots of the Matter device pairing flow.
 ///
 /// Run via:
-///   ./scripts/capture-tutorial-screenshots.sh
+///   ./tools/app/scripts/capture-tutorial-screenshots.sh
 ///
 /// Output: flutter/rhythm_app/screenshots/*.png
 library;

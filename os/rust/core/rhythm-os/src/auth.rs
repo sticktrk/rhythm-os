@@ -363,7 +363,8 @@ pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthReq
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| addr.ip().is_loopback())
-            .unwrap_or(false);
+            .unwrap_or(false)
+        && has_remote_access_forwarding_headers(&req);
 
     let requires_auth = if via_remote_access {
         true
@@ -387,6 +388,14 @@ fn is_public_request(method: &Method, path: &str, auth_info: ApiAuthRequestInfo)
         || path == "/health"
         || path == "/api/auth/status"
         || (*method == Method::POST && path == "/api/auth/claim" && auth_info.claim_available)
+}
+
+fn has_remote_access_forwarding_headers(req: &Request<Body>) -> bool {
+    req.headers().contains_key("cf-connecting-ip")
+        || req.headers().contains_key("cf-ray")
+        || req.headers().contains_key("cf-visitor")
+        || req.headers().contains_key("cdn-loop")
+        || req.headers().contains_key("x-forwarded-for")
 }
 
 fn bearer_token(value: Option<&axum::http::HeaderValue>) -> Option<&str> {
@@ -475,6 +484,13 @@ mod tests {
             .unwrap();
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::new(peer_ip, 49152)));
+        req
+    }
+
+    fn tunnel_request(method: Method, uri: &str, body: Body) -> Request<Body> {
+        let mut req = request_with_peer(method, uri, IpAddr::V4(Ipv4Addr::LOCALHOST), body);
+        req.headers_mut()
+            .insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
         req
     }
 
@@ -686,14 +702,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn appliance_tunnel_request_requires_owner_token() {
+    async fn appliance_loopback_without_tunnel_headers_stays_open() {
         let state = test_state();
         {
             let mut state = state.lock().unwrap();
             state.platform_type = "appliance";
             state.platform_context = "rpiz";
+            state.require_api_auth = true;
+            state.api_auth.require_api_auth = Some(true);
         }
-        let issued = issue_local_owner_token(&state, Some("phone".into())).unwrap();
         let app = auth_test_router(state);
 
         let status = app
@@ -711,12 +728,11 @@ mod tests {
             &to_bytes(status.into_body(), usize::MAX).await.unwrap(),
         )
         .unwrap();
-        assert_eq!(body["requires_auth"].as_bool(), Some(true));
-        assert_eq!(body["claim_available"].as_bool(), Some(false));
-        assert_eq!(body["via_remote_access"].as_bool(), Some(true));
+        assert_eq!(body["requires_auth"].as_bool(), Some(false));
+        assert_eq!(body["claim_available"].as_bool(), Some(true));
+        assert_eq!(body["via_remote_access"].as_bool(), Some(false));
 
-        let unauthenticated = app
-            .clone()
+        let response = app
             .oneshot(request_with_peer(
                 Method::GET,
                 "/api/state",
@@ -725,16 +741,48 @@ mod tests {
             ))
             .await
             .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn appliance_tunnel_request_requires_owner_token() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let issued = issue_local_owner_token(&state, Some("phone".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let status = app
+            .clone()
+            .oneshot(tunnel_request(
+                Method::GET,
+                "/api/auth/status",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let body = serde_json::from_slice::<Value>(
+            &to_bytes(status.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["requires_auth"].as_bool(), Some(true));
+        assert_eq!(body["claim_available"].as_bool(), Some(false));
+        assert_eq!(body["via_remote_access"].as_bool(), Some(true));
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(tunnel_request(Method::GET, "/api/state", Body::empty()))
+            .await
+            .unwrap();
         assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
         let authenticated = app
             .oneshot({
-                let mut req = request_with_peer(
-                    Method::GET,
-                    "/api/state",
-                    IpAddr::V4(Ipv4Addr::LOCALHOST),
-                    Body::empty(),
-                );
+                let mut req = tunnel_request(Method::GET, "/api/state", Body::empty());
                 req.headers_mut().insert(
                     AUTHORIZATION,
                     format!("Bearer {}", issued.token).parse().unwrap(),

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/widgets/first_run_explainer.dart';
 import 'package:rhythm_app/widgets/room_card.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -195,6 +196,14 @@ double _timeOffsetMinutesForEffectiveHour(double targetHour) {
 }
 
 void main() {
+  setUp(() {
+    // Most tests exercise Mood mechanics directly; treat the one-time
+    // explainer as already seen so it doesn't intercept the first tap. The
+    // gating itself is covered by a dedicated test below.
+    FirstRunExplainer.seenReader = (_) => true;
+    FirstRunExplainer.seenWriter = (_) async {};
+  });
+
   testWidgets('shows and clears a spinner while the room is transitioning',
       (tester) async {
     final roomProvider = RoomProvider();
@@ -278,6 +287,82 @@ void main() {
     expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
   });
 
+  testWidgets('shows spinner for pending dispatch without disabling controls',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      pendingDispatch: true,
+      lightsOn: true,
+    );
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      pendingDispatch: false,
+      lightsOn: true,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
   testWidgets('mood segment sends mood room state', (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -334,6 +419,70 @@ void main() {
     expect(call.state, RoomModeState.mood);
     expect(call.state?.wireValue, 'mood');
     expect(call.profileSettings, {'mood_enabled': true});
+  });
+
+  testWidgets('first Mood tap shows the explainer and defers the mode change',
+      (tester) async {
+    // Pretend the explainer has never been seen for this test only.
+    var marked = false;
+    FirstRunExplainer.seenReader = (_) => false;
+    FirstRunExplainer.seenWriter = (_) async {
+      marked = true;
+    };
+
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Mood'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // The explainer is presented and marked seen…
+    expect(find.text('Meet Mood'), findsOneWidget);
+    expect(marked, isTrue);
+    // …and the mode change is deferred until the user acts on it.
+    expect(roomProvider.getRoomState('room-1'), isNot(RoomModeState.mood));
+    expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
   testWidgets('standby uses on segment and disabled brightness slider',
@@ -393,6 +542,7 @@ void main() {
     );
 
     expect(find.text('Standby'), findsOneWidget);
+    expect(find.text('Off'), findsOneWidget);
     expect(find.text('On'), findsNothing);
     final slider = tester.widget<Slider>(find.byType(Slider));
     expect(slider.value, 1);

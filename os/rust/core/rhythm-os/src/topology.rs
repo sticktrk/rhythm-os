@@ -368,6 +368,10 @@ struct DispatchPlan {
 
 const INTERNAL_LIGHT_NODE_PREFIX: &str = "__rhythm_light_node__";
 
+pub fn is_internal_light_node_id(node_id: &str) -> bool {
+    node_id.starts_with(INTERNAL_LIGHT_NODE_PREFIX)
+}
+
 fn group_light_node_id(room_id: &str, hub_key: &HubKey, hub_room_id: &str) -> String {
     format!(
         "{INTERNAL_LIGHT_NODE_PREFIX}|room={room_id}|kind=group|hub={hub_key}|source={hub_room_id}"

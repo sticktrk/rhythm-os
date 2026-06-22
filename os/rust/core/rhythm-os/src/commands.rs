@@ -19,15 +19,17 @@ use rhythm_core::{
     ModeTransitionConfig, ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb,
     RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
 };
+use rhythm_runtime_api::{RuntimeEvent, TickContext};
 use serde_json::Value;
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, CurveModifierDto,
-    HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto, LocationDto,
-    ModeLastChangeDto, ModeSettingsDto, ModeTransitionsDto, NodeStateDto, NodesPollResponse,
-    ObservedPowerDto, PreferredEndpointDto, ProfilesDto, ReviewCountsDto, ReviewEntryDto,
-    ReviewHubDto, ReviewSummaryDto, RoomPollState, RoomProfileSettingsDto, RoomRhythmState,
-    RoomsPollResponse, SettingsDto, StateSnapshot, TopologyNodeControlDto, TopologyNodeDto,
+    HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto,
+    LightRuntimeDto, LightRuntimeInitialApplyDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
+    ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto,
+    ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
+    RoomProfileSettingsDto, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot,
+    TopologyNodeControlDto, TopologyNodeDto,
 };
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
@@ -41,6 +43,7 @@ use crate::factory_default_config::{
     factory_default_mode_config_map, factory_default_mode_transition_configs,
     factory_default_power_save, factory_default_profile_bundle, factory_default_scene_map,
 };
+use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::{
     LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput, LightScenePower,
     LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest, SceneApplyResponse,
@@ -1155,9 +1158,7 @@ fn semantic_lights_on_override(
 ) -> Option<bool> {
     if hard_off {
         Some(false)
-    } else if mood_active && settings.mood_scene_id.is_none() {
-        Some(true)
-    } else if soft_off {
+    } else if (mood_active && settings.mood_scene_id.is_none()) || soft_off {
         Some(true)
     } else {
         None
@@ -1653,6 +1654,7 @@ struct NodeStateDtoBuildContext<'a> {
     motion_snapshots: &'a HashMap<String, crate::state::MotionSnapshot>,
     nodes_with_sensors: &'a HashSet<String>,
     transitioning_nodes: &'a HashSet<String>,
+    pending_dispatch_nodes: &'a HashSet<String>,
 }
 
 struct NodeStateDtoMetadata {
@@ -1675,6 +1677,31 @@ fn node_state_dto_metadata(s: &AppState, node_id: &str) -> NodeStateDtoMetadata 
         manufacturer,
         model,
     }
+}
+
+fn parent_node_id_for_pending_dispatch(s: &AppState, node_id: &str) -> Option<String> {
+    s.topology
+        .get_device_node(node_id)
+        .and_then(|node| node.parent_id.clone())
+        .filter(|parent_id| parent_id != node_id)
+}
+
+fn pending_dispatch_node_ids(s: &AppState) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for node_id in s.pending_node_dispatches.keys() {
+        ids.insert(node_id.clone());
+        if let Some(parent_id) = parent_node_id_for_pending_dispatch(s, node_id) {
+            ids.insert(parent_id);
+        }
+    }
+    ids
+}
+
+fn node_has_pending_dispatch(s: &AppState, node_id: &str) -> bool {
+    s.pending_node_dispatches.contains_key(node_id)
+        || s.pending_node_dispatches.keys().any(|pending_id| {
+            parent_node_id_for_pending_dispatch(s, pending_id).as_deref() == Some(node_id)
+        })
 }
 
 fn scene_entry_targets_display_room(s: &AppState, entry_node_id: &str, room_id: &str) -> bool {
@@ -1863,6 +1890,7 @@ fn build_node_state_dto_from_snapshot_parts(
         lights_on: observed_power.lights_on,
         observed_power,
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
+        pending_dispatch: ctx.pending_dispatch_nodes.contains(&snap.id),
         brightness,
         kelvin,
         mood_enabled,
@@ -1899,6 +1927,7 @@ pub fn build_node_state_event(
         mood_active,
         standby_enabled,
         standby_active,
+        pending_dispatch,
     ) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
@@ -1928,6 +1957,7 @@ pub fn build_node_state_event(
             ),
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
+        let pending_dispatch = node_has_pending_dispatch(&s, &snap.id);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
         let mood_active = room_mood_active(
@@ -1971,6 +2001,7 @@ pub fn build_node_state_event(
             mood_active,
             standby_enabled,
             standby_active,
+            pending_dispatch,
         )
     };
     crate::server_event::NodeStateEvent::from_snapshot(
@@ -1982,6 +2013,7 @@ pub fn build_node_state_event(
             lights_on: observed_power.lights_on,
             observed_power,
             transitioning,
+            pending_dispatch,
             brightness,
             kelvin,
             mood_enabled,
@@ -2119,6 +2151,7 @@ fn persist_settings_locked(s: &AppState) {
         if let Err(e) = storage.save_settings(&crate::storage::StoredSettings {
             power_save: s.power_save,
             light_breaker_enabled: s.light_breaker_enabled,
+            light_runtime: s.light_runtime_kind.clone(),
             active_mode: s.active_mode,
             last_active_mode_cause: s.last_active_mode_cause,
             last_active_mode_transition_id: s.last_active_mode_transition_id.clone(),
@@ -2332,22 +2365,42 @@ pub fn do_input_binding_delete(state: &SharedState, binding_id: &str) -> Result<
 // State snapshots (for GET endpoints)
 // ============================================================================
 
-pub fn refresh_observed_power_authoritatively(state: &SharedState) -> Result<()> {
+pub fn refresh_observed_power_authoritatively(
+    state: &SharedState,
+) -> Result<Vec<rhythm_core::RoomSnapshot>> {
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
     };
 
     let Some(runtime) = runtime else {
-        return Ok(());
+        return Ok(Vec::new());
     };
 
-    refresh_all_lights_on_cache_for_runtime(
+    let snapshots = refresh_all_lights_on_cache_for_runtime(
         state,
         &runtime,
         ObservedPowerSource::AuthoritativeRefresh,
     );
-    Ok(())
+    Ok(snapshots)
+}
+
+pub fn refresh_observed_power_authoritatively_and_emit(state: &SharedState) -> Result<usize> {
+    let snapshots = refresh_observed_power_authoritatively(state)?;
+    let events: Vec<_> = snapshots
+        .into_iter()
+        .filter(|snap| snap.kind.is_light_addressable())
+        .map(rhythm_core::NodeSnapshot::from_room_snapshot)
+        .map(|snap| build_node_state_event(state, &snap))
+        .collect();
+    let event_count = events.len();
+    if !events.is_empty() {
+        crate::state::emit_server_event(
+            state,
+            crate::server_event::ServerEvent::NodeState { nodes: events },
+        );
+    }
+    Ok(event_count)
 }
 
 /// Build a full state snapshot.
@@ -2392,6 +2445,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         update_interval,
         power_save,
         review_dto,
+        pending_dispatch_nodes,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -2525,6 +2579,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             Duration::from_secs(s.runtime_config.update_interval_secs),
             s.power_save,
             build_review_summary_dto(&s),
+            pending_dispatch_node_ids(&s),
         )
     };
 
@@ -2533,6 +2588,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     } else {
         bootstrap_node_snapshots_from_state(state)
     };
+    node_snapshots.retain(|snap| !crate::topology::is_internal_light_node_id(&snap.id));
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
     active_profile_effective.rhythm_interval_secs = crate::periodic::effective_cycle_duration(
@@ -2560,6 +2616,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             motion_snapshots: &motion_snapshots,
             nodes_with_sensors: &nodes_with_sensors,
             transitioning_nodes: &transitioning_nodes,
+            pending_dispatch_nodes: &pending_dispatch_nodes,
         };
         let mut nodes = Vec::with_capacity(node_snapshots.len());
         for snap in &node_snapshots {
@@ -2794,7 +2851,14 @@ fn build_hub_startup_retry_dto(retry: &crate::state::HubStartupRetryState) -> Hu
 
 /// Build a full node state for a single addressable node.
 pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateDto> {
-    let (runtime, room_observed_power, motion_snapshots, nodes_with_sensors, transitioning_nodes) = {
+    let (
+        runtime,
+        room_observed_power,
+        motion_snapshots,
+        nodes_with_sensors,
+        transitioning_nodes,
+        pending_dispatch_nodes,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -2802,6 +2866,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
             s.motion_snapshots.clone(),
             s.motion_control_target_ids(),
             active_transition_room_ids(&s.room_mode_transitions, std::time::Instant::now()),
+            pending_dispatch_node_ids(&s),
         )
     };
 
@@ -2826,6 +2891,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
         transitioning_nodes: &transitioning_nodes,
+        pending_dispatch_nodes: &pending_dispatch_nodes,
     };
     let (placement, manufacturer, model) = node_metadata_from_topology(&s, node_id);
     Ok(build_node_state_dto_from_snapshot_parts(
@@ -2861,6 +2927,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         longitude,
         utc_offset,
         timezone_name,
+        pending_dispatch_nodes,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
@@ -2878,6 +2945,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
             s.longitude,
             s.utc_offset_hours,
             s.timezone_name.clone(),
+            pending_dispatch_node_ids(&s),
         )
     };
 
@@ -2903,6 +2971,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         motion_snapshots: &motion_snapshots,
         nodes_with_sensors: &nodes_with_sensors,
         transitioning_nodes: &transitioning_nodes,
+        pending_dispatch_nodes: &pending_dispatch_nodes,
     };
     let mut nodes = Vec::with_capacity(node_snapshots.len());
     for snap in &node_snapshots {
@@ -2944,6 +3013,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
         topo_hub_types,
         rooms_with_sensors,
         transitioning_rooms,
+        pending_dispatch_rooms,
         power_save,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -2974,6 +3044,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
             topology_hub_types_map(&s),
             sensor_rooms,
             active_transition_room_ids(&s.room_mode_transitions, now),
+            pending_dispatch_node_ids(&s),
             s.power_save,
         )
     };
@@ -3044,6 +3115,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                 lights_on: observed_power.lights_on,
                 observed_power,
                 transitioning: transitioning_rooms.contains(&snap.id),
+                pending_dispatch: pending_dispatch_rooms.contains(&snap.id),
                 brightness: curve_brightness,
                 kelvin,
                 mood_enabled,
@@ -3138,6 +3210,7 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
                     lights_on: false,
                     observed_power: fallback_observed_power_dto(false),
                     transitioning: false,
+                    pending_dispatch: pending_dispatch_rooms.contains(&room.id),
                     brightness: curve_brightness,
                     kelvin,
                     mood_enabled,
@@ -3166,7 +3239,15 @@ pub fn build_rooms_state(state: &SharedState) -> Result<String> {
 /// Build a `RoomRhythmState` for a single room from engine state.
 pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<RoomRhythmState> {
     let now = std::time::Instant::now();
-    let (runtime, room_observed_power, warning_active, transitioning, hub_types, power_save) = {
+    let (
+        runtime,
+        room_observed_power,
+        warning_active,
+        transitioning,
+        pending_dispatch,
+        hub_types,
+        power_save,
+    ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.hub_runtime(),
@@ -3175,6 +3256,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
                 .get(room_id)
                 .is_some_and(|motion| motion.warning_active),
             room_mode_transition_active(&s.room_mode_transitions, room_id, now),
+            node_has_pending_dispatch(&s, room_id),
             room_hub_types_from_topology(&s, room_id),
             s.power_save,
         )
@@ -3238,6 +3320,7 @@ pub fn build_room_rhythm_state(state: &SharedState, room_id: &str) -> Result<Roo
         lights_on: observed_power.lights_on,
         observed_power,
         transitioning,
+        pending_dispatch,
         brightness: curve_brightness,
         kelvin,
         mood_enabled,
@@ -3272,12 +3355,21 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
         auto_update: s.auto_update,
+        light_runtime: s.light_runtime_kind.clone(),
     }
 }
 
 fn build_light_breaker_dto_inner(s: &AppState) -> LightBreakerDto {
     LightBreakerDto {
         enabled: s.light_breaker_enabled,
+    }
+}
+
+fn build_light_runtime_dto_inner(s: &AppState) -> LightRuntimeDto {
+    LightRuntimeDto {
+        runtime_id: s.light_runtime_kind.clone(),
+        available_runtime_ids: s.light_runtime_registry.available_runtime_ids(),
+        initial_apply: None,
     }
 }
 
@@ -3334,6 +3426,12 @@ pub fn build_light_breaker(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let dto = build_light_breaker_dto_inner(&s);
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light breaker: {}", e))
+}
+
+pub fn build_light_runtime(state: &SharedState) -> Result<String> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let dto = build_light_runtime_dto_inner(&s);
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light runtime: {}", e))
 }
 
 /// Build the current mode state and policy.
@@ -4680,6 +4778,9 @@ fn restore_backup_room_manager(
 ) -> Result<()> {
     let mut normalized_rooms = rhythm_core::RoomManager::new();
     for room in rooms.iter().cloned().map(normalize_legacy_soft_off_room) {
+        if crate::topology::is_internal_light_node_id(&room.id) {
+            continue;
+        }
         normalized_rooms.add_room(room);
     }
     let needs_runtime = {
@@ -4966,6 +5067,91 @@ pub(crate) fn emit_node_state_event_after_apply(
                 state,
                 crate::server_event::ServerEvent::NodeState { nodes: events },
             );
+        }
+    }
+}
+
+fn emit_node_state_event_for_dispatch_pending_change(state: &SharedState, node_id: &str) {
+    let runtime = {
+        let Ok(s) = state.lock() else { return };
+        s.hub_runtime()
+    };
+    if let Some(runtime) = runtime {
+        emit_node_state_event_after_apply(state, &runtime, node_id);
+    }
+}
+
+pub(crate) fn mark_node_dispatch_pending(state: &SharedState, node_id: &str) {
+    let became_pending = {
+        let Ok(mut s) = state.lock() else { return };
+        let count = s
+            .pending_node_dispatches
+            .entry(node_id.to_string())
+            .or_insert(0);
+        let became_pending = *count == 0;
+        *count += 1;
+        became_pending
+    };
+    if became_pending {
+        emit_node_state_event_for_dispatch_pending_change(state, node_id);
+    }
+}
+
+pub(crate) fn clear_node_dispatch_pending(state: &SharedState, node_id: &str) {
+    let cleared = {
+        let Ok(mut s) = state.lock() else { return };
+        let Some(count) = s.pending_node_dispatches.get_mut(node_id) else {
+            return;
+        };
+        if *count > 1 {
+            *count -= 1;
+            false
+        } else {
+            s.pending_node_dispatches.remove(node_id);
+            true
+        }
+    };
+    if cleared {
+        emit_node_state_event_for_dispatch_pending_change(state, node_id);
+    }
+}
+
+pub(crate) fn try_send_work_item_with_pending(
+    state: &SharedState,
+    tx: &std::sync::mpsc::SyncSender<WorkItem>,
+    item: WorkItem,
+) -> std::result::Result<(), std::sync::mpsc::TrySendError<WorkItem>> {
+    let pending_node_id = item.pending_node_id().map(str::to_string);
+    if let Some(node_id) = pending_node_id.as_deref() {
+        mark_node_dispatch_pending(state, node_id);
+    }
+    match tx.try_send(item) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(node_id) = pending_node_id.as_deref() {
+                clear_node_dispatch_pending(state, node_id);
+            }
+            Err(err)
+        }
+    }
+}
+
+fn send_work_item_with_pending(
+    state: &SharedState,
+    tx: &std::sync::mpsc::SyncSender<WorkItem>,
+    item: WorkItem,
+) -> std::result::Result<(), std::sync::mpsc::SendError<WorkItem>> {
+    let pending_node_id = item.pending_node_id().map(str::to_string);
+    if let Some(node_id) = pending_node_id.as_deref() {
+        mark_node_dispatch_pending(state, node_id);
+    }
+    match tx.send(item) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if let Some(node_id) = pending_node_id.as_deref() {
+                clear_node_dispatch_pending(state, node_id);
+            }
+            Err(err)
         }
     }
 }
@@ -5271,11 +5457,12 @@ fn queue_node_dispatch_work_items(
     let item_count = work_items.len();
     let error_label = dispatch_label.to_string();
     let thread_label = error_label.clone();
+    let dispatcher_state = state.clone();
     std::thread::Builder::new()
         .name("node-dispatch".to_string())
         .spawn(move || {
             for item in work_items {
-                if tx.send(item).is_err() {
+                if send_work_item_with_pending(&dispatcher_state, &tx, item).is_err() {
                     warn!(
                         target: "cmd",
                         "{}: node dispatch worker disconnected",
@@ -5591,16 +5778,20 @@ fn update_scene_brightness_for_target(
     Ok(())
 }
 
-fn update_node_mood_scene_color(
-    state: &SharedState,
-    runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
-    snapshot: &rhythm_core::NodeSnapshot,
+struct MoodSceneColorUpdate {
     rgb: Rgb,
     xy: XyColor,
     brightness: Option<u8>,
     transition_ms: Option<u32>,
     persist: bool,
+}
+
+fn update_node_mood_scene_color(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    snapshot: &rhythm_core::NodeSnapshot,
+    update: MoodSceneColorUpdate,
 ) -> Result<()> {
     let node_scene_id = node_mood_scene_id(node_id);
     let (scene_id, seed_scene, current_scene_is_node_scene) = {
@@ -5631,7 +5822,7 @@ fn update_node_mood_scene_color(
             description: None,
             source: SceneSource::User,
             light: Some(LightSceneLayer {
-                default_transition_ms: transition_ms,
+                default_transition_ms: update.transition_ms,
                 default_output: None,
                 palette: Vec::new(),
                 entries: Vec::new(),
@@ -5666,9 +5857,15 @@ fn update_node_mood_scene_color(
             seed_output.or(node_output)
         }
     };
-    let output = mood_scene_color_output(existing_output, rgb, xy, brightness, transition_ms);
+    let output = mood_scene_color_output(
+        existing_output,
+        update.rgb,
+        update.xy,
+        update.brightness,
+        update.transition_ms,
+    );
     let layer = scene.light.get_or_insert_with(|| LightSceneLayer {
-        default_transition_ms: transition_ms,
+        default_transition_ms: update.transition_ms,
         default_output: None,
         palette: Vec::new(),
         entries: Vec::new(),
@@ -5680,10 +5877,10 @@ fn update_node_mood_scene_color(
             if scope_node_ids.contains(entry.target.node_id()) {
                 entry.output = mood_scene_color_output(
                     Some(entry.output.clone()),
-                    rgb,
-                    xy,
-                    brightness,
-                    transition_ms,
+                    update.rgb,
+                    update.xy,
+                    update.brightness,
+                    update.transition_ms,
                 );
             }
         }
@@ -5707,7 +5904,7 @@ fn update_node_mood_scene_color(
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.insert(scene.id.clone(), scene);
-        if persist {
+        if update.persist {
             persist_scenes_locked(&s);
         }
     }
@@ -5746,7 +5943,7 @@ fn update_node_mood_scene_color(
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
 
-    if persist {
+    if update.persist {
         persist_rooms(state);
     }
 
@@ -5884,11 +6081,13 @@ pub fn do_set_node_color(
             &runtime,
             node_id,
             &snap,
-            update.rgb,
-            xy,
-            brightness,
-            update.transition_ms,
-            persist,
+            MoodSceneColorUpdate {
+                rgb: update.rgb,
+                xy,
+                brightness,
+                transition_ms: update.transition_ms,
+                persist,
+            },
         )?;
         return build_node_state(state, node_id).and_then(|node_state| {
             serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
@@ -5966,15 +6165,18 @@ fn dispatch_room_commands(
                     );
                     return;
                 }
-                if tx
-                    .send(crate::state::WorkItem::ApplyNodeCommand {
+                if send_work_item_with_pending(
+                    &dispatcher_state,
+                    &tx,
+                    crate::state::WorkItem::ApplyNodeCommand {
                         command_id: crate::logging::next_command_id("apply-node-command"),
                         node_id,
                         command,
                         dispatch_spacing: phase_gap,
                         dispatch_generation,
-                    })
-                    .is_err()
+                    },
+                )
+                .is_err()
                 {
                     warn!(target: "cmd", "active_mode_apply: room dispatcher disconnected");
                     return;
@@ -6856,6 +7058,214 @@ pub fn do_light_breaker_set(state: &SharedState, enabled: bool) -> Result<String
     }
 
     serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+/// Select the plan-based light runtime.
+pub fn do_light_runtime_settings_set(
+    state: &SharedState,
+    runtime_kind: LightRuntimeKind,
+) -> Result<String> {
+    let (settings, changed, dispatch_generation) = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime_kind = s
+            .light_runtime_registry
+            .parse_runtime_kind(runtime_kind.as_str())?;
+        let changed = s.light_runtime_kind != runtime_kind;
+        let dispatch_generation = if changed {
+            crate::light_runtime::reset_light_runtime_for_kind(&mut s, runtime_kind.clone());
+            Some(s.invalidate_queued_light_dispatches())
+        } else {
+            None
+        };
+        persist_settings_locked(&s);
+        (build_settings_dto_inner(&s), changed, dispatch_generation)
+    };
+
+    if changed {
+        info!(
+            target: "cmd",
+            "light_runtime: selected={} dispatch_generation={:?}",
+            runtime_kind.as_str(),
+            dispatch_generation
+        );
+    }
+
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::SettingsChanged {
+            settings: settings.clone(),
+        },
+    );
+
+    serde_json::to_string(&settings).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+/// Select the active light runtime and return the runtime selector resource.
+pub fn do_light_runtime_set(state: &SharedState, runtime_kind: LightRuntimeKind) -> Result<String> {
+    let (resolved_kind, changed) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let resolved_kind = s
+            .light_runtime_registry
+            .parse_runtime_kind(runtime_kind.as_str())?;
+        let changed = s.light_runtime_kind != resolved_kind;
+        (resolved_kind, changed)
+    };
+
+    do_light_runtime_settings_set(state, resolved_kind)?;
+    let initial_apply = changed.then(|| queue_light_runtime_initial_apply(state));
+
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut dto = build_light_runtime_dto_inner(&s);
+    dto.initial_apply = initial_apply;
+    serde_json::to_string(&dto).map_err(|e| anyhow::anyhow!("serialize light runtime: {}", e))
+}
+
+fn queue_light_runtime_initial_apply(state: &SharedState) -> LightRuntimeInitialApplyDto {
+    match try_queue_light_runtime_initial_apply(state, default_http_batch_dispatch_spacing()) {
+        Ok(apply) => apply,
+        Err(error) => {
+            warn!(
+                target: "cmd",
+                "light_runtime: initial apply was not queued: {}",
+                error
+            );
+            LightRuntimeInitialApplyDto {
+                queued: false,
+                dispatch_count: 0,
+                dispatch_spacing_ms: 0,
+                estimated_dispatch_ms: 0,
+                error: Some(error.to_string()),
+            }
+        }
+    }
+}
+
+fn try_queue_light_runtime_initial_apply(
+    state: &SharedState,
+    dispatch_spacing: Duration,
+) -> Result<LightRuntimeInitialApplyDto> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?
+    };
+    let mut node_snapshots = runtime.engine_all_effective_node_snapshots();
+    node_snapshots.retain(|snap| !crate::topology::is_internal_light_node_id(&snap.id));
+    let (dispatch_tx, dispatch_generation, dispatch_nodes) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.periodic_work_tx.clone().or_else(|| s.work_tx.clone()),
+            s.light_dispatch_generation,
+            crate::periodic::periodic_dispatch_nodes_from_state(&s, &node_snapshots),
+        )
+    };
+    let dispatch_count = dispatch_nodes.len();
+    let dispatch_spacing_ms = dispatch_spacing.as_millis() as u64;
+    let estimated_dispatch_ms =
+        estimated_dispatch_duration(dispatch_count, dispatch_spacing).as_millis() as u64;
+    if dispatch_count == 0 {
+        return Ok(LightRuntimeInitialApplyDto {
+            queued: false,
+            dispatch_count,
+            dispatch_spacing_ms,
+            estimated_dispatch_ms,
+            error: None,
+        });
+    }
+
+    let command_id = crate::logging::next_command_id("runtime-initial-apply");
+    let current_hour = runtime.current_hour();
+    let mut last_node_index_by_emit_target = HashMap::new();
+    for (idx, node) in dispatch_nodes.iter().enumerate() {
+        last_node_index_by_emit_target.insert(node.emit_node_id.clone(), idx);
+    }
+
+    if let Some(tx) = dispatch_tx {
+        for (idx, node) in dispatch_nodes.iter().enumerate() {
+            let emit_parent_node_id = last_node_index_by_emit_target
+                .get(&node.emit_node_id)
+                .is_some_and(|last_idx| *last_idx == idx)
+                .then_some(node.emit_node_id.as_str())
+                .filter(|emit_id| *emit_id != node.settings_node_id);
+            if !crate::periodic::enqueue_periodic_tick(
+                state,
+                &tx,
+                crate::periodic::PeriodicTickEnqueue {
+                    command_id: &command_id,
+                    node_id: &node.node_id,
+                    settings_node_id: &node.settings_node_id,
+                    dispatch_generation,
+                    current_hour,
+                    emit_parent_node_id,
+                    dispatch_spacing,
+                },
+            ) {
+                return Err(anyhow::anyhow!("Node dispatch queue full"));
+            }
+        }
+        return Ok(LightRuntimeInitialApplyDto {
+            queued: true,
+            dispatch_count,
+            dispatch_spacing_ms,
+            estimated_dispatch_ms,
+            error: None,
+        });
+    }
+
+    for (idx, node) in dispatch_nodes.iter().enumerate() {
+        crate::light_runtime::run_selected_light_runtime_event(
+            state,
+            runtime_event_for_light_runtime_initial_apply(
+                &node.node_id,
+                &node.settings_node_id,
+                current_hour,
+                &command_id,
+            ),
+        )?;
+        crate::periodic::post_tick_node(state, &runtime, &node.settings_node_id);
+        let emit_parent_node_id = last_node_index_by_emit_target
+            .get(&node.emit_node_id)
+            .is_some_and(|last_idx| *last_idx == idx)
+            .then_some(node.emit_node_id.as_str())
+            .filter(|emit_id| *emit_id != node.settings_node_id);
+        if let Some(emit_parent_node_id) = emit_parent_node_id {
+            crate::periodic::post_tick_node(state, &runtime, emit_parent_node_id);
+        }
+    }
+
+    Ok(LightRuntimeInitialApplyDto {
+        queued: false,
+        dispatch_count,
+        dispatch_spacing_ms,
+        estimated_dispatch_ms,
+        error: None,
+    })
+}
+
+fn runtime_event_for_light_runtime_initial_apply(
+    node_id: &str,
+    settings_node_id: &str,
+    current_hour: f32,
+    command_id: &str,
+) -> RuntimeEvent {
+    RuntimeEvent::PeriodicTick(TickContext {
+        node_id: node_id.to_string(),
+        hour: current_hour as f64,
+        epoch_ms: Some(current_epoch_ms().min(i64::MAX as u64) as i64),
+        metadata: [
+            (
+                "source_node_id".to_string(),
+                serde_json::json!(settings_node_id),
+            ),
+            ("command_id".to_string(), serde_json::json!(command_id)),
+            (
+                "reason".to_string(),
+                serde_json::json!("light_runtime_initial_apply"),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    })
 }
 
 /// Update global settings (partial: only provided fields are changed).
@@ -7755,14 +8165,18 @@ pub fn queue_node_action(
     }
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::QueuedNodeAction {
-        command_id: crate::logging::next_command_id("node-action"),
-        node_id: node_id.to_string(),
-        action,
-        device_id: None,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::QueuedNodeAction {
+            command_id: crate::logging::next_command_id("node-action"),
+            node_id: node_id.to_string(),
+            action,
+            device_id: None,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -7889,13 +8303,17 @@ pub fn queue_set_node_brightness(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::SetNodeBrightness {
-        command_id: crate::logging::next_command_id("node-brightness"),
-        node_id: node_id.to_string(),
-        brightness,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::SetNodeBrightness {
+            command_id: crate::logging::next_command_id("node-brightness"),
+            node_id: node_id.to_string(),
+            brightness,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -8014,13 +8432,17 @@ pub fn queue_set_node_curve_modifier(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::SetNodeCurveModifier {
-        command_id: crate::logging::next_command_id("node-curve"),
-        node_id: node_id.to_string(),
-        modifier,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::SetNodeCurveModifier {
+            command_id: crate::logging::next_command_id("node-curve"),
+            node_id: node_id.to_string(),
+            modifier,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -9756,17 +10178,21 @@ pub fn queue_node_preferences_set(
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
     let tx = tx.ok_or_else(|| anyhow::anyhow!("Node dispatch queue unavailable"))?;
 
-    tx.try_send(WorkItem::SetNodePreferences {
-        command_id: crate::logging::next_command_id("node-preferences"),
-        node_id: node_id.to_string(),
-        rhythm_enabled,
-        disabled,
-        standby_enabled,
-        target_state,
-        room_profile,
-        dispatch_spacing,
-        persist_after,
-    })
+    try_send_work_item_with_pending(
+        state,
+        &tx,
+        WorkItem::SetNodePreferences {
+            command_id: crate::logging::next_command_id("node-preferences"),
+            node_id: node_id.to_string(),
+            rhythm_enabled,
+            disabled,
+            standby_enabled,
+            target_state,
+            room_profile,
+            dispatch_spacing,
+            persist_after,
+        },
+    )
     .map_err(|e| anyhow::anyhow!("Node dispatch queue unavailable: {}", e))
 }
 
@@ -9963,6 +10389,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             .map(|rooms| {
                 rooms
                     .iter()
+                    .filter(|room| !crate::topology::is_internal_light_node_id(&room.id))
                     .map(|room| (room.id.clone(), room.clone()))
                     .collect()
             })
@@ -9974,6 +10401,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             runtime
                 .engine_all_room_snapshots()
                 .into_iter()
+                .filter(|snap| !crate::topology::is_internal_light_node_id(&snap.id))
                 .map(|snap| (snap.id.clone(), snap))
                 .collect()
         })
@@ -9984,6 +10412,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             runtime
                 .engine_all_node_snapshots()
                 .into_iter()
+                .filter(|snap| !crate::topology::is_internal_light_node_id(&snap.id))
                 .map(|snap| (snap.id.clone(), snap))
                 .collect()
         })
@@ -11785,6 +12214,10 @@ mod tests {
         HubDispatchTarget, HubLightController, HubRegistry, LightControlResult, LightController,
         LightProfileConfig, Room, RoomSnapshot, RuntimeHandle,
     };
+    use rhythm_runtime_api::{
+        LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
+        RuntimeResult, RuntimeSnapshot,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -12221,6 +12654,17 @@ mod tests {
         fn turn_on_calls(&self) -> Vec<String> {
             self.turn_on_calls.lock().unwrap().clone()
         }
+
+        fn wait_for_turn_on_calls(&self, expected: usize) -> Vec<String> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let calls = self.turn_on_calls();
+                if calls.len() >= expected || std::time::Instant::now() >= deadline {
+                    return calls;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -12369,6 +12813,7 @@ mod tests {
     ) -> (SharedState, Arc<MockRuntime>) {
         let runtime = Arc::new(MockRuntime::new(snapshots, current_hour));
         let mut app = AppState::default();
+        install_test_light_runtime_modules(&mut app);
         let hub_type = HubType::parse("mock").unwrap();
         let hub_key = crate::canonical::identity::HubKey::new(hub_type.clone(), "mock");
         app.hubs.insert(
@@ -12384,6 +12829,97 @@ mod tests {
             },
         );
         (Arc::new(Mutex::new(app)), runtime)
+    }
+
+    fn install_test_light_runtime_modules(app: &mut AppState) {
+        crate::light_runtime::register_light_runtime_modules(
+            app,
+            [
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                    &["rhythm", "rhythm_adaptive"],
+                    test_rhythm_adaptive_manifest,
+                    create_test_rhythm_adaptive_runtime,
+                ),
+                crate::light_runtime::LightRuntimeModule::ephemeral(
+                    crate::light_runtime::removed_circadian_RUNTIME_ID,
+                    &["removed-project-circadian", "removed-project", "removed_circadian"],
+                    test_removed-project_manifest,
+                    create_test_removed-project_runtime,
+                ),
+            ],
+        )
+        .expect("test light runtime modules should register");
+    }
+
+    fn test_rhythm_adaptive_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+            "Rhythm Adaptive",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn test_removed-project_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+            "removed-project Circadian",
+        )
+        .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_test_rhythm_adaptive_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+        ))
+    }
+
+    fn create_test_removed-project_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(
+            crate::light_runtime::removed_circadian_RUNTIME_ID,
+        ))
+    }
+
+    const COMMAND_EXTERNAL_RUNTIME_ID: &str = "command-lab";
+    const COMMAND_EXTERNAL_RUNTIME_ALIAS: &str = "command_lab";
+
+    fn register_external_test_light_runtime_module(state: &SharedState) {
+        let mut s = state.lock().unwrap();
+        crate::light_runtime::register_light_runtime_module(
+            &mut s,
+            crate::light_runtime::LightRuntimeModule::ephemeral(
+                COMMAND_EXTERNAL_RUNTIME_ID,
+                &[COMMAND_EXTERNAL_RUNTIME_ALIAS],
+                command_external_runtime_manifest,
+                create_command_external_runtime,
+            ),
+        )
+        .expect("external command test runtime should register");
+    }
+
+    fn command_external_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(COMMAND_EXTERNAL_RUNTIME_ID, "Command Lab")
+            .with_capabilities(RuntimeCapabilities::light_runtime())
+    }
+
+    fn create_command_external_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
+        Box::new(NoopTestLightRuntime(COMMAND_EXTERNAL_RUNTIME_ID))
+    }
+
+    struct NoopTestLightRuntime(&'static str);
+
+    impl LightRuntime for NoopTestLightRuntime {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn handle_event(
+            &mut self,
+            _snapshot: &RuntimeSnapshot,
+            _event: RuntimeEvent,
+        ) -> RuntimeResult<RuntimePlan> {
+            Ok(RuntimePlan::noop())
+        }
     }
 
     fn setup_state_with_registry(snapshots: Vec<RoomSnapshot>) -> (SharedState, Arc<MockRuntime>) {
@@ -15979,6 +16515,38 @@ mod tests {
     }
 
     #[test]
+    fn build_room_rhythm_state_marks_pending_dispatch() {
+        let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert("r1".into(), 1);
+
+        let room_state = build_room_rhythm_state(&state, "r1").unwrap();
+        let json = serde_json::to_value(&room_state).unwrap();
+
+        assert!(room_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+    }
+
+    #[test]
+    fn build_room_rhythm_state_marks_pending_child_dispatch() {
+        let (state, _rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert(device_id, 1);
+
+        let room_state = build_room_rhythm_state(&state, "room1").unwrap();
+        let json = serde_json::to_value(&room_state).unwrap();
+
+        assert!(room_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+    }
+
+    #[test]
     fn build_room_rhythm_state_ignores_expired_mode_transition() {
         let (state, _rt) = setup_state(vec![make_snapshot("r1", false, false)]);
         state.lock().unwrap().room_mode_transitions.insert(
@@ -16073,6 +16641,26 @@ mod tests {
         let event = build_node_state_event(&state, &snap);
 
         assert!(event.lights_on);
+    }
+
+    #[test]
+    fn build_node_state_event_marks_parent_pending_for_child_dispatch() {
+        let (state, rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert(device_id, 1);
+
+        let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
+            rt.engine_room_snapshot("room1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snap);
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert!(event.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+        assert!(!event.transitioning);
     }
 
     #[test]
@@ -17950,8 +18538,42 @@ mod tests {
         assert!(parsed["profiles"].is_array());
         assert!(parsed["nodes"].is_array());
         assert!(parsed["nodes"][0]["transitioning"].is_boolean());
+        assert!(parsed["nodes"][0]["pending_dispatch"].is_boolean());
         // No status wrapper
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn build_node_state_marks_pending_dispatch() {
+        let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert("r1".into(), 1);
+
+        let node_state = build_node_state(&state, "r1").unwrap();
+        let json = serde_json::to_value(&node_state).unwrap();
+
+        assert!(node_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+    }
+
+    #[test]
+    fn build_node_state_marks_parent_pending_for_child_dispatch() {
+        let (state, _rt, device_id) = setup_attached_matter_light_without_group_dispatch();
+        state
+            .lock()
+            .unwrap()
+            .pending_node_dispatches
+            .insert(device_id, 1);
+
+        let node_state = build_node_state(&state, "room1").unwrap();
+        let json = serde_json::to_value(&node_state).unwrap();
+
+        assert!(node_state.pending_dispatch);
+        assert_eq!(json["pending_dispatch"], true);
+        assert!(!node_state.transitioning);
     }
 
     #[test]
@@ -19390,6 +20012,108 @@ mod tests {
             }
         }
         assert_eq!(auto_update, Some(false));
+    }
+
+    #[test]
+    fn light_runtime_set_emits_settings_changed_payload() {
+        let (state, _rt) = setup_state(vec![]);
+        let (event_tx, mut event_rx) =
+            tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
+        state.lock().unwrap().event_tx = Some(event_tx);
+
+        let result =
+            do_light_runtime_settings_set(&state, LightRuntimeKind::removed_circadian()).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["light_runtime"], "removed-circadian");
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind,
+            LightRuntimeKind::removed_circadian()
+        );
+
+        let mut light_runtime = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let crate::server_event::ServerEvent::SettingsChanged { settings } = event {
+                light_runtime = Some(settings.light_runtime);
+                break;
+            }
+        }
+        assert_eq!(light_runtime, Some(LightRuntimeKind::removed_circadian()));
+    }
+
+    #[test]
+    fn light_runtime_selector_lists_and_selects_external_registered_module_by_alias() {
+        let (state, _rt) = setup_state(vec![]);
+        register_external_test_light_runtime_module(&state);
+
+        let selector: serde_json::Value =
+            serde_json::from_str(&build_light_runtime(&state).unwrap()).unwrap();
+        assert_eq!(selector["runtime_id"], "rhythm-adaptive");
+        assert!(selector["available_runtime_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == COMMAND_EXTERNAL_RUNTIME_ID));
+
+        let selected = do_light_runtime_set(
+            &state,
+            crate::light_runtime::LightRuntimeKind::new(COMMAND_EXTERNAL_RUNTIME_ALIAS),
+        )
+        .unwrap();
+        let selected: serde_json::Value = serde_json::from_str(&selected).unwrap();
+
+        assert_eq!(selected["runtime_id"], COMMAND_EXTERNAL_RUNTIME_ID);
+        assert!(selected["available_runtime_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == COMMAND_EXTERNAL_RUNTIME_ID));
+        assert_eq!(
+            state.lock().unwrap().light_runtime_kind.as_str(),
+            COMMAND_EXTERNAL_RUNTIME_ID
+        );
+    }
+
+    #[test]
+    fn light_runtime_set_queues_initial_apply_ticks() {
+        let (state, _rt) = setup_state(vec![
+            make_snapshot("r1", false, false),
+            make_snapshot("r2", false, false),
+        ]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().periodic_work_tx = Some(tx);
+
+        let selected = do_light_runtime_set(&state, LightRuntimeKind::removed_circadian()).unwrap();
+        let selected: serde_json::Value = serde_json::from_str(&selected).unwrap();
+
+        assert_eq!(selected["runtime_id"], "removed-circadian");
+        assert_eq!(selected["initial_apply"]["queued"], true);
+        assert_eq!(selected["initial_apply"]["dispatch_count"], 2);
+        assert_eq!(selected["initial_apply"]["dispatch_spacing_ms"], 500);
+        assert_eq!(selected["initial_apply"]["estimated_dispatch_ms"], 500);
+
+        let queued_node_ids: Vec<String> = rx
+            .try_iter()
+            .map(|item| match item {
+                WorkItem::PeriodicNodeTick { node_id, .. } => node_id,
+                _ => panic!("unexpected work item"),
+            })
+            .collect();
+        assert_eq!(queued_node_ids, vec!["r1".to_string(), "r2".to_string()]);
+    }
+
+    #[test]
+    fn light_runtime_selection_rejects_unregistered_external_runtime() {
+        let (state, _rt) = setup_state(vec![]);
+
+        let error = do_light_runtime_settings_set(
+            &state,
+            crate::light_runtime::LightRuntimeKind::new("not-registered"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("unknown light runtime"));
     }
 
     #[test]
@@ -21917,7 +22641,7 @@ mod tests {
         )
         .expect("turn_on should succeed");
 
-        let calls = recording.turn_on_calls();
+        let calls = recording.wait_for_turn_on_calls(1);
         assert_eq!(
             calls.len(),
             1,

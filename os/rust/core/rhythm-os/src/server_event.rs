@@ -217,6 +217,8 @@ pub struct NodeStateEvent {
     pub observed_power: ObservedPowerDto,
     /// Whether a global mode transition fade is currently in progress.
     pub transitioning: bool,
+    /// Whether light-dispatch work for this node is queued or running.
+    pub pending_dispatch: bool,
     /// Effective brightness percentage (1-100) after offsets.
     pub brightness: u8,
     /// Effective color temperature in Kelvin.
@@ -240,6 +242,7 @@ pub(crate) struct NodeStateEventParams {
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
     pub transitioning: bool,
+    pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
     pub mood_enabled: bool,
@@ -258,6 +261,7 @@ impl NodeStateEvent {
             lights_on,
             observed_power,
             transitioning,
+            pending_dispatch,
             brightness,
             kelvin,
             mood_enabled,
@@ -276,6 +280,7 @@ impl NodeStateEvent {
             lights_on,
             observed_power,
             transitioning,
+            pending_dispatch,
             brightness,
             kelvin,
             mood_enabled,
@@ -320,11 +325,15 @@ impl MotionTimerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::light_runtime::LightRuntimeKind;
 
     #[test]
     fn server_event_serializes_with_tagged_type_and_data() {
         let event = ServerEvent::SettingsChanged {
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                light_runtime: LightRuntimeKind::default(),
+            },
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -525,7 +534,10 @@ mod tests {
         // Push more events than the channel capacity.
         for _ in 0..32 {
             let _ = tx.send(ServerEvent::SettingsChanged {
-                settings: SettingsDto { auto_update: true },
+                settings: SettingsDto {
+                    auto_update: true,
+                    light_runtime: LightRuntimeKind::default(),
+                },
             });
         }
 
@@ -571,7 +583,10 @@ mod tests {
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(4);
         drop(rx);
         let result = tx.send(ServerEvent::SettingsChanged {
-            settings: SettingsDto { auto_update: true },
+            settings: SettingsDto {
+                auto_update: true,
+                light_runtime: LightRuntimeKind::default(),
+            },
         });
         assert!(
             result.is_err(),

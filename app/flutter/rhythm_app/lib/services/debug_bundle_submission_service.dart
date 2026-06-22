@@ -157,12 +157,7 @@ class DebugBundleSubmissionService {
     }
 
     final issueReport = await _createGitHubIssue(client, submission.id);
-    return submission.copyWith(
-      status: issueReport.status,
-      githubIssueUrl: issueReport.url,
-      githubIssueNumber: issueReport.number,
-      githubIssueError: issueReport.error,
-    );
+    return _applyGitHubIssueReport(submission, issueReport);
   }
 
   /// Submit a text-only bug report — no debug bundle, no required server hub.
@@ -242,12 +237,7 @@ class DebugBundleSubmissionService {
     }
 
     final issueReport = await _createGitHubIssue(client, submission.id);
-    return submission.copyWith(
-      status: issueReport.status,
-      githubIssueUrl: issueReport.url,
-      githubIssueNumber: issueReport.number,
-      githubIssueError: issueReport.error,
-    );
+    return _applyGitHubIssueReport(submission, issueReport);
   }
 
   Future<_UploadedDebugBundle> _uploadBundle({
@@ -305,6 +295,18 @@ class DebugBundleSubmissionService {
     required String appLogText,
   }) {
     return _appendAppLogToBundle(bundle: bundle, appLogText: appLogText);
+  }
+
+  @visibleForTesting
+  static DebugBundleSubmission applyGitHubIssueResponseForTesting(
+    DebugBundleSubmission submission, {
+    required int status,
+    required Object? data,
+  }) {
+    return _applyGitHubIssueReport(
+      submission,
+      _parseGitHubIssueFunctionResponse(status: status, data: data),
+    );
   }
 
   static RhythmDebugBundle _appendAppLogToBundle({
@@ -418,38 +420,66 @@ class DebugBundleSubmissionService {
         body: {'submission_id': submissionId},
       );
 
-      final data = response.data;
-      if (response.status < 200 || response.status >= 300) {
-        throw DebugBundleSubmissionException(
-          _formatGitHubIssueError(
-            _extractResponseMessage(data) ?? 'HTTP ${response.status}',
-          ),
-        );
-      }
-
-      if (data is! Map) {
-        throw const DebugBundleSubmissionException(
-          'Debug bundle uploaded, but GitHub did not return issue details.',
-        );
-      }
-      final issueCreated = data['issue_created'] == true;
-      final alreadyExists = data['already_exists'] == true;
-      final issueReport = _GitHubIssueReport.fromMap(data);
-      if (!issueCreated && !alreadyExists) {
-        throw DebugBundleSubmissionException(
-          _formatGitHubIssueError(
-            issueReport.error ?? 'No details returned.',
-          ),
-        );
-      }
-      return issueReport;
+      return _parseGitHubIssueFunctionResponse(
+        status: response.status,
+        data: response.data,
+      );
     } catch (error) {
-      if (error is DebugBundleSubmissionException) rethrow;
-      throw DebugBundleSubmissionException(
-        _formatGitHubIssueError(error.toString()),
-        cause: error,
+      return _GitHubIssueReport(
+        status: 'received',
+        error: _formatGitHubIssueError(error.toString()),
       );
     }
+  }
+
+  static DebugBundleSubmission _applyGitHubIssueReport(
+    DebugBundleSubmission submission,
+    _GitHubIssueReport issueReport,
+  ) {
+    return submission.copyWith(
+      status: issueReport.status,
+      githubIssueUrl: issueReport.url,
+      githubIssueNumber: issueReport.number,
+      githubIssueError: issueReport.error,
+    );
+  }
+
+  static _GitHubIssueReport _parseGitHubIssueFunctionResponse({
+    required int status,
+    required Object? data,
+  }) {
+    if (status < 200 || status >= 300) {
+      return _GitHubIssueReport(
+        status: 'received',
+        error: _formatGitHubIssueError(
+          _extractResponseMessage(data) ?? 'HTTP $status',
+        ),
+      );
+    }
+
+    if (data is! Map) {
+      return const _GitHubIssueReport(
+        status: 'received',
+        error:
+            'Debug bundle uploaded, but GitHub did not return issue details.',
+      );
+    }
+
+    final issueCreated = data['issue_created'] == true;
+    final alreadyExists = data['already_exists'] == true;
+    final issueReport = _GitHubIssueReport.fromMap(data);
+    if (!issueCreated && !alreadyExists) {
+      return _GitHubIssueReport(
+        status: issueReport.status,
+        url: issueReport.url,
+        number: issueReport.number,
+        error: _formatGitHubIssueError(
+          issueReport.error ?? 'No details returned.',
+        ),
+      );
+    }
+
+    return issueReport;
   }
 
   SupabaseClient? get _client {
@@ -533,7 +563,7 @@ class DebugBundleSubmissionService {
     return 'Failed to submit the bug report.';
   }
 
-  String _formatGitHubIssueError(String detail) {
+  static String _formatGitHubIssueError(String detail) {
     final trimmed = detail.trim();
     if (trimmed.isEmpty) {
       return 'Debug bundle uploaded, but failed to create the GitHub issue.';

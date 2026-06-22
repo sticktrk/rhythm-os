@@ -8,9 +8,9 @@ description = "Flutter FFI bindings for rhythm-core"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-rhythm-core = { path = "../../../../../rhythm-lighting/rust/core/rhythm-core" }
-rhythm-profile = { path = "../../../../../rhythm-lighting/rust/core/rhythm-profile" }
-rhythm-hue = { path = "../../../../../rhythm-lighting/rust/integrations/rhythm-hue" }
+rhythm-core = { path = "../../../../os/rust/core/rhythm-core" }
+rhythm-profile = { path = "../../../../os/rust/core/rhythm-profile" }
+rhythm-hue = { path = "../../../../os/rust/integrations/rhythm-hue" }
 flutter_rust_bridge = "=2.11.1"
 
 [lints.rust]

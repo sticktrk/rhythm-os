@@ -9,6 +9,7 @@ pub mod handle;
 #[cfg(feature = "serde")]
 pub mod hub_registry;
 pub mod orchestrator;
+pub mod plan;
 pub mod registry;
 pub mod scheduler;
 pub mod storage;
@@ -22,6 +23,12 @@ pub use handle::{NodeSnapshot, RestoredNodeState, RestoredRoomState, RoomSnapsho
 #[cfg(feature = "serde")]
 pub use hub_registry::{DeviceType, HubRegistry};
 pub use orchestrator::RhythmRuntime;
+pub use plan::{
+    button_action_from_runtime_input, core_lighting_command_from_runtime,
+    runtime_input_from_button_action, runtime_lighting_command_from_core,
+    runtime_node_kind_from_light_node_kind, RhythmDispatchRecord, RhythmInputPlanOutcome,
+    RhythmPeriodicPlanOutcome,
+};
 pub use registry::{DeviceRegistry, SimpleDeviceRegistry};
 pub use scheduler::{NoOpScheduler, ScheduleHandle, Scheduler};
 pub use storage::{NoOpRoomStateStore, RoomStateStore, StorageError, StorageResult};
