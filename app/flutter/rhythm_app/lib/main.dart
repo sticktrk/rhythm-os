@@ -24,7 +24,6 @@ import 'services/employee_mode_service.dart';
 import 'services/entitlements_service.dart';
 import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
-import 'services/support_proxy_dio.dart';
 import 'services/app_state_refresh.dart';
 import 'services/virtual_experience_service.dart';
 import 'data/local_data_source.dart';
@@ -103,10 +102,6 @@ void main() async {
   if (initialAppLink != null) {
     EmployeeModeService.instance.activateFromLaunch(initialAppLink);
   }
-  final supportProxyDioFactory = SupportProxyDioFactory(
-    employeeMode: EmployeeModeService.instance,
-  );
-
   HybridApiClient? client;
   String? initError;
 
@@ -115,12 +110,8 @@ void main() async {
     client = await HybridApiClient.create(
       storedHubs: LocalDataSource().getAllHubs(),
       syncSolarDataOnCreate: false,
-      remoteDio: EmployeeModeService.instance.isActive
-          ? supportProxyDioFactory.configDio()
-          : null,
-      remoteDioOverride: () => EmployeeModeService.instance.isActive
-          ? supportProxyDioFactory.configDio()
-          : null,
+      remoteDio: null,
+      remoteDioOverride: null,
     );
 
     // Fail explicitly if local brain isn't available (except on web,
@@ -169,24 +160,13 @@ Future<Uri?> _readInitialAppLink() async {
   return null;
 }
 
-Dio _rhythmConnectionDio(
-  SupportProxyDioFactory supportProxyDioFactory, {
+Dio _rhythmConnectionDio({
   required String baseUrl,
   required Duration connectTimeout,
   required Duration receiveTimeout,
   String? authToken,
   Map<String, dynamic>? headers,
 }) {
-  if (EmployeeModeService.instance.isActive) {
-    return supportProxyDioFactory(
-      baseUrl: baseUrl,
-      connectTimeout: connectTimeout,
-      receiveTimeout: receiveTimeout,
-      authToken: authToken,
-      headers: headers,
-    );
-  }
-
   final token = authToken?.trim();
   return Dio(BaseOptions(
     baseUrl: baseUrl,
@@ -287,7 +267,6 @@ class RhythmApp extends StatelessWidget {
               Map<String, dynamic>? headers,
             }) =>
                 _rhythmConnectionDio(
-              supportProxyDioFactory,
               baseUrl: baseUrl,
               connectTimeout: connectTimeout,
               receiveTimeout: receiveTimeout,

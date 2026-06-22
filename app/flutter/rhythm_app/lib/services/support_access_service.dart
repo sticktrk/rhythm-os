@@ -15,6 +15,22 @@ class SupportAccessRevokeResult {
   final DateTime? revokedAt;
 }
 
+class SupportAccessDirectSession {
+  const SupportAccessDirectSession({
+    required this.grantId,
+    required this.hostname,
+    required this.tokenId,
+    required this.token,
+    required this.expiresAt,
+  });
+
+  final String grantId;
+  final String hostname;
+  final String tokenId;
+  final String token;
+  final DateTime expiresAt;
+}
+
 class SupportStaffMember {
   const SupportStaffMember({
     required this.userId,
@@ -124,6 +140,55 @@ class SupportAccessService {
       grantId: row['grant_id']?.toString() ?? cleanGrantId,
       status: row['status']?.toString() ?? 'revoked',
       revokedAt: _parseDateTime(row['revoked_at']?.toString()),
+    );
+  }
+
+  Future<SupportAccessDirectSession> openDirectSession(String grantId) async {
+    final cleanGrantId = grantId.trim();
+    if (cleanGrantId.isEmpty) {
+      throw const SupportAccessException('Missing support grant id.');
+    }
+
+    final response = await _supabaseClient().functions.invoke(
+      _functionName,
+      body: {
+        'action': 'direct-session',
+        'grant_id': cleanGrantId,
+      },
+    );
+    final statusCode = _responseStatus(response);
+    final data = _responseData(response);
+    if (statusCode < 200 || statusCode >= 300) {
+      throw SupportAccessException(
+        _readError(data) ?? 'Could not open direct support session.',
+        statusCode: statusCode,
+      );
+    }
+
+    final row = _readMap(data);
+    final direct = _readMap(row['direct_access']);
+    final hostname = direct['hostname']?.toString().trim();
+    final tokenId = direct['token_id']?.toString().trim();
+    final token = direct['token']?.toString().trim();
+    final expiresAt = _parseDateTime(direct['expires_at']?.toString());
+    if (hostname == null ||
+        hostname.isEmpty ||
+        tokenId == null ||
+        tokenId.isEmpty ||
+        token == null ||
+        token.isEmpty ||
+        expiresAt == null) {
+      throw const SupportAccessException(
+        'Direct support session response was incomplete.',
+      );
+    }
+
+    return SupportAccessDirectSession(
+      grantId: row['grant_id']?.toString() ?? cleanGrantId,
+      hostname: hostname,
+      tokenId: tokenId,
+      token: token,
+      expiresAt: expiresAt,
     );
   }
 

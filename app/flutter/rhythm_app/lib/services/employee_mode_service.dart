@@ -6,6 +6,8 @@ class EmployeeModeSession {
   const EmployeeModeSession({
     required this.grantId,
     this.hostname,
+    this.directToken,
+    this.directTokenId,
     this.hubId,
     this.homeName,
     this.hubName,
@@ -14,6 +16,8 @@ class EmployeeModeSession {
 
   final String grantId;
   final String? hostname;
+  final String? directToken;
+  final String? directTokenId;
   final String? hubId;
   final String? homeName;
   final String? hubName;
@@ -32,6 +36,8 @@ class EmployeeModeSession {
     return other is EmployeeModeSession &&
         other.grantId == grantId &&
         other.hostname == hostname &&
+        other.directToken == directToken &&
+        other.directTokenId == directTokenId &&
         other.hubId == hubId &&
         other.homeName == homeName &&
         other.hubName == hubName &&
@@ -42,6 +48,8 @@ class EmployeeModeSession {
   int get hashCode => Object.hash(
         grantId,
         hostname,
+        directToken,
+        directTokenId,
         hubId,
         homeName,
         hubName,
@@ -67,6 +75,10 @@ class EmployeeModeService extends ChangeNotifier {
       String.fromEnvironment('RHYTHM_EMPLOYEE_HUB_NAME');
   static const _expiresAtDefine =
       String.fromEnvironment('RHYTHM_EMPLOYEE_EXPIRES_AT');
+  static const _directTokenDefine =
+      String.fromEnvironment('RHYTHM_EMPLOYEE_DIRECT_TOKEN');
+  static const _directTokenIdDefine =
+      String.fromEnvironment('RHYTHM_EMPLOYEE_DIRECT_TOKEN_ID');
 
   final List<Future<void> Function()> _onEnabled = [];
   final List<Future<void> Function()> _onDisabled = [];
@@ -117,6 +129,18 @@ class EmployeeModeService extends ChangeNotifier {
           params['support_hostname'],
           if (allowGenericParams) params['hostname'],
           _hostnameDefine,
+        ]),
+        directToken: _firstNonEmpty([
+          params['employee_direct_token'],
+          params['support_direct_token'],
+          if (allowGenericParams) params['direct_token'],
+          _directTokenDefine,
+        ]),
+        directTokenId: _firstNonEmpty([
+          params['employee_direct_token_id'],
+          params['support_direct_token_id'],
+          if (allowGenericParams) params['direct_token_id'],
+          _directTokenIdDefine,
         ]),
         hubId: _firstNonEmpty([
           params['employee_hub_id'],
@@ -221,6 +245,38 @@ class EmployeeModeService extends ChangeNotifier {
     }
     notifyListeners();
     return true;
+  }
+
+  void attachDirectAccess({
+    required String hostname,
+    required String token,
+    String? tokenId,
+    DateTime? expiresAt,
+  }) {
+    final current = _session;
+    if (current == null) return;
+
+    final next = EmployeeModeSession(
+      grantId: current.grantId,
+      hostname: hostname.trim().isEmpty ? current.hostname : hostname.trim(),
+      directToken: token.trim().isEmpty ? current.directToken : token.trim(),
+      directTokenId: tokenId == null || tokenId.trim().isEmpty
+          ? current.directTokenId
+          : tokenId.trim(),
+      hubId: current.hubId,
+      homeName: current.homeName,
+      hubName: current.hubName,
+      expiresAt: expiresAt ?? current.expiresAt,
+    );
+    if (_sessionIsExpired(next)) {
+      exit();
+      return;
+    }
+
+    _expiryTimer?.cancel();
+    _session = next;
+    _scheduleExpiry(next);
+    notifyListeners();
   }
 
   void exit() {

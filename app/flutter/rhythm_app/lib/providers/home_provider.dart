@@ -1037,7 +1037,7 @@ class HomeProvider extends ChangeNotifier {
   static const _demoHomeOwnerId = 'demo-user';
   static const _demoServerHost = 'demo.rhythm.local';
   static const _employeeHomeOwnerId = 'employee-support';
-  static const _employeeServerHost = 'support-proxy.rhythm.local';
+  static const _legacyEmployeeProxyHost = 'support-proxy.rhythm.local';
 
   /// Ensure the demo user has a Home + RhythmServer hub so they can reach
   /// surfaces like Matter pairing without manual setup.
@@ -1109,6 +1109,35 @@ class HomeProvider extends ChangeNotifier {
       return;
     }
 
+    var directHostname = session.hostname;
+    var directToken = session.directToken;
+    var directTokenId = session.directTokenId;
+    var directExpiresAt = session.expiresAt;
+    if (directHostname == null ||
+        directHostname.trim().isEmpty ||
+        directToken == null ||
+        directToken.trim().isEmpty) {
+      try {
+        final directSession = await SupportAccessService.instance
+            .openDirectSession(session.grantId);
+        directHostname = directSession.hostname;
+        directToken = directSession.token;
+        directTokenId = directSession.tokenId;
+        directExpiresAt = directSession.expiresAt;
+        EmployeeModeService.instance.attachDirectAccess(
+          hostname: directSession.hostname,
+          token: directSession.token,
+          tokenId: directSession.tokenId,
+          expiresAt: directSession.expiresAt,
+        );
+      } catch (error, stackTrace) {
+        debugPrint('Employee mode: direct session failed: $error');
+        debugPrint('$stackTrace');
+        await _clearEmployeeEnvironment();
+        return;
+      }
+    }
+
     await _clearEmployeeEnvironment(notify: false);
 
     final home = await _repository.createHome(
@@ -1118,12 +1147,18 @@ class HomeProvider extends ChangeNotifier {
     _loadHomes();
     _setCurrentHome(home);
 
-    final hostname = session.hostname ?? _employeeServerHost;
+    final hostname = directHostname.trim();
+    if (hostname.isEmpty) {
+      debugPrint('Employee mode: missing direct session hostname');
+      await _clearEmployeeEnvironment();
+      return;
+    }
     final hub = await _repository.createServerHub(
       homeId: home.id,
       name: session.hubName ?? session.displayName,
       host: hostname,
       port: 443,
+      token: directToken,
     );
     await _repository.updateHub(
       hub.copyWith(
@@ -1131,6 +1166,10 @@ class HomeProvider extends ChangeNotifier {
         lastConnected: DateTime.now(),
         pendingSync: false,
       ),
+    );
+    debugPrint(
+      'Employee mode: direct session token ${directTokenId ?? 'unknown'} '
+      'expires at ${directExpiresAt?.toIso8601String() ?? 'unknown'}',
     );
     _loadCurrentHomeHubs();
     notifyListeners();
@@ -1152,7 +1191,7 @@ class HomeProvider extends ChangeNotifier {
     final employeeHubs = _repository
         .getAllHubs()
         .where((h) =>
-            h.endpoint.host == _employeeServerHost ||
+            h.endpoint.host == _legacyEmployeeProxyHost ||
             employeeHomeIds.contains(h.homeId))
         .toList(growable: false);
     for (final hub in employeeHubs) {

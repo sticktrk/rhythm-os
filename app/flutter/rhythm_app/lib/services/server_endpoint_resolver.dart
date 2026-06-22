@@ -1,14 +1,12 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:dio/dio.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../config/feature_flags.dart';
 import '../providers/server_sync_provider.dart';
 import 'employee_mode_service.dart';
-import 'support_proxy_dio.dart';
 
 enum ResolvedServerEndpointSource {
   lan,
@@ -37,10 +35,6 @@ class ResolvedServerEndpoint {
   }) {
     return RhythmDiagnosticsApi.fromBaseUrl(
       baseUrl: baseUrl,
-      dio: supportProxyDio(
-        connectTimeout: connectTimeout,
-        receiveTimeout: receiveTimeout,
-      ),
       connectTimeout: connectTimeout,
       receiveTimeout: receiveTimeout,
       debugBundleReceiveTimeout: debugBundleReceiveTimeout,
@@ -55,10 +49,6 @@ class ResolvedServerEndpoint {
   }) {
     return RhythmConfigApi(
       baseUrl: baseUrl,
-      dio: supportProxyDio(
-        connectTimeout: connectTimeout,
-        receiveTimeout: receiveTimeout,
-      ),
       authToken: authToken ?? hub.token,
     );
   }
@@ -66,7 +56,6 @@ class ResolvedServerEndpoint {
   RhythmAuthApi authApi({String? authToken}) {
     return RhythmAuthApi(
       baseUrl: baseUrl,
-      dio: supportProxyDio(),
       authToken: authToken ?? hub.token,
     );
   }
@@ -78,10 +67,6 @@ class ResolvedServerEndpoint {
   }) {
     return RhythmMatterApi(
       baseUrl: baseUrl,
-      dio: supportProxyDio(
-        connectTimeout: connectTimeout,
-        receiveTimeout: receiveTimeout,
-      ),
       authToken: authToken ?? hub.token,
     );
   }
@@ -89,23 +74,7 @@ class ResolvedServerEndpoint {
   RhythmBundleApi bundleApi() {
     return RhythmBundleApi(
       baseUrl: baseUrl,
-      dio: supportProxyDio(
-        receiveTimeout: const Duration(seconds: 15),
-      ),
       authToken: hub.token,
-    );
-  }
-
-  Dio? supportProxyDio({
-    Duration connectTimeout = const Duration(seconds: 5),
-    Duration receiveTimeout = const Duration(seconds: 10),
-  }) {
-    if (!EmployeeModeService.instance.isActive) return null;
-    return SupportProxyDioFactory(
-      employeeMode: EmployeeModeService.instance,
-    ).configDio(
-      connectTimeout: connectTimeout,
-      receiveTimeout: receiveTimeout,
     );
   }
 }

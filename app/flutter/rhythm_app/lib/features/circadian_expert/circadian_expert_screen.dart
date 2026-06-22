@@ -22931,10 +22931,6 @@ class _CircadianExpertClient {
     return _CircadianExpertClient._(
       baseUrl: resolved.baseUrl,
       authToken: resolved.hub.token,
-      dio: resolved.supportProxyDio(
-        connectTimeout: const Duration(seconds: 3),
-        receiveTimeout: const Duration(seconds: 5),
-      ),
     );
   }
 

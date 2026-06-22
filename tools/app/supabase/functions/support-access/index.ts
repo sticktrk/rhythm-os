@@ -48,6 +48,13 @@ type SupportTokenRow = {
   token: string
 }
 
+type DirectAccessPayload = {
+  hostname: string
+  token_id: string
+  token: string
+  expires_at: string
+}
+
 type GrantRow = {
   id: string
   staff_user_id: string
@@ -61,6 +68,7 @@ type GrantRow = {
   created_at: string
   expires_at: string
   revoked_at: string | null
+  direct_token_id: string | null
 }
 
 type SubmissionRow = {
@@ -91,6 +99,9 @@ Deno.serve((req) =>
     try {
       if (action === 'grant') {
         return await grantAccess(adminClient, staff, body)
+      }
+      if (action === 'direct-session') {
+        return await directSession(adminClient, staff, body)
       }
       if (action === 'refresh') {
         return await refreshGrant(adminClient, staff, body)
@@ -153,6 +164,32 @@ async function grantAccess(
     .single()
   if (error) throw new Error(error.message)
 
+  const grant: GrantRow = {
+    id: data.id,
+    staff_user_id: staff.userId,
+    staff_email: staff.email,
+    hub_id: hub.id,
+    home_id: hub.home_id,
+    submission_id: submission?.id ?? null,
+    status: data.status,
+    reason,
+    hostname: data.hostname,
+    created_at: new Date().toISOString(),
+    expires_at: data.expires_at,
+    revoked_at: null,
+    direct_token_id: null,
+  }
+  const directAccess = await issueDirectSessionForGrant(
+    adminClient,
+    grant,
+    supportToken,
+    staff,
+  )
+  if (directAccess instanceof Response) {
+    await revokeGrantAfterDirectSessionFailure(adminClient, grant, staff)
+    return directAccess
+  }
+
   await insertAudit(adminClient, {
     grantId: data.id,
     hubId: hub.id,
@@ -196,6 +233,52 @@ async function grantAccess(
     expires_at: data.expires_at,
     app_link_params: appLinkParams,
     app_link_query: employeeAppLinkQuery(appLinkParams),
+    direct_access: directAccess,
+  })
+}
+
+async function directSession(
+  adminClient: any,
+  staff: StaffContext,
+  body: JsonObject,
+): Promise<Response> {
+  const grantId = readString(body, 'grant_id')
+  if (!grantId) return jsonResponse({ error: 'Missing grant_id' }, 400)
+
+  const grant = await readOwnedGrant(adminClient, staff.userId, grantId)
+  if (grant instanceof Response) return grant
+  const active = await expireIfNeeded(adminClient, grant)
+  if (active instanceof Response) return active
+
+  const home = await fetchHome(adminClient, grant.home_id)
+  if (!home) return jsonResponse({ error: 'Home not found' }, 404)
+  const managed = await ensureManagedConsent(adminClient, home)
+  if (managed instanceof Response) return managed
+
+  const supportToken = await fetchSupportToken(adminClient, grant.hub_id)
+  if (!supportToken) {
+    return jsonResponse({ error: 'Support token not configured' }, 409)
+  }
+  if (supportToken.home_id !== grant.home_id) {
+    return jsonResponse({ error: 'Support token home mismatch' }, 409)
+  }
+
+  const directAccess = await issueDirectSessionForGrant(
+    adminClient,
+    grant,
+    supportToken,
+    staff,
+  )
+  if (directAccess instanceof Response) return directAccess
+
+  return jsonResponse({
+    grant_id: grant.id,
+    status: 'active',
+    hub_id: grant.hub_id,
+    home_id: grant.home_id,
+    hostname: grant.hostname,
+    expires_at: grant.expires_at,
+    direct_access: directAccess,
   })
 }
 
@@ -233,11 +316,27 @@ async function refreshGrant(
     detail: { ttl_seconds: ttlSeconds },
   })
 
+  let directAccess: DirectAccessPayload | null = null
+  const supportToken = await fetchSupportToken(adminClient, grant.hub_id)
+  if (supportToken && supportToken.home_id === grant.home_id) {
+    const directGrant = { ...grant, expires_at: expiresAt }
+    const issued = await issueDirectSessionForGrant(
+      adminClient,
+      directGrant,
+      supportToken,
+      staff,
+    )
+    if (!(issued instanceof Response)) {
+      directAccess = issued
+    }
+  }
+
   return jsonResponse({
     grant_id: grant.id,
     status: 'active',
     hostname: grant.hostname,
     expires_at: expiresAt,
+    ...(directAccess ? { direct_access: directAccess } : {}),
   })
 }
 
@@ -296,6 +395,8 @@ async function revokeGrant(
     })
     .eq('id', grant.id)
   if (error) throw new Error(error.message)
+
+  await revokeDirectSessionForGrant(adminClient, grant, staff)
 
   let submission: SubmissionRow | null = null
   if (grant.submission_id) {
@@ -543,7 +644,7 @@ async function readOwnedGrant(
   const { data, error } = await adminClient
     .from('support_access_grants')
     .select(
-      'id,staff_user_id,staff_email,hub_id,home_id,submission_id,status,reason,hostname,created_at,expires_at,revoked_at',
+      'id,staff_user_id,staff_email,hub_id,home_id,submission_id,status,reason,hostname,created_at,expires_at,revoked_at,direct_token_id',
     )
     .eq('id', grantId)
     .eq('staff_user_id', userId)
@@ -615,6 +716,200 @@ async function insertAudit(
     detail,
   })
   if (error) console.error('Failed to write support access audit:', error)
+}
+
+async function issueDirectSessionForGrant(
+  adminClient: any,
+  grant: GrantRow,
+  supportToken: SupportTokenRow,
+  staff: StaffContext,
+): Promise<DirectAccessPayload | Response> {
+  if (grant.direct_token_id) {
+    await revokeDirectSessionToken({
+      hostname: grant.hostname,
+      supportToken: supportToken.token,
+      tokenId: grant.direct_token_id,
+    })
+  }
+
+  const ttlSeconds = Math.max(
+    1,
+    Math.floor((new Date(grant.expires_at).getTime() - Date.now()) / 1000),
+  )
+  const response = await fetch(
+    `https://${grant.hostname}/api/auth/support-session-token`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${supportToken.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ttl_seconds: ttlSeconds,
+        label: `support:${grant.id}:${staff.email}`,
+      }),
+    },
+  ).catch((error) => error as Error)
+
+  if (response instanceof Error) {
+    await insertAudit(adminClient, {
+      grantId: grant.id,
+      hubId: grant.hub_id,
+      staffEmail: staff.email,
+      action: 'direct_session_failed',
+      detail: { error: errorMessage(response) },
+    })
+    return jsonResponse({ error: 'Could not open direct support session' }, 502)
+  }
+
+  const data = await readResponseJson(response)
+  if (!response.ok) {
+    await insertAudit(adminClient, {
+      grantId: grant.id,
+      hubId: grant.hub_id,
+      staffEmail: staff.email,
+      action: 'direct_session_failed',
+      detail: {
+        status_code: response.status,
+        error: readErrorFromResponseData(data),
+      },
+    })
+    return jsonResponse({ error: 'Could not open direct support session' }, 502)
+  }
+
+  const token = readString(data, 'token')
+  const tokenId = readString(data, 'token_id')
+  const expiresAtEpochMs = readNumber(data, 'expires_at_epoch_ms')
+  if (!token || !tokenId || !expiresAtEpochMs) {
+    await insertAudit(adminClient, {
+      grantId: grant.id,
+      hubId: grant.hub_id,
+      staffEmail: staff.email,
+      action: 'direct_session_failed',
+      detail: { error: 'invalid_device_response' },
+    })
+    return jsonResponse({ error: 'Invalid direct support session response' }, 502)
+  }
+
+  const directExpiresAt = new Date(expiresAtEpochMs).toISOString()
+  const { error } = await adminClient
+    .from('support_access_grants')
+    .update({
+      direct_token_id: tokenId,
+      last_accessed_at: new Date().toISOString(),
+    })
+    .eq('id', grant.id)
+  if (error) throw new Error(error.message)
+
+  await insertAudit(adminClient, {
+    grantId: grant.id,
+    hubId: grant.hub_id,
+    staffEmail: staff.email,
+    action: 'direct_session_issued',
+    detail: {
+      token_id: tokenId,
+      expires_at: directExpiresAt,
+    },
+  })
+
+  grant.direct_token_id = tokenId
+  return {
+    hostname: grant.hostname,
+    token_id: tokenId,
+    token,
+    expires_at: directExpiresAt,
+  }
+}
+
+async function revokeGrantAfterDirectSessionFailure(
+  adminClient: any,
+  grant: GrantRow,
+  staff: StaffContext,
+): Promise<void> {
+  const revokedAt = new Date().toISOString()
+  const { error } = await adminClient
+    .from('support_access_grants')
+    .update({
+      status: 'revoked',
+      revoked_at: revokedAt,
+      revoked_by: staff.userId,
+    })
+    .eq('id', grant.id)
+    .eq('status', 'active')
+  if (error) {
+    console.error('Failed to revoke grant after direct session failure:', error)
+  }
+  await insertAudit(adminClient, {
+    grantId: grant.id,
+    hubId: grant.hub_id,
+    staffEmail: staff.email,
+    action: 'grant_revoked_direct_session_failed',
+  })
+}
+
+async function revokeDirectSessionForGrant(
+  adminClient: any,
+  grant: GrantRow,
+  staff: StaffContext,
+): Promise<void> {
+  if (!grant.direct_token_id) return
+  const supportToken = await fetchSupportToken(adminClient, grant.hub_id)
+  if (!supportToken) return
+  const revoked = await revokeDirectSessionToken({
+    hostname: grant.hostname,
+    supportToken: supportToken.token,
+    tokenId: grant.direct_token_id,
+  })
+  await insertAudit(adminClient, {
+    grantId: grant.id,
+    hubId: grant.hub_id,
+    staffEmail: staff.email,
+    action: revoked ? 'direct_session_revoked' : 'direct_session_revoke_failed',
+    detail: { token_id: grant.direct_token_id },
+  })
+}
+
+async function revokeDirectSessionToken({
+  hostname,
+  supportToken,
+  tokenId,
+}: {
+  hostname: string
+  supportToken: string
+  tokenId: string
+}): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `https://${hostname}/api/auth/support-session-token/revoke`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${supportToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ token_id: tokenId }),
+      },
+    )
+    return response.ok
+  } catch (error) {
+    console.error('Failed to revoke direct support session token:', error)
+    return false
+  }
+}
+
+async function readResponseJson(response: Response): Promise<JsonObject> {
+  try {
+    const data = await response.json()
+    return data && typeof data === 'object'
+      ? data as JsonObject
+      : {}
+  } catch (_) {
+    return {}
+  }
+}
+
+function readErrorFromResponseData(data: JsonObject): string | null {
+  return readString(data, 'error') ?? readString(data, 'message')
 }
 
 async function commentOnGitHubIssueIfConfigured(

@@ -293,7 +293,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       fallbackPlatformContext: fallbackPlatformContext,
       resetCheckStateOnInitialize: true,
       authToken: resolved.hub.token,
-      dio: resolved.supportProxyDio(),
     );
   }
 

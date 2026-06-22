@@ -48,6 +48,3 @@ verify_jwt = false
 
 [functions.support-access]
 verify_jwt = false
-
-[functions.support-proxy]
-verify_jwt = false

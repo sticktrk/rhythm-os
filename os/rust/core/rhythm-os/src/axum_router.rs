@@ -63,6 +63,14 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/auth/status", get(get_auth_status))
         .route("/api/auth/claim", post(post_auth_claim))
         .route("/api/auth/support-token", post(post_auth_support_token))
+        .route(
+            "/api/auth/support-session-token",
+            post(post_auth_support_session_token),
+        )
+        .route(
+            "/api/auth/support-session-token/revoke",
+            post(post_auth_support_session_token_revoke),
+        )
         .route("/api/auth/settings", put(put_auth_settings))
         .route(
             "/api/remote-access/status",
@@ -255,6 +263,30 @@ async fn post_auth_support_token(
         .filter(|label| !label.is_empty())
         .map(str::to_string);
     crate::auth::handle_issue_support_token(&state, auth_info.map(|Extension(info)| info), label)
+}
+
+async fn post_auth_support_session_token(
+    State(state): State<SharedState>,
+    auth_info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    crate::auth::handle_issue_support_session_token(
+        &state,
+        auth_info.map(|Extension(info)| info),
+        &body,
+    )
+}
+
+async fn post_auth_support_session_token_revoke(
+    State(state): State<SharedState>,
+    auth_info: Option<Extension<crate::auth::ApiAuthRequestInfo>>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    crate::auth::handle_revoke_support_session_token(
+        &state,
+        auth_info.map(|Extension(info)| info),
+        &body,
+    )
 }
 
 async fn put_auth_settings(

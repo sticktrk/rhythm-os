@@ -1272,7 +1272,12 @@ class ServerSyncProvider extends ChangeNotifier {
     bool assumeSavedAuth = false,
   }) async {
     if (EmployeeModeService.instance.isActive) {
-      return (hub: hub, authToken: null);
+      final directToken = hub.token?.trim();
+      return (
+        hub: hub,
+        authToken:
+            directToken == null || directToken.isEmpty ? null : directToken,
+      );
     }
 
     final existingToken = hub.token?.trim();

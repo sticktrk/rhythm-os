@@ -445,7 +445,6 @@ bool accountHomeBelongsToUserForTesting({
   return home.ownerId == cleanUserId || home.memberIds.contains(cleanUserId);
 }
 
-@visibleForTesting
 bool accountHomeCanSyncForUserForTesting({
   required Home home,
   required String? userId,

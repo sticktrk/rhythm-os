@@ -26,7 +26,11 @@ use crate::state::{current_epoch_ms, SharedState};
 const TOKEN_RANDOM_BYTES: usize = 32;
 const TOKEN_PREFIX: &str = "rhythm_owner_";
 const SUPPORT_TOKEN_PREFIX: &str = "rhythm_support_";
+const SUPPORT_SESSION_TOKEN_PREFIX: &str = "rhythm_support_session_";
 const SUPPORT_AUDIT_FILE: &str = "support-audit.log";
+const DEFAULT_SUPPORT_SESSION_TTL_SECS: u64 = 60 * 60;
+const MIN_SUPPORT_SESSION_TTL_SECS: u64 = 1;
+const MAX_SUPPORT_SESSION_TTL_SECS: u64 = 4 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiAuthRequestInfo {
@@ -34,6 +38,7 @@ pub struct ApiAuthRequestInfo {
     pub claim_available: bool,
     pub via_remote_access: bool,
     pub role: Option<ApiTokenRole>,
+    pub token_expires_at_epoch_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,12 +89,17 @@ impl StoredApiAuth {
             return None;
         }
         let candidate_hash = hash_token(raw_token);
+        let now = current_epoch_ms();
         self.tokens
             .iter()
-            .find(|token| constant_time_eq(token.token_hash.as_bytes(), candidate_hash.as_bytes()))
+            .find(|token| {
+                !token.is_expired(now)
+                    && constant_time_eq(token.token_hash.as_bytes(), candidate_hash.as_bytes())
+            })
             .map(|token| VerifiedApiToken {
                 id: token.id.clone(),
                 role: token.role,
+                expires_at_epoch_ms: token.expires_at_epoch_ms,
             })
     }
 }
@@ -111,6 +121,7 @@ impl Default for ApiTokenRole {
 struct VerifiedApiToken {
     id: String,
     role: ApiTokenRole,
+    expires_at_epoch_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +133,16 @@ pub struct StoredApiToken {
     pub created_at_epoch_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_epoch_ms: Option<u64>,
+}
+
+impl StoredApiToken {
+    fn is_expired(&self, now_epoch_ms: u64) -> bool {
+        self.expires_at_epoch_ms
+            .map(|expires_at| expires_at <= now_epoch_ms)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -146,18 +167,25 @@ pub fn issue_local_owner_token(
     state: &SharedState,
     label: Option<String>,
 ) -> anyhow::Result<IssuedOwnerToken> {
-    issue_local_token(state, ApiTokenRole::Owner, TOKEN_PREFIX, label)
+    issue_local_token(state, ApiTokenRole::Owner, TOKEN_PREFIX, label, None)
 }
 
 /// Issue a support token from a trusted local or owner-authenticated channel.
 ///
-/// Support tokens are never publicly claimable. They are intended for managed
-/// support access through the cloud proxy and are scoped by the middleware gate.
+/// Support tokens are never publicly claimable. The long-lived support token is
+/// held by the cloud only; employee clients receive short-lived support session
+/// tokens minted from it and scoped by the middleware gate.
 pub fn issue_local_support_token(
     state: &SharedState,
     label: Option<String>,
 ) -> anyhow::Result<IssuedToken> {
-    issue_local_token(state, ApiTokenRole::Support, SUPPORT_TOKEN_PREFIX, label)
+    issue_local_token(
+        state,
+        ApiTokenRole::Support,
+        SUPPORT_TOKEN_PREFIX,
+        label,
+        None,
+    )
 }
 
 fn issue_local_token(
@@ -165,18 +193,21 @@ fn issue_local_token(
     role: ApiTokenRole,
     prefix: &str,
     label: Option<String>,
+    expires_at_epoch_ms: Option<u64>,
 ) -> anyhow::Result<IssuedToken> {
     let token = generate_raw_token(prefix);
     let token_hash = hash_token(&token);
     let id = token_hash.chars().take(16).collect::<String>();
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    prune_expired_tokens(&mut s.api_auth.tokens, current_epoch_ms());
     s.api_auth.tokens.push(StoredApiToken {
         id: id.clone(),
         role,
         token_hash,
         created_at_epoch_ms: current_epoch_ms(),
         label,
+        expires_at_epoch_ms,
     });
 
     if let Some(storage) = s.storage.as_ref() {
@@ -184,6 +215,58 @@ fn issue_local_token(
     }
 
     Ok(IssuedToken { id, token })
+}
+
+pub fn issue_support_session_token(
+    state: &SharedState,
+    label: Option<String>,
+    ttl_seconds: Option<u64>,
+) -> anyhow::Result<(IssuedToken, u64)> {
+    let ttl_seconds = clamp_support_session_ttl(ttl_seconds);
+    let expires_at_epoch_ms = current_epoch_ms().saturating_add(ttl_seconds.saturating_mul(1000));
+    let issued = issue_local_token(
+        state,
+        ApiTokenRole::Support,
+        SUPPORT_SESSION_TOKEN_PREFIX,
+        label,
+        Some(expires_at_epoch_ms),
+    )?;
+    Ok((issued, expires_at_epoch_ms))
+}
+
+pub fn revoke_support_session_token(state: &SharedState, token_id: &str) -> anyhow::Result<bool> {
+    let clean_id = token_id.trim();
+    if clean_id.is_empty() {
+        return Ok(false);
+    }
+
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let before = s.api_auth.tokens.len();
+    s.api_auth.tokens.retain(|token| {
+        !(token.id == clean_id
+            && token.role == ApiTokenRole::Support
+            && token.expires_at_epoch_ms.is_some())
+    });
+    let revoked = s.api_auth.tokens.len() != before;
+    prune_expired_tokens(&mut s.api_auth.tokens, current_epoch_ms());
+
+    if revoked {
+        if let Some(storage) = s.storage.as_ref() {
+            storage.save_api_auth(&s.api_auth)?;
+        }
+    }
+
+    Ok(revoked)
+}
+
+fn prune_expired_tokens(tokens: &mut Vec<StoredApiToken>, now_epoch_ms: u64) {
+    tokens.retain(|token| !token.is_expired(now_epoch_ms));
+}
+
+fn clamp_support_session_ttl(ttl_seconds: Option<u64>) -> u64 {
+    ttl_seconds
+        .unwrap_or(DEFAULT_SUPPORT_SESSION_TTL_SECS)
+        .clamp(MIN_SUPPORT_SESSION_TTL_SECS, MAX_SUPPORT_SESSION_TTL_SECS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +296,7 @@ pub fn issue_owner_token(
         token_hash,
         created_at_epoch_ms: current_epoch_ms(),
         label,
+        expires_at_epoch_ms: None,
     });
 
     if let Some(storage) = s.storage.as_ref() {
@@ -242,6 +326,7 @@ pub fn set_api_auth_required(
             token_hash,
             created_at_epoch_ms: current_epoch_ms(),
             label,
+            expires_at_epoch_ms: None,
         });
 
         Some(IssuedOwnerToken { id, token })
@@ -284,6 +369,7 @@ pub fn handle_get_auth_status(
                 claim_available: s.require_api_auth && !s.api_auth.has_owner(),
                 via_remote_access: false,
                 role: None,
+                token_expires_at_epoch_ms: None,
             });
             ApiResponse::json_ok(
                 auth_status_payload(
@@ -340,6 +426,85 @@ pub fn handle_issue_support_token(
     }
 }
 
+pub fn handle_issue_support_session_token(
+    state: &SharedState,
+    request_info: Option<ApiAuthRequestInfo>,
+    body: &Value,
+) -> ApiResponse {
+    if !request_has_privileged_token(request_info) {
+        return ApiResponse::forbidden(
+            "Support session tokens require an authenticated support token",
+        );
+    }
+
+    let label = body
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string);
+    let ttl_seconds = body.get("ttl_seconds").and_then(Value::as_u64);
+
+    match issue_support_session_token(state, label, ttl_seconds) {
+        Ok((issued, expires_at_epoch_ms)) => ApiResponse::json_ok(
+            json!({
+                "status": "ok",
+                "token_id": issued.id,
+                "token": issued.token,
+                "role": "support",
+                "expires_at_epoch_ms": expires_at_epoch_ms,
+            })
+            .to_string(),
+        ),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_revoke_support_session_token(
+    state: &SharedState,
+    request_info: Option<ApiAuthRequestInfo>,
+    body: &Value,
+) -> ApiResponse {
+    if !request_has_privileged_token(request_info) {
+        return ApiResponse::forbidden(
+            "Support session tokens require an authenticated support token",
+        );
+    }
+
+    let token_id = body
+        .get("token_id")
+        .or_else(|| body.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(token_id) = token_id else {
+        return ApiResponse::bad_request("Missing token_id");
+    };
+
+    match revoke_support_session_token(state, token_id) {
+        Ok(revoked) => ApiResponse::json_ok(
+            json!({
+                "status": "ok",
+                "token_id": token_id,
+                "revoked": revoked,
+            })
+            .to_string(),
+        ),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+fn request_has_privileged_token(request_info: Option<ApiAuthRequestInfo>) -> bool {
+    let Some(info) = request_info else {
+        return false;
+    };
+    match info.role {
+        Some(ApiTokenRole::Owner) => true,
+        Some(ApiTokenRole::Support) => info.token_expires_at_epoch_ms.is_none(),
+        None => false,
+    }
+}
+
 pub fn handle_put_auth_settings(state: &SharedState, body: &Value) -> ApiResponse {
     let require_api_auth = match body
         .get("require_api_auth")
@@ -392,6 +557,7 @@ pub async fn require_api_auth_middleware(
     if let Some(verified_token) = verified_bearer.as_ref() {
         if verified_token.role == ApiTokenRole::Support {
             auth_info.role = Some(verified_token.role);
+            auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
             req.extensions_mut().insert(auth_info);
             write_support_audit_line(&state, &verified_token.id, req.method(), req.uri().path());
             if is_owner_only_request_for_support(req.method(), req.uri().path()) {
@@ -423,6 +589,7 @@ pub async fn require_api_auth_middleware(
     };
 
     auth_info.role = Some(verified_token.role);
+    auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
     req.extensions_mut().insert(auth_info);
 
     if verified_token.role == ApiTokenRole::Support {
@@ -485,6 +652,7 @@ pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthReq
         claim_available,
         via_remote_access,
         role: None,
+        token_expires_at_epoch_ms: None,
     }
 }
 
@@ -691,6 +859,7 @@ mod tests {
                 token_hash: hash_token(raw),
                 created_at_epoch_ms: 1,
                 label: None,
+                expires_at_epoch_ms: None,
             }],
         };
 
@@ -756,6 +925,49 @@ mod tests {
             Some(ApiTokenRole::Support)
         );
         assert_eq!(state.api_auth.tokens[0].label.as_deref(), Some("support"));
+    }
+
+    #[test]
+    fn support_session_token_expires_and_can_be_revoked() {
+        let state = test_state();
+
+        let (issued, expires_at_epoch_ms) =
+            issue_support_session_token(&state, Some("grant".into()), Some(60)).unwrap();
+
+        assert!(issued.token.starts_with(SUPPORT_SESSION_TOKEN_PREFIX));
+        assert!(expires_at_epoch_ms > current_epoch_ms());
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(
+                state.api_auth.verify_token_role(&issued.token),
+                Some(ApiTokenRole::Support)
+            );
+            assert_eq!(
+                state.api_auth.tokens[0].expires_at_epoch_ms,
+                Some(expires_at_epoch_ms)
+            );
+        }
+
+        assert!(revoke_support_session_token(&state, &issued.id).unwrap());
+        assert!(!state.lock().unwrap().api_auth.verify_token(&issued.token));
+    }
+
+    #[test]
+    fn expiring_support_session_token_cannot_mint_more_sessions() {
+        assert!(request_has_privileged_token(Some(ApiAuthRequestInfo {
+            requires_auth: true,
+            claim_available: false,
+            via_remote_access: true,
+            role: Some(ApiTokenRole::Support),
+            token_expires_at_epoch_ms: None,
+        })));
+        assert!(!request_has_privileged_token(Some(ApiAuthRequestInfo {
+            requires_auth: true,
+            claim_available: false,
+            via_remote_access: true,
+            role: Some(ApiTokenRole::Support),
+            token_expires_at_epoch_ms: Some(current_epoch_ms() + 60_000),
+        })));
     }
 
     #[test]

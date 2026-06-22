@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS support_access_grants (
   status support_access_status NOT NULL DEFAULT 'active',
   reason TEXT,
   hostname TEXT NOT NULL,
+  direct_token_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL,
   last_accessed_at TIMESTAMPTZ,
@@ -88,7 +89,10 @@ CREATE POLICY "Home members can view support access grants"
     EXISTS (
       SELECT 1 FROM homes
       WHERE homes.id = support_access_grants.home_id
-        AND auth.uid() = ANY(homes.member_ids)
+        AND (
+          auth.uid() = homes.owner_id
+          OR auth.uid() = ANY(homes.member_ids)
+        )
     )
   );
 
@@ -130,7 +134,10 @@ CREATE POLICY "Home members can view support access audit"
       FROM support_access_grants grants
       JOIN homes ON homes.id = grants.home_id
       WHERE grants.id = support_access_audit.grant_id
-        AND auth.uid() = ANY(homes.member_ids)
+        AND (
+          auth.uid() = homes.owner_id
+          OR auth.uid() = ANY(homes.member_ids)
+        )
     )
   );
 
@@ -159,8 +166,8 @@ COMMENT ON COLUMN homes.support_access_consent_at IS
 COMMENT ON FUNCTION enforce_support_access_consent_owner() IS
   'Prevents non-owner home members from changing managed support access consent';
 COMMENT ON TABLE hub_support_tokens IS
-  'Service-role-only vault for per-hub support bearer tokens used by support-proxy';
+  'Service-role-only vault for per-hub support bearer tokens used to mint short-lived direct support sessions';
 COMMENT ON TABLE support_access_grants IS
   'Time-boxed employee support sessions granted against a managed hub';
 COMMENT ON TABLE support_access_audit IS
-  'Request-level support access audit log written by support-access and support-proxy';
+  'Support access audit log written by support-access for grants and direct session lifecycle';

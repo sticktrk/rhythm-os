@@ -89,7 +89,7 @@ class HybridApiClient implements RhythmApi {
                 final dio = remoteDioOverride();
                 if (dio == null) return null;
                 return _SdkConfigAdapter(sdk.RhythmConfigApi(
-                  baseUrl: 'https://support-proxy.invalid/',
+                  baseUrl: 'https://remote-override.invalid/',
                   dio: dio,
                 ));
               });
@@ -98,7 +98,7 @@ class HybridApiClient implements RhythmApi {
       remote: remoteDio == null && effectiveBaseUrl == null
           ? _LocalOnlyApi()
           : _SdkConfigAdapter(sdk.RhythmConfigApi(
-              baseUrl: effectiveBaseUrl ?? 'https://support-proxy.invalid/',
+              baseUrl: effectiveBaseUrl ?? 'https://remote-override.invalid/',
               dio: remoteDio,
               authToken: authToken,
             )),
