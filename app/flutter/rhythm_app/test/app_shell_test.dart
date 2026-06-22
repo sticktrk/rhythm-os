@@ -814,6 +814,62 @@ void main() {
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
+  testWidgets('app resume refresh keeps synced Home on the room grid',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final home = Home.create(
+      id: 'home-1',
+      name: 'Kitchen',
+      ownerId: 'user-1',
+    );
+    final hub = _serverHub(remote: true).copyWith(
+      token: 'owner-token',
+      homeId: home.id,
+    );
+    final homeProvider = _FakeHomeProvider([hub], currentHome: home);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      endpointReachability: (_, __) async => false,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await serverSync.retryActiveServerConnection(
+      assumeLanReachable: true,
+      assumeSavedAuth: true,
+    );
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Kitchen'), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(serverSync.hasHomeEntryRefreshGate, isFalse);
+    expect(connection.reconnectCallCount, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
+    expect(find.text('Waiting to Retry...'), findsNothing);
+    expect(find.byType(ServerDisconnectedScreen), findsNothing);
+    expect(find.text('Kitchen'), findsOneWidget);
+  });
+
   testWidgets(
       'shows setup loading while a server with cached rooms is still connecting',
       (tester) async {

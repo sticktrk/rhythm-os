@@ -1193,13 +1193,14 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     _SegmentSpec(RoomMode.on, Icons.lightbulb_rounded, 'On'),
   ];
 
-  int _indexFor(RoomMode m) => switch (m) {
-        RoomMode.mood => 0,
-        // Standby and off share the middle segment — it toggles between the
-        // two labels (see [_displaySegments]).
-        RoomMode.standby || RoomMode.off => 1,
-        RoomMode.on => 2,
-      };
+  int _indexFor(RoomMode m) {
+    if (m == RoomMode.standby) return _indexFor(RoomMode.on);
+    final segs = _segments;
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i].mode == m) return i;
+    }
+    return 1;
+  }
 
   int _indexAtX(double x, double trackWidth) {
     final segs = _segments;
@@ -1212,7 +1213,14 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
 
   void _select(int i, {bool repeatTap = false}) {
     if (!widget.enabled) return;
-    final target = _displaySegments()[i].mode;
+    final target = _segments[i].mode;
+    if (repeatTap &&
+        target == RoomMode.on &&
+        widget.mode == RoomMode.on &&
+        widget.standbyEnabled) {
+      widget.onModeChanged(RoomMode.standby);
+      return;
+    }
     if (target != widget.mode || (repeatTap && target == RoomMode.mood)) {
       widget.onModeChanged(target);
     }
@@ -1223,11 +1231,7 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     final segments = _displaySegments();
     final restingIndex = _indexFor(widget.mode);
     final activeIndex = _dragIndex ?? restingIndex;
-    // While dragging, preview the segment under the finger; at rest reflect
-    // the room's true mode so standby keeps its warm highlight even though its
-    // middle segment reads "Off".
-    final activeMode =
-        _dragIndex != null ? segments[activeIndex].mode : widget.mode;
+    final activeMode = segments[activeIndex].mode;
     final activeText = _activeTextColor(activeMode);
     final inactiveText = const Color(0xFF8B949E);
 
@@ -1364,18 +1368,13 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     );
   }
 
-  // The middle segment doubles as the standby/off control. Standby is offered
-  // from the OFF state: when the room is off (and standby is enabled) it reads
-  // "Standby" so a tap parks the room in its dim standby state. Once in standby
-  // — or whenever the room is up (on/mood) — it reverts to plain "Off".
   List<_SegmentSpec> _displaySegments() {
-    final offerStandby = widget.standbyEnabled && widget.mode == RoomMode.off;
-    if (!offerStandby) return _segments;
+    if (widget.mode != RoomMode.standby) return _segments;
     return const [
       _SegmentSpec(RoomMode.mood, Icons.spa_rounded, 'Mood'),
+      _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
       _SegmentSpec(
           RoomMode.standby, Icons.lightbulb_outline_rounded, 'Standby'),
-      _SegmentSpec(RoomMode.on, Icons.lightbulb_rounded, 'On'),
     ];
   }
 

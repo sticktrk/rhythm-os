@@ -432,5 +432,28 @@ void main() {
       expect(updatedHub.token, 'owner-token');
       expect(updatedHub.pendingSync, isTrue);
     });
+
+    test('builds detached server hub for local hardware inspection', () {
+      final discovered = DiscoveredHub(
+        host: '192.168.5.123',
+        address: '192.168.5.123',
+        port: rhythmServerDefaultPort,
+        name: 'Kitchen Box',
+        type: HubType.server,
+      );
+
+      final hub = rhythmDetachedServerHubForTesting(
+        server: discovered,
+        authToken: 'owner-token',
+      );
+
+      expect(hub.id, 'detached-192.168.5.123:54448');
+      expect(hub.homeId, 'detached-home');
+      expect(hub.name, 'Kitchen Box');
+      expect(hub.endpoint.host, '192.168.5.123');
+      expect(hub.endpoint.port, rhythmServerDefaultPort);
+      expect(hub.token, 'owner-token');
+      expect(hub.pendingSync, isFalse);
+    });
   });
 }

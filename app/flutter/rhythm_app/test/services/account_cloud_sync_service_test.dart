@@ -56,6 +56,52 @@ void main() {
       );
     });
 
+    test('account home membership requires owner or member match', () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Household',
+        ownerId: 'owner-user',
+      );
+
+      expect(
+        accountHomeBelongsToUserForTesting(home: home, userId: 'owner-user'),
+        isTrue,
+      );
+      expect(
+        accountHomeBelongsToUserForTesting(home: home, userId: 'other-user'),
+        isFalse,
+      );
+    });
+
+    test('signed-in sync can claim anonymous homes but rejects other accounts',
+        () {
+      final anonymousHome = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Local Home',
+        ownerId: 'anonymous-user',
+      );
+      final staleAccountHome = Home.create(
+        id: 'e4d37ce1-2ac9-4ac4-a226-e9d1234ca471',
+        name: 'Old Household',
+        ownerId: 'previous-user',
+      );
+
+      expect(
+        accountHomeCanSyncForUserForTesting(
+          home: anonymousHome,
+          userId: 'signed-in-user',
+        ),
+        isTrue,
+      );
+      expect(
+        accountHomeCanSyncForUserForTesting(
+          home: staleAccountHome,
+          userId: 'signed-in-user',
+        ),
+        isFalse,
+      );
+    });
+
     test('server hub payload encrypts local owner token envelope', () async {
       final hub = Hub.server(
         id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',

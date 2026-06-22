@@ -132,8 +132,12 @@ async function handleRequest(
 
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(githubRepo)) {
     const message = 'GITHUB_ISSUES_REPO must be in owner/repo format.'
-    await markGitHubIssueError(adminClient, submission.id, message)
-    return jsonResponse({ issue_created: false, error: message }, 500)
+    await markGitHubIssueError(adminClient, submission.id, message, 'received')
+    return jsonResponse({
+      issue_created: false,
+      status: 'received',
+      error: message,
+    })
   }
 
   const signedBundleLink = submission.bundle_storage_path
@@ -181,11 +185,13 @@ async function handleRequest(
     })
   } catch (error) {
     const message = errorMessage(error)
-    await markGitHubIssueError(adminClient, submission.id, message)
-    return jsonResponse(
-      { issue_created: false, status: 'error', error: message },
-      500,
-    )
+    console.error('GitHub issue creation failed:', error)
+    await markGitHubIssueError(adminClient, submission.id, message, 'received')
+    return jsonResponse({
+      issue_created: false,
+      status: 'received',
+      error: message,
+    })
   }
 }
 
@@ -270,7 +276,7 @@ async function createGitHubIssue({
 
   const responseBody = await response.json().catch(() => ({}))
   if (!response.ok) {
-    throw new Error(formatGitHubError(response.status, responseBody))
+    throw new Error(formatGitHubError(repo, response.status, responseBody))
   }
 
   if (
@@ -421,16 +427,20 @@ function formatBytes(size: number | null): string {
   return `${(kib / 1024).toFixed(1)} MiB`
 }
 
-function formatGitHubError(status: number, responseBody: unknown): string {
+function formatGitHubError(
+  repo: string,
+  status: number,
+  responseBody: unknown,
+): string {
   if (
     responseBody &&
     typeof responseBody === 'object' &&
     'message' in responseBody &&
     typeof responseBody.message === 'string'
   ) {
-    return `GitHub issue creation failed (${status}): ${responseBody.message}`
+    return `GitHub issue creation failed for ${repo} (${status}): ${responseBody.message}`
   }
-  return `GitHub issue creation failed with HTTP ${status}.`
+  return `GitHub issue creation failed for ${repo} with HTTP ${status}.`
 }
 
 function quoteBlock(value: string): string {

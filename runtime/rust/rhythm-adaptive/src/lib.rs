@@ -299,7 +299,7 @@ mod tests {
     use rhythm_core::runtime::registry::SimpleDeviceRegistry;
     use rhythm_core::runtime::scheduler::NoOpScheduler;
     use rhythm_core::runtime::time::MockTimeProvider;
-    use rhythm_core::NoOpController;
+    use rhythm_core::{NoOpController, RestoredRoomState, RoomProfileSettings};
     use rhythm_runtime_api::{
         DispatchCommand, DispatchTarget, InputAction, NodeState, RuntimeInputEvent, RuntimeNode,
         RuntimeNodeKind, TickContext,
@@ -379,6 +379,53 @@ mod tests {
                 ..
             }) if node_id == "room-a"
         ));
+    }
+
+    #[test]
+    fn off_press_enters_standby_when_enabled() {
+        let mut runtime = test_runtime();
+        RuntimeHandle::add_room(runtime.inner(), "room-a", "Room A");
+        RuntimeHandle::restore_room_state(
+            runtime.inner(),
+            "room-a",
+            RestoredRoomState {
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                mood_active: false,
+                standby_enabled: true,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            },
+        );
+
+        let plan = runtime
+            .handle_event(
+                &room_snapshot(true),
+                RuntimeEvent::Input(RuntimeInputEvent {
+                    source_id: "motion-timeout".to_string(),
+                    target_id: "room-a".to_string(),
+                    action: InputAction::Named("off_press".to_string()),
+                    epoch_ms: None,
+                    metadata: Default::default(),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(plan.dispatch.len(), 1);
+        match &plan.dispatch[0] {
+            DispatchCommand::TurnOn {
+                target: DispatchTarget::Node { node_id },
+                command,
+            } => {
+                assert_eq!(node_id, "room-a");
+                assert_eq!(command.brightness, 1);
+                assert!(command.kelvin > 0);
+            }
+            command => panic!("expected standby turn_on, got {command:?}"),
+        }
     }
 
     #[test]

@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-runtime-api"
-version = "0.6.114-beta"
+version = "0.6.110-beta"
 dependencies = [
  "async-trait",
  "serde",

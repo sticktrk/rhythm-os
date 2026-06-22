@@ -71,6 +71,7 @@ class AccountCloudSyncService {
 
   Future<List<AccountHomeServerHubs>> loadHomesAndServerHubs() async {
     final client = _client;
+    final userId = AuthService().currentUserId;
     if (!canUseSignedInCloudFeatures || client == null) {
       return const [];
     }
@@ -84,6 +85,10 @@ class AccountCloudSyncService {
     final homes = homeRows
         .whereType<Map>()
         .map((row) => Home.fromSupabase(_stringKeyMap(row)))
+        .where((home) => accountHomeBelongsToUserForTesting(
+              home: home,
+              userId: userId,
+            ))
         .toList(growable: false);
     if (homes.isEmpty) return const [];
 
@@ -138,6 +143,13 @@ class AccountCloudSyncService {
       debugPrint(
         'AccountCloudSyncService: sync skipped for home=${home.id} '
         'reason=$reason server_hubs=0',
+      );
+      return;
+    }
+    if (!accountHomeCanSyncForUserForTesting(home: home, userId: userId)) {
+      debugPrint(
+        'AccountCloudSyncService: sync skipped for home=${home.id} '
+        'reason=$reason not a member of this account',
       );
       return;
     }
@@ -381,6 +393,30 @@ bool shouldSyncHomeAndServerHubsForTesting({
   required Iterable<Hub> serverHubs,
 }) {
   return home != null && serverHubs.any((hub) => hub.type == HubType.server);
+}
+
+@visibleForTesting
+bool accountHomeBelongsToUserForTesting({
+  required Home home,
+  required String? userId,
+}) {
+  final cleanUserId = userId?.trim();
+  if (cleanUserId == null || cleanUserId.isEmpty) return false;
+  return home.ownerId == cleanUserId || home.memberIds.contains(cleanUserId);
+}
+
+@visibleForTesting
+bool accountHomeCanSyncForUserForTesting({
+  required Home home,
+  required String? userId,
+}) {
+  if (accountHomeBelongsToUserForTesting(home: home, userId: userId)) {
+    return true;
+  }
+  final ownerId = home.ownerId.trim();
+  return ownerId.isEmpty ||
+      ownerId == 'anonymous-user' ||
+      ownerId == 'web-local';
 }
 
 @visibleForTesting

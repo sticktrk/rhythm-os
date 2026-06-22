@@ -172,11 +172,20 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       final serverHub = homeProvider.getFirstHubOfType(HubType.server);
       if (serverHub == null) return;
 
-      final homeName = homeProvider.currentHome?.name ?? 'Home';
+      final serverSync = context.read<ServerSyncProvider>();
+      if (!serverSync.hasBeenSynced || serverSync.connectedServerHub == null) {
+        return;
+      }
+
       unawaited(
-        context
-            .read<ServerSyncProvider>()
-            .refreshForHomeEntry(homeName: homeName),
+        serverSync
+            .retryActiveServerConnection(
+          authoritative: true,
+        )
+            .catchError((Object error, StackTrace stackTrace) {
+          debugPrint('AppShell: Resume server refresh failed: $error');
+          debugPrint('$stackTrace');
+        }),
       );
     } catch (e) {
       // Server not available, ignore

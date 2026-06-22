@@ -82,7 +82,8 @@ pub fn runtime_input_from_button_action(action: ButtonAction) -> InputAction {
     match action {
         ButtonAction::OnPress => InputAction::On,
         ButtonAction::Toggle => InputAction::Toggle,
-        ButtonAction::OffPress | ButtonAction::LightsOff => InputAction::Off,
+        ButtonAction::OffPress => InputAction::Named("off_press".to_string()),
+        ButtonAction::LightsOff => InputAction::Off,
         ButtonAction::Reset => InputAction::Reset,
         ButtonAction::UpPress => InputAction::BrightnessUp,
         ButtonAction::DownPress => InputAction::BrightnessDown,
@@ -112,6 +113,7 @@ pub fn button_action_from_runtime_input(action: &InputAction) -> Option<ButtonAc
             "rhythm_off" => Some(ButtonAction::RhythmOff),
             "sleep_on" => Some(ButtonAction::SleepOn),
             "sleep_off" => Some(ButtonAction::SleepOff),
+            "off_press" => Some(ButtonAction::OffPress),
             "lights_off" => Some(ButtonAction::LightsOff),
             _ => None,
         },
@@ -323,6 +325,22 @@ mod tests {
         assert_eq!(
             runtime_input_from_button_action(ButtonAction::UpPress),
             InputAction::BrightnessUp
+        );
+        assert_eq!(
+            runtime_input_from_button_action(ButtonAction::OffPress),
+            InputAction::Named("off_press".to_string())
+        );
+        assert_eq!(
+            runtime_input_from_button_action(ButtonAction::LightsOff),
+            InputAction::Off
+        );
+        assert_eq!(
+            button_action_from_runtime_input(&InputAction::Named("off_press".to_string())),
+            Some(ButtonAction::OffPress)
+        );
+        assert_eq!(
+            button_action_from_runtime_input(&InputAction::Off),
+            Some(ButtonAction::LightsOff)
         );
         assert_eq!(
             button_action_from_runtime_input(&InputAction::Named("sleep_on".to_string())),

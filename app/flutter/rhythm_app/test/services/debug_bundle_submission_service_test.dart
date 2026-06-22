@@ -32,6 +32,60 @@ void main() {
     expect(_text(decoded.findFile('app/metadata.json')),
         contains('rhythm_app_log'));
   });
+
+  test('keeps submission received when GitHub issue creation fails', () {
+    const submission = DebugBundleSubmission(
+      id: 'submission-1',
+      referenceCode: 'RHY-1234',
+      status: 'received',
+    );
+
+    final updated =
+        DebugBundleSubmissionService.applyGitHubIssueResponseForTesting(
+      submission,
+      status: 500,
+      data: {
+        'error': 'GitHub issue creation failed (404): Not Found',
+      },
+    );
+
+    expect(updated.status, 'received');
+    expect(updated.githubIssueUrl, isNull);
+    expect(updated.githubIssueNumber, isNull);
+    expect(
+      updated.githubIssueError,
+      contains('Debug bundle uploaded, but failed to create the GitHub issue.'),
+    );
+    expect(updated.githubIssueError, contains('GitHub issue creation failed'));
+  });
+
+  test('applies created GitHub issue metadata', () {
+    const submission = DebugBundleSubmission(
+      id: 'submission-1',
+      referenceCode: 'RHY-1234',
+      status: 'received',
+    );
+
+    final updated =
+        DebugBundleSubmissionService.applyGitHubIssueResponseForTesting(
+      submission,
+      status: 200,
+      data: {
+        'issue_created': true,
+        'status': 'reported',
+        'issue_url': 'https://github.com/sticktrk/cross/issues/42',
+        'issue_number': 42,
+      },
+    );
+
+    expect(updated.status, 'reported');
+    expect(
+      updated.githubIssueUrl,
+      'https://github.com/sticktrk/cross/issues/42',
+    );
+    expect(updated.githubIssueNumber, 42);
+    expect(updated.githubIssueError, isNull);
+  });
 }
 
 String _text(ArchiveFile? file) {

@@ -485,7 +485,7 @@ void main() {
     expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
-  testWidgets('standby state shows Off/On segments and disables the slider',
+  testWidgets('standby uses on segment and disabled brightness slider',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -515,7 +515,7 @@ void main() {
 
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
-    final serverSync = _StandbyServerSyncProvider(
+    final serverSync = ServerSyncProvider(
       connection: connection,
       roomProvider: roomProvider,
       homeProvider: homeProvider,
@@ -541,11 +541,9 @@ void main() {
       ),
     );
 
-    // Once in standby the middle button reverts to "Off" (tap to step fully
-    // off); the brightness slider stays locked.
-    expect(find.text('Standby'), findsNothing);
+    expect(find.text('Standby'), findsOneWidget);
     expect(find.text('Off'), findsOneWidget);
-    expect(find.text('On'), findsOneWidget);
+    expect(find.text('On'), findsNothing);
     final slider = tester.widget<Slider>(find.byType(Slider));
     expect(slider.value, 1);
     expect(slider.onChanged, isNull);
@@ -557,8 +555,7 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
     expect(connection.api.nodePreferenceCalls, isEmpty);
 
-    // Tapping On returns the room to its active state.
-    await tester.tap(find.text('On'));
+    await tester.tap(find.text('Standby'));
     await tester.pump();
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
@@ -569,7 +566,7 @@ void main() {
     expect(call.state, RoomModeState.active);
   });
 
-  testWidgets('off state offers Standby and entering it dispatches standby',
+  testWidgets('selected on segment enters standby when enabled',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -581,7 +578,7 @@ void main() {
         deviceIds: ['light-1'],
         rhythmEnabled: true,
         disabled: false,
-        lightsOn: false,
+        lightsOn: true,
         timeOffsetMinutes: 0,
         brightnessOffset: 0,
       ),
@@ -591,8 +588,8 @@ void main() {
       rhythmEnabled: true,
       timeOffset: 0,
       brightnessOffset: 0,
-      state: RoomModeState.hardOff,
-      lightsOn: false,
+      state: RoomModeState.active,
+      lightsOn: true,
       brightness: 42,
       kelvin: 2700,
     );
@@ -625,11 +622,7 @@ void main() {
       ),
     );
 
-    // The off state surfaces Standby in place of the Off label.
-    expect(find.text('Standby'), findsOneWidget);
-    expect(find.text('Off'), findsNothing);
-
-    await tester.tap(find.text('Standby'));
+    await tester.tap(find.text('On'));
     await tester.pump();
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);

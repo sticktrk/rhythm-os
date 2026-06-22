@@ -8,6 +8,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmAuthApi,
         RhythmAuthStatus,
+        RhythmConfigApi,
         RhythmConnection,
         RhythmConnectionState,
         RhythmDevice,
@@ -53,12 +54,14 @@ class RhythmServerSettingsScreen extends StatefulWidget {
   final Hub hub;
   final String? headerTitleOverride;
   final bool useBackButton;
+  final bool homeManaged;
 
   const RhythmServerSettingsScreen({
     super.key,
     required this.hub,
     this.headerTitleOverride,
     this.useBackButton = false,
+    this.homeManaged = true,
   });
 
   /// Show as a full-screen modal with slide-up transition.
@@ -67,6 +70,7 @@ class RhythmServerSettingsScreen extends StatefulWidget {
     required Hub hub,
     String? headerTitleOverride,
     bool useBackButton = false,
+    bool homeManaged = true,
   }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
@@ -77,6 +81,7 @@ class RhythmServerSettingsScreen extends StatefulWidget {
             hub: hub,
             headerTitleOverride: headerTitleOverride,
             useBackButton: useBackButton,
+            homeManaged: homeManaged,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -116,6 +121,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   bool _isSubmittingDebugBundle = false;
   bool _isChangingWifi = false;
   OtaState? _lastHandledOtaState;
+  String? _detachedServerPlatformType;
+  String? _detachedServerPlatformContext;
 
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
@@ -125,8 +132,19 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   // ─── Server-type-aware computed getters ────────────────────
 
-  String get _serverContext =>
-      context.read<ServerSyncProvider>().serverPlatformContext;
+  String get _serverPlatformType => widget.homeManaged
+      ? context.read<ServerSyncProvider>().serverPlatformType
+      : _detachedServerPlatformType ?? 'desktop';
+  String get _serverContext => widget.homeManaged
+      ? context.read<ServerSyncProvider>().serverPlatformContext
+      : _detachedServerPlatformContext ?? 'server';
+  String get _serverVersion {
+    final otaVersion = _otaService.currentVersion;
+    if (otaVersion != '0.0.0') return otaVersion;
+    if (!widget.homeManaged) return '0.0.0';
+    return context.read<ServerSyncProvider>().firmwareVersion;
+  }
+
   bool get _isBridge =>
       _serverContext == 'bridge' ||
       _serverContext == 'embedded' ||
@@ -150,6 +168,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       };
 
   Hub get _currentHub {
+    if (!widget.homeManaged) return widget.hub;
     final hubs = context.read<HomeProvider>().currentHomeHubs;
     return hubs
         .where((hub) => hub.id == widget.hub.id)
@@ -178,6 +197,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Future<ResolvedServerEndpoint> _resolveServerEndpoint() {
+    if (!widget.homeManaged) {
+      return Future.value(ServerEndpointResolver.local(_currentHub));
+    }
     return ServerEndpointResolver.resolve(
       _currentHub,
       syncProvider: context.read<ServerSyncProvider>(),
@@ -214,7 +236,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       // Force a full reconnect so the sync provider picks up the new
       // firmware version from GET /api/state (the poll endpoint doesn't
       // include version info).
-      context.read<ServerSyncProvider>().connection.reconnect();
+      if (widget.homeManaged) {
+        context.read<ServerSyncProvider>().connection.reconnect();
+      }
     } else if (_otaService.state == OtaState.error) {
       AnalyticsService().logOtaUpdateFailed(
         _otaService.errorMessage ?? 'Unknown error',
@@ -227,13 +251,40 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   Future<void> _loadOtaSupport() async {
     final syncProvider = context.read<ServerSyncProvider>();
     final resolved = await _resolveServerEndpoint();
+    String? fallbackCurrentVersion =
+        widget.homeManaged ? syncProvider.firmwareVersion : null;
+    String? fallbackPlatformType =
+        widget.homeManaged ? syncProvider.serverPlatformType : null;
+    String? fallbackPlatformContext =
+        widget.homeManaged ? syncProvider.serverPlatformContext : null;
+
+    if (!widget.homeManaged) {
+      try {
+        final state = await RhythmConfigApi(
+          baseUrl: resolved.endpoint.baseUrl,
+          authToken: resolved.hub.token,
+        ).getState().timeout(const Duration(seconds: 10));
+        fallbackCurrentVersion = state.version;
+        fallbackPlatformType = state.platformType;
+        fallbackPlatformContext = state.platformContext;
+        if (mounted) {
+          setState(() {
+            _detachedServerPlatformType = state.platformType;
+            _detachedServerPlatformContext = state.platformContext;
+          });
+        }
+      } catch (error) {
+        debugPrint('Detached server metadata load failed: $error');
+      }
+    }
+
     await _otaService.initialize(
       host: resolved.endpoint.host,
       port: resolved.endpoint.port,
       useSsl: resolved.endpoint.useSsl,
-      fallbackCurrentVersion: syncProvider.firmwareVersion,
-      fallbackPlatformType: syncProvider.serverPlatformType,
-      fallbackPlatformContext: syncProvider.serverPlatformContext,
+      fallbackCurrentVersion: fallbackCurrentVersion,
+      fallbackPlatformType: fallbackPlatformType,
+      fallbackPlatformContext: fallbackPlatformContext,
       resetCheckStateOnInitialize: true,
       authToken: resolved.hub.token,
     );
@@ -259,11 +310,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     await Future.wait([
       _checkHealth(),
       _loadOtaSupport(),
-      () async {
-        // Force SSE reconnect to re-fetch /api/state (rooms, hubs, settings).
-        final sync = context.read<ServerSyncProvider>();
-        sync.connection.reconnect();
-      }(),
+      if (widget.homeManaged)
+        () async {
+          // Force SSE reconnect to re-fetch /api/state (rooms, hubs, settings).
+          final sync = context.read<ServerSyncProvider>();
+          sync.connection.reconnect();
+        }(),
     ]);
 
     if (mounted) {
@@ -272,6 +324,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Future<void> _handleRemoveFromHome() async {
+    if (!widget.homeManaged) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -386,7 +440,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       const SizedBox(height: 8),
                       _buildHeroSection(http),
                       const SizedBox(height: 24),
-                      _buildSettingsNavigationSection(),
+                      if (widget.homeManaged) _buildSettingsNavigationSection(),
                       if (_supportsWifiChange) ...[
                         const SizedBox(height: 16),
                         _buildNetworkSection(),
@@ -402,9 +456,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         _buildRebootButton(),
                         const SizedBox(height: 12),
                       ],
-                      _buildRemoveFromHomeButton(),
-                      const SizedBox(height: 12),
-                      _buildFactoryResetButton(),
+                      if (widget.homeManaged) ...[
+                        _buildRemoveFromHomeButton(),
+                        const SizedBox(height: 12),
+                        _buildFactoryResetButton(),
+                      ],
                       const SizedBox(height: 40),
                     ],
                   ),
@@ -461,8 +517,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Widget _buildHeroSection(RhythmConnection http) {
-    final connState = http.connectionState;
-    final fullyOffline = !http.connected && !_isOnline;
+    final connState = widget.homeManaged
+        ? http.connectionState
+        : _isOnline
+            ? RhythmConnectionState.connected
+            : RhythmConnectionState.disconnected;
+    final fullyOffline =
+        widget.homeManaged ? !http.connected && !_isOnline : !_isOnline;
     final statusText = _connectionStatusText(connState);
     final statusColor = _connectionStatusColor(connState);
     final isLive = connState == RhythmConnectionState.connected;
@@ -752,8 +813,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildNetworkSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final connected =
-        syncProvider.connectionState == RhythmConnectionState.connected;
+    final connected = widget.homeManaged
+        ? syncProvider.connectionState == RhythmConnectionState.connected
+        : _isOnline;
     final canChange = !_isChangingWifi && (connected || _isOnline);
     final subtitle = _isChangingWifi
         ? 'Saving new network...'
@@ -985,7 +1047,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (!mounted) return;
     await _checkHealth();
     if (!mounted) return;
-    context.read<ServerSyncProvider>().connection.reconnect();
+    if (widget.homeManaged) {
+      context.read<ServerSyncProvider>().connection.reconnect();
+    }
   }
 
   void _showSnackBar(String message, {Color? backgroundColor}) {
@@ -1001,13 +1065,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildVersionSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final currentVersion = _otaService.currentVersion != '0.0.0'
-        ? _otaService.currentVersion
-        : syncProvider.firmwareVersion;
+    final currentVersion = _serverVersion;
     final showOtaControls =
         _otaService.isLoadingSupport || _otaService.showUpdateUi;
-    final showAutoUpdateToggle = !_isHaAddon && _otaService.isSelfPull;
-    final autoUpdateEnabled = syncProvider.autoUpdate;
+    final showAutoUpdateToggle =
+        widget.homeManaged && !_isHaAddon && _otaService.isSelfPull;
+    final autoUpdateEnabled = widget.homeManaged && syncProvider.autoUpdate;
     final allowManualUpdate = !autoUpdateEnabled || !showAutoUpdateToggle;
 
     return _buildSection(
@@ -1061,8 +1124,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     children: [
                       Icon(
                         Icons.history_rounded,
-                        color:
-                            CelestialColors.textSecondary.withValues(alpha: 0.5),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
                         size: 14,
                       ),
                       const SizedBox(width: 6),
@@ -1213,7 +1276,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (_isSubmittingDebugBundle) return;
     setState(() => _isSubmittingDebugBundle = true);
     try {
-      await showReportBugFlow(context, serverHub: _currentHub);
+      await showReportBugFlow(
+        context,
+        serverHub: _currentHub,
+        localServerOnly: !widget.homeManaged,
+        serverVersionOverride: widget.homeManaged ? null : _serverVersion,
+        serverPlatformContextOverride:
+            widget.homeManaged ? null : _serverContext,
+      );
     } finally {
       if (mounted) {
         setState(() => _isSubmittingDebugBundle = false);
@@ -1615,7 +1685,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     _OtaUpdateOverlay.show(
       context,
       otaService: _otaService,
-      connection: context.read<ServerSyncProvider>().connection,
+      connection: widget.homeManaged
+          ? context.read<ServerSyncProvider>().connection
+          : null,
     );
   }
 
@@ -1823,7 +1895,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (!mounted) return;
 
     if (cameBack) {
-      unawaited(context.read<ServerSyncProvider>().connection.reconnect());
+      if (widget.homeManaged) {
+        unawaited(context.read<ServerSyncProvider>().connection.reconnect());
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('$_headerTitle is back online.'),
@@ -2022,11 +2096,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     AnalyticsService().logRhythmServerReset(wasOnline: _isOnline);
     setState(() => _isFactoryResetting = true);
 
-    final syncProvider = context.read<ServerSyncProvider>();
     final client = await _diagnosticsClient();
     final success = await client.factoryReset(
-      platformType: syncProvider.serverPlatformType,
-      platformContext: syncProvider.serverPlatformContext,
+      platformType: _serverPlatformType,
+      platformContext: _serverContext,
     );
     if (!mounted) return;
 
@@ -2042,15 +2115,17 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       return;
     }
 
-    // Tear down the local pairing — device is going away to provisioning mode.
-    if (mounted) {
-      await context.read<RoomProvider>().clearAllRooms();
-    }
-    if (mounted) {
-      context.read<ServerSyncProvider>().connection.disconnect();
-    }
-    if (mounted) {
-      await context.read<HomeProvider>().deleteHub(widget.hub.id);
+    if (widget.homeManaged) {
+      // Tear down the local pairing — device is going away to provisioning mode.
+      if (mounted) {
+        await context.read<RoomProvider>().clearAllRooms();
+      }
+      if (mounted) {
+        context.read<ServerSyncProvider>().connection.disconnect();
+      }
+      if (mounted) {
+        await context.read<HomeProvider>().deleteHub(widget.hub.id);
+      }
     }
 
     if (mounted) {
