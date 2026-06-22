@@ -1075,16 +1075,25 @@ class RhythmServerApi {
   // =========================================================================
 
   /// Push hub credentials to the server.
-  Future<void> hubCredentials({
+  Future<bool> hubCredentials({
     required String hubType,
     required String address,
     required Map<String, dynamic> credentials,
   }) async {
-    await _safePut('api/hub/credentials', data: {
-      'hub_type': hubType,
-      'address': address,
-      'credentials': credentials,
-    });
+    try {
+      final response = await _dio.put('api/hub/credentials', data: {
+        'hub_type': hubType,
+        'address': address,
+        'credentials': credentials,
+      });
+      final data = response.data;
+      if (data is Map) {
+        return data['hub_connected'] == true;
+      }
+    } catch (e) {
+      _log.warning('hubCredentials failed', e);
+    }
+    return false;
   }
 
   /// Disconnect ALL hubs on the server.

@@ -1591,9 +1591,13 @@ pub fn handle_put_hub_credentials(state: &SharedState, body: &Value) -> ApiRespo
 
     match commands::do_hub_credentials(state, hub_type, address, &credentials) {
         Ok(()) => {
+            let hub_key = crate::canonical::identity::HubKey::new(
+                crate::hub::HubType::new(hub_type),
+                address,
+            );
             let hub_connected = state
                 .lock()
-                .map(|s| s.has_any_connected_hub())
+                .map(|s| s.hub_is_connected(&hub_key))
                 .unwrap_or(false);
             let resp = HubCredentialsResponse { hub_connected };
             match serde_json::to_string(&resp) {
@@ -3943,6 +3947,81 @@ mod tests {
         let state = test_state();
         let r = handle_put_hub_credentials(&state, &json!({"hub_type": "hue", "credentials": {}}));
         assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn hub_credentials_response_reports_configured_hub_connection_status() {
+        struct TestHubProvider;
+
+        impl crate::hub::HubProvider for TestHubProvider {
+            fn hub_type(&self) -> HubType {
+                HubType::new("homeassistant")
+            }
+
+            fn configure(
+                &self,
+                address: &str,
+                credentials_json: &str,
+                state: &SharedState,
+            ) -> anyhow::Result<()> {
+                let key = HubKey::new(HubType::new("homeassistant"), address);
+                let credentials = serde_json::from_str(credentials_json)?;
+                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                s.hub_credentials.insert(
+                    key.clone(),
+                    crate::hub::HubCredentials::new("homeassistant", address, credentials),
+                );
+                s.hubs.insert(
+                    key.clone(),
+                    ActiveHub {
+                        hub_type: HubType::new("homeassistant"),
+                        hub_key: key.clone(),
+                        runtime: None,
+                        hub_data: Box::new(()),
+                        registry: None,
+                        discovery: None,
+                        shutdown: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+                s.set_hub_connected(&key, false);
+                Ok(())
+            }
+        }
+
+        static TEST_HUB_PROVIDER: TestHubProvider = TestHubProvider;
+
+        let state = test_state();
+        {
+            let hue_key = HubKey::new(HubType::new("hue"), "192.168.1.20:443");
+            let mut s = state.lock().unwrap();
+            s.get_hub_provider_fn = Some(Arc::new(|_| &TEST_HUB_PROVIDER));
+            s.hubs.insert(
+                hue_key.clone(),
+                ActiveHub {
+                    hub_type: HubType::new("hue"),
+                    hub_key: hue_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            s.set_hub_connected(&hue_key, true);
+        }
+
+        let r = handle_put_hub_credentials(
+            &state,
+            &json!({
+                "hub_type": "homeassistant",
+                "address": "homeassistant.local:8123",
+                "credentials": {"token": "ha-token"}
+            }),
+        );
+
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["hub_connected"], false);
     }
 
     // ---- Unified response convention tests ----

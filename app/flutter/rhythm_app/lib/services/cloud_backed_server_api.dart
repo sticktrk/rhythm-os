@@ -376,7 +376,7 @@ class CloudBackedServerApi {
     );
   }
 
-  Future<void> hubCredentials({
+  Future<bool> hubCredentials({
     required String hubType,
     required String address,
     required Map<String, dynamic> credentials,

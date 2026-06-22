@@ -74,6 +74,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   int hubCredentialsCalls = 0;
   int hubRetryCalls = 0;
+  bool hubCredentialsResult = true;
   String? lastHubType;
   String? lastAddress;
   Map<String, dynamic>? lastCredentials;
@@ -146,7 +147,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       })> nodeCurveColorTemperatureCalls = [];
 
   @override
-  Future<void> hubCredentials({
+  Future<bool> hubCredentials({
     required String hubType,
     required String address,
     required Map<String, dynamic> credentials,
@@ -155,6 +156,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastHubType = hubType;
     lastAddress = address;
     lastCredentials = credentials;
+    return hubCredentialsResult;
   }
 
   @override
@@ -715,12 +717,13 @@ void main() {
       );
       addTearDown(provider.dispose);
 
-      await provider.pushHubCredentials(RoomSourceDto.hue);
+      final hubConnected = await provider.pushHubCredentials(RoomSourceDto.hue);
 
       expect(api.hubCredentialsCalls, 1);
       expect(api.lastHubType, 'hue');
       expect(api.lastAddress, '192.168.1.20:443');
       expect(api.lastCredentials, {'username': 'hue-user'});
+      expect(hubConnected, isTrue);
       expect(connection.reconnectCalls, 1);
     });
 
@@ -743,12 +746,45 @@ void main() {
       );
       addTearDown(provider.dispose);
 
-      await provider.pushHubCredentials(RoomSourceDto.homeAssistant);
+      final hubConnected =
+          await provider.pushHubCredentials(RoomSourceDto.homeAssistant);
 
       expect(api.hubCredentialsCalls, 1);
       expect(api.lastHubType, 'homeassistant');
       expect(api.lastAddress, 'ha.local:8123');
       expect(api.lastCredentials, {'token': 'ha-token'});
+      expect(hubConnected, isTrue);
+      expect(connection.reconnectCalls, 1);
+    });
+
+    test('returns false when Home Assistant credentials do not connect on server',
+        () async {
+      api.hubCredentialsResult = false;
+      final homeProvider = _TestHomeProvider([
+        Hub.homeAssistant(
+          id: 'ha-1',
+          homeId: 'home-1',
+          name: 'Home Assistant',
+          host: 'homeassistant.local',
+          port: 8123,
+          useSsl: false,
+          token: 'ha-token',
+        ),
+      ]);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+
+      final hubConnected =
+          await provider.pushHubCredentials(RoomSourceDto.homeAssistant);
+
+      expect(api.hubCredentialsCalls, 1);
+      expect(api.lastHubType, 'homeassistant');
+      expect(api.lastAddress, 'homeassistant.local:8123');
+      expect(hubConnected, isFalse);
       expect(connection.reconnectCalls, 1);
     });
 
@@ -770,9 +806,10 @@ void main() {
       );
       addTearDown(provider.dispose);
 
-      await provider.pushHubCredentials(RoomSourceDto.hue);
+      final hubConnected = await provider.pushHubCredentials(RoomSourceDto.hue);
 
       expect(api.hubCredentialsCalls, 0);
+      expect(hubConnected, isFalse);
       expect(connection.reconnectCalls, 0);
     });
   });
