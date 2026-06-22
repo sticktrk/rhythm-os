@@ -359,6 +359,9 @@ fn sync_with_discovery(
             .iter()
             .map(|identity| identity.native_id.clone())
             .collect();
+        let has_typed_light_identities = identities
+            .iter()
+            .any(|identity| identity.device_type == DeviceType::Light);
         let had_active_endpoints = state
             .lock()
             .ok()
@@ -377,6 +380,7 @@ fn sync_with_discovery(
                 .as_secs();
 
             let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
+            let mut room_light_device_ids: HashMap<String, Vec<String>> = HashMap::new();
 
             {
                 let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -412,6 +416,15 @@ fn sync_with_discovery(
                 }
 
                 for identity in &identities {
+                    if identity.device_type == DeviceType::Light {
+                        if let Some(hub_room_id) = identity.room_id.as_ref() {
+                            room_light_device_ids
+                                .entry(hub_room_id.clone())
+                                .or_default()
+                                .push(identity.native_id.clone());
+                        }
+                    }
+
                     let result = s
                         .canonical_registry
                         .resolve(identity, &canonical_hub_key, now);
@@ -440,6 +453,14 @@ fn sync_with_discovery(
                         .or_default()
                         .push(canonical_id);
                 }
+                for ids in canonical_room_devices.values_mut() {
+                    ids.sort();
+                    ids.dedup();
+                }
+                for ids in room_light_device_ids.values_mut() {
+                    ids.sort();
+                    ids.dedup();
+                }
 
                 // ============================================================
                 // Phase 4c: Topology sync
@@ -449,12 +470,20 @@ fn sync_with_discovery(
                         .get(&room.id)
                         .cloned()
                         .unwrap_or_default();
+                    let light_device_ids = if has_typed_light_identities {
+                        room_light_device_ids
+                            .get(&room.id)
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        room.device_ids.clone()
+                    };
 
                     let topo_room = DiscoveredTopologyRoom {
                         hub_room_id: room.id.clone(),
                         name: room.name.clone(),
                         control_id: room.grouped_light_id.clone(),
-                        light_device_ids: room.device_ids.clone(),
+                        light_device_ids: light_device_ids.clone(),
                         canonical_device_ids: canonical_device_ids.clone(),
                     };
                     let canonical_registry = s.canonical_registry.clone();
@@ -509,7 +538,7 @@ fn sync_with_discovery(
                                     hub_room_id: room.id.clone(),
                                     hub_room_name: room.name.clone(),
                                     control_id: room.grouped_light_id.clone(),
-                                    light_device_ids: room.device_ids.clone(),
+                                    light_device_ids,
                                     canonical_device_ids,
                                     target_rhythm_room_id: proposed_target_id,
                                     target_rhythm_room_name: proposed_target_name,
@@ -1231,6 +1260,107 @@ mod tests {
         );
         let state: SharedState = Arc::new(Mutex::new(app));
         (hub_key, state)
+    }
+
+    #[test]
+    fn sync_filters_room_binding_light_ids_from_typed_identities() {
+        let (hub_key, state) = install_test_hub();
+
+        let discovery = IdentityDiscovery {
+            rooms: vec![
+                DiscoveredRoom {
+                    id: "stairwell-hue-id".to_string(),
+                    name: "Stairwell".to_string(),
+                    grouped_light_id: "stairwell-gl".to_string(),
+                    device_ids: vec![
+                        "hue-light-1".to_string(),
+                        "hue-button-device-1".to_string(),
+                        "hue-motion-device-1".to_string(),
+                    ],
+                },
+                DiscoveredRoom {
+                    id: "sensor-only-hue-id".to_string(),
+                    name: "Sensor Only".to_string(),
+                    grouped_light_id: "sensor-only-gl".to_string(),
+                    device_ids: vec![
+                        "hue-button-device-2".to_string(),
+                        "hue-motion-device-2".to_string(),
+                    ],
+                },
+            ],
+            identities: vec![
+                make_identity(
+                    "hue-light-1",
+                    "stairwell-hue-id",
+                    "Stairwell",
+                    "Stairwell light",
+                    DeviceType::Light,
+                ),
+                make_identity(
+                    "hue-button-device-1",
+                    "stairwell-hue-id",
+                    "Stairwell",
+                    "Stairwell dimmer",
+                    DeviceType::Button,
+                ),
+                make_identity(
+                    "hue-motion-service-1",
+                    "stairwell-hue-id",
+                    "Stairwell",
+                    "Stairwell motion",
+                    DeviceType::Motion,
+                ),
+                make_identity(
+                    "hue-button-device-2",
+                    "sensor-only-hue-id",
+                    "Sensor Only",
+                    "Sensor Only dimmer",
+                    DeviceType::Button,
+                ),
+                make_identity(
+                    "hue-motion-service-2",
+                    "sensor-only-hue-id",
+                    "Sensor Only",
+                    "Sensor Only motion",
+                    DeviceType::Motion,
+                ),
+            ],
+        };
+
+        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+
+        let s = state.lock().unwrap();
+        let room = s
+            .topology
+            .find_by_hub_room(&hub_key, "stairwell-hue-id")
+            .expect("stairwell should be mapped into topology");
+        let binding = room
+            .binding_for_hub_room(&hub_key, "stairwell-hue-id")
+            .expect("stairwell should retain its hub binding");
+
+        assert_eq!(
+            binding.light_device_ids,
+            vec!["hue-light-1".to_string()],
+            "Hue room children include controls and sensors, but binding light ids must not"
+        );
+        assert_eq!(
+            room.devices.len(),
+            3,
+            "typed canonical devices should still be attached to the topology room"
+        );
+
+        let sensor_only_room = s
+            .topology
+            .find_by_hub_room(&hub_key, "sensor-only-hue-id")
+            .expect("sensor-only room should be mapped into topology");
+        let sensor_only_binding = sensor_only_room
+            .binding_for_hub_room(&hub_key, "sensor-only-hue-id")
+            .expect("sensor-only room should retain its hub binding");
+
+        assert!(
+            sensor_only_binding.light_device_ids.is_empty(),
+            "rooms with typed identity discovery but no lights must not fall back to all Hue children"
+        );
     }
 
     /// Issue #43 reproducer: unassigning a motion sensor (parent=None) marks
