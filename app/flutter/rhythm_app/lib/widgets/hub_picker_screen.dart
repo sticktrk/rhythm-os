@@ -8,6 +8,7 @@ import '../screens/hubs/ha_configurator_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../screens/hubs/matter_add_method.dart';
 import '../screens/hubs/matter_pairing_flow.dart';
+import '../services/employee_mode_service.dart';
 import 'beta_badge.dart';
 import 'solar_orbit.dart';
 
@@ -112,6 +113,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
   Widget build(BuildContext context) {
     final serverSync = context.watch<ServerSyncProvider>();
     final isAddon = serverSync.serverPlatformContext == 'ha_addon';
+    final employeeMode = EmployeeModeService.instance.isActive;
     final homeAssistantConnected = _isHubConnected(serverSync, 'homeassistant');
     final hueConnected = _isHubConnected(serverSync, 'hue');
 
@@ -135,7 +137,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                         const SizedBox(height: 32),
                         // Title
                         Text(
-                          'Add Hubs',
+                          employeeMode ? 'Add Matter Device' : 'Add Hubs',
                           style: TextStyle(
                             color: CelestialColors.textPrimary,
                             fontSize: 24,
@@ -145,7 +147,9 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                         ),
                         const SizedBox(height: 10),
                         Text(
-                          'Connect Hue or Home Assistant,\nor scan a Matter bulb',
+                          employeeMode
+                              ? 'Scan a QR code or enter a setup code'
+                              : 'Connect Hue or Home Assistant,\nor scan a Matter bulb',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: CelestialColors.textSecondary
@@ -155,41 +159,43 @@ class _HubPickerScreenState extends State<HubPickerScreen>
                           ),
                         ),
                         const SizedBox(height: 36),
-                        // HA card — one-tap for addon, manual token for server
-                        if (isAddon) ...[
+                        if (!employeeMode) ...[
+                          // HA card — one-tap for addon, manual token for server
+                          if (isAddon) ...[
+                            _buildHubCard(
+                              icon: Icons.home_outlined,
+                              title: 'Home Assistant',
+                              subtitle: 'Use your existing HA areas and lights',
+                              color: const Color(0xFF42A5F5),
+                              isConnected: homeAssistantConnected,
+                              isLoading: _isConfiguringHa,
+                              showBetaBadge: true,
+                              onTap: _isConfiguringHa ? null : _configureHa,
+                            ),
+                            const SizedBox(height: 12),
+                          ] else ...[
+                            _buildHubCard(
+                              icon: Icons.home_outlined,
+                              title: 'Home Assistant',
+                              subtitle:
+                                  'Connect with a long-lived access token',
+                              color: const Color(0xFF42A5F5),
+                              isConnected: homeAssistantConnected,
+                              showBetaBadge: true,
+                              onTap: _configureHaManual,
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           _buildHubCard(
-                            icon: Icons.home_outlined,
-                            title: 'Home Assistant',
-                            subtitle: 'Use your existing HA areas and lights',
-                            color: const Color(0xFF42A5F5),
-                            isConnected: homeAssistantConnected,
-                            isLoading: _isConfiguringHa,
-                            showBetaBadge: true,
-                            onTap: _isConfiguringHa ? null : _configureHa,
-                          ),
-                          const SizedBox(height: 12),
-                        ] else ...[
-                          _buildHubCard(
-                            icon: Icons.home_outlined,
-                            title: 'Home Assistant',
-                            subtitle: 'Connect with a long-lived access token',
-                            color: const Color(0xFF42A5F5),
-                            isConnected: homeAssistantConnected,
-                            showBetaBadge: true,
-                            onTap: _configureHaManual,
+                            icon: Icons.lightbulb_outline,
+                            title: 'Philips Hue',
+                            subtitle: 'Connect via push-link pairing',
+                            color: const Color(0xFFFFB900),
+                            isConnected: hueConnected,
+                            onTap: _configureHue,
                           ),
                           const SizedBox(height: 12),
                         ],
-                        // Hue card (always)
-                        _buildHubCard(
-                          icon: Icons.lightbulb_outline,
-                          title: 'Philips Hue',
-                          subtitle: 'Connect via push-link pairing',
-                          color: const Color(0xFFFFB900),
-                          isConnected: hueConnected,
-                          onTap: _configureHue,
-                        ),
-                        const SizedBox(height: 12),
                         _buildHubCard(
                           icon: Icons.memory_outlined,
                           title: 'Matter',

@@ -23,11 +23,12 @@ class AccountSessionService {
     required HomeProvider homeProvider,
     required HubConnectionProvider hubProvider,
     required RoomProvider roomProvider,
+    bool preserveEmployeeMode = false,
   }) async {
     debugPrint('Log Out: Signing out...');
     final authService = AuthService();
     if (authService.currentUser != null) {
-      await authService.signOut();
+      await authService.signOut(preserveEmployeeMode: preserveEmployeeMode);
     } else {
       HueServiceLocator.setDemoMode(false);
     }

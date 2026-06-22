@@ -10,6 +10,7 @@ import '../backend/backend.dart';
 import '../providers/room_page_provider.dart';
 import 'account_cloud_sync_service.dart';
 import 'auth_service.dart';
+import 'employee_mode_service.dart';
 import 'server_endpoint_resolver.dart';
 import 'settings_service.dart';
 
@@ -136,6 +137,7 @@ class CloudBackupService {
   bool get canUseCloudBackups {
     final client = _client;
     if (client == null) return false;
+    if (EmployeeModeService.instance.isActive) return false;
     final auth = AuthService();
     return auth.isSignedIn && !auth.isAnonymous && auth.currentUserId != null;
   }

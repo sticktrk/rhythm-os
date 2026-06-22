@@ -9,6 +9,7 @@ import '../../widgets/success_modal.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/hue_sse_storage.dart';
 import '../../services/analytics_service.dart';
+import '../../services/employee_mode_service.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/hub_connection_provider.dart';
 import '../../providers/home_provider.dart';
@@ -38,6 +39,15 @@ class HueConfiguratorScreen extends StatefulWidget {
   /// Show the configurator as a full-screen modal.
   /// Returns true when connected, or null if cancelled.
   static Future<bool?> show(BuildContext context) {
+    if (EmployeeModeService.instance.isActive) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('Hub pairing is disabled for support sessions.'),
+        ),
+      );
+      return Future<bool?>.value(false);
+    }
+
     return Navigator.of(context).push<bool>(
       PageRouteBuilder(
         opaque: false,

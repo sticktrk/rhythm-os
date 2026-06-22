@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,17 +49,20 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required this.endpoint,
     required this.addMethod,
     this.authToken,
+    this.dio,
   });
 
   final HubEndpoint endpoint;
   final MatterAddMethod addMethod;
   final String? authToken;
+  final Dio? dio;
 
   static Future<MatterDevicePairingResult?> show(
     BuildContext context, {
     required HubEndpoint endpoint,
     required MatterAddMethod addMethod,
     String? authToken,
+    Dio? dio,
   }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
@@ -69,6 +73,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
             endpoint: endpoint,
             addMethod: addMethod,
             authToken: authToken,
+            dio: dio,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -119,6 +124,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     super.initState();
     _pairingApi = RhythmMatterApi(
       baseUrl: widget.endpoint.baseUrl,
+      dio: widget.dio,
       authToken: widget.authToken,
     );
     _sessionId =

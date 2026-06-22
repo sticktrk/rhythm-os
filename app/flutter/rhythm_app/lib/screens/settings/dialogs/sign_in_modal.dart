@@ -8,6 +8,7 @@ import '../../../onboarding/providers/auth_provider.dart' as onboarding;
 import '../../../onboarding/widgets/onboarding_orbit.dart';
 import '../../../services/app_state_refresh.dart';
 import '../../../services/analytics_service.dart';
+import '../../../services/employee_mode_service.dart';
 import '../../../widgets/connect_hub_screen.dart';
 
 /// Full-screen sign-in modal.
@@ -130,7 +131,7 @@ class SignInModal {
 
     Navigator.of(context).popUntil((route) => route.isFirst);
 
-    if (!openHomeChooser) return;
+    if (!openHomeChooser || EmployeeModeService.instance.isActive) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!context.mounted) return;
       ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);

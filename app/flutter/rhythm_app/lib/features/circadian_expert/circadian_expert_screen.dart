@@ -22901,15 +22901,22 @@ class _CircadianExpertClient {
   _CircadianExpertClient._({
     required String baseUrl,
     required String? authToken,
+    Dio? dio,
   })  : baseUrlLabel = _trimTrailingSlash(baseUrl),
-        _dio = Dio(
-          BaseOptions(
-            baseUrl: _normalizeBaseUrl(baseUrl),
-            connectTimeout: const Duration(seconds: 3),
-            receiveTimeout: const Duration(seconds: 5),
-            headers: _bearerHeaders(authToken),
-          ),
-        );
+        _dio = dio ??
+            Dio(
+              BaseOptions(
+                baseUrl: _normalizeBaseUrl(baseUrl),
+                connectTimeout: const Duration(seconds: 3),
+                receiveTimeout: const Duration(seconds: 5),
+                headers: _bearerHeaders(authToken),
+              ),
+            ) {
+    final headers = _bearerHeaders(authToken);
+    if (headers != null) {
+      _dio.options.headers.addAll(headers);
+    }
+  }
 
   static Future<_CircadianExpertClient?> resolve(BuildContext context) async {
     final homeProvider = context.read<HomeProvider>();
@@ -22924,6 +22931,10 @@ class _CircadianExpertClient {
     return _CircadianExpertClient._(
       baseUrl: resolved.baseUrl,
       authToken: resolved.hub.token,
+      dio: resolved.supportProxyDio(
+        connectTimeout: const Duration(seconds: 3),
+        receiveTimeout: const Duration(seconds: 5),
+      ),
     );
   }
 

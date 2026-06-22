@@ -67,7 +67,13 @@ Deno.serve((req) =>
       return jsonResponse({ error: 'Method not allowed' }, 405)
     }
 
-    const body = await readJson(req)
+    let body: JsonObject
+    try {
+      body = await readJson(req)
+    } catch (error) {
+      return jsonResponse({ error: errorMessage(error) }, 400)
+    }
+
     const hubId = readString(body, 'hub_id')
     if (!hubId) {
       return jsonResponse({ error: 'Missing hub_id' }, 400)
@@ -76,11 +82,31 @@ Deno.serve((req) =>
     if (actionResult instanceof Response) return actionResult
     const action = actionResult
 
+    let supportToken: string | null = null
+    if (action !== 'disable') {
+      const supportTokenResult = readRequiredSupportToken(body)
+      if (supportTokenResult instanceof Response) return supportTokenResult
+      supportToken = supportTokenResult
+
+      const supportTokenOwner = await authorizeSupportTokenOwner(
+        adminClient,
+        userId,
+        hubId,
+        body,
+      )
+      if (supportTokenOwner instanceof Response) return supportTokenOwner
+    }
+
     const ensured = await ensureServerHubRows(adminClient, userId, hubId, body)
     if (ensured instanceof Response) return ensured
-    const { hub } = ensured
+    const { hub, home } = ensured
     const serverInstanceId = readServerInstanceId(body)
     const serverEndpoint = readServerEndpoint(body)
+    if (action !== 'disable' && home.owner_id !== userId) {
+      return jsonResponse({
+        error: 'Only the home owner can configure support access',
+      }, 403)
+    }
 
     try {
       if (action === 'disable') {
@@ -91,6 +117,9 @@ Deno.serve((req) =>
           serverInstanceId,
           serverEndpoint,
         })
+      }
+      if (!supportToken) {
+        return jsonResponse({ error: 'Missing support_token' }, 400)
       }
 
       const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID')
@@ -142,6 +171,14 @@ Deno.serve((req) =>
         tunnelName: tunnel.name,
         serverInstanceId,
       })
+      if (existing?.hub_id && existing.hub_id !== hubId) {
+        await deleteSupportTokenIfPresent(adminClient, existing.hub_id)
+      }
+      await upsertSupportToken(adminClient, {
+        hubId,
+        homeId: hub.home_id,
+        supportToken,
+      })
       await adminClient
         .from('hubs')
         .update({ remote_endpoint: remoteEndpoint })
@@ -190,6 +227,52 @@ function readServerEndpoint(body: JsonObject): RemoteAccessEndpoint | null {
   }
 }
 
+function readRequiredSupportToken(body: JsonObject): string | Response {
+  const supportToken = readString(body, 'support_token')
+  if (!supportToken) {
+    return jsonResponse({ error: 'Missing support_token' }, 400)
+  }
+  return supportToken
+}
+
+async function authorizeSupportTokenOwner(
+  adminClient: any,
+  userId: string,
+  hubId: string,
+  body: JsonObject,
+): Promise<true | Response> {
+  try {
+    const homeSnapshot = readJsonObject(body, 'home')
+    if (homeSnapshot) {
+      const requestedHomeId = readString(homeSnapshot, 'id')
+      if (!requestedHomeId) {
+        return jsonResponse({ error: 'Missing home.id' }, 400)
+      }
+
+      const existingHome = await fetchHome(adminClient, requestedHomeId)
+      if (existingHome && existingHome.owner_id !== userId) {
+        return jsonResponse({
+          error: 'Only the home owner can configure support access',
+        }, 403)
+      }
+      return true
+    }
+
+    const existingHub = await fetchHub(adminClient, hubId)
+    if (!existingHub || existingHub.type !== 'server') return true
+
+    const existingHome = await fetchHome(adminClient, existingHub.home_id)
+    if (existingHome && existingHome.owner_id !== userId) {
+      return jsonResponse({
+        error: 'Only the home owner can configure support access',
+      }, 403)
+    }
+    return true
+  } catch (error) {
+    return jsonResponse({ error: errorMessage(error) }, 500)
+  }
+}
+
 async function disableRemoteAccess({
   adminClient,
   hubId,
@@ -218,9 +301,11 @@ async function disableRemoteAccess({
     await deleteDnsRecordIfPresent(zoneId, apiToken, existing.hostname)
     await deleteTunnelIfPresent(accountId, apiToken, existing.tunnel_id)
     await deleteRemoteAccessMapping(adminClient, existing.hub_id)
+    await deleteSupportTokenIfPresent(adminClient, existing.hub_id)
   }
 
   await clearHubRemoteEndpoint(adminClient, hubId)
+  await deleteSupportTokenIfPresent(adminClient, hubId)
   if (existing && existing.hub_id !== hubId) {
     await clearHubRemoteEndpoint(adminClient, existing.hub_id)
   }
@@ -667,6 +752,40 @@ async function clearHubRemoteEndpoint(
     .from('hubs')
     .update({ remote_endpoint: null })
     .eq('id', hubId)
+  if (error) throw new Error(error.message)
+}
+
+async function deleteSupportTokenIfPresent(
+  adminClient: any,
+  hubId: string,
+): Promise<void> {
+  const { error } = await adminClient
+    .from('hub_support_tokens')
+    .delete()
+    .eq('hub_id', hubId)
+  if (error) throw new Error(error.message)
+}
+
+async function upsertSupportToken(
+  adminClient: any,
+  {
+    hubId,
+    homeId,
+    supportToken,
+  }: {
+    hubId: string
+    homeId: string
+    supportToken: string
+  },
+): Promise<void> {
+  const { error } = await adminClient
+    .from('hub_support_tokens')
+    .upsert({
+      hub_id: hubId,
+      home_id: homeId,
+      token: supportToken,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'hub_id' })
   if (error) throw new Error(error.message)
 }
 

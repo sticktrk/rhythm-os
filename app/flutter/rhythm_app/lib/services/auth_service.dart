@@ -2,7 +2,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../backend/backend.dart';
+import 'employee_mode_service.dart';
 import 'hue/hue_service_locator.dart';
+import 'support_access_service.dart';
 
 /// Result of a Google sign-in operation.
 /// Re-exported from backend for backwards compatibility.
@@ -113,9 +115,15 @@ class AuthService {
   }
 
   /// Sign out from both backend and Google.
-  /// Also clears demo mode if active.
-  Future<void> signOut() async {
+  /// Also clears demo mode if active. Employee mode is normally cleared too,
+  /// except during staff-session bootstrap where we need to discard a stale
+  /// anonymous account without losing the active support grant.
+  Future<void> signOut({bool preserveEmployeeMode = false}) async {
     HueServiceLocator.setDemoMode(false);
+    if (!preserveEmployeeMode) {
+      await _revokeEmployeeGrantIfPresent(EmployeeModeService.instance.grantId);
+      EmployeeModeService.instance.exit();
+    }
     await _auth!.signOut();
   }
 
@@ -124,11 +132,25 @@ class AuthService {
   /// Also clears demo mode if active.
   Future<void> deleteAccount() async {
     HueServiceLocator.setDemoMode(false);
+    await _revokeEmployeeGrantIfPresent(EmployeeModeService.instance.grantId);
+    EmployeeModeService.instance.exit();
     await _auth!.deleteAccount();
   }
 
   /// Disconnect Google account (revokes access).
   Future<void> disconnectGoogle() async {
     await _auth!.disconnectProviders();
+  }
+
+  Future<void> _revokeEmployeeGrantIfPresent(String? grantId) async {
+    final cleanGrantId = grantId?.trim();
+    if (cleanGrantId == null || cleanGrantId.isEmpty) return;
+
+    try {
+      await SupportAccessService.instance.revokeGrant(cleanGrantId);
+    } catch (error, stackTrace) {
+      debugPrint('AuthService: support grant revoke skipped: $error');
+      debugPrint('$stackTrace');
+    }
   }
 }

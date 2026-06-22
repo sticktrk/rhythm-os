@@ -15,19 +15,25 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::path::Path;
 
 use crate::handlers::ApiResponse;
 use crate::state::{current_epoch_ms, SharedState};
 
 const TOKEN_RANDOM_BYTES: usize = 32;
 const TOKEN_PREFIX: &str = "rhythm_owner_";
+const SUPPORT_TOKEN_PREFIX: &str = "rhythm_support_";
+const SUPPORT_AUDIT_FILE: &str = "support-audit.log";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiAuthRequestInfo {
     pub requires_auth: bool,
     pub claim_available: bool,
     pub via_remote_access: bool,
+    pub role: Option<ApiTokenRole>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,13 +72,25 @@ impl StoredApiAuth {
     }
 
     pub fn verify_token(&self, raw_token: &str) -> bool {
+        self.verify_token_info(raw_token).is_some()
+    }
+
+    pub fn verify_token_role(&self, raw_token: &str) -> Option<ApiTokenRole> {
+        self.verify_token_info(raw_token).map(|token| token.role)
+    }
+
+    fn verify_token_info(&self, raw_token: &str) -> Option<VerifiedApiToken> {
         if raw_token.trim().is_empty() {
-            return false;
+            return None;
         }
         let candidate_hash = hash_token(raw_token);
         self.tokens
             .iter()
-            .any(|token| constant_time_eq(token.token_hash.as_bytes(), candidate_hash.as_bytes()))
+            .find(|token| constant_time_eq(token.token_hash.as_bytes(), candidate_hash.as_bytes()))
+            .map(|token| VerifiedApiToken {
+                id: token.id.clone(),
+                role: token.role,
+            })
     }
 }
 
@@ -80,11 +98,25 @@ impl StoredApiAuth {
 #[serde(rename_all = "snake_case")]
 pub enum ApiTokenRole {
     Owner,
+    Support,
+}
+
+impl Default for ApiTokenRole {
+    fn default() -> Self {
+        Self::Owner
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerifiedApiToken {
+    id: String,
+    role: ApiTokenRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiToken {
     pub id: String,
+    #[serde(default)]
     pub role: ApiTokenRole,
     pub token_hash: String,
     pub created_at_epoch_ms: u64,
@@ -93,10 +125,12 @@ pub struct StoredApiToken {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct IssuedOwnerToken {
+pub struct IssuedToken {
     pub id: String,
     pub token: String,
 }
+
+pub type IssuedOwnerToken = IssuedToken;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueOwnerTokenResult {
@@ -112,14 +146,34 @@ pub fn issue_local_owner_token(
     state: &SharedState,
     label: Option<String>,
 ) -> anyhow::Result<IssuedOwnerToken> {
-    let token = generate_raw_token();
+    issue_local_token(state, ApiTokenRole::Owner, TOKEN_PREFIX, label)
+}
+
+/// Issue a support token from a trusted local or owner-authenticated channel.
+///
+/// Support tokens are never publicly claimable. They are intended for managed
+/// support access through the cloud proxy and are scoped by the middleware gate.
+pub fn issue_local_support_token(
+    state: &SharedState,
+    label: Option<String>,
+) -> anyhow::Result<IssuedToken> {
+    issue_local_token(state, ApiTokenRole::Support, SUPPORT_TOKEN_PREFIX, label)
+}
+
+fn issue_local_token(
+    state: &SharedState,
+    role: ApiTokenRole,
+    prefix: &str,
+    label: Option<String>,
+) -> anyhow::Result<IssuedToken> {
+    let token = generate_raw_token(prefix);
     let token_hash = hash_token(&token);
     let id = token_hash.chars().take(16).collect::<String>();
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     s.api_auth.tokens.push(StoredApiToken {
         id: id.clone(),
-        role: ApiTokenRole::Owner,
+        role,
         token_hash,
         created_at_epoch_ms: current_epoch_ms(),
         label,
@@ -129,7 +183,7 @@ pub fn issue_local_owner_token(
         storage.save_api_auth(&s.api_auth)?;
     }
 
-    Ok(IssuedOwnerToken { id, token })
+    Ok(IssuedToken { id, token })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +198,7 @@ pub fn issue_owner_token(
     state: &SharedState,
     label: Option<String>,
 ) -> anyhow::Result<IssueOwnerTokenResult> {
-    let token = generate_raw_token();
+    let token = generate_raw_token(TOKEN_PREFIX);
     let token_hash = hash_token(&token);
     let id = token_hash.chars().take(16).collect::<String>();
 
@@ -178,7 +232,7 @@ pub fn set_api_auth_required(
 ) -> anyhow::Result<ApiAuthSettingsUpdate> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let issued_owner_token = if require_api_auth && !s.api_auth.has_owner() {
-        let token = generate_raw_token();
+        let token = generate_raw_token(TOKEN_PREFIX);
         let token_hash = hash_token(&token);
         let id = token_hash.chars().take(16).collect::<String>();
 
@@ -229,6 +283,7 @@ pub fn handle_get_auth_status(
                 requires_auth: s.require_api_auth,
                 claim_available: s.require_api_auth && !s.api_auth.has_owner(),
                 via_remote_access: false,
+                role: None,
             });
             ApiResponse::json_ok(
                 auth_status_payload(
@@ -252,6 +307,32 @@ pub fn handle_claim_owner_token(state: &SharedState, label: Option<String>) -> A
                 "status": "ok",
                 "token_id": issued.id,
                 "token": issued.token,
+            })
+            .to_string(),
+        ),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_issue_support_token(
+    state: &SharedState,
+    request_info: Option<ApiAuthRequestInfo>,
+    label: Option<String>,
+) -> ApiResponse {
+    if request_info
+        .map(|info| info.via_remote_access)
+        .unwrap_or(false)
+    {
+        return ApiResponse::forbidden("Support tokens can only be issued locally");
+    }
+
+    match issue_local_support_token(state, label) {
+        Ok(issued) => ApiResponse::json_ok(
+            json!({
+                "status": "ok",
+                "token_id": issued.id,
+                "token": issued.token,
+                "role": "support",
             })
             .to_string(),
         ),
@@ -304,8 +385,20 @@ pub async fn require_api_auth_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    let auth_info = auth_request_info(&state, &req);
+    let mut auth_info = auth_request_info(&state, &req);
     req.extensions_mut().insert(auth_info);
+
+    let verified_bearer = verified_bearer_token(&state, &req);
+    if let Some(verified_token) = verified_bearer.as_ref() {
+        if verified_token.role == ApiTokenRole::Support {
+            auth_info.role = Some(verified_token.role);
+            req.extensions_mut().insert(auth_info);
+            write_support_audit_line(&state, &verified_token.id, req.method(), req.uri().path());
+            if is_owner_only_request_for_support(req.method(), req.uri().path()) {
+                return forbidden("Support token is not allowed for this endpoint");
+            }
+        }
+    }
 
     if is_public_request(req.method(), req.uri().path(), auth_info) {
         return next.run(req).await;
@@ -319,15 +412,26 @@ pub async fn require_api_auth_middleware(
         return unauthorized("Missing bearer token");
     };
 
-    let token_ok = state
-        .lock()
-        .map(|s| s.api_auth.verify_token(token))
-        .unwrap_or(false);
-    if token_ok {
-        return next.run(req).await;
+    let verified_token = verified_bearer.or_else(|| {
+        state
+            .lock()
+            .map(|s| s.api_auth.verify_token_info(token))
+            .unwrap_or(None)
+    });
+    let Some(verified_token) = verified_token else {
+        return unauthorized("Invalid bearer token");
+    };
+
+    auth_info.role = Some(verified_token.role);
+    req.extensions_mut().insert(auth_info);
+
+    if verified_token.role == ApiTokenRole::Support {
+        if is_owner_only_request_for_support(req.method(), req.uri().path()) {
+            return forbidden("Support token is not allowed for this endpoint");
+        }
     }
 
-    unauthorized("Invalid bearer token")
+    next.run(req).await
 }
 
 fn auth_status_payload(
@@ -380,6 +484,7 @@ pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthReq
         requires_auth,
         claim_available,
         via_remote_access,
+        role: None,
     }
 }
 
@@ -407,6 +512,14 @@ fn bearer_token(value: Option<&axum::http::HeaderValue>) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
+fn verified_bearer_token(state: &SharedState, req: &Request<Body>) -> Option<VerifiedApiToken> {
+    let token = bearer_token(req.headers().get(AUTHORIZATION))?;
+    state
+        .lock()
+        .map(|s| s.api_auth.verify_token_info(token))
+        .unwrap_or(None)
+}
+
 fn unauthorized(message: &str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -420,10 +533,71 @@ fn unauthorized(message: &str) -> Response {
         .into_response()
 }
 
-fn generate_raw_token() -> String {
+fn forbidden(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [("content-type", "application/json")],
+        json!({
+            "status": "error",
+            "message": message,
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
+fn is_owner_only_request_for_support(method: &Method, path: &str) -> bool {
+    matches!(
+        (method, path),
+        (&Method::POST, "/api/auth/claim")
+            | (&Method::POST, "/api/auth/support-token")
+            | (&Method::PUT, "/api/auth/settings")
+            | (&Method::POST, "/api/factory-reset")
+            | (&Method::PUT, "/api/hub/credentials")
+            | (&Method::DELETE, "/api/hub/credentials")
+            | (&Method::PUT, "/api/remote-access/config")
+            | (&Method::DELETE, "/api/remote-access/config")
+            | (&Method::PUT, "/api/wifi")
+            | (&Method::DELETE, "/api/wifi")
+            | (&Method::POST, "/api/diag/reset-matter-fabric")
+            | (&Method::POST, "/api/ota/upload")
+            | (&Method::POST, "/api/ota/update")
+            | (&Method::PUT, "/api/backup")
+    )
+}
+
+fn write_support_audit_line(state: &SharedState, token_id: &str, method: &Method, path: &str) {
+    let data_dir = state
+        .lock()
+        .ok()
+        .map(|s| s.data_dir.clone())
+        .unwrap_or_default();
+    if data_dir.trim().is_empty() {
+        return;
+    }
+
+    let audit_path = Path::new(&data_dir).join(SUPPORT_AUDIT_FILE);
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)
+    else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "{}\t{}\t{}\t{}",
+        current_epoch_ms(),
+        token_id,
+        method,
+        path
+    );
+}
+
+fn generate_raw_token(prefix: &str) -> String {
     let mut bytes = [0_u8; TOKEN_RANDOM_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
-    format!("{}{}", TOKEN_PREFIX, hex_encode(&bytes))
+    format!("{}{}", prefix, hex_encode(&bytes))
 }
 
 fn hash_token(raw_token: &str) -> String {
@@ -454,6 +628,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::{Arc, Mutex};
 
     use axum::body::{to_bytes, Body};
@@ -494,6 +669,16 @@ mod tests {
         req
     }
 
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("rhythm-auth-{name}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
     #[test]
     fn stored_auth_verifies_hashed_token_only() {
         let raw = "rhythm_owner_test";
@@ -515,8 +700,8 @@ mod tests {
 
     #[test]
     fn generated_owner_tokens_are_prefixed_and_distinct() {
-        let a = generate_raw_token();
-        let b = generate_raw_token();
+        let a = generate_raw_token(TOKEN_PREFIX);
+        let b = generate_raw_token(TOKEN_PREFIX);
 
         assert!(a.starts_with(TOKEN_PREFIX));
         assert!(b.starts_with(TOKEN_PREFIX));
@@ -555,6 +740,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("first phone"), Some("second phone")]
         );
+    }
+
+    #[test]
+    fn local_support_token_is_stored_with_support_role() {
+        let state = test_state();
+
+        let issued = issue_local_support_token(&state, Some("support".into())).unwrap();
+
+        assert!(issued.token.starts_with(SUPPORT_TOKEN_PREFIX));
+        let state = state.lock().unwrap();
+        assert!(state.api_auth.verify_token(&issued.token));
+        assert_eq!(
+            state.api_auth.verify_token_role(&issued.token),
+            Some(ApiTokenRole::Support)
+        );
+        assert_eq!(state.api_auth.tokens[0].label.as_deref(), Some("support"));
     }
 
     #[test]
@@ -792,6 +993,136 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn appliance_tunnel_request_cannot_issue_support_token() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let owner = issue_local_owner_token(&state, Some("phone".into())).unwrap();
+        let app = auth_test_router(state.clone());
+
+        let response = app
+            .oneshot({
+                let mut req = tunnel_request(
+                    Method::POST,
+                    "/api/auth/support-token",
+                    Body::from(json!({"label": "support"}).to_string()),
+                );
+                req.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                req.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", owner.token).parse().unwrap(),
+                );
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(state.lock().unwrap().api_auth.tokens.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn appliance_tunnel_request_accepts_support_token_for_allowed_routes_and_audits() {
+        let data_dir = unique_test_dir("support-audit");
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+            state.data_dir = data_dir.to_string_lossy().to_string();
+        }
+        let issued = issue_local_support_token(&state, Some("support".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let response = app
+            .oneshot({
+                let mut req = tunnel_request(Method::GET, "/api/state", Body::empty());
+                req.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", issued.token).parse().unwrap(),
+                );
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let audit = fs::read_to_string(data_dir.join(SUPPORT_AUDIT_FILE)).unwrap();
+        assert!(audit.contains(&issued.id));
+        assert!(audit.contains("\tGET\t/api/state"));
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn support_token_is_forbidden_from_owner_only_routes() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let issued = issue_local_support_token(&state, Some("support".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let response = app
+            .oneshot({
+                let mut req = tunnel_request(Method::POST, "/api/factory-reset", Body::empty());
+                req.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", issued.token).parse().unwrap(),
+                );
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn support_denylist_marks_owner_only_routes() {
+        let denied = [
+            (Method::POST, "/api/auth/claim"),
+            (Method::POST, "/api/auth/support-token"),
+            (Method::PUT, "/api/auth/settings"),
+            (Method::POST, "/api/factory-reset"),
+            (Method::PUT, "/api/hub/credentials"),
+            (Method::DELETE, "/api/hub/credentials"),
+            (Method::PUT, "/api/remote-access/config"),
+            (Method::DELETE, "/api/remote-access/config"),
+            (Method::PUT, "/api/wifi"),
+            (Method::DELETE, "/api/wifi"),
+            (Method::POST, "/api/diag/reset-matter-fabric"),
+            (Method::POST, "/api/ota/upload"),
+            (Method::POST, "/api/ota/update"),
+            (Method::PUT, "/api/backup"),
+        ];
+
+        for (method, path) in denied {
+            assert!(
+                is_owner_only_request_for_support(&method, path),
+                "{method} {path} should be owner-only"
+            );
+        }
+        assert!(!is_owner_only_request_for_support(
+            &Method::GET,
+            "/api/ota/status"
+        ));
+        assert!(!is_owner_only_request_for_support(
+            &Method::POST,
+            "/api/diag/debug-bundle"
+        ));
+        assert!(!is_owner_only_request_for_support(
+            &Method::POST,
+            "/api/restart"
+        ));
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -55,6 +56,86 @@ class RhythmWifiChangeResponse {
   bool get accepted => httpStatus == 200 && error == null;
 }
 
+class RhythmLogSource {
+  const RhythmLogSource({
+    required this.id,
+    required this.fileName,
+    required this.bytes,
+    this.modifiedAt,
+  });
+
+  factory RhythmLogSource.fromJson(Map<String, dynamic> json) {
+    return RhythmLogSource(
+      id: json['id']?.toString() ?? '',
+      fileName: json['file_name']?.toString() ?? '',
+      bytes: (json['bytes'] as num?)?.toInt() ?? 0,
+      modifiedAt: _parseOptionalDateTime(json['modified_at']),
+    );
+  }
+
+  final String id;
+  final String fileName;
+  final int bytes;
+  final DateTime? modifiedAt;
+}
+
+class RhythmLogTailLine {
+  const RhythmLogTailLine({
+    required this.source,
+    required this.lineNumber,
+    required this.text,
+    this.isReset = false,
+  });
+
+  factory RhythmLogTailLine.fromJson(Map<String, dynamic> json) {
+    return RhythmLogTailLine(
+      source: json['source']?.toString() ?? '',
+      lineNumber: (json['line_number'] as num?)?.toInt() ?? 0,
+      text: json['text']?.toString() ?? '',
+      isReset: json['reset'] == true,
+    );
+  }
+
+  final String source;
+  final int lineNumber;
+  final String text;
+  final bool isReset;
+}
+
+class RhythmLogTail {
+  const RhythmLogTail({
+    required this.source,
+    required this.lines,
+    required this.requestedLines,
+    required this.returnedLines,
+  });
+
+  factory RhythmLogTail.fromJson(Map<String, dynamic> json) {
+    final source = json['source'] is Map
+        ? RhythmLogSource.fromJson(Map<String, dynamic>.from(
+            json['source'] as Map,
+          ))
+        : const RhythmLogSource(id: '', fileName: '', bytes: 0);
+    final lines = (json['lines'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((line) => RhythmLogTailLine.fromJson(
+              Map<String, dynamic>.from(line),
+            ))
+        .toList(growable: false);
+    return RhythmLogTail(
+      source: source,
+      lines: lines,
+      requestedLines: (json['requested_lines'] as num?)?.toInt() ?? 0,
+      returnedLines: (json['returned_lines'] as num?)?.toInt() ?? lines.length,
+    );
+  }
+
+  final RhythmLogSource source;
+  final List<RhythmLogTailLine> lines;
+  final int requestedLines;
+  final int returnedLines;
+}
+
 /// Lightweight HTTP client for device diagnostic endpoints.
 ///
 /// Can be instantiated directly with a host for one-off operations
@@ -86,17 +167,23 @@ class RhythmDiagnosticsApi {
 
   RhythmDiagnosticsApi.fromBaseUrl({
     required String baseUrl,
+    Dio? dio,
     Duration connectTimeout = defaultConnectTimeout,
     Duration receiveTimeout = defaultReceiveTimeout,
     Duration debugBundleReceiveTimeout = defaultDebugBundleReceiveTimeout,
     String? authToken,
   })  : _debugBundleReceiveTimeout = debugBundleReceiveTimeout,
-        _dio = Dio(BaseOptions(
-          baseUrl: _normalizeBaseUrl(baseUrl),
-          connectTimeout: connectTimeout,
-          receiveTimeout: receiveTimeout,
-          headers: bearerAuthHeaders(authToken),
-        )) {
+        _dio = dio ??
+            Dio(BaseOptions(
+              baseUrl: _normalizeBaseUrl(baseUrl),
+              connectTimeout: connectTimeout,
+              receiveTimeout: receiveTimeout,
+              headers: bearerAuthHeaders(authToken),
+            )) {
+    final headers = bearerAuthHeaders(authToken);
+    if (headers != null) {
+      _dio.options.headers.addAll(headers);
+    }
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
 
@@ -132,12 +219,153 @@ class RhythmDiagnosticsApi {
       if (category != null) params['cat'] = category;
       final response = await _dio.get('api/diag/logs', queryParameters: params);
       final data = response.data as Map<String, dynamic>;
-      final logs = data['logs'] as List<dynamic>? ?? [];
-      return logs.cast<Map<String, dynamic>>();
+      final legacyLogs = data['logs'] as List<dynamic>?;
+      if (legacyLogs != null) return legacyLogs.cast<Map<String, dynamic>>();
+
+      final sources = (data['sources'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((source) => RhythmLogSource.fromJson(
+                Map<String, dynamic>.from(source),
+              ))
+          .where((source) => source.id.isNotEmpty)
+          .toList(growable: false);
+      if (sources.isEmpty) return const [];
+
+      final requestedLimit = limit.clamp(1, 2000).toInt();
+      final entries = <Map<String, dynamic>>[];
+      for (final source in sources) {
+        final tail = await tailDiagLog(source.id, lines: requestedLimit);
+        if (tail == null) continue;
+        for (final line in tail.lines) {
+          entries.add(_legacyLogEntryFromTailLine(line));
+        }
+      }
+      entries.sort((left, right) {
+        final leftSource = left['cat']?.toString() ?? '';
+        final rightSource = right['cat']?.toString() ?? '';
+        final sourceCompare = leftSource.compareTo(rightSource);
+        if (sourceCompare != 0) return sourceCompare;
+        final leftLine = (left['line'] as num?)?.toInt() ?? 0;
+        final rightLine = (right['line'] as num?)?.toInt() ?? 0;
+        return leftLine.compareTo(rightLine);
+      });
+      return entries;
     } catch (e) {
       _log.warning('getDiagLogs failed', e);
       return null;
     }
+  }
+
+  Future<List<RhythmLogSource>?> listDiagLogSources() async {
+    try {
+      final response = await _dio.get('api/diag/logs');
+      final data = response.data as Map<String, dynamic>;
+      final sources = data['sources'] as List<dynamic>? ?? const [];
+      return sources
+          .whereType<Map>()
+          .map((source) => RhythmLogSource.fromJson(
+                Map<String, dynamic>.from(source),
+              ))
+          .where((source) => source.id.isNotEmpty)
+          .toList(growable: false);
+    } catch (e) {
+      _log.warning('listDiagLogSources failed', e);
+      return null;
+    }
+  }
+
+  Future<RhythmLogTail?> tailDiagLog(String sourceId, {int lines = 500}) async {
+    final cleanSourceId = sourceId.trim();
+    if (cleanSourceId.isEmpty) return null;
+
+    try {
+      final response = await _dio.get(
+        'api/diag/logs/${Uri.encodeComponent(cleanSourceId)}/tail',
+        queryParameters: {'lines': lines},
+      );
+      final data = response.data as Map<String, dynamic>;
+      final tail = data['tail'];
+      if (tail is! Map) return null;
+      return RhythmLogTail.fromJson(Map<String, dynamic>.from(tail));
+    } catch (e) {
+      _log.warning('tailDiagLog failed', e);
+      return null;
+    }
+  }
+
+  Stream<RhythmLogTailLine> streamDiagLog(
+    String sourceId, {
+    int lines = 200,
+    Duration pollInterval = const Duration(seconds: 1),
+    Duration maxDuration = const Duration(minutes: 30),
+  }) async* {
+    final cleanSourceId = sourceId.trim();
+    if (cleanSourceId.isEmpty) return;
+
+    final response = await _dio.get<ResponseBody>(
+      'api/diag/logs/${Uri.encodeComponent(cleanSourceId)}/stream',
+      queryParameters: {
+        'lines': lines,
+        'poll_ms': pollInterval.inMilliseconds,
+        'max_seconds': maxDuration.inSeconds,
+      },
+      options: Options(
+        responseType: ResponseType.stream,
+        receiveTimeout: Duration.zero,
+        validateStatus: (_) => true,
+      ),
+    );
+    _throwForUnexpectedStatus(response, message: 'Failed to stream logs');
+
+    final body = response.data;
+    if (body == null) return;
+
+    var eventName = 'message';
+    final dataLines = <String>[];
+
+    RhythmLogTailLine? flushEvent() {
+      final data = dataLines.join('\n').trim();
+      final currentEvent = eventName;
+      eventName = 'message';
+      dataLines.clear();
+      if ((currentEvent != 'log' && currentEvent != 'reset') || data.isEmpty) {
+        return null;
+      }
+
+      final decoded = jsonDecode(data);
+      if (decoded is! Map) return null;
+      if (currentEvent == 'reset') {
+        final source = decoded['source']?.toString() ?? cleanSourceId;
+        return RhythmLogTailLine(
+          source: source,
+          lineNumber: 0,
+          text: 'Log rotated',
+          isReset: true,
+        );
+      }
+      return RhythmLogTailLine.fromJson(Map<String, dynamic>.from(decoded));
+    }
+
+    await for (final line in body.stream
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())) {
+      if (line.isEmpty) {
+        final event = flushEvent();
+        if (event != null) yield event;
+        continue;
+      }
+      if (line.startsWith(':')) continue;
+      if (line.startsWith('event:')) {
+        eventName = line.substring('event:'.length).trim();
+        continue;
+      }
+      if (line.startsWith('data:')) {
+        dataLines.add(line.substring('data:'.length).trimLeft());
+      }
+    }
+
+    final event = flushEvent();
+    if (event != null) yield event;
   }
 
   /// Build and download a gzip-compressed debug bundle attachment.
@@ -383,4 +611,39 @@ String _normalizeBaseUrl(String baseUrl) {
     throw ArgumentError.value(baseUrl, 'baseUrl', 'must not be empty');
   }
   return trimmed.endsWith('/') ? trimmed : '$trimmed/';
+}
+
+DateTime? _parseOptionalDateTime(Object? value) {
+  final text = value?.toString().trim();
+  if (text == null || text.isEmpty) return null;
+  return DateTime.tryParse(text);
+}
+
+Map<String, dynamic> _legacyLogEntryFromTailLine(RhythmLogTailLine line) {
+  final level = _inferLogLevel(line.text);
+  return {
+    'level': level,
+    'cat': line.source,
+    'msg': line.text,
+    'line': line.lineNumber,
+    'source_log': true,
+  };
+}
+
+String _inferLogLevel(String text) {
+  final upper = text.toUpperCase();
+  if (upper.contains(' ERROR ') ||
+      upper.contains('[ERROR]') ||
+      upper.contains(' ERR ') ||
+      upper.startsWith('ERROR') ||
+      upper.startsWith('ERR')) {
+    return 'error';
+  }
+  if (upper.contains(' WARN ') ||
+      upper.contains('[WARN]') ||
+      upper.startsWith('WARN') ||
+      upper.startsWith('WARNING')) {
+    return 'warn';
+  }
+  return 'info';
 }

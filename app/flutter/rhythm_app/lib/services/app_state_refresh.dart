@@ -12,6 +12,7 @@ import '../providers/hub_connection_provider.dart';
 import 'account_cloud_sync_service.dart';
 import 'cloud_backup_service.dart';
 import 'demo_server_api.dart';
+import 'employee_mode_service.dart';
 import 'hue/hue_service_locator.dart';
 import 'hue/demo_hue_bridge_service.dart';
 import 'settings_service.dart';
@@ -95,11 +96,13 @@ class AppStateRefresh {
       return const SyncResult.failure('Context not mounted after home init');
     }
 
-    await AccountCloudSyncService.instance.syncHomeAndServerHubs(
-      home: homeProvider.currentHome,
-      hubs: homeProvider.currentHomeHubs,
-      reason: 'app_state_refresh',
-    );
+    if (!EmployeeModeService.instance.isActive) {
+      await AccountCloudSyncService.instance.syncHomeAndServerHubs(
+        home: homeProvider.currentHome,
+        hubs: homeProvider.currentHomeHubs,
+        reason: 'app_state_refresh',
+      );
+    }
     if (!context.mounted) {
       return const SyncResult.failure('Context not mounted after cloud sync');
     }
@@ -158,7 +161,9 @@ class AppStateRefresh {
   ) async {
     // The demo / Virtual Experience hub is a fake host (`demo.rhythm.local`);
     // hitting the cloud backup service for it would just throw a DNS error.
-    if (HueServiceLocator.isDemoMode) return;
+    if (HueServiceLocator.isDemoMode || EmployeeModeService.instance.isActive) {
+      return;
+    }
     final serverHub = homeProvider.getFirstHubOfType(HubType.server);
     if (serverHub == null || !CloudBackupService.instance.canUseCloudBackups) {
       return;
@@ -206,7 +211,9 @@ class AppStateRefresh {
   static void _scheduleCloudBackupIfAvailable(HomeProvider homeProvider) {
     // Demo hub host (`demo.rhythm.local`) isn't reachable — skip cloud
     // backup capture entirely while in Virtual Experience / demo mode.
-    if (HueServiceLocator.isDemoMode) return;
+    if (HueServiceLocator.isDemoMode || EmployeeModeService.instance.isActive) {
+      return;
+    }
     final serverHub = homeProvider.getFirstHubOfType(HubType.server);
     if (serverHub == null || !CloudBackupService.instance.canUseCloudBackups) {
       return;
@@ -230,6 +237,10 @@ class AppStateRefresh {
     debugPrint('AppStateRefresh: currentHome=${homeProvider.currentHome?.id}');
     debugPrint(
         'AppStateRefresh: currentHomeHubs=${homeProvider.currentHomeHubs.length}');
+
+    if (EmployeeModeService.instance.isActive) {
+      return 0;
+    }
 
     // HA addon: fetch rooms from the addon backend (auto-imported from HA areas)
     if (PlatformCtx.isHaAddon) {

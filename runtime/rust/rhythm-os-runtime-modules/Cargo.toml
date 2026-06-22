@@ -1,6 +1,6 @@
 [package]
 name = "rhythm-os-runtime-modules"
-version = "0.6.110-beta"
+version = "0.6.115-beta"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Tim Kijewski <3043754+sticktrk@users.noreply.github.com>"]

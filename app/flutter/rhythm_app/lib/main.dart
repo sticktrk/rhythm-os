@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:app_links/app_links.dart';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -19,9 +20,11 @@ import 'onboarding/screens/password_recovery_screen.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
 import 'services/app_log_service.dart';
+import 'services/employee_mode_service.dart';
 import 'services/entitlements_service.dart';
 import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
+import 'services/support_proxy_dio.dart';
 import 'services/app_state_refresh.dart';
 import 'services/virtual_experience_service.dart';
 import 'data/local_data_source.dart';
@@ -95,6 +98,15 @@ void main() async {
   // bootstraps — for HA add-on (no cloud) this short-circuits to Pro.
   await EntitlementsService.bootstrap(caps);
 
+  final initialAppLink = await _readInitialAppLink();
+  EmployeeModeService.instance.activateFromLaunch(Uri.base);
+  if (initialAppLink != null) {
+    EmployeeModeService.instance.activateFromLaunch(initialAppLink);
+  }
+  final supportProxyDioFactory = SupportProxyDioFactory(
+    employeeMode: EmployeeModeService.instance,
+  );
+
   HybridApiClient? client;
   String? initError;
 
@@ -103,6 +115,12 @@ void main() async {
     client = await HybridApiClient.create(
       storedHubs: LocalDataSource().getAllHubs(),
       syncSolarDataOnCreate: false,
+      remoteDio: EmployeeModeService.instance.isActive
+          ? supportProxyDioFactory.configDio()
+          : null,
+      remoteDioOverride: () => EmployeeModeService.instance.isActive
+          ? supportProxyDioFactory.configDio()
+          : null,
     );
 
     // Fail explicitly if local brain isn't available (except on web,
@@ -133,6 +151,51 @@ void main() async {
     client: client,
     initError: initError,
     capabilities: caps,
+    initialAppLink: initialAppLink,
+  ));
+}
+
+Future<Uri?> _readInitialAppLink() async {
+  if (kIsWeb) return null;
+  try {
+    return await AppLinks().getInitialLink();
+  } on PlatformException catch (error, stackTrace) {
+    debugPrint('Could not read initial app link: ${error.message}');
+    debugPrint('$stackTrace');
+  } catch (error, stackTrace) {
+    debugPrint('Could not read initial app link: $error');
+    debugPrint('$stackTrace');
+  }
+  return null;
+}
+
+Dio _rhythmConnectionDio(
+  SupportProxyDioFactory supportProxyDioFactory, {
+  required String baseUrl,
+  required Duration connectTimeout,
+  required Duration receiveTimeout,
+  String? authToken,
+  Map<String, dynamic>? headers,
+}) {
+  if (EmployeeModeService.instance.isActive) {
+    return supportProxyDioFactory(
+      baseUrl: baseUrl,
+      connectTimeout: connectTimeout,
+      receiveTimeout: receiveTimeout,
+      authToken: authToken,
+      headers: headers,
+    );
+  }
+
+  final token = authToken?.trim();
+  return Dio(BaseOptions(
+    baseUrl: baseUrl,
+    connectTimeout: connectTimeout,
+    receiveTimeout: receiveTimeout,
+    headers: {
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+      ...?headers,
+    },
   ));
 }
 
@@ -140,12 +203,14 @@ class RhythmApp extends StatelessWidget {
   final HybridApiClient? client;
   final String? initError;
   final PlatformCapabilities capabilities;
+  final Uri? initialAppLink;
 
   const RhythmApp({
     super.key,
     this.client,
     this.initError,
     required this.capabilities,
+    this.initialAppLink,
   });
 
   @override
@@ -177,6 +242,9 @@ class RhythmApp extends StatelessWidget {
         Provider<PlatformCapabilities>.value(value: capabilities),
         ChangeNotifierProvider(
           create: (_) => SubscriptionProvider(EntitlementsService.instance),
+        ),
+        ChangeNotifierProvider<EmployeeModeService>.value(
+          value: EmployeeModeService.instance,
         ),
         ChangeNotifierProvider(create: (_) => ConfigModel()),
         Provider<RhythmApi>.value(value: client!),
@@ -210,7 +278,25 @@ class RhythmApp extends StatelessWidget {
         ),
         // Server connection (transport layer — SDK)
         Provider(
-            create: (_) => RhythmConnection(), dispose: (_, c) => c.dispose()),
+          create: (_) => RhythmConnection(
+            dioFactory: ({
+              required String baseUrl,
+              required Duration connectTimeout,
+              required Duration receiveTimeout,
+              String? authToken,
+              Map<String, dynamic>? headers,
+            }) =>
+                _rhythmConnectionDio(
+              supportProxyDioFactory,
+              baseUrl: baseUrl,
+              connectTimeout: connectTimeout,
+              receiveTimeout: receiveTimeout,
+              authToken: authToken,
+              headers: headers,
+            ),
+          ),
+          dispose: (_, c) => c.dispose(),
+        ),
         // Server sync provider (bridges SDK connection with app state)
         ChangeNotifierProxyProvider3<RhythmConnection, RoomProvider,
             HomeProvider, ServerSyncProvider>(
@@ -230,7 +316,10 @@ class RhythmApp extends StatelessWidget {
         title: 'Rhythm Lighting',
         debugShowCheckedModeBanner: false,
         theme: theme,
-        home: AuthGate(key: AuthGate.globalKey),
+        home: AuthGate(
+          key: AuthGate.globalKey,
+          initialAppLink: initialAppLink,
+        ),
       ),
     );
   }
@@ -238,7 +327,9 @@ class RhythmApp extends StatelessWidget {
 
 /// Auth gate that checks auth state before entering the app shell.
 class AuthGate extends StatefulWidget {
-  const AuthGate({super.key});
+  const AuthGate({super.key, this.initialAppLink});
+
+  final Uri? initialAppLink;
 
   /// Global key to access AuthGate state for reset functionality.
   static final GlobalKey<State<AuthGate>> globalKey =
@@ -277,9 +368,9 @@ class _AuthGateState extends State<AuthGate> {
   @override
   void initState() {
     super.initState();
-    _checkAuthState();
     _authEventSubscription = AuthService().authEvents.listen(_onAuthEvent);
-    _listenForPasswordRecoveryLinks();
+    final initialLinkHandled = _listenForIncomingLinks();
+    unawaited(initialLinkHandled.whenComplete(_checkAuthState));
     // Listen to reset events from static method
     AuthGate._resetController.addListener(_onResetRequested);
     // Listen for Virtual Experience entry so demo state can be seeded whether
@@ -308,37 +399,38 @@ class _AuthGateState extends State<AuthGate> {
     _showPasswordRecoveryScreen(source: 'auth_event');
   }
 
-  void _listenForPasswordRecoveryLinks() {
+  Future<void> _listenForIncomingLinks() async {
     if (kIsWeb) return;
 
     final appLinks = AppLinks();
     _passwordRecoveryLinkSubscription = appLinks.uriLinkStream.listen(
       (uri) => unawaited(_handleIncomingLink(uri)),
       onError: (Object error, StackTrace stackTrace) {
-        debugPrint('AuthGate: Password recovery link error: $error');
+        debugPrint('AuthGate: Incoming app link error: $error');
         debugPrint('$stackTrace');
       },
     );
 
-    unawaited(_handleInitialLink(appLinks));
-  }
-
-  Future<void> _handleInitialLink(AppLinks appLinks) async {
-    try {
-      final uri = await appLinks.getInitialLink();
-      if (uri != null) {
-        await _handleIncomingLink(uri);
-      }
-    } on PlatformException catch (error, stackTrace) {
-      debugPrint('AuthGate: Could not read initial app link: ${error.message}');
-      debugPrint('$stackTrace');
-    } catch (error, stackTrace) {
-      debugPrint('AuthGate: Could not read initial app link: $error');
-      debugPrint('$stackTrace');
+    final initialUri = widget.initialAppLink;
+    if (initialUri != null) {
+      await _handleIncomingLink(initialUri);
     }
   }
 
   Future<void> _handleIncomingLink(Uri uri) async {
+    if (EmployeeModeService.instance.activateFromLaunch(uri)) {
+      debugPrint('AuthGate: Employee support link received');
+      await SettingsService.instance.setOnboardingComplete(true);
+      await _clearAnonymousSessionForEmployeeMode();
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _showPasswordRecovery = false;
+      });
+      _refreshAppStateInBackground();
+      return;
+    }
+
     if (!_isPasswordRecoveryLink(uri)) return;
     final fingerprint = _passwordRecoveryLinkFingerprint(uri);
     if (await SettingsService.instance
@@ -462,7 +554,7 @@ class _AuthGateState extends State<AuthGate> {
 
   Future<void> _checkAuthState() async {
     // Web platform: skip auth bootstrap and show the app shell.
-    if (kIsWeb) {
+    if (kIsWeb && !EmployeeModeService.instance.isActive) {
       await SettingsService.instance.setOnboardingComplete(true);
       if (!mounted) return;
       setState(() {
@@ -482,6 +574,7 @@ class _AuthGateState extends State<AuthGate> {
     }
 
     final authService = AuthService();
+    await _clearAnonymousSessionForEmployeeMode();
     if (authService.currentUser != null) {
       debugPrint(
           'Recovering session from Keychain: ${authService.currentUserId}');
@@ -494,7 +587,7 @@ class _AuthGateState extends State<AuthGate> {
         'user_id': authService.currentUserId ?? 'unknown',
         'is_anonymous': authService.isAnonymous ? 1 : 0,
       });
-    } else {
+    } else if (!EmployeeModeService.instance.isActive) {
       try {
         await authService.signInAnonymously();
         debugPrint('Created anonymous user: ${authService.currentUserId}');
@@ -505,6 +598,8 @@ class _AuthGateState extends State<AuthGate> {
         debugPrint('Anonymous auth failed: $e');
         debugPrint('  stackTrace: $stackTrace');
       }
+    } else {
+      debugPrint('Employee mode: waiting for staff sign-in');
     }
 
     await SettingsService.instance.setOnboardingComplete(true);
@@ -513,6 +608,21 @@ class _AuthGateState extends State<AuthGate> {
       _isLoading = false;
     });
     _refreshAppStateInBackground();
+  }
+
+  Future<void> _clearAnonymousSessionForEmployeeMode() async {
+    if (!EmployeeModeService.instance.isActive ||
+        !BackendProvider.isInitialized) {
+      return;
+    }
+
+    final authService = AuthService();
+    if (authService.currentUser == null || !authService.isAnonymous) {
+      return;
+    }
+
+    debugPrint('Employee mode: clearing recovered anonymous session');
+    await authService.signOut(preserveEmployeeMode: true);
   }
 
   /// Drop the user into [AppShell] in Virtual Experience mode.
@@ -547,7 +657,8 @@ class _AuthGateState extends State<AuthGate> {
   Future<void> _resetToOnboarding() async {
     debugPrint('_resetToOnboarding: resetting to clean hardware gate');
     try {
-      if (BackendProvider.isInitialized) {
+      if (BackendProvider.isInitialized &&
+          !EmployeeModeService.instance.isActive) {
         final authService = AuthService();
         if (authService.currentUser == null) {
           final user = await authService.signInAnonymously();

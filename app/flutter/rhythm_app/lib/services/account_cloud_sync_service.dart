@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../backend/backend.dart';
 import 'account_data_encryption_service.dart';
 import 'auth_service.dart';
+import 'employee_mode_service.dart';
 
 /// A Home plus the Rhythm Server hubs saved for that Home in the account.
 class AccountHomeServerHubs {
@@ -57,6 +58,7 @@ class AccountCloudSyncService {
   bool get canUseSignedInCloudFeatures {
     final auth = AuthService();
     return _client != null &&
+        !EmployeeModeService.instance.isActive &&
         auth.isSignedIn &&
         !auth.isAnonymous &&
         auth.currentUserId != null;
@@ -122,6 +124,13 @@ class AccountCloudSyncService {
     required Iterable<Hub> hubs,
     required String reason,
   }) async {
+    if (EmployeeModeService.instance.isActive) {
+      debugPrint(
+        'AccountCloudSyncService: sync skipped in employee mode reason=$reason',
+      );
+      return;
+    }
+
     final auth = AuthService();
     final userId = auth.currentUserId;
     final client = _client;
@@ -216,6 +225,37 @@ class AccountCloudSyncService {
         'reason=$reason error=$error',
       );
     }
+  }
+
+  Future<DateTime?> setSupportAccessConsent({
+    required String homeId,
+    required bool accepted,
+  }) async {
+    final client = _client;
+    final auth = AuthService();
+    final userId = auth.currentUserId;
+    if (client == null ||
+        EmployeeModeService.instance.isActive ||
+        !auth.isSignedIn ||
+        auth.isAnonymous ||
+        userId == null) {
+      throw StateError('Support access consent requires a signed-in owner.');
+    }
+
+    final timestamp = accepted ? DateTime.now().toUtc() : null;
+    final row = await client
+        .from('homes')
+        .update({
+          'support_access_consent_at': timestamp?.toIso8601String(),
+        })
+        .eq('id', homeId)
+        .eq('owner_id', userId)
+        .select('id')
+        .maybeSingle();
+    if (row == null) {
+      throw StateError('Support access consent can only be set by the owner.');
+    }
+    return timestamp;
   }
 
   static Map<String, dynamic> homeSnapshotPayload(

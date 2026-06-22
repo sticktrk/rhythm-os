@@ -50,6 +50,36 @@ pub struct DebugBundle {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct LogSource {
+    pub id: String,
+    pub file_name: String,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedLogSource {
+    pub source: LogSource,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LogTailLine {
+    pub source: String,
+    pub line_number: usize,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LogTail {
+    pub source: LogSource,
+    pub lines: Vec<LogTailLine>,
+    pub requested_lines: usize,
+    pub returned_lines: usize,
+}
+
 #[derive(Clone, Debug)]
 struct RuntimeSnapshot {
     firmware_version: String,
@@ -795,6 +825,94 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
     })
 }
 
+pub fn list_log_sources(state: &SharedState) -> Result<Vec<LogSource>> {
+    let runtime = snapshot_runtime(state)?;
+    let artifacts = discover_log_artifacts_for_runtime(&runtime);
+    let mut sources = Vec::<LogSource>::new();
+
+    for artifact in artifacts {
+        if let Some(source) = log_source_from_artifact(&artifact)? {
+            sources.push(source);
+        }
+    }
+
+    sources.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(sources)
+}
+
+pub fn resolve_log_source(
+    state: &SharedState,
+    source_id: &str,
+) -> Result<Option<ResolvedLogSource>> {
+    let runtime = snapshot_runtime(state)?;
+    let requested = normalize_log_source_id(source_id);
+    if requested.is_empty() || requested.contains('/') || requested.contains('\\') {
+        return Ok(None);
+    }
+
+    for artifact in discover_log_artifacts_for_runtime(&runtime) {
+        let Some(file_name) = artifact
+            .source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if file_name != requested {
+            continue;
+        }
+        let Some(source) = log_source_from_artifact(&artifact)? else {
+            return Ok(None);
+        };
+        return Ok(Some(ResolvedLogSource {
+            source,
+            path: artifact.source_path,
+        }));
+    }
+
+    Ok(None)
+}
+
+pub fn tail_log_source(state: &SharedState, source_id: &str, lines: usize) -> Result<LogTail> {
+    let Some(resolved) = resolve_log_source(state, source_id)? else {
+        anyhow::bail!("log source not found");
+    };
+    let requested_lines = clamp_log_tail_lines(lines);
+    let tail = read_log_tail_lines(&resolved.path, &resolved.source.id, requested_lines)?;
+    Ok(LogTail {
+        source: resolved.source,
+        returned_lines: tail.len(),
+        requested_lines,
+        lines: tail,
+    })
+}
+
+pub fn read_log_tail_lines(path: &Path, source_id: &str, lines: usize) -> Result<Vec<LogTailLine>> {
+    let requested_lines = clamp_log_tail_lines(lines);
+    let file = fs::File::open(path).with_context(|| format!("opening log {}", path.display()))?;
+    let mut tail = VecDeque::<LogTailLine>::new();
+
+    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line = line.with_context(|| format!("reading log {}", path.display()))?;
+        push_limited(
+            &mut tail,
+            requested_lines,
+            LogTailLine {
+                source: source_id.to_string(),
+                line_number: index + 1,
+                text: truncate_log_line(&line),
+            },
+        );
+    }
+
+    Ok(tail.into())
+}
+
+pub fn clamp_log_tail_lines(lines: usize) -> usize {
+    lines.clamp(1, 2_000)
+}
+
 fn snapshot_runtime(state: &SharedState) -> Result<RuntimeSnapshot> {
     let guard = lock_state(state)?;
     Ok(RuntimeSnapshot {
@@ -871,6 +989,54 @@ fn discover_log_dirs(runtime: &RuntimeSnapshot) -> Vec<PathBuf> {
     dirs.into_iter()
         .filter(|dir| dedup.insert(dir.clone()))
         .collect()
+}
+
+fn discover_log_artifacts_for_runtime(runtime: &RuntimeSnapshot) -> Vec<FileArtifact> {
+    let log_dirs = discover_log_dirs(runtime);
+    let mut diagnostics = BundleDiagnostics::new(
+        Utc::now(),
+        runtime.data_dir.clone(),
+        log_dirs
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect(),
+    );
+    discover_log_artifacts(&log_dirs, &mut diagnostics)
+}
+
+fn log_source_from_artifact(artifact: &FileArtifact) -> Result<Option<LogSource>> {
+    let Some(file_name) = artifact
+        .source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return Ok(None);
+    };
+    if !matches_log_name(file_name) {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(&artifact.source_path)
+        .with_context(|| format!("reading log metadata {}", artifact.source_path.display()))?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339());
+
+    Ok(Some(LogSource {
+        id: normalize_log_source_id(file_name),
+        file_name: file_name.to_string(),
+        bytes: metadata.len(),
+        modified_at,
+    }))
+}
+
+fn normalize_log_source_id(source_id: &str) -> String {
+    source_id.trim().to_string()
 }
 
 fn discover_log_artifacts(

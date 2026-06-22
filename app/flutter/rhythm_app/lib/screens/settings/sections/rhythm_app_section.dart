@@ -14,6 +14,7 @@ import '../../../services/analytics_service.dart';
 import '../../../services/account_session_service.dart';
 import '../../../services/auth_service.dart';
 import '../../../services/cloud_backup_service.dart';
+import '../../../services/employee_mode_service.dart';
 import '../dialogs/feedback_dialog.dart';
 import '../../location_settings_screen.dart';
 import 'backup_restore_screen.dart';
@@ -57,6 +58,8 @@ class RhythmAppDetailScreen extends StatelessWidget {
                           RhythmConnectionState.connected;
                       final canUseCloudBackups =
                           CloudBackupService.instance.canUseCloudBackups;
+                      final employeeMode =
+                          EmployeeModeService.instance.isActive;
                       final currentUser = AuthService().currentUser;
                       final hasAccountSession =
                           caps.hasAccounts && currentUser != null;
@@ -105,17 +108,19 @@ class RhythmAppDetailScreen extends StatelessWidget {
                                   FeedbackDialog.show(context);
                                 },
                               ),
-                              SettingsRow(
-                                icon: Icons.cloud_sync_outlined,
-                                iconColor: const Color(0xFF26A69A),
-                                label: 'Backup & Restore',
-                                value: serverConnected
-                                    ? (canUseCloudBackups
-                                        ? null
-                                        : 'Sign in required')
-                                    : 'Server not connected',
-                                onTap: () => BackupRestoreScreen.show(context),
-                              ),
+                              if (!employeeMode)
+                                SettingsRow(
+                                  icon: Icons.cloud_sync_outlined,
+                                  iconColor: const Color(0xFF26A69A),
+                                  label: 'Backup & Restore',
+                                  value: serverConnected
+                                      ? (canUseCloudBackups
+                                          ? null
+                                          : 'Sign in required')
+                                      : 'Server not connected',
+                                  onTap: () =>
+                                      BackupRestoreScreen.show(context),
+                                ),
                             ],
                           ),
                           const SizedBox(height: 12),
@@ -142,7 +147,7 @@ class RhythmAppDetailScreen extends StatelessWidget {
                                   showChevron: false,
                                   onTap: () => _logOut(context),
                                 ),
-                                if (hasPermanentAccount)
+                                if (hasPermanentAccount && !employeeMode)
                                   SettingsRow(
                                     icon: Icons.delete_forever_rounded,
                                     iconColor: Colors.red,
@@ -252,6 +257,7 @@ class RhythmAppDetailScreen extends StatelessWidget {
         homeProvider: context.read<HomeProvider>(),
         hubProvider: context.read<HubConnectionProvider>(),
         roomProvider: context.read<RoomProvider>(),
+        preserveEmployeeMode: EmployeeModeService.instance.isActive,
       );
     } catch (error, stackTrace) {
       debugPrint('Log Out: Failed: $error');

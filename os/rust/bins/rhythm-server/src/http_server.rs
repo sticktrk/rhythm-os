@@ -2,20 +2,27 @@
 
 use anyhow::{Context, Result};
 use axum::body::Body;
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use serde::Deserialize;
 use serde::Serialize;
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use axum::extract::State;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::stream::{self, Stream};
 use rhythm_os::handlers::ApiResponse;
 use rhythm_os::logging;
 use rhythm_os::mdns::MDNS_HOSTNAME_PREFIX;
 use rhythm_os::state::SharedState;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::CorsLayer;
 
 /// Create the Axum router with all API routes.
@@ -28,6 +35,9 @@ pub fn create_router(state: SharedState) -> Router {
             // Server-specific endpoints
             .route("/api/discover", get(discover))
             .route("/api/diag/debug-bundle", post(debug_bundle))
+            .route("/api/diag/logs", get(list_logs))
+            .route("/api/diag/logs/:source/tail", get(tail_log))
+            .route("/api/diag/logs/:source/stream", get(stream_log))
             .route("/api/diag/reset-matter-fabric", post(reset_matter_fabric))
             .route(
                 "/api/ota/capabilities",
@@ -184,6 +194,29 @@ fn emit_ota_apply_progress(
 // Server-specific handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Deserialize)]
+struct LogTailQuery {
+    lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogStreamQuery {
+    lines: Option<usize>,
+    poll_ms: Option<u64>,
+    max_seconds: Option<u64>,
+}
+
+struct LogStreamState {
+    path: PathBuf,
+    source_id: String,
+    offset: u64,
+    next_line_number: Option<usize>,
+    pending: VecDeque<Event>,
+    partial: String,
+    poll_interval: Duration,
+    deadline: Instant,
+}
+
 async fn debug_bundle(State(state): State<SharedState>) -> Response {
     let started_at = std::time::Instant::now();
     match tokio::task::spawn_blocking(move || crate::debug_bundle::build_debug_bundle(&state)).await
@@ -217,6 +250,221 @@ async fn debug_bundle(State(state): State<SharedState>) -> Response {
             err_500(e)
         }
     }
+}
+
+async fn list_logs(State(state): State<SharedState>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::debug_bundle::list_log_sources(&state)).await {
+        Ok(Ok(sources)) => json_ok(
+            serde_json::json!({
+                "status": "ok",
+                "sources": sources,
+            })
+            .to_string(),
+        ),
+        Ok(Err(e)) => err_500(e),
+        Err(e) => err_500(e),
+    }
+}
+
+async fn tail_log(
+    State(state): State<SharedState>,
+    AxumPath(source): AxumPath<String>,
+    Query(query): Query<LogTailQuery>,
+) -> Response {
+    let lines = query.lines.unwrap_or(500);
+    match tokio::task::spawn_blocking(move || {
+        crate::debug_bundle::tail_log_source(&state, &source, lines)
+    })
+    .await
+    {
+        Ok(Ok(tail)) => json_ok(
+            serde_json::json!({
+                "status": "ok",
+                "tail": tail,
+            })
+            .to_string(),
+        ),
+        Ok(Err(e)) if e.to_string().contains("log source not found") => json_status(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "status": "error",
+                "message": "Log source not found",
+            }),
+        ),
+        Ok(Err(e)) => err_500(e),
+        Err(e) => err_500(e),
+    }
+}
+
+async fn stream_log(
+    State(state): State<SharedState>,
+    AxumPath(source): AxumPath<String>,
+    Query(query): Query<LogStreamQuery>,
+) -> Response {
+    let lines = query.lines.unwrap_or(200);
+    let poll_interval = Duration::from_millis(query.poll_ms.unwrap_or(1000).clamp(250, 10_000));
+    let max_seconds = query.max_seconds.unwrap_or(30 * 60).clamp(10, 60 * 60);
+
+    let prepared = tokio::task::spawn_blocking(move || {
+        let Some(resolved) = crate::debug_bundle::resolve_log_source(&state, &source)? else {
+            anyhow::bail!("log source not found");
+        };
+        let requested_lines = crate::debug_bundle::clamp_log_tail_lines(lines);
+        let tail = crate::debug_bundle::read_log_tail_lines(
+            &resolved.path,
+            &resolved.source.id,
+            requested_lines,
+        )?;
+        let offset = std::fs::metadata(&resolved.path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let next_line_number = Some(tail.last().map(|line| line.line_number + 1).unwrap_or(1));
+        let pending = tail
+            .into_iter()
+            .map(|line| log_sse_event(&line.source, Some(line.line_number), &line.text))
+            .collect::<VecDeque<_>>();
+        Ok::<_, anyhow::Error>((resolved, offset, next_line_number, pending))
+    })
+    .await;
+
+    let (resolved, offset, next_line_number, pending) = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(e)) if e.to_string().contains("log source not found") => {
+            return json_status(
+                StatusCode::NOT_FOUND,
+                serde_json::json!({
+                    "status": "error",
+                    "message": "Log source not found",
+                }),
+            );
+        }
+        Ok(Err(e)) => return err_500(e),
+        Err(e) => return err_500(e),
+    };
+
+    let stream_state = LogStreamState {
+        path: resolved.path,
+        source_id: resolved.source.id,
+        offset,
+        next_line_number,
+        pending,
+        partial: String::new(),
+        poll_interval,
+        deadline: Instant::now() + Duration::from_secs(max_seconds),
+    };
+    Sse::new(log_event_stream(stream_state))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+fn log_event_stream(
+    state: LogStreamState,
+) -> impl Stream<Item = Result<Event, Infallible>> + Send + 'static {
+    stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(event) = state.pending.pop_front() {
+                return Some((Ok(event), state));
+            }
+
+            if Instant::now() >= state.deadline {
+                return None;
+            }
+
+            tokio::time::sleep(state.poll_interval).await;
+            if let Err(error) = read_new_log_events(&mut state).await {
+                let event = Event::default().event("error").data(
+                    serde_json::json!({
+                        "source": state.source_id,
+                        "message": error.to_string(),
+                    })
+                    .to_string(),
+                );
+                return Some((Ok(event), state));
+            }
+        }
+    })
+}
+
+async fn read_new_log_events(state: &mut LogStreamState) -> Result<()> {
+    let metadata = tokio::fs::metadata(&state.path).await?;
+    if metadata.len() < state.offset {
+        state.offset = 0;
+        state.partial.clear();
+        state.next_line_number = Some(1);
+        let source_id = state.source_id.clone();
+        state.pending.push_back(
+            Event::default()
+                .event("reset")
+                .data(serde_json::json!({ "source": source_id }).to_string()),
+        );
+    }
+
+    if metadata.len() == state.offset {
+        return Ok(());
+    }
+
+    let mut file = tokio::fs::File::open(&state.path).await?;
+    file.seek(std::io::SeekFrom::Start(state.offset)).await?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    state.offset = state.offset.saturating_add(bytes.len() as u64);
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let chunk = String::from_utf8_lossy(&bytes);
+    state.partial.push_str(&chunk);
+    let complete_through = state
+        .partial
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    if complete_through == 0 {
+        return Ok(());
+    }
+
+    let complete = state.partial[..complete_through].to_string();
+    state.partial = state.partial[complete_through..].to_string();
+
+    for line in complete.lines() {
+        let line_number = state.next_line_number;
+        state.next_line_number = line_number.map(|value| value + 1);
+        let source_id = state.source_id.clone();
+        state.pending.push_back(log_sse_event(
+            &source_id,
+            line_number,
+            &truncate_stream_log_line(line),
+        ));
+    }
+
+    Ok(())
+}
+
+fn log_sse_event(source: &str, line_number: Option<usize>, text: &str) -> Event {
+    Event::default().event("log").data(
+        serde_json::json!({
+            "source": source,
+            "line_number": line_number,
+            "text": text,
+        })
+        .to_string(),
+    )
+}
+
+fn truncate_stream_log_line(line: &str) -> String {
+    const MAX_CHARS: usize = 2_000;
+    let mut chars = line.chars();
+    let mut truncated = String::new();
+    for _ in 0..MAX_CHARS {
+        let Some(ch) = chars.next() else {
+            return line.to_string();
+        };
+        truncated.push(ch);
+    }
+    if chars.next().is_some() {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 async fn check_update(

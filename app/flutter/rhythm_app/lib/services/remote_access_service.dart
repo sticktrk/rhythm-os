@@ -7,6 +7,7 @@ import '../backend/backend_provider.dart';
 import '../config/feature_flags.dart';
 import '../models/plan_tier.dart';
 import 'account_cloud_sync_service.dart';
+import 'employee_mode_service.dart';
 import 'entitlements_service.dart';
 
 typedef RemoteAccessApiFactory = RhythmRemoteAccessApi Function({
@@ -48,6 +49,17 @@ class RemoteAccessActivationException implements Exception {
         'connector_healthy=${status.connectorHealthy}, '
         'registered_connections=${status.registeredConnections}, '
         'metrics_error=${status.metricsError})';
+  }
+}
+
+class RemoteAccessSupportTokenException implements Exception {
+  const RemoteAccessSupportTokenException(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() {
+    return 'Remote access requires RhythmOS support-token support: $cause';
   }
 }
 
@@ -94,6 +106,7 @@ class RemoteAccessService {
 
   bool get canUseRemoteAccess {
     return FeatureFlags.remoteAccessTunnel &&
+        !EmployeeModeService.instance.isActive &&
         AccountCloudSyncService.instance.canUseSignedInCloudFeatures &&
         EntitlementsService.instance.has(Entitlement.remoteAccess);
   }
@@ -110,6 +123,7 @@ class RemoteAccessService {
       reason: 'remote_access_enable',
     );
 
+    final supportToken = await _issueRequiredSupportToken(serverHub);
     final serverInstanceId = await _serverInstanceIdFor(serverHub);
     final client = _supabaseClient();
     final response = await client.functions.invoke(
@@ -118,6 +132,7 @@ class RemoteAccessService {
         serverHub: serverHub,
         home: home,
         serverInstanceId: serverInstanceId,
+        supportToken: supportToken,
       ),
     );
     final data = Map<String, dynamic>.from(response.data as Map);
@@ -170,6 +185,10 @@ class RemoteAccessService {
     Hub serverHub, {
     Home? home,
   }) async {
+    if (EmployeeModeService.instance.isActive) {
+      throw StateError(
+          'Remote access changes are not available in employee mode.');
+    }
     if (!FeatureFlags.remoteAccessTunnel) {
       throw StateError('Remote access is not enabled in this build.');
     }
@@ -273,6 +292,33 @@ class RemoteAccessService {
     );
   }
 
+  Future<String> _issueRequiredSupportToken(Hub serverHub) async {
+    final ownerToken = serverHub.token?.trim();
+    if (ownerToken == null || ownerToken.isEmpty) {
+      throw const RemoteAccessSupportTokenException(
+        'missing owner token',
+      );
+    }
+
+    try {
+      final issued = await RhythmAuthApi(
+        baseUrl: serverHub.endpoint.baseUrl,
+        authToken: ownerToken,
+      ).issueSupportToken();
+      final supportToken = issued.token.trim();
+      if (supportToken.isEmpty) {
+        throw const RemoteAccessSupportTokenException(
+          'empty support token response',
+        );
+      }
+      return supportToken;
+    } on RemoteAccessSupportTokenException {
+      rethrow;
+    } catch (error) {
+      throw RemoteAccessSupportTokenException(error);
+    }
+  }
+
   @visibleForTesting
   Future<RhythmRemoteAccessStatus> waitForActivationForTesting({
     required RhythmRemoteAccessApi api,
@@ -374,14 +420,18 @@ class RemoteAccessService {
     required Hub serverHub,
     Home? home,
     String? serverInstanceId,
+    String? supportToken,
     bool clearRemoteEndpoint = false,
   }) {
     final normalizedServerInstanceId = serverInstanceId?.trim();
+    final normalizedSupportToken = supportToken?.trim();
     return {
       'hub_id': serverHub.id,
       if (normalizedServerInstanceId != null &&
           normalizedServerInstanceId.isNotEmpty)
         'server_instance_id': normalizedServerInstanceId,
+      if (normalizedSupportToken != null && normalizedSupportToken.isNotEmpty)
+        'support_token': normalizedSupportToken,
       if (home != null) ...{
         'home': AccountCloudSyncService.homeSnapshotPayload(home),
         'server_hub': AccountCloudSyncService.serverHubSnapshotPayload(

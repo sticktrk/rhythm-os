@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart'
     show debugPrint, kIsWeb, visibleForTesting;
+import 'package:dio/dio.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 import '../services/settings_service.dart';
@@ -15,10 +16,14 @@ import '../providers/home_provider.dart';
 /// - Persistence and server sync via REST API
 class HybridApiClient implements RhythmApi {
   static const Duration _defaultRemoteReadTimeout = Duration(seconds: 2);
+  static const Duration _defaultRemoteOverrideReadTimeout =
+      Duration(seconds: 10);
 
   final RhythmApi _remote;
+  final RhythmApi? Function()? _remoteOverride;
   final NativeBrain? _brain;
   final Duration _remoteReadTimeout;
+  final Duration _remoteOverrideReadTimeout;
   final _LocalOnlyApi _localFallback = _LocalOnlyApi();
 
   // Cached preview/location data for local curve math.
@@ -31,11 +36,15 @@ class HybridApiClient implements RhythmApi {
 
   HybridApiClient._({
     required RhythmApi remote,
+    RhythmApi? Function()? remoteOverride,
     NativeBrain? brain,
     Duration remoteReadTimeout = _defaultRemoteReadTimeout,
+    Duration remoteOverrideReadTimeout = _defaultRemoteOverrideReadTimeout,
   })  : _remote = remote,
+        _remoteOverride = remoteOverride,
         _brain = brain,
-        _remoteReadTimeout = remoteReadTimeout;
+        _remoteReadTimeout = remoteReadTimeout,
+        _remoteOverrideReadTimeout = remoteOverrideReadTimeout;
 
   /// Create a hybrid client with both remote and local capabilities.
   ///
@@ -44,6 +53,11 @@ class HybridApiClient implements RhythmApi {
     String? baseUrl,
     Iterable<Hub> storedHubs = const [],
     bool syncSolarDataOnCreate = true,
+    Dio? remoteDio,
+    Dio? Function()? remoteDioOverride,
+    RhythmApi? Function()? remoteOverride,
+    Duration remoteReadTimeout = _defaultRemoteReadTimeout,
+    Duration remoteOverrideReadTimeout = _defaultRemoteOverrideReadTimeout,
   }) async {
     final startupServerHub = _selectStartupServerHub(storedHubs);
     final effectiveBaseUrl = resolveHybridApiBaseUrl(
@@ -59,25 +73,42 @@ class HybridApiClient implements RhythmApi {
       // Fall back to remote-only mode
       debugPrint('NativeBrain not available, using remote-only mode: $e');
     }
-    final authToken = effectiveBaseUrl ==
-            _normalizeBaseUrl(startupServerHub?.endpoint.baseUrl)
+    final authToken = remoteDio == null &&
+            effectiveBaseUrl ==
+                _normalizeBaseUrl(startupServerHub?.endpoint.baseUrl)
         ? await _resolveStartupAuthToken(
             effectiveBaseUrl,
             startupServerHub?.token,
           )
         : null;
 
+    final dynamicRemoteOverride = remoteOverride ??
+        (remoteDioOverride == null
+            ? null
+            : () {
+                final dio = remoteDioOverride();
+                if (dio == null) return null;
+                return _SdkConfigAdapter(sdk.RhythmConfigApi(
+                  baseUrl: 'https://support-proxy.invalid/',
+                  dio: dio,
+                ));
+              });
+
     final client = HybridApiClient._(
-      remote: effectiveBaseUrl == null
+      remote: remoteDio == null && effectiveBaseUrl == null
           ? _LocalOnlyApi()
           : _SdkConfigAdapter(sdk.RhythmConfigApi(
-              baseUrl: effectiveBaseUrl,
+              baseUrl: effectiveBaseUrl ?? 'https://support-proxy.invalid/',
+              dio: remoteDio,
               authToken: authToken,
             )),
+      remoteOverride: dynamicRemoteOverride,
       brain: brain,
+      remoteReadTimeout: remoteReadTimeout,
+      remoteOverrideReadTimeout: remoteOverrideReadTimeout,
     );
 
-    if (effectiveBaseUrl == null) {
+    if (remoteDio == null && effectiveBaseUrl == null) {
       debugPrint(
           'HybridApiClient: No remote base URL configured, starting in local-only mode');
     }
@@ -150,20 +181,42 @@ class HybridApiClient implements RhythmApi {
       remote: _LocalOnlyApi(),
       brain: _brain,
       remoteReadTimeout: _remoteReadTimeout,
+      remoteOverrideReadTimeout: _remoteOverrideReadTimeout,
     );
   }
 
   /// Check if local brain is available.
   bool get hasLocalBrain => _brain != null && _brain.isInitialized;
 
-  bool get _remoteIsLocalOnly => _remote is _LocalOnlyApi;
+  ({RhythmApi remote, bool fromOverride}) get _selectedRemote {
+    final override = _remoteOverride?.call();
+    return (
+      remote: override ?? _remote,
+      fromOverride: override != null,
+    );
+  }
 
-  RhythmApi get _localApi => _remoteIsLocalOnly ? _remote : _localFallback;
+  RhythmApi get _effectiveRemote => _selectedRemote.remote;
 
-  Future<T> _readRemote<T>(Future<T> Function() request) {
-    final future = request();
-    if (_remoteIsLocalOnly) return future;
-    return future.timeout(_remoteReadTimeout);
+  bool get _remoteIsLocalOnly => _effectiveRemote is _LocalOnlyApi;
+
+  RhythmApi get _localApi =>
+      _remote is _LocalOnlyApi ? _remote : _localFallback;
+
+  Future<T> _readRemote<T>(Future<T> Function(RhythmApi remote) request) {
+    final selected = _selectedRemote;
+    return _readSelectedRemote(selected, request);
+  }
+
+  Future<T> _readSelectedRemote<T>(
+    ({RhythmApi remote, bool fromOverride}) selected,
+    Future<T> Function(RhythmApi remote) request,
+  ) {
+    final future = request(selected.remote);
+    if (selected.remote is _LocalOnlyApi) return future;
+    return future.timeout(
+      selected.fromOverride ? _remoteOverrideReadTimeout : _remoteReadTimeout,
+    );
   }
 
   Future<ConfigState> _fallbackConfigState(Object error) async {
@@ -188,19 +241,26 @@ class HybridApiClient implements RhythmApi {
 
   @override
   Future<ConfigState> getConfigState() async {
+    final selected = _selectedRemote;
     try {
-      return await _readRemote(_remote.getConfigState);
+      return await _readSelectedRemote(
+        selected,
+        (remote) => remote.getConfigState(),
+      );
     } catch (e) {
+      if (selected.fromOverride) rethrow;
       return _fallbackConfigState(e);
     }
   }
 
   @override
   Future<void> saveConfig(RawConfig config) async {
+    final selected = _selectedRemote;
     try {
-      await _remote.saveConfig(config);
+      await selected.remote.saveConfig(config);
     } catch (e) {
-      if (_remoteIsLocalOnly) rethrow;
+      if (selected.fromOverride) rethrow;
+      if (selected.remote is _LocalOnlyApi) rethrow;
       debugPrint(
           'HybridApiClient: Remote config save failed, saving local copy: $e');
       await _localApi.saveConfig(config);
@@ -257,7 +317,7 @@ class HybridApiClient implements RhythmApi {
 
     // Fetch from server when brain unavailable
     return _readRemote(
-      () => _remote.getCurveData(month: month, overrides: overrides),
+      (remote) => remote.getCurveData(month: month, overrides: overrides),
     );
   }
 
@@ -342,7 +402,7 @@ class HybridApiClient implements RhythmApi {
     }
 
     return _readRemote(
-      () => _remote.getStepSequences(
+      (remote) => remote.getStepSequences(
         hour: hour,
         maxSteps: maxSteps,
         overrides: overrides,
@@ -354,7 +414,7 @@ class HybridApiClient implements RhythmApi {
   Future<TimeInfo> getTime() async {
     TimeInfo info;
     try {
-      info = await _readRemote(_remote.getTime);
+      info = await _readRemote((remote) => remote.getTime());
     } catch (e) {
       if (!_remoteIsLocalOnly) {
         debugPrint(
@@ -373,7 +433,7 @@ class HybridApiClient implements RhythmApi {
   @override
   Future<bool> healthCheck() async {
     try {
-      return await _readRemote(_remote.healthCheck);
+      return await _readRemote((remote) => remote.healthCheck());
     } catch (_) {
       return false;
     }

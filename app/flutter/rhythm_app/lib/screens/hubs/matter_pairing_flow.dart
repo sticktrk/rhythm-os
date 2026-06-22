@@ -36,6 +36,10 @@ Future<void> startMatterPairingFlow(
     context,
     endpoint: serverEndpoint.endpoint,
     authToken: serverEndpoint.hub.token,
+    dio: serverEndpoint.supportProxyDio(
+      connectTimeout: const Duration(seconds: 5),
+      receiveTimeout: const Duration(seconds: 45),
+    ),
     addMethod: addMethod,
   );
   if (!context.mounted || pairingResult == null) return;

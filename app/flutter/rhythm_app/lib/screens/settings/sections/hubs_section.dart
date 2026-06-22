@@ -4,6 +4,7 @@ import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
 import '../../../providers/home_provider.dart';
 import '../../../providers/server_sync_provider.dart';
+import '../../../services/employee_mode_service.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmConnectionState;
 import '../../triage_screen.dart';
 import '../../../widgets/connect_hub_screen.dart';
@@ -27,6 +28,7 @@ class HubsSection extends StatelessWidget {
                 Builder(
                   builder: (context) {
                     final bridgeHub = homeProvider.activeServerHub;
+                    final employeeMode = EmployeeModeService.instance.isActive;
                     final serverState = serverSync.connectionState;
                     final isOnline =
                         serverState == RhythmConnectionState.connected;
@@ -88,10 +90,12 @@ class HubsSection extends StatelessWidget {
                       value: bridgeHub?.name,
                       onTap: bridgeHub != null
                           ? () => RhythmServerDetailScreen.show(context)
-                          : () => ConnectHubScreen.show(
-                                context,
-                                mode: ConnectHubMode.rhythmServer,
-                              ),
+                          : employeeMode
+                              ? null
+                              : () => ConnectHubScreen.show(
+                                    context,
+                                    mode: ConnectHubMode.rhythmServer,
+                                  ),
                     );
                   },
                 ),

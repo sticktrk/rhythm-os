@@ -11,6 +11,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
 
+import 'employee_mode_service.dart';
+
 /// OTA update state machine surfaced to the settings UI.
 enum OtaState {
   idle,
@@ -494,6 +496,8 @@ class OtaService extends ChangeNotifier {
   final Duration _selfPullPollInterval;
 
   Dio? _dio;
+  Dio? _injectedDio;
+  bool _ownsDio = false;
   String? _host;
   String? _authToken;
   int _port = 80;
@@ -580,8 +584,9 @@ class OtaService extends ChangeNotifier {
     String? fallbackPlatformContext,
     bool resetCheckStateOnInitialize = false,
     String? authToken,
+    Dio? dio,
   }) async {
-    _configureClient(host, port, useSsl, authToken);
+    _configureClient(host, port, useSsl, authToken, dio: dio);
 
     final fallbackVersion = _normalizeVersion(fallbackCurrentVersion);
     if (fallbackVersion != null) {
@@ -713,8 +718,22 @@ class OtaService extends ChangeNotifier {
     int port = 80,
     bool useSsl = false,
     String? authToken,
+    Dio? dio,
   }) async {
-    _configureClient(deviceIp, port, useSsl, authToken ?? _authToken);
+    if (EmployeeModeService.instance.isActive) {
+      _state = OtaState.error;
+      _errorMessage = 'OTA installs are disabled for support sessions.';
+      _notifyListeners();
+      return;
+    }
+
+    _configureClient(
+      deviceIp,
+      port,
+      useSsl,
+      authToken ?? _authToken,
+      dio: dio,
+    );
     if (_strategy == _OtaStrategy.selfPull) {
       await _startSelfPullUpdate();
       return;
@@ -1126,11 +1145,18 @@ class OtaService extends ChangeNotifier {
     }
   }
 
-  void _configureClient(String host, int port, bool useSsl, String? authToken) {
+  void _configureClient(
+    String host,
+    int port,
+    bool useSsl,
+    String? authToken, {
+    Dio? dio,
+  }) {
     if (_host == host &&
         _port == port &&
         _useSsl == useSsl &&
         _authToken == authToken &&
+        identical(_injectedDio, dio) &&
         _dio != null) {
       return;
     }
@@ -1139,7 +1165,16 @@ class OtaService extends ChangeNotifier {
     _port = port;
     _useSsl = useSsl;
     _authToken = authToken;
-    _dio?.close();
+    if (_ownsDio) {
+      _dio?.close();
+    }
+    _injectedDio = dio;
+    if (dio != null) {
+      _dio = dio;
+      _ownsDio = false;
+      return;
+    }
+
     final scheme = useSsl ? 'https' : 'http';
     _dio = Dio(BaseOptions(
       baseUrl: '$scheme://$host:$port/',
@@ -1147,6 +1182,7 @@ class OtaService extends ChangeNotifier {
       receiveTimeout: const Duration(seconds: 10),
       headers: _bearerAuthHeaders(authToken),
     ));
+    _ownsDio = true;
   }
 
   Future<Map<String, dynamic>> _getJson(String path) async {
@@ -1359,7 +1395,9 @@ class OtaService extends ChangeNotifier {
     _disposed = true;
     _selfPullPollToken++;
     _updateSub?.cancel();
-    _dio?.close();
+    if (_ownsDio) {
+      _dio?.close();
+    }
     super.dispose();
   }
 }

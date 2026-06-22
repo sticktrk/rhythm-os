@@ -28,6 +28,14 @@ import '../models/rhythm_runtime.dart';
 import '../models/rhythm_settings.dart';
 import '../rhythm_log_interceptor.dart';
 
+typedef RhythmConnectionDioFactory = Dio Function({
+  required String baseUrl,
+  required Duration connectTimeout,
+  required Duration receiveTimeout,
+  String? authToken,
+  Map<String, dynamic>? headers,
+});
+
 /// Cached node state for diff detection.
 class _CachedNodeState {
   final bool rhythmEnabled;
@@ -78,6 +86,9 @@ class _CachedNodeState {
 class RhythmConnection {
   static final _log = Logger('rhythm_sdk.connection');
 
+  RhythmConnection({RhythmConnectionDioFactory? dioFactory})
+      : _dioFactory = dioFactory ?? _defaultDioFactory;
+
   // Stream controllers (broadcast so multiple listeners work).
   final _helloController = StreamController<RhythmHello>.broadcast();
   final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
@@ -114,6 +125,7 @@ class RhythmConnection {
       StreamController<RhythmOtaUpdateProgress>.broadcast();
 
   // Connection state.
+  final RhythmConnectionDioFactory _dioFactory;
   RhythmConnectionState _connectionState = RhythmConnectionState.disconnected;
   String? _host;
   int _port = 80;
@@ -291,12 +303,12 @@ class RhythmConnection {
     _webBaseUrl = webBaseUrl;
     _authToken = authToken;
     final baseUrl = _buildBaseUrl(host, port, useSsl, webBaseUrl);
-    _dio = Dio(BaseOptions(
+    _dio = _dioFactory(
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 5),
       receiveTimeout: const Duration(seconds: 10),
-      headers: bearerAuthHeaders(authToken),
-    ));
+      authToken: authToken,
+    );
     _dio!.interceptors.add(RhythmLogInterceptor(_log));
     _api = RhythmServerApi(_dio!, onStatesReceived: _updateCacheFromStates);
     _runtimeApi =
@@ -709,11 +721,11 @@ class RhythmConnection {
     }
 
     try {
-      final sseDio = Dio(BaseOptions(
+      final sseDio = _dioFactory(
         baseUrl: sseBaseUrl,
         connectTimeout: const Duration(seconds: 30),
         receiveTimeout: Duration.zero,
-      ));
+      );
       final response = await sseDio.get(
         'api/events',
         options: Options(
@@ -1236,6 +1248,25 @@ class RhythmConnection {
     }
     final scheme = useSsl ? 'https' : 'http';
     return '$scheme://$host:$port/';
+  }
+
+  static Dio _defaultDioFactory({
+    required String baseUrl,
+    required Duration connectTimeout,
+    required Duration receiveTimeout,
+    String? authToken,
+    Map<String, dynamic>? headers,
+  }) {
+    final authHeaders = bearerAuthHeaders(authToken);
+    return Dio(BaseOptions(
+      baseUrl: baseUrl,
+      connectTimeout: connectTimeout,
+      receiveTimeout: receiveTimeout,
+      headers: {
+        ...?authHeaders,
+        ...?headers,
+      },
+    ));
   }
 
   static bool _pendingDispatchForRoom(RhythmRoom room) {
