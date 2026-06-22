@@ -647,6 +647,19 @@ pub struct RoomBindingRecord {
     pub approved_at: u64,
 }
 
+/// Summary of topology repairs applied while loading older persisted state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TopologyMigrationReport {
+    pub filtered_light_device_ids: usize,
+    pub moved_light_devices: usize,
+}
+
+impl TopologyMigrationReport {
+    pub fn changed(&self) -> bool {
+        self.filtered_light_device_ids > 0 || self.moved_light_devices > 0
+    }
+}
+
 /// The room topology store — Rhythm's authoritative room registry.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RoomTopologyStore {
@@ -728,6 +741,127 @@ impl RoomTopologyStore {
             valid_public_nodes.contains(&link.source_id)
                 && valid_public_nodes.contains(&link.target_id)
         });
+    }
+
+    /// Repair persisted state from versions that copied every hub room child
+    /// into `light_device_ids` and could preserve hub-default light placement
+    /// as a user override.
+    pub fn migrate_legacy_light_room_bindings(
+        &mut self,
+        canonical_registry: &mut crate::canonical::registry::CanonicalRegistry,
+    ) -> TopologyMigrationReport {
+        let mut report = TopologyMigrationReport::default();
+        let mut light_native_ids_by_hub: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for device in canonical_registry.devices() {
+            if device.device_type != DeviceType::Light {
+                continue;
+            }
+            for endpoint in device.active_endpoints() {
+                light_native_ids_by_hub
+                    .entry(endpoint.hub_key.to_string())
+                    .or_default()
+                    .insert(endpoint.native_id.clone());
+            }
+        }
+
+        if light_native_ids_by_hub.is_empty() {
+            return report;
+        }
+
+        for room in self.rooms.values_mut() {
+            for binding in &mut room.hub_room_bindings {
+                let hub_key = binding.hub_key.to_string();
+                let Some(light_native_ids) = light_native_ids_by_hub.get(&hub_key) else {
+                    continue;
+                };
+
+                let before = binding.light_device_ids.len();
+                binding
+                    .light_device_ids
+                    .retain(|native_id| light_native_ids.contains(native_id));
+                binding.light_device_ids.sort();
+                binding.light_device_ids.dedup();
+                report.filtered_light_device_ids +=
+                    before.saturating_sub(binding.light_device_ids.len());
+            }
+        }
+
+        let mut binding_targets: HashMap<(String, String), Option<String>> = HashMap::new();
+        for (room_id, room) in &self.rooms {
+            for binding in &room.hub_room_bindings {
+                let hub_key = binding.hub_key.to_string();
+                for native_id in &binding.light_device_ids {
+                    let key = (hub_key.clone(), native_id.clone());
+                    binding_targets
+                        .entry(key)
+                        .and_modify(|existing| {
+                            if existing.as_deref() != Some(room_id.as_str()) {
+                                *existing = None;
+                            }
+                        })
+                        .or_insert_with(|| Some(room_id.clone()));
+                }
+            }
+        }
+
+        let binding_targets: HashMap<(String, String), String> = binding_targets
+            .into_iter()
+            .filter_map(|(key, room_id)| room_id.map(|room_id| (key, room_id)))
+            .collect();
+
+        let mut repairs = Vec::new();
+        let mut node_ids: Vec<_> = self.device_nodes.keys().cloned().collect();
+        node_ids.sort();
+
+        for node_id in node_ids {
+            let Some(node) = self.device_nodes.get(&node_id) else {
+                continue;
+            };
+            let Some(current_parent_id) = node.parent_id.as_deref() else {
+                continue;
+            };
+            let Some(device) = canonical_registry.get(&node.canonical_device_id) else {
+                continue;
+            };
+            if device.device_type != DeviceType::Light || device.is_removed() {
+                continue;
+            }
+
+            let mut target_room_ids = Vec::new();
+            for endpoint in device.active_endpoints() {
+                let key = (endpoint.hub_key.to_string(), endpoint.native_id.clone());
+                if let Some(target_room_id) = binding_targets.get(&key) {
+                    target_room_ids.push(target_room_id.clone());
+                }
+            }
+            target_room_ids.sort();
+            target_room_ids.dedup();
+
+            let [target_room_id] = target_room_ids.as_slice() else {
+                continue;
+            };
+            if target_room_id == current_parent_id {
+                continue;
+            }
+
+            repairs.push((node.canonical_device_id.clone(), target_room_id.clone()));
+        }
+
+        for (canonical_device_id, target_room_id) in repairs {
+            if let Some(node) = self.device_nodes.get_mut(&canonical_device_id) {
+                node.parent_id = Some(target_room_id.clone());
+                node.placement = DevicePlacement::HubDefault;
+                report.moved_light_devices += 1;
+            }
+            canonical_registry.assign_room(&canonical_device_id, Some(&target_room_id));
+        }
+
+        if report.moved_light_devices > 0 {
+            self.rebuild_room_device_projections();
+        }
+
+        report
     }
 
     pub fn has_public_node(&self, node_id: &str) -> bool {
