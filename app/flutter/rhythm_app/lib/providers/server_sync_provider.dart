@@ -2868,23 +2868,23 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
-  Future<void> pushHubCredentials(RoomSourceDto source) async {
-    if (!_connection.connected) return;
-    await _pushHubCredentialsForSource(source);
+  Future<bool> pushHubCredentials(RoomSourceDto source) async {
+    if (!_connection.connected) return false;
+    return _pushHubCredentialsForSource(source);
   }
 
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
   /// Sends empty credentials — server fills them from its environment.
   Future<bool> configureAddonHaHub() async {
     if (!_connection.connected) return false;
-    await api.hubCredentials(
+    final hubConnected = await api.hubCredentials(
       hubType: 'homeassistant',
       address: '',
       credentials: {},
     );
     _lastHubReconnectTime = DateTime.now();
     await _connection.reconnect(); // Re-fetch state with new rooms
-    return true;
+    return hubConnected;
   }
 
   /// Tell the server to disconnect ALL hubs — clears all credentials, runtimes,
@@ -2939,12 +2939,12 @@ class ServerSyncProvider extends ChangeNotifier {
     return accepted;
   }
 
-  Future<void> _pushHubCredentialsForSource(RoomSourceDto source) async {
+  Future<bool> _pushHubCredentialsForSource(RoomSourceDto source) async {
     final hubType = _hubTypeForSource(source);
-    if (hubType == null) return;
+    if (hubType == null) return false;
 
     final hub = _homeProvider.getFirstHubOfType(hubType);
-    if (hub == null || !hub.hasCredentials) return;
+    if (hub == null || !hub.hasCredentials) return false;
 
     // HA expects {"token": "..."}, Hue expects {"username": "..."}
     final credentials = hubType == HubType.homeAssistant
@@ -2953,13 +2953,14 @@ class ServerSyncProvider extends ChangeNotifier {
 
     debugPrint(
         'ServerSync: Pushing ${hub.typeName} credentials after source change');
-    await api.hubCredentials(
+    final hubConnected = await api.hubCredentials(
       hubType: _hubTypeWireName(hubType),
       address: '${hub.endpoint.host}:${hub.endpoint.port}',
       credentials: credentials,
     );
     _lastHubReconnectTime = DateTime.now();
     await _connection.reconnect();
+    return hubConnected;
   }
 
   /// Accept server config as authoritative — update app's Home if different.

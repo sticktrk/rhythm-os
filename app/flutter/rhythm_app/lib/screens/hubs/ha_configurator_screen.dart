@@ -72,6 +72,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
   HAConnectionStatus _status = HAConnectionStatus.notConfigured;
   String? _errorMessage;
   bool _isVerified = false;
+  bool _isSavingConfig = false;
   bool _wasAlreadyConfigured = false;
 
   late AnimationController _glowController;
@@ -229,39 +230,77 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
   }
 
   Future<void> _saveConfig() async {
-    if (!_isVerified) return;
+    if (!_isVerified || _isSavingConfig) return;
 
     final homeProvider = context.read<HomeProvider>();
+    final syncProvider = context.read<ServerSyncProvider>();
     final existingHub = homeProvider.getFirstHubOfType(HubType.homeAssistant);
+    final host = _hostController.text.trim();
+    final port = int.tryParse(_portController.text) ?? 8123;
 
-    if (existingHub != null) {
-      // Update existing hub
-      final updatedHub = existingHub.copyWith(
-        endpoint: HubEndpoint(
-          host: _hostController.text.trim(),
-          port: int.tryParse(_portController.text) ?? 8123,
+    setState(() {
+      _isSavingConfig = true;
+      _status = HAConnectionStatus.connecting;
+      _errorMessage = null;
+    });
+
+    try {
+      if (existingHub != null) {
+        // Update existing hub
+        final updatedHub = existingHub.copyWith(
+          endpoint: HubEndpoint(
+            host: host,
+            port: port,
+            useSsl: _useSsl,
+          ),
+          token: _tokenController.text.trim(),
+          updatedAt: DateTime.now(),
+          pendingSync: true,
+        );
+        await homeProvider.updateHub(updatedHub);
+      } else {
+        // Create new hub
+        final hub = await homeProvider.addHomeAssistantHub(
+          name: 'Home Assistant',
+          host: host,
+          port: port,
           useSsl: _useSsl,
-        ),
-        token: _tokenController.text.trim(),
-        updatedAt: DateTime.now(),
-        pendingSync: true,
-      );
-      await homeProvider.updateHub(updatedHub);
-    } else {
-      // Create new hub
-      await homeProvider.addHomeAssistantHub(
-        name: 'Home Assistant',
-        host: _hostController.text.trim(),
-        port: int.tryParse(_portController.text) ?? 8123,
-        useSsl: _useSsl,
-        token: _tokenController.text.trim(),
-      );
-    }
+          token: _tokenController.text.trim(),
+        );
+        if (hub == null) {
+          throw StateError(homeProvider.error ?? 'Failed to save Home Assistant');
+        }
+      }
 
-    HapticFeedback.heavyImpact();
+      final hubConnected =
+          await syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
+      if (!hubConnected) {
+        if (!mounted) return;
+        setState(() {
+          _status = HAConnectionStatus.error;
+          _errorMessage =
+              'RhythmServer could not reach Home Assistant at $host:$port. Use the Home Assistant IP address or a hostname the hub can resolve.';
+        });
+        return;
+      }
 
-    if (mounted) {
-      Navigator.of(context).pop(true);
+      HapticFeedback.heavyImpact();
+
+      if (mounted) {
+        Navigator.of(context).pop(true);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _status = HAConnectionStatus.error;
+        _errorMessage = 'Failed to save Home Assistant: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSavingConfig = false;
+        });
+      }
     }
   }
 
@@ -783,7 +822,9 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
       case HAConnectionStatus.connecting:
         statusColor = CelestialColors.sunWarm;
         statusIcon = Icons.sync_rounded;
-        statusText = 'Verifying connection...';
+        statusText = _isSavingConfig
+            ? 'Checking connection from RhythmServer...'
+            : 'Verifying connection...';
       case HAConnectionStatus.connected:
         statusColor = Colors.green.shade400;
         statusIcon = Icons.check_circle_rounded;
@@ -841,7 +882,7 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
       children: [
         // Verify button
         GestureDetector(
-          onTap: _status == HAConnectionStatus.connecting
+          onTap: _status == HAConnectionStatus.connecting || _isSavingConfig
               ? null
               : _verifyConnection,
           child: AnimatedContainer(
@@ -889,13 +930,13 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
 
         // Save button
         GestureDetector(
-          onTap: _isVerified ? _saveConfig : null,
+          onTap: _isVerified && !_isSavingConfig ? _saveConfig : null,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.symmetric(vertical: 16),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
-              gradient: _isVerified
+              gradient: _isVerified && !_isSavingConfig
                   ? const LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
@@ -905,10 +946,10 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
                       ],
                     )
                   : null,
-              color: _isVerified
+              color: _isVerified && !_isSavingConfig
                   ? null
                   : CelestialColors.orbitRing.withValues(alpha: 0.3),
-              boxShadow: _isVerified
+              boxShadow: _isVerified && !_isSavingConfig
                   ? [
                       BoxShadow(
                         color: const Color(0xFF03A9F4).withValues(alpha: 0.3),
@@ -919,17 +960,27 @@ class _HAConfiguratorScreenState extends State<HAConfiguratorScreen>
                   : null,
             ),
             child: Center(
-              child: Text(
-                'Save Configuration',
-                style: TextStyle(
-                  color: _isVerified
-                      ? Colors.white
-                      : CelestialColors.textSecondary.withValues(alpha: 0.5),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.3,
-                ),
-              ),
+              child: _isSavingConfig
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation(Colors.white),
+                      ),
+                    )
+                  : Text(
+                      'Save Configuration',
+                      style: TextStyle(
+                        color: _isVerified
+                            ? Colors.white
+                            : CelestialColors.textSecondary
+                                .withValues(alpha: 0.5),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
             ),
           ),
         ),
