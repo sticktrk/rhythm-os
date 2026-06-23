@@ -2540,7 +2540,7 @@ class _RhythmServerAdvancedSettingsScreenState
                       _buildRemoteAccessSection(),
                       const SizedBox(height: 16),
                     ],
-                    _buildDisableServerSection(),
+                    _buildAutomaticLightingSection(),
                     const SizedBox(height: 40),
                   ],
                 ),
@@ -2646,36 +2646,34 @@ class _RhythmServerAdvancedSettingsScreenState
     );
   }
 
-  Widget _buildDisableServerSection() {
+  Widget _buildAutomaticLightingSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
     final connected =
         syncProvider.connectionState == RhythmConnectionState.connected;
-    final disabled = !syncProvider.lightBreakerEnabled;
-    final statusText =
-        connected ? (disabled ? 'Disabled' : 'Enabled') : 'Offline';
+    final enabled = syncProvider.lightBreakerEnabled;
+    final statusText = connected ? (enabled ? 'On' : 'Off') : 'Offline';
     final statusColor = !connected
         ? CelestialColors.textSecondary.withValues(alpha: 0.6)
-        : disabled
-            ? _disabledRed
-            : _enabledGreen;
+        : enabled
+            ? _enabledGreen
+            : _disabledRed;
 
     return _buildSection(
       title: 'SERVER',
       children: [
         _buildSwitchRow(
-          icon: Icons.power_settings_new_rounded,
+          icon: Icons.wb_sunny_rounded,
           iconColor: statusColor,
-          label: 'Disable Rhythm Server',
+          label: 'Automatic Lighting',
           tooltip:
-              'Stops automatic Rhythm light changes until this switch is turned off.',
+              'When on, Rhythm adjusts your lights through the day and responds to your switches and motion. Turn off to pause all of it.',
           statusText: statusText,
           statusColor: statusColor,
-          value: disabled,
-          activeTrackColor: _disabledRed,
+          value: enabled,
+          activeTrackColor: _enabledGreen,
           onChanged: connected
-              ? (nextDisabled) => unawaited(
-                    syncProvider.setLightBreakerEnabled(!nextDisabled),
-                  )
+              ? (next) =>
+                  unawaited(syncProvider.setLightBreakerEnabled(next))
               : null,
         ),
       ],
