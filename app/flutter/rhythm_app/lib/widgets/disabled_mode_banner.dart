@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
 /// Slim warning banner shown at the top of [AppShell] while autonomous light
-/// control (the "Rhythm Server") is disabled. Makes the paused state
-/// unmistakable so the user doesn't forget their lights aren't following the
-/// rhythm, and offers a single-tap re-enable.
+/// control ("Automatic Lighting") is off. Makes the paused state unmistakable
+/// so the user doesn't forget their lights aren't following the rhythm, and
+/// offers a single-tap re-enable.
 class DisabledModeBanner extends StatefulWidget {
   /// Re-enables autonomous light control.
   final VoidCallback onEnable;
@@ -98,7 +98,7 @@ class _DisabledModeBannerState extends State<DisabledModeBanner>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'RHYTHM SERVER DISABLED',
+                    'AUTOMATIC LIGHTING OFF',
                     style: TextStyle(
                       color: Color(0xFFE6EDF3),
                       fontSize: 11,
@@ -108,7 +108,7 @@ class _DisabledModeBannerState extends State<DisabledModeBanner>
                   ),
                   SizedBox(height: 2),
                   Text(
-                    'Automatic light changes are paused',
+                    'Rhythm, switches & motion are paused',
                     style: TextStyle(
                       color: Color(0xFF9DA7B3),
                       fontSize: 11,
@@ -130,9 +130,9 @@ class _DisabledModeBannerState extends State<DisabledModeBanner>
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              icon: const Icon(Icons.power_settings_new_rounded, size: 16),
+              icon: const Icon(Icons.wb_sunny_rounded, size: 16),
               label: const Text(
-                'Enable',
+                'Turn on',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
