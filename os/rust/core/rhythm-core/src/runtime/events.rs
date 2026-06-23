@@ -88,25 +88,26 @@ impl ButtonAction {
     /// Convert from a ZHA command string.
     ///
     /// Common Hue dimmer switch commands:
-    /// - on_press / on_short_release -> OnPress (turn on)
-    /// - off_press / off_short_release -> Reset
-    /// - up_press / up_short_release -> UpPress (dim up, brightness only)
-    /// - down_press / down_short_release -> DownPress (dim down, brightness only)
+    /// - on_press / on -> OnPress (turn on)
+    /// - off_press / off / off_short_release -> OffPress (turn off)
+    /// - off_long_release -> LightsOff
+    /// - up_press / up -> UpPress (dim up, brightness only)
+    /// - down_press / down -> DownPress (dim down, brightness only)
     /// - up_hold -> UpHold (step up along curve)
     /// - down_hold -> DownHold (step down along curve)
     /// - stop -> Stop
     pub fn from_zha_command(command: &str) -> Option<Self> {
         match command {
             "on_press" | "on" => Some(Self::OnPress),
-            "off_press" | "off" => Some(Self::Reset),
+            "off_press" | "off" | "off_short_release" => Some(Self::OffPress),
+            "off_long_release" => Some(Self::LightsOff),
             "up_press" | "up" => Some(Self::UpPress),
             "down_press" | "down" => Some(Self::DownPress),
             "up_hold" => Some(Self::UpHold),
             "down_hold" => Some(Self::DownHold),
             "stop" | "stop_with_on_off" => Some(Self::Stop),
-            // Ignore release events to avoid double-triggering
-            "on_short_release" | "off_short_release" | "up_short_release"
-            | "down_short_release" => None,
+            // Ignore non-off release events to avoid double-triggering.
+            "on_short_release" | "up_short_release" | "down_short_release" => None,
             _ => None,
         }
     }
@@ -312,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             ButtonAction::from_zha_event("off_press", None),
-            Some(ButtonAction::Reset)
+            Some(ButtonAction::OffPress)
         );
     }
 
@@ -397,8 +398,8 @@ mod tests {
         let mappings = [
             ("on_press", Some(ButtonAction::OnPress)),
             ("on", Some(ButtonAction::OnPress)),
-            ("off_press", Some(ButtonAction::Reset)),
-            ("off", Some(ButtonAction::Reset)),
+            ("off_press", Some(ButtonAction::OffPress)),
+            ("off", Some(ButtonAction::OffPress)),
             ("up_press", Some(ButtonAction::UpPress)),
             ("up", Some(ButtonAction::UpPress)),
             ("down_press", Some(ButtonAction::DownPress)),
@@ -407,9 +408,10 @@ mod tests {
             ("down_hold", Some(ButtonAction::DownHold)),
             ("stop", Some(ButtonAction::Stop)),
             ("stop_with_on_off", Some(ButtonAction::Stop)),
-            // Release events should be ignored
+            // Non-off release events should be ignored.
             ("on_short_release", None),
-            ("off_short_release", None),
+            ("off_short_release", Some(ButtonAction::OffPress)),
+            ("off_long_release", Some(ButtonAction::LightsOff)),
             ("up_short_release", None),
             ("down_short_release", None),
             // Unknown

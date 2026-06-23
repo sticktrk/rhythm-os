@@ -1074,7 +1074,7 @@ mod tests {
         let event_data = json!({
             "device_ieee": "00:17:88:01:aa:bb:cc:dd",
             "device_id": "ha-dev-zha-1",
-            "command": "off_press"
+            "command": "off_short_release"
         });
 
         let results = translate_zha_event(&event_data, &registry, &cache);
@@ -1085,7 +1085,38 @@ mod tests {
                 room_id, action, ..
             } => {
                 assert_eq!(room_id, "living_room");
-                assert_eq!(*action, ButtonAction::Reset); // off_press → Reset
+                assert_eq!(*action, ButtonAction::OffPress);
+            }
+            _ => panic!("Expected Button event"),
+        }
+    }
+
+    #[test]
+    fn test_zha_event_bottom_long_release_maps_to_lights_off() {
+        let (registry, cache) = make_registry_and_cache();
+
+        registry.lock().unwrap().upsert_device(
+            "00:17:88:01:aa:bb:cc:dd",
+            Some("living_room"),
+            &[],
+            DeviceType::Button,
+        );
+
+        let event_data = json!({
+            "device_ieee": "00:17:88:01:aa:bb:cc:dd",
+            "device_id": "ha-dev-zha-1",
+            "command": "off_long_release"
+        });
+
+        let results = translate_zha_event(&event_data, &registry, &cache);
+
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            HubEvent::Button {
+                room_id, action, ..
+            } => {
+                assert_eq!(room_id, "living_room");
+                assert_eq!(*action, ButtonAction::LightsOff);
             }
             _ => panic!("Expected Button event"),
         }
