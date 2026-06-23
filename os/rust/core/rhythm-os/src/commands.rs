@@ -2255,6 +2255,74 @@ pub(crate) fn resolve_input_source_node_id(
         .map(|device| device.id.clone())
 }
 
+/// Promote a hub-recognized button that has no canonical device yet so its
+/// presses can route.
+///
+/// Some control devices (e.g. ZHA Hue dimmers whose HA name/model doesn't match
+/// the discovery keyword heuristic) are only ever seen via their `zha_event`s:
+/// the hub layer on-demand registers them into the per-hub registry but they are
+/// never promoted into the canonical registry. The event loop then drops every
+/// press because `resolve_input_source_node_id` returns `None`. This completes
+/// the "discover" step for that case — it canonicalizes the device and parents
+/// it to the topology room that owns the hub-native room, mirroring what a normal
+/// hub sync would have produced, and returns the canonical source node id so the
+/// triggering press can route immediately.
+///
+/// Returns `None` (preserving the existing drop) when the hub-native room is not
+/// bound to a topology room, since without a placement target the button still
+/// could not route.
+pub(crate) fn ensure_canonical_button_source(
+    state: &SharedState,
+    hub_key: &HubKey,
+    native_device_id: &str,
+    hub_room_id: &str,
+) -> Option<String> {
+    let now = crate::state::current_epoch_ms() / 1000;
+    let canonical_id = {
+        let mut s = state.lock().ok()?;
+
+        // Only self-heal when the hub-native room is bound to a topology room;
+        // without a placement target the press still couldn't route, so leave
+        // the existing "unresolved" drop in place.
+        let (topo_room_id, topo_room_name) = s
+            .topology
+            .find_by_hub_room(hub_key, hub_room_id)
+            .map(|room| (room.id.clone(), room.name.clone()))?;
+
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: native_device_id.to_string(),
+            room_id: Some(hub_room_id.to_string()),
+            room_name: Some(topo_room_name.clone()),
+            name: format!("{topo_room_name} button"),
+            device_type: DeviceType::Button,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::mac(native_device_id)],
+            manufacturer: None,
+            model: None,
+        };
+
+        let canonical_id = match s.canonical_registry.resolve(&identity, hub_key, now) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id }
+            | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => canonical_id,
+            // A cross-hub match was queued for user approval and no silo device
+            // was created — don't force a binding; the user resolves the triage.
+            crate::canonical::registry::ResolveResult::Queued { .. } => return None,
+        };
+
+        s.canonical_registry
+            .assign_room(&canonical_id, Some(&topo_room_id));
+        s.topology
+            .attach_device_hub_default(&topo_room_id, &canonical_id);
+
+        persist_canonical(&s);
+        persist_topology(&s);
+        canonical_id
+    };
+
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    Some(canonical_id)
+}
+
 /// Resolve an already-known source node to its effective topology control target.
 pub(crate) fn resolve_node_control_target_for_source(
     state: &SharedState,
