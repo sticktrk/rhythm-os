@@ -1376,6 +1376,42 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         }
     }
 
+    let topology_migration = s
+        .topology
+        .migrate_legacy_light_room_bindings(&mut s.canonical_registry);
+    if topology_migration.changed() {
+        info!(
+            target: "sys",
+            "Migrated legacy topology light bindings: filtered_light_device_ids={}, moved_light_devices={}",
+            topology_migration.filtered_light_device_ids,
+            topology_migration.moved_light_devices
+        );
+
+        if let Some(storage) = s.storage.as_ref() {
+            match serde_json::to_value(&s.canonical_registry) {
+                Ok(value) => {
+                    if let Err(e) = storage.save_canonical_registry(&value) {
+                        warn!(target: "sys", "Failed to persist migrated canonical registry: {}", e);
+                    }
+                }
+                Err(e) => warn!(
+                    target: "sys",
+                    "Failed to serialize migrated canonical registry: {}",
+                    e
+                ),
+            }
+
+            match serde_json::to_value(&s.topology) {
+                Ok(value) => {
+                    if let Err(e) = storage.save_topology(&value) {
+                        warn!(target: "sys", "Failed to persist migrated topology: {}", e);
+                    }
+                }
+                Err(e) => warn!(target: "sys", "Failed to serialize migrated topology: {}", e),
+            }
+        }
+    }
+
     info!(target: "sys", "Persisted state loaded");
 }
 
@@ -1435,6 +1471,9 @@ mod tests {
         settings: Option<StoredSettings>,
         saved_settings: Arc<Mutex<Vec<StoredSettings>>>,
         canonical_registry: Option<Value>,
+        saved_canonical_registry: Arc<Mutex<Vec<Value>>>,
+        topology: Option<Value>,
+        saved_topology: Arc<Mutex<Vec<Value>>>,
     }
 
     impl Storage for TestStorage {
@@ -1498,6 +1537,19 @@ mod tests {
         }
 
         fn save_canonical_registry(&self, _data: &Value) -> Result<()> {
+            self.saved_canonical_registry
+                .lock()
+                .unwrap()
+                .push(_data.clone());
+            Ok(())
+        }
+
+        fn load_topology(&self) -> Result<Option<Value>> {
+            Ok(self.topology.clone())
+        }
+
+        fn save_topology(&self, _data: &Value) -> Result<()> {
+            self.saved_topology.lock().unwrap().push(_data.clone());
             Ok(())
         }
     }
@@ -2008,6 +2060,139 @@ mod tests {
             pending[0].canonical_id.as_deref(),
             Some(canonical_id.as_str())
         );
+    }
+
+    #[test]
+    fn load_persisted_state_migrates_legacy_hue_room_light_bindings() {
+        use crate::canonical::identity::{DiscoveredIdentity, HardwareId};
+        use crate::canonical::registry::{CanonicalRegistry, ResolveResult};
+        use crate::hub::HubType;
+        use crate::topology::{DevicePlacement, DiscoveredTopologyRoom, SyncAction};
+        use rhythm_core::runtime::hub_registry::DeviceType;
+
+        let hub_key = HubKey::new(HubType::new("hue"), "192.168.1.10");
+        let mut registry = CanonicalRegistry::new();
+
+        let stairwell_light_id = match registry.resolve(
+            &DiscoveredIdentity {
+                native_id: "stairwell-light-1".to_string(),
+                room_id: Some("hue-stairwell".to_string()),
+                room_name: Some("Stairwell".to_string()),
+                name: "Stairwell light".to_string(),
+                device_type: DeviceType::Light,
+                hardware_ids: vec![HardwareId::mac("00:17:88:01:00:00:00:01")],
+                manufacturer: Some("Signify".to_string()),
+                model: Some("LCT001".to_string()),
+            },
+            &hub_key,
+            1000,
+        ) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        let drop_zone_light_id = match registry.resolve(
+            &DiscoveredIdentity {
+                native_id: "drop-zone-light-1".to_string(),
+                room_id: Some("hue-drop-zone".to_string()),
+                room_name: Some("Drop Zone".to_string()),
+                name: "Drop Zone light".to_string(),
+                device_type: DeviceType::Light,
+                hardware_ids: vec![HardwareId::mac("00:17:88:01:00:00:00:02")],
+                manufacturer: Some("Signify".to_string()),
+                model: Some("LCT001".to_string()),
+            },
+            &hub_key,
+            1000,
+        ) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+
+        let mut topology = crate::topology::RoomTopologyStore::new();
+        let stairwell_room_id = match topology.sync_hub_room(
+            &hub_key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-stairwell".to_string(),
+                name: "Stairwell".to_string(),
+                control_id: "stairwell-grouped-light".to_string(),
+                light_device_ids: vec![
+                    "stairwell-light-1".to_string(),
+                    "stale-motion-device-id".to_string(),
+                ],
+                canonical_device_ids: vec![stairwell_light_id.clone()],
+            },
+        ) {
+            SyncAction::Created { rhythm_room_id } => rhythm_room_id,
+            other => panic!("unexpected sync action: {:?}", other),
+        };
+        let drop_zone_room_id = match topology.sync_hub_room(
+            &hub_key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-drop-zone".to_string(),
+                name: "Drop Zone".to_string(),
+                control_id: "drop-zone-grouped-light".to_string(),
+                light_device_ids: vec!["drop-zone-light-1".to_string()],
+                canonical_device_ids: vec![drop_zone_light_id.clone()],
+            },
+        ) {
+            SyncAction::Created { rhythm_room_id } => rhythm_room_id,
+            other => panic!("unexpected sync action: {:?}", other),
+        };
+
+        assert!(topology.move_device(&drop_zone_light_id, &drop_zone_room_id, &stairwell_room_id,));
+        registry.assign_room(&stairwell_light_id, Some(&stairwell_room_id));
+        registry.assign_room(&drop_zone_light_id, Some(&stairwell_room_id));
+
+        let saved_canonical_registry = Arc::new(Mutex::new(Vec::new()));
+        let saved_topology = Arc::new(Mutex::new(Vec::new()));
+        let storage = TestStorage {
+            canonical_registry: Some(serde_json::to_value(&registry).unwrap()),
+            saved_canonical_registry: saved_canonical_registry.clone(),
+            topology: Some(serde_json::to_value(&topology).unwrap()),
+            saved_topology: saved_topology.clone(),
+            ..Default::default()
+        };
+
+        let mut app = crate::state::AppState {
+            storage: Some(Box::new(storage)),
+            ..Default::default()
+        };
+        load_persisted_state(&mut app);
+
+        assert_eq!(
+            app.topology.device_parent_room_id(&drop_zone_light_id),
+            Some(drop_zone_room_id.as_str())
+        );
+        assert_eq!(
+            app.topology
+                .get_device_node(&drop_zone_light_id)
+                .unwrap()
+                .placement,
+            DevicePlacement::HubDefault
+        );
+        assert_eq!(
+            app.canonical_registry
+                .get(&drop_zone_light_id)
+                .unwrap()
+                .room_id
+                .as_deref(),
+            Some(drop_zone_room_id.as_str())
+        );
+
+        let stairwell_room = app
+            .topology
+            .find_by_hub_room(&hub_key, "hue-stairwell")
+            .expect("stairwell room should still be bound");
+        assert_eq!(
+            stairwell_room
+                .binding_for_hub_room(&hub_key, "hue-stairwell")
+                .unwrap()
+                .light_device_ids,
+            vec!["stairwell-light-1".to_string()]
+        );
+
+        assert_eq!(saved_canonical_registry.lock().unwrap().len(), 1);
+        assert_eq!(saved_topology.lock().unwrap().len(), 1);
     }
 
     #[test]
