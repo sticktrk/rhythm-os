@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, RoomModeState};
+use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, Rgb, RoomModeState};
 
 use crate::api_types::{LightBreakerDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto};
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
@@ -223,6 +223,10 @@ pub struct NodeStateEvent {
     pub brightness: u8,
     /// Effective color temperature in Kelvin.
     pub kelvin: u16,
+    /// Direct RGB color the node is rendering, set when a mood scene applies a
+    /// non-kelvin color so the app's mood indicator matches the bulbs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgb>,
     pub mood_enabled: bool,
     pub mood_active: bool,
     pub standby_enabled: bool,
@@ -245,6 +249,7 @@ pub(crate) struct NodeStateEventParams {
     pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
+    pub color: Option<Rgb>,
     pub mood_enabled: bool,
     pub mood_active: bool,
     pub standby_enabled: bool,
@@ -264,6 +269,7 @@ impl NodeStateEvent {
             pending_dispatch,
             brightness,
             kelvin,
+            color,
             mood_enabled,
             mood_active,
             standby_enabled,
@@ -283,6 +289,7 @@ impl NodeStateEvent {
             pending_dispatch,
             brightness,
             kelvin,
+            color,
             mood_enabled,
             mood_active,
             standby_enabled,

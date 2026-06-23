@@ -476,6 +476,11 @@ pub struct NodeStateDto {
     pub pending_dispatch: bool,
     pub brightness: u8,
     pub kelvin: u16,
+    /// Direct RGB color the node is rendering, set when a mood scene applies a
+    /// non-kelvin color. `kelvin` cannot express a saturated mood color, so the
+    /// app uses this to keep the mood indicator in sync with the bulbs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<rhythm_profile::Rgb>,
     pub mood_enabled: bool,
     pub mood_active: bool,
     pub standby_enabled: bool,
@@ -730,6 +735,7 @@ mod tests {
             pending_dispatch: true,
             brightness: 80,
             kelvin: 4000,
+            color: None,
             mood_enabled: false,
             mood_active: false,
             standby_enabled: false,
