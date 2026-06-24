@@ -445,6 +445,28 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Profile configs from the server.
   List<RhythmCurveConfig> get profiles => _profiles;
 
+  /// Replace (or insert) a single cached profile config so curve-editing UI
+  /// reflects a server-side change immediately, without waiting for the next
+  /// `hello`.
+  ///
+  /// The Time Simulator's "Absorb" action edits a profile's curve on the
+  /// server and receives the updated config back in the HTTP response. Its
+  /// curve graph is rebuilt from [profiles], which is otherwise only refreshed
+  /// by an asynchronous `hello` after a reconnect — so absorb appeared to do
+  /// nothing until that landed. Keep the cache in sync the moment the edit
+  /// returns.
+  void applyProfileConfig(RhythmCurveConfig config) {
+    final index = _profiles.indexWhere((profile) => profile.id == config.id);
+    if (index == -1) {
+      _profiles = [..._profiles, config];
+    } else {
+      final updated = List<RhythmCurveConfig>.of(_profiles);
+      updated[index] = config;
+      _profiles = updated;
+    }
+    notifyListeners();
+  }
+
   /// Persisted Mood color resolved from server profile settings, if present.
   (int r, int g, int b)? moodColorForNode(String nodeId) {
     final node = nodeById(nodeId);
