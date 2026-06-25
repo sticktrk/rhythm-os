@@ -489,6 +489,40 @@ void main() {
       expect(updatedHub.pendingSync, isTrue);
     });
 
+    test(
+        'keeps direct-IP Box separate when endpoint is reused by another token',
+        () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.123',
+        token: 'old-owner-token',
+      );
+      final discovered = DiscoveredHub(
+        host: '192.168.5.123',
+        address: '192.168.5.123',
+        port: rhythmServerDefaultPort,
+        name: 'RhythmServer',
+        type: HubType.server,
+      );
+
+      final entry = rhythmHomeEntryForDiscoveredServerForTesting(
+        server: discovered,
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        authToken: 'new-owner-token',
+      );
+
+      expect(entry, isNull);
+    });
+
     test('builds detached server hub for local hardware inspection', () {
       final discovered = DiscoveredHub(
         host: '192.168.5.123',
