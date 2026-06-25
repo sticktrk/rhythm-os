@@ -995,26 +995,51 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
-            let Some(source_node_id) =
-                commands::resolve_input_source_node_id(state, key, native_device_id)
-            else {
-                emit_button_input_event(
+            let source_node_id = match commands::resolve_input_source_node_id(
+                state,
+                key,
+                native_device_id,
+            ) {
+                Some(source_node_id) => source_node_id,
+                // The device is known to the hub registry (we have a hub key,
+                // native id and room) but was never promoted into the canonical
+                // registry — complete the discovery on demand so the press can
+                // route instead of being dropped.
+                None => match commands::ensure_canonical_button_source(
                     state,
-                    hub_key.as_ref(),
-                    None,
-                    None,
-                    Some(room_id.as_str()),
-                    Some(native_device_id),
-                    None,
-                    Some(action),
-                    InputEventRoute::Unresolved,
-                );
-                info!(
-                    target: "evt",
-                    "Button event from {:?} could not resolve canonical source node, ignoring",
-                    device_id.as_deref()
-                );
-                return;
+                    key,
+                    native_device_id,
+                    room_id.as_str(),
+                ) {
+                    Some(source_node_id) => {
+                        info!(
+                            target: "evt",
+                            "Canonicalized previously-unknown button {:?} in room {} on demand",
+                            device_id.as_deref(),
+                            room_id
+                        );
+                        source_node_id
+                    }
+                    None => {
+                        emit_button_input_event(
+                            state,
+                            hub_key.as_ref(),
+                            None,
+                            None,
+                            Some(room_id.as_str()),
+                            Some(native_device_id),
+                            None,
+                            Some(action),
+                            InputEventRoute::Unresolved,
+                        );
+                        info!(
+                            target: "evt",
+                            "Button event from {:?} could not resolve canonical source node, ignoring",
+                            device_id.as_deref()
+                        );
+                        return;
+                    }
+                },
             };
             let command_id = logging::next_command_id("button");
 
@@ -4271,6 +4296,101 @@ mod tests {
             other => panic!("unexpected event: {:?}", other),
         }
         assert_eq!(handle_event_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn button_event_for_unknown_source_with_bound_room_self_heals_and_routes() {
+        // Regression: a control device that the hub registry recognizes (hub
+        // key + native id + a hub-native room bound to a topology room) but that
+        // was never promoted into the canonical registry — e.g. a ZHA Hue
+        // dimmer only ever seen via on-demand `zha_event` registration — used to
+        // be dropped as `Unresolved`. It should now be canonicalized on demand
+        // and route to its room. See issue #27.
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+
+        // Bind hub-native room "queen" to a topology room, exactly as a normal
+        // hub sync would have, but WITHOUT canonicalizing the switch.
+        {
+            let mut room = TopologyRoom::new("queen-room", "Queen");
+            room.hub_room_bindings.push(crate::topology::HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "queen".into(),
+                control_id: "queen".into(),
+                light_device_ids: vec![],
+            });
+            state.lock().unwrap().topology.insert_room(room);
+        }
+
+        let native_id = "00:17:88:01:0b:74:29:aa";
+        assert!(
+            commands::resolve_input_source_node_id(&state, &hub_key, native_id).is_none(),
+            "precondition: switch is not canonical yet"
+        );
+
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key.clone()),
+                room_id: "queen".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some(native_id.into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        // The switch is now canonical and parented to the queen topology room.
+        let canonical_id = commands::resolve_input_source_node_id(&state, &hub_key, native_id)
+            .expect("switch should have been canonicalized on demand");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .topology
+                .effective_control_target(&canonical_id, &crate::topology::NodeControlKind::Button)
+                .as_deref(),
+            Some("queen-room"),
+        );
+
+        // The triggering press routes (NodeControl) instead of being dropped.
+        let mut button_event = None;
+        while let Ok(ev) = event_rx.try_recv() {
+            if matches!(
+                ev,
+                crate::server_event::ServerEvent::InputEvent(InputEventResource::Button { .. })
+            ) {
+                button_event = Some(ev);
+                break;
+            }
+        }
+        match button_event.expect("expected button input event broadcast") {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                native_device_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(source_node_id.as_deref(), Some(canonical_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("queen-room"));
+                assert_eq!(source_room_id.as_deref(), Some("queen"));
+                assert_eq!(native_device_id.as_deref(), Some(native_id));
+                assert_eq!(button_action, Some(ButtonAction::OnPress));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
     }
 
     #[test]
