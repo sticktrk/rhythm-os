@@ -250,17 +250,25 @@ bool _serverHubsRepresentSameBox(Hub left, Hub right) {
       _sameHubEndpoint(leftRemote, rightRemote)) {
     return true;
   }
+  if (_sameNonEmptyToken(left.token, right.token)) return true;
 
-  return left.type == HubType.server &&
-      right.type == HubType.server &&
-      _normalizedHomeName(left.name) == _normalizedHomeName(right.name) &&
-      (leftRemote != null || rightRemote != null);
+  return false;
 }
 
 bool _sameHubEndpoint(HubEndpoint left, HubEndpoint right) {
   return left.host == right.host &&
       left.port == right.port &&
       left.useSsl == right.useSsl;
+}
+
+bool _sameNonEmptyToken(String? left, String? right) {
+  final cleanLeft = left?.trim();
+  final cleanRight = right?.trim();
+  return cleanLeft != null &&
+      cleanLeft.isNotEmpty &&
+      cleanRight != null &&
+      cleanRight.isNotEmpty &&
+      cleanLeft == cleanRight;
 }
 
 Set<String> _homeIdsRepresentedBy({
