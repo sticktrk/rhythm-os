@@ -8,7 +8,7 @@
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::header::AUTHORIZATION;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rand::RngCore;
@@ -405,11 +405,14 @@ pub fn handle_issue_support_token(
     request_info: Option<ApiAuthRequestInfo>,
     label: Option<String>,
 ) -> ApiResponse {
-    if request_info
-        .map(|info| info.via_remote_access)
-        .unwrap_or(false)
-    {
+    let Some(request_info) = request_info else {
+        return ApiResponse::forbidden("Support tokens require an owner token");
+    };
+    if request_info.via_remote_access {
         return ApiResponse::forbidden("Support tokens can only be issued locally");
+    }
+    if request_info.role != Some(ApiTokenRole::Owner) {
+        return ApiResponse::forbidden("Support tokens require an owner token");
     }
 
     match issue_local_support_token(state, label) {
@@ -555,13 +558,13 @@ pub async fn require_api_auth_middleware(
 
     let verified_bearer = verified_bearer_token(&state, &req);
     if let Some(verified_token) = verified_bearer.as_ref() {
+        auth_info.role = Some(verified_token.role);
+        auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
+        req.extensions_mut().insert(auth_info);
         if verified_token.role == ApiTokenRole::Support {
-            auth_info.role = Some(verified_token.role);
-            auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
-            req.extensions_mut().insert(auth_info);
             write_support_audit_line(&state, &verified_token.id, req.method(), req.uri().path());
-            if is_owner_only_request_for_support(req.method(), req.uri().path()) {
-                return forbidden("Support token is not allowed for this endpoint");
+            if let Some(reason) = support_token_forbidden_reason(req.method(), req.uri()) {
+                return forbidden(reason);
             }
         }
     }
@@ -593,8 +596,8 @@ pub async fn require_api_auth_middleware(
     req.extensions_mut().insert(auth_info);
 
     if verified_token.role == ApiTokenRole::Support {
-        if is_owner_only_request_for_support(req.method(), req.uri().path()) {
-            return forbidden("Support token is not allowed for this endpoint");
+        if let Some(reason) = support_token_forbidden_reason(req.method(), req.uri()) {
+            return forbidden(reason);
         }
     }
 
@@ -714,8 +717,16 @@ fn forbidden(message: &str) -> Response {
         .into_response()
 }
 
-fn is_owner_only_request_for_support(method: &Method, path: &str) -> bool {
-    matches!(
+fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static str> {
+    let path = uri.path();
+    if *method == Method::GET
+        && path == "/api/backup"
+        && query_flag_truthy(uri.query(), "include_secrets")
+    {
+        return Some("Support token cannot export backup secrets");
+    }
+
+    let forbidden = matches!(
         (method, path),
         (&Method::POST, "/api/auth/claim")
             | (&Method::POST, "/api/auth/support-token")
@@ -731,7 +742,22 @@ fn is_owner_only_request_for_support(method: &Method, path: &str) -> bool {
             | (&Method::POST, "/api/ota/upload")
             | (&Method::POST, "/api/ota/update")
             | (&Method::PUT, "/api/backup")
-    )
+    );
+    if forbidden {
+        Some("Support token is not allowed for this endpoint")
+    } else {
+        None
+    }
+}
+
+fn query_flag_truthy(query: Option<&str>, key: &str) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    query.split('&').any(|pair| {
+        let (pair_key, value) = pair.split_once('=').unwrap_or((pair, "true"));
+        pair_key == key && matches!(value, "" | "1" | "true" | "yes" | "on")
+    })
 }
 
 fn write_support_audit_line(state: &SharedState, token_id: &str, method: &Method, path: &str) {
@@ -835,6 +861,10 @@ mod tests {
         req.headers_mut()
             .insert("cf-connecting-ip", "203.0.113.10".parse().unwrap());
         req
+    }
+
+    fn test_uri(uri: &str) -> Uri {
+        uri.parse().unwrap()
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
@@ -1241,6 +1271,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_support_token_endpoint_requires_owner_bearer() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let app = auth_test_router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot({
+                let mut req = request_with_peer(
+                    Method::POST,
+                    "/api/auth/support-token",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::from(json!({"label": "support"}).to_string()),
+                );
+                req.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(state.lock().unwrap().api_auth.tokens.is_empty());
+
+        let owner = issue_local_owner_token(&state, Some("owner".into())).unwrap();
+        let response = app
+            .oneshot({
+                let mut req = request_with_peer(
+                    Method::POST,
+                    "/api/auth/support-token",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::from(json!({"label": "support"}).to_string()),
+                );
+                req.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                req.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", owner.token).parse().unwrap(),
+                );
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let state = state.lock().unwrap();
+        assert_eq!(state.api_auth.tokens.len(), 2);
+        assert_eq!(state.api_auth.tokens[1].role, ApiTokenRole::Support);
+    }
+
+    #[tokio::test]
     async fn appliance_tunnel_request_accepts_support_token_for_allowed_routes_and_audits() {
         let data_dir = unique_test_dir("support-audit");
         let state = test_state();
@@ -1298,43 +1383,107 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn support_token_cannot_export_backup_secrets() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let issued = issue_local_support_token(&state, Some("support".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let response = app
+            .oneshot({
+                let mut req = tunnel_request(
+                    Method::GET,
+                    "/api/backup?include_secrets=true",
+                    Body::empty(),
+                );
+                req.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", issued.token).parse().unwrap(),
+                );
+                req
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
-    fn support_denylist_marks_owner_only_routes() {
+    fn support_policy_blocks_safety_critical_routes() {
         let denied = [
-            (Method::POST, "/api/auth/claim"),
-            (Method::POST, "/api/auth/support-token"),
-            (Method::PUT, "/api/auth/settings"),
-            (Method::POST, "/api/factory-reset"),
-            (Method::PUT, "/api/hub/credentials"),
-            (Method::DELETE, "/api/hub/credentials"),
-            (Method::PUT, "/api/remote-access/config"),
-            (Method::DELETE, "/api/remote-access/config"),
-            (Method::PUT, "/api/wifi"),
-            (Method::DELETE, "/api/wifi"),
-            (Method::POST, "/api/diag/reset-matter-fabric"),
-            (Method::POST, "/api/ota/upload"),
-            (Method::POST, "/api/ota/update"),
-            (Method::PUT, "/api/backup"),
+            (Method::POST, "/api/auth/claim", "auth claim"),
+            (
+                Method::POST,
+                "/api/auth/support-token",
+                "support token mint",
+            ),
+            (Method::PUT, "/api/auth/settings", "auth settings"),
+            (Method::POST, "/api/factory-reset", "factory reset"),
+            (Method::PUT, "/api/hub/credentials", "hub credentials"),
+            (Method::DELETE, "/api/hub/credentials", "hub delete"),
+            (
+                Method::PUT,
+                "/api/remote-access/config",
+                "remote access config",
+            ),
+            (
+                Method::DELETE,
+                "/api/remote-access/config",
+                "remote access clear",
+            ),
+            (Method::PUT, "/api/wifi", "wifi"),
+            (Method::DELETE, "/api/wifi", "wifi clear"),
+            (
+                Method::POST,
+                "/api/diag/reset-matter-fabric",
+                "matter fabric reset",
+            ),
+            (Method::POST, "/api/ota/upload", "ota upload"),
+            (Method::POST, "/api/ota/update", "ota apply"),
+            (Method::PUT, "/api/backup", "backup restore"),
+            (
+                Method::GET,
+                "/api/backup?include_secrets=true",
+                "secret backup export",
+            ),
         ];
 
-        for (method, path) in denied {
+        for (method, uri, label) in denied {
             assert!(
-                is_owner_only_request_for_support(&method, path),
-                "{method} {path} should be owner-only"
+                support_token_forbidden_reason(&method, &test_uri(uri)).is_some(),
+                "{label} should be owner-only"
             );
         }
-        assert!(!is_owner_only_request_for_support(
-            &Method::GET,
-            "/api/ota/status"
-        ));
-        assert!(!is_owner_only_request_for_support(
-            &Method::POST,
-            "/api/diag/debug-bundle"
-        ));
-        assert!(!is_owner_only_request_for_support(
-            &Method::POST,
-            "/api/restart"
-        ));
+    }
+
+    #[test]
+    fn support_policy_allows_lighting_admin_routes() {
+        let allowed = [
+            (Method::GET, "/api/backup", "redacted backup export"),
+            (Method::GET, "/api/ota/status", "ota status"),
+            (Method::POST, "/api/diag/debug-bundle", "debug bundle"),
+            (Method::POST, "/api/restart", "restart"),
+            (Method::PUT, "/api/config", "runtime config"),
+            (Method::PUT, "/api/settings", "settings"),
+            (Method::PUT, "/api/mode", "mode"),
+            (Method::PUT, "/api/transitions", "transitions"),
+            (Method::POST, "/api/scenes", "scene create"),
+            (Method::PUT, "/api/topology/rooms/kitchen", "room rename"),
+            (Method::POST, "/api/devices/pair", "device pairing"),
+            (Method::POST, "/api/devices/unpair", "device unpairing"),
+        ];
+
+        for (method, uri, label) in allowed {
+            assert!(
+                support_token_forbidden_reason(&method, &test_uri(uri)).is_none(),
+                "{label} should be allowed for support"
+            );
+        }
     }
 
     #[tokio::test]
