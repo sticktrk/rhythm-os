@@ -457,11 +457,9 @@ bool _accountServerHubsRepresentSameBox(Hub left, Hub right) {
       _sameEndpoint(leftRemote, rightRemote)) {
     return true;
   }
+  if (_sameNonEmptyToken(left.token, right.token)) return true;
 
-  return left.type == HubType.server &&
-      right.type == HubType.server &&
-      _normalizedName(left.name) == _normalizedName(right.name) &&
-      (leftRemote != null || rightRemote != null);
+  return false;
 }
 
 Hub _mergeAccountServerHubRows(Hub base, Hub incoming) {
@@ -492,7 +490,15 @@ bool _sameEndpoint(HubEndpoint left, HubEndpoint right) {
       left.useSsl == right.useSsl;
 }
 
-String _normalizedName(String name) => name.trim().toLowerCase();
+bool _sameNonEmptyToken(String? left, String? right) {
+  final cleanLeft = left?.trim();
+  final cleanRight = right?.trim();
+  return cleanLeft != null &&
+      cleanLeft.isNotEmpty &&
+      cleanRight != null &&
+      cleanRight.isNotEmpty &&
+      cleanLeft == cleanRight;
+}
 
 DateTime _latestDate(DateTime left, DateTime right) {
   return left.isAfter(right) ? left : right;

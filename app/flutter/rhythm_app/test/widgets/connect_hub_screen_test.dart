@@ -203,7 +203,7 @@ void main() {
       );
     });
 
-    test('merges same-named local and tunneled Box entries', () {
+    test('merges same-token local and tunneled Box entries', () {
       final localHome = Home.create(
         id: 'local-home',
         name: 'Kitchen',
@@ -226,6 +226,7 @@ void main() {
         homeId: cloudHome.id,
         name: 'Kitchen Box',
         host: '100.64.0.12',
+        token: 'local-owner-token',
         remoteEndpoint: const HubEndpoint(
           host: 'kitchen.devices.rhythm.lighting',
           port: 443,
@@ -248,6 +249,61 @@ void main() {
       expect(hub.id, 'server-local');
       expect(hub.token, 'local-owner-token');
       expect(hub.remoteEndpoint?.host, 'kitchen.devices.rhythm.lighting');
+    });
+
+    test('keeps same-named remote Box entries separate without shared identity',
+        () {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Home',
+        ownerId: 'local-user',
+      );
+      final cloudHome = Home.create(
+        id: 'cloud-home',
+        name: 'Home',
+        ownerId: 'cloud-user',
+      );
+      final localHub = Hub.server(
+        id: 'server-local',
+        homeId: localHome.id,
+        name: 'Rhythm OS',
+        host: '192.168.5.123',
+        token: 'local-owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'local.devices.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+      final cloudHub = Hub.server(
+        id: 'server-cloud',
+        homeId: cloudHome.id,
+        name: 'Rhythm OS',
+        host: '192.168.5.124',
+        token: 'cloud-owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'cloud.devices.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+
+      final homes = rhythmMergedHomeEntriesForTesting(
+        localHomes: [
+          AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+        ],
+        cloudHomes: [
+          AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+        ],
+      );
+
+      expect(homes, hasLength(2));
+      expect(homes.map((entry) => entry.home.id), [
+        localHome.id,
+        cloudHome.id,
+      ]);
+      expect(homes.first.serverHubs.single.id, localHub.id);
+      expect(homes.last.serverHubs.single.id, cloudHub.id);
     });
 
     test('keeps different Homes separate even when they share a Box', () {

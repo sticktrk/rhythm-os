@@ -264,7 +264,7 @@ void main() {
       expect(snapshots.last.hasRemoteServerHub, isTrue);
     });
 
-    test('collapses tunneled and local-only rows for the same account Box', () {
+    test('collapses same-token tunneled and local-only account Box rows', () {
       final home = Home.create(
         id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
         name: 'Main Home',
@@ -283,6 +283,7 @@ void main() {
         homeId: home.id,
         name: 'Kitchen Box',
         host: '100.64.0.12',
+        token: 'owner-token',
         remoteEndpoint: const HubEndpoint(
           host: 'kitchen.devices.rhythm.lighting',
           port: 443,
@@ -299,6 +300,50 @@ void main() {
       final hub = snapshots.single.serverHubs.single;
       expect(hub.remoteEndpoint?.host, 'kitchen.devices.rhythm.lighting');
       expect(hub.token, 'owner-token');
+    });
+
+    test('keeps same-named account Box rows separate without shared identity',
+        () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Main Home',
+        ownerId: '8f075ac1-e4e7-40f7-817c-4a27424307f4',
+      );
+      final firstHub = Hub.server(
+        id: '11111111-1111-4111-8111-111111111111',
+        homeId: home.id,
+        name: 'Rhythm OS',
+        host: '192.168.5.123',
+        token: 'first-owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'first.devices.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+      final secondHub = Hub.server(
+        id: '22222222-2222-4222-8222-222222222222',
+        homeId: home.id,
+        name: 'Rhythm OS',
+        host: '192.168.5.124',
+        token: 'second-owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'second.devices.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+
+      final snapshots = accountHomeServerHubsFromRowsForTesting(
+        homes: [home],
+        serverHubs: [firstHub, secondHub],
+      );
+
+      expect(snapshots.single.serverHubs, hasLength(2));
+      expect(
+        snapshots.single.serverHubs.map((hub) => hub.id),
+        [firstHub.id, secondHub.id],
+      );
     });
   });
 }
