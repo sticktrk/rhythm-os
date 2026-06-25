@@ -38,6 +38,7 @@ import 'services/hue/hue_service_locator.dart';
 import 'services/virtual_experience_service.dart';
 import 'utils/room_visibility.dart';
 import 'widgets/connect_hub_screen.dart';
+import 'widgets/disabled_mode_banner.dart';
 import 'widgets/hardware_gate_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
@@ -770,29 +771,46 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               backgroundColor: CelestialColors.backgroundDark,
               body: Stack(
                 children: [
-                  Column(
-                    children: [
-                      if (isVirtual)
-                        VirtualExperienceBanner(
-                          onExit: VirtualExperienceService.instance.exit,
-                        ),
-                      Expanded(
-                        // Banner already consumed the status-bar inset; the tab
-                        // screens below use SafeArea(top:true) and would otherwise
-                        // double-pad.
-                        child: MediaQuery.removePadding(
-                          context: context,
-                          removeTop: isVirtual,
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: List.generate(
-                              _activeTabs.length,
-                              _buildTabSlot,
+                  // Disabled-mode banner shows only when the server is reachable
+                  // but autonomous light control is off. A Selector keeps the
+                  // tab stack from rebuilding on every ServerSync notification.
+                  Selector<ServerSyncProvider, bool>(
+                    selector: (_, sync) =>
+                        !isVirtual && sync.synced && !sync.lightBreakerEnabled,
+                    builder: (context, showDisabledBanner, _) {
+                      return Column(
+                        children: [
+                          if (isVirtual)
+                            VirtualExperienceBanner(
+                              onExit: VirtualExperienceService.instance.exit,
+                            ),
+                          if (showDisabledBanner)
+                            DisabledModeBanner(
+                              onEnable: () => unawaited(
+                                context
+                                    .read<ServerSyncProvider>()
+                                    .setLightBreakerEnabled(true),
+                              ),
+                            ),
+                          Expanded(
+                            // The top banner (if any) already consumed the
+                            // status-bar inset; the tab screens below use
+                            // SafeArea(top:true) and would otherwise double-pad.
+                            child: MediaQuery.removePadding(
+                              context: context,
+                              removeTop: isVirtual || showDisabledBanner,
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: List.generate(
+                                  _activeTabs.length,
+                                  _buildTabSlot,
+                                ),
+                              ),
                             ),
                           ),
-                        ),
-                      ),
-                    ],
+                        ],
+                      );
+                    },
                   ),
                   if (enteringHome)
                     Positioned.fill(

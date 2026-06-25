@@ -445,6 +445,28 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Profile configs from the server.
   List<RhythmCurveConfig> get profiles => _profiles;
 
+  /// Replace (or insert) a single cached profile config so curve-editing UI
+  /// reflects a server-side change immediately, without waiting for the next
+  /// `hello`.
+  ///
+  /// The Time Simulator's "Absorb" action edits a profile's curve on the
+  /// server and receives the updated config back in the HTTP response. Its
+  /// curve graph is rebuilt from [profiles], which is otherwise only refreshed
+  /// by an asynchronous `hello` after a reconnect — so absorb appeared to do
+  /// nothing until that landed. Keep the cache in sync the moment the edit
+  /// returns.
+  void applyProfileConfig(RhythmCurveConfig config) {
+    final index = _profiles.indexWhere((profile) => profile.id == config.id);
+    if (index == -1) {
+      _profiles = [..._profiles, config];
+    } else {
+      final updated = List<RhythmCurveConfig>.of(_profiles);
+      updated[index] = config;
+      _profiles = updated;
+    }
+    notifyListeners();
+  }
+
   /// Persisted Mood color resolved from server profile settings, if present.
   (int r, int g, int b)? moodColorForNode(String nodeId) {
     final node = nodeById(nodeId);
@@ -844,7 +866,14 @@ class ServerSyncProvider extends ChangeNotifier {
   void _syncServerMoodProfiles(Iterable<RhythmRoom> nodes) {
     if (_profiles.isEmpty) return;
     for (final node in nodes) {
-      _roomProvider.setMoodColorFromServer(node.id, _moodColorForNode(node));
+      // Only override the cached mood color when this node actually resolves a
+      // mood *profile* color. Scene-based moods carry their color on the live
+      // node state instead, so pushing a null here would clobber it and leave
+      // the mood indicator stuck on the rhythm-curve white (issue #12).
+      final moodColor = _moodColorForNode(node);
+      if (moodColor != null) {
+        _roomProvider.setMoodColorFromServer(node.id, moodColor);
+      }
       _roomProvider.setMoodBrightnessFromServer(
         node.id,
         _moodBrightnessForNode(node),
@@ -2868,23 +2897,23 @@ class ServerSyncProvider extends ChangeNotifier {
   ///
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
-  Future<void> pushHubCredentials(RoomSourceDto source) async {
-    if (!_connection.connected) return;
-    await _pushHubCredentialsForSource(source);
+  Future<bool> pushHubCredentials(RoomSourceDto source) async {
+    if (!_connection.connected) return false;
+    return _pushHubCredentialsForSource(source);
   }
 
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
   /// Sends empty credentials — server fills them from its environment.
   Future<bool> configureAddonHaHub() async {
     if (!_connection.connected) return false;
-    await api.hubCredentials(
+    final hubConnected = await api.hubCredentials(
       hubType: 'homeassistant',
       address: '',
       credentials: {},
     );
     _lastHubReconnectTime = DateTime.now();
     await _connection.reconnect(); // Re-fetch state with new rooms
-    return true;
+    return hubConnected;
   }
 
   /// Tell the server to disconnect ALL hubs — clears all credentials, runtimes,
@@ -2939,12 +2968,12 @@ class ServerSyncProvider extends ChangeNotifier {
     return accepted;
   }
 
-  Future<void> _pushHubCredentialsForSource(RoomSourceDto source) async {
+  Future<bool> _pushHubCredentialsForSource(RoomSourceDto source) async {
     final hubType = _hubTypeForSource(source);
-    if (hubType == null) return;
+    if (hubType == null) return false;
 
     final hub = _homeProvider.getFirstHubOfType(hubType);
-    if (hub == null || !hub.hasCredentials) return;
+    if (hub == null || !hub.hasCredentials) return false;
 
     // HA expects {"token": "..."}, Hue expects {"username": "..."}
     final credentials = hubType == HubType.homeAssistant
@@ -2953,13 +2982,14 @@ class ServerSyncProvider extends ChangeNotifier {
 
     debugPrint(
         'ServerSync: Pushing ${hub.typeName} credentials after source change');
-    await api.hubCredentials(
+    final hubConnected = await api.hubCredentials(
       hubType: _hubTypeWireName(hubType),
       address: '${hub.endpoint.host}:${hub.endpoint.port}',
       credentials: credentials,
     );
     _lastHubReconnectTime = DateTime.now();
     await _connection.reconnect();
+    return hubConnected;
   }
 
   /// Accept server config as authoritative — update app's Home if different.
