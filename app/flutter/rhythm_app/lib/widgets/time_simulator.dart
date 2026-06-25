@@ -473,6 +473,10 @@ class _TimeSimulatorState extends State<TimeSimulator>
       if (!mounted) return;
       final sdkConfig = result.config;
       if (sdkConfig != null) {
+        // Refresh the cached profile synchronously so the curve graph rebuilds
+        // from the absorbed widths instead of the stale pre-absorb config that
+        // _loadCurve() would otherwise read back from _serverSync.profiles.
+        _serverSync.applyProfileConfig(sdkConfig);
         await _syncActiveConfigModel(sdkConfig);
         await _loadCurve();
       }

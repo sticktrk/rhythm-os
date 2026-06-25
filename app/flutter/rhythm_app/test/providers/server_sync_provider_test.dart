@@ -684,6 +684,95 @@ RhythmSceneDefinition _testPresetOnlyScene(String id) =>
     });
 
 void main() {
+  group('ServerSyncProvider.applyProfileConfig', () {
+    late RoomProvider roomProvider;
+    late _FakeRhythmServerApi api;
+    late _FakeRhythmConnection connection;
+
+    setUp(() {
+      roomProvider = RoomProvider();
+      api = _FakeRhythmServerApi();
+      connection = _FakeRhythmConnection(api);
+    });
+
+    tearDown(() {
+      roomProvider.dispose();
+      connection.dispose();
+    });
+
+    ServerSyncProvider buildProvider() {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      return provider;
+    }
+
+    test('inserts a profile config when none is cached', () {
+      final provider = buildProvider();
+      expect(provider.profiles, isEmpty);
+
+      final config = RhythmCurveConfig(
+        id: 'rhythm',
+        name: 'Day',
+        curve: const RhythmSuperGaussianCurve(widthRightBri: 0.85),
+      );
+      provider.applyProfileConfig(config);
+
+      expect(provider.profiles, hasLength(1));
+      expect(provider.profiles.single.id, 'rhythm');
+      expect(
+        provider.profiles.single.superGaussianCurve?.widthRightBri,
+        closeTo(0.85, 1e-9),
+      );
+    });
+
+    test('replaces an existing cached profile with absorbed widths', () {
+      // Regression: after "Absorb", the Time Simulator rebuilds its curve graph
+      // from ServerSyncProvider.profiles (via _dayConfig). Before the fix the
+      // cache held the pre-absorb widths until the next async hello, so the
+      // graph never reshaped — the user's "Absorb does nothing" symptom.
+      final provider = buildProvider();
+
+      final before = RhythmCurveConfig(
+        id: 'rhythm',
+        name: 'Day',
+        curve: const RhythmSuperGaussianCurve(widthRightBri: 0.85),
+      );
+      provider.applyProfileConfig(before);
+
+      var notified = 0;
+      provider.addListener(() => notified++);
+
+      final absorbed = RhythmCurveConfig(
+        id: 'rhythm',
+        name: 'Day',
+        curve: const RhythmSuperGaussianCurve(widthRightBri: 1.70),
+      );
+      provider.applyProfileConfig(absorbed);
+
+      expect(
+        provider.profiles,
+        hasLength(1),
+        reason: 'should replace the profile in place, not append a duplicate',
+      );
+      final cached =
+          provider.profiles.firstWhere((profile) => profile.id == 'rhythm');
+      expect(
+        cached.superGaussianCurve?.widthRightBri,
+        closeTo(1.70, 1e-9),
+        reason: 'cached profile must carry the freshly absorbed widths',
+      );
+      expect(
+        notified,
+        1,
+        reason: 'listeners are notified so the curve graph reloads',
+      );
+    });
+  });
+
   group('ServerSyncProvider.pushHubCredentials', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
