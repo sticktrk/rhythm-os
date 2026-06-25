@@ -33,7 +33,6 @@ import '../screens/hubs/add_home_flow.dart';
 import '../screens/hubs/ble_provisioning_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../screens/hubs/rhythmserver_settings_screen.dart';
-import '../services/employee_mode_service.dart';
 import '../services/account_cloud_sync_service.dart';
 import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
@@ -529,15 +528,6 @@ class ConnectHubScreen extends StatefulWidget {
   /// Show as a full-screen modal with slide-up transition and close button.
   static Future<void> show(BuildContext context,
       {ConnectHubMode mode = ConnectHubMode.rhythmServer}) {
-    if (EmployeeModeService.instance.isActive) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(
-          content: Text('Hub setup is disabled for support sessions.'),
-        ),
-      );
-      return Future<void>.value();
-    }
-
     return Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder(
         opaque: true,

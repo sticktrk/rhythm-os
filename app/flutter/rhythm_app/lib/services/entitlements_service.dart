@@ -9,7 +9,6 @@ import '../config/feature_flags.dart';
 import '../config/platform_capabilities.dart';
 import '../models/plan_tier.dart';
 import 'auth_service.dart';
-import 'employee_mode_service.dart';
 import 'hue/hue_service_locator.dart';
 
 /// Local-only key used by the plan-tier modal to grant/revoke entitlements
@@ -71,16 +70,13 @@ class EntitlementsService {
 
   bool has(Entitlement e) {
     if (!FeatureFlags.entitlementsEnabled) return !e.isComingSoon;
-    if (EmployeeModeService.instance.isActive) return !e.isComingSoon;
     return _currentTier.grants(e) && !e.isComingSoon;
   }
 
   bool isEligibleFor(Entitlement e) {
     if (!FeatureFlags.entitlementsEnabled) return true;
-    if (EmployeeModeService.instance.isActive) return true;
     return _currentTier.grants(e);
   }
-
   Stream<PlanTier> get tierChanges => _controller.stream;
 
   Future<void> _initialize() async {

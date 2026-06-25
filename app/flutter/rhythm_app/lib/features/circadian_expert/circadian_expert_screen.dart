@@ -22901,22 +22901,15 @@ class _CircadianExpertClient {
   _CircadianExpertClient._({
     required String baseUrl,
     required String? authToken,
-    Dio? dio,
   })  : baseUrlLabel = _trimTrailingSlash(baseUrl),
-        _dio = dio ??
-            Dio(
-              BaseOptions(
-                baseUrl: _normalizeBaseUrl(baseUrl),
-                connectTimeout: const Duration(seconds: 3),
-                receiveTimeout: const Duration(seconds: 5),
-                headers: _bearerHeaders(authToken),
-              ),
-            ) {
-    final headers = _bearerHeaders(authToken);
-    if (headers != null) {
-      _dio.options.headers.addAll(headers);
-    }
-  }
+        _dio = Dio(
+          BaseOptions(
+            baseUrl: _normalizeBaseUrl(baseUrl),
+            connectTimeout: const Duration(seconds: 3),
+            receiveTimeout: const Duration(seconds: 5),
+            headers: _bearerHeaders(authToken),
+          ),
+        );
 
   static Future<_CircadianExpertClient?> resolve(BuildContext context) async {
     final homeProvider = context.read<HomeProvider>();

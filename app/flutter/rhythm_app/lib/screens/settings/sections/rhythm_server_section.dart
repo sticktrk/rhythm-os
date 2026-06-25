@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../providers/home_provider.dart';
 import '../../../services/analytics_service.dart';
-import '../../../services/employee_mode_service.dart';
 import '../../../widgets/connect_hub_screen.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
@@ -22,7 +21,6 @@ class RhythmServerDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bridgeHub = context.watch<HomeProvider>().activeServerHub;
-    final employeeMode = EmployeeModeService.instance.isActive;
 
     if (bridgeHub != null) {
       return RhythmServerSettingsScreen(
@@ -50,16 +48,11 @@ class RhythmServerDetailScreen extends StatelessWidget {
                         SettingsRow(
                           icon: Icons.developer_board,
                           iconColor: const Color(0xFF00BCD4),
-                          label: employeeMode
-                              ? 'Support server unavailable'
-                              : 'Connect RhythmOS Server',
-                          value: employeeMode ? 'Waiting for grant' : null,
-                          onTap: employeeMode
-                              ? null
-                              : () => ConnectHubScreen.show(
-                                    context,
-                                    mode: ConnectHubMode.rhythmServer,
-                                  ),
+                          label: 'Connect RhythmOS Server',
+                          onTap: () => ConnectHubScreen.show(
+                            context,
+                            mode: ConnectHubMode.rhythmServer,
+                          ),
                         ),
                       ],
                     ),

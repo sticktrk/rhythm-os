@@ -7,7 +7,6 @@ import '../../../widgets/plan_tier_modal.dart';
 import '../../../widgets/solar_orbit.dart'; // For CelestialColors
 import '../../../widgets/settings_row.dart';
 import '../../../backend/auth/auth_user.dart';
-import '../../../services/employee_mode_service.dart';
 import '../dialogs/sign_in_modal.dart';
 
 /// Account section showing sign-in card or profile info.
@@ -19,7 +18,6 @@ class AccountSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final subscription = context.watch<SubscriptionProvider>();
-    final employeeMode = EmployeeModeService.instance.isActive;
     final isSignedIn = user != null && !user!.isAnonymous;
     final isAnonymous = user != null && user!.isAnonymous;
     final rows = <Widget>[
@@ -48,7 +46,7 @@ class AccountSection extends StatelessWidget {
             value: 'Sync layout & backup',
             onTap: () => SignInModal.show(context),
           ),
-      if (FeatureFlags.entitlementsEnabled && !employeeMode)
+      if (FeatureFlags.entitlementsEnabled)
         SettingsRow(
           icon: Icons.workspace_premium_outlined,
           iconColor: subscription.isPro

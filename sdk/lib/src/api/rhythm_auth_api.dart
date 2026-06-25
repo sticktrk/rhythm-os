@@ -47,25 +47,6 @@ class RhythmOwnerClaim {
   final String token;
 }
 
-class RhythmSupportToken {
-  const RhythmSupportToken({
-    required this.tokenId,
-    required this.token,
-  });
-
-  factory RhythmSupportToken.fromJson(Map<String, dynamic> json) {
-    final tokenId = json['token_id']?.toString() ?? '';
-    final token = json['token']?.toString() ?? '';
-    if (tokenId.isEmpty || token.isEmpty) {
-      throw StateError('Server returned an invalid support token response.');
-    }
-    return RhythmSupportToken(tokenId: tokenId, token: token);
-  }
-
-  final String tokenId;
-  final String token;
-}
-
 class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
   const RhythmAuthSettingsUpdate({
     required super.requiresAuth,
@@ -149,28 +130,6 @@ class RhythmAuthApi {
     } on DioException catch (error) {
       throw RhythmApiException(
         'Failed to claim owner token',
-        statusCode: error.response?.statusCode,
-        cause: error,
-      );
-    }
-  }
-
-  Future<RhythmSupportToken> issueSupportToken({
-    String label = 'Rhythm support',
-  }) async {
-    try {
-      final response = await _dio.post<Map<String, dynamic>>(
-        'api/auth/support-token',
-        data: {'label': label},
-      );
-      final data = response.data;
-      if (data == null) {
-        throw StateError('Server returned an empty support token response.');
-      }
-      return RhythmSupportToken.fromJson(Map<String, dynamic>.from(data));
-    } on DioException catch (error) {
-      throw RhythmApiException(
-        'Failed to issue support token',
         statusCode: error.response?.statusCode,
         cause: error,
       );

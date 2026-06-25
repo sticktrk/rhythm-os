@@ -19,7 +19,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../config/feature_flags.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
-import '../services/employee_mode_service.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/local_rhythm_server_service.dart';
@@ -112,7 +111,6 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
   StreamSubscription<void>? _demoChangeSub;
-  String? _employeeModeGrantId;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -1052,9 +1050,6 @@ class ServerSyncProvider extends ChangeNotifier {
       if (!HueServiceLocator.isDemoMode) return;
       unawaited(_refreshDemoState());
     });
-
-    _employeeModeGrantId = EmployeeModeService.instance.grantId;
-    EmployeeModeService.instance.addListener(_onEmployeeModeChanged);
   }
 
   /// Connect to server if a hub is available.
@@ -1134,39 +1129,6 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  void _onEmployeeModeChanged() {
-    final previousGrantId = _employeeModeGrantId;
-    final nextGrantId = EmployeeModeService.instance.grantId;
-    if (previousGrantId == nextGrantId) return;
-
-    _employeeModeGrantId = nextGrantId;
-    _disconnectEmployeeModeSession();
-  }
-
-  void _disconnectEmployeeModeSession() {
-    debugPrint('ServerSync: employee support session changed, disconnecting');
-    _serverHub = null;
-    _activeConnectionEndpoint = null;
-    _hasBeenSynced = false;
-    _homeEntryRefreshGeneration++;
-    _completeHomeEntryRefreshWaiter();
-    _homeEntryRefreshHelloCompleter = null;
-    _homeEntryRefreshPending = false;
-    _homeEntryRefreshAwaitingHello = false;
-    _homeEntryRefreshHomeName = null;
-    _homeEntryRefreshHubId = null;
-    _homeEntryRefreshHomeId = null;
-    _homeEntryRefreshError = null;
-    _optimisticMoodSceneIds.clear();
-    _resetConnectionMetadata();
-    _roomProvider.clearTransientState();
-    Future.microtask(() async {
-      await _roomProvider.clearAllRooms();
-      _connection.disconnect();
-    });
-    notifyListeners();
-  }
-
   Future<void> _connectToServerHub(
     Hub hub, {
     required bool clearTransientState,
@@ -1174,8 +1136,7 @@ class ServerSyncProvider extends ChangeNotifier {
     bool assumeSavedAuth = false,
   }) async {
     var targetHub = hub;
-    if (FeatureFlags.remoteAccessTunnel &&
-        !EmployeeModeService.instance.isActive) {
+    if (FeatureFlags.remoteAccessTunnel) {
       targetHub = await _homeProvider.refreshServerHubEndpoints(hub);
       if (!_sameServerHubIdentity(_serverHub, hub)) return;
       _serverHub = targetHub;
@@ -1271,15 +1232,6 @@ class ServerSyncProvider extends ChangeNotifier {
     Hub hub, {
     bool assumeSavedAuth = false,
   }) async {
-    if (EmployeeModeService.instance.isActive) {
-      final directToken = hub.token?.trim();
-      return (
-        hub: hub,
-        authToken:
-            directToken == null || directToken.isEmpty ? null : directToken,
-      );
-    }
-
     final existingToken = hub.token?.trim();
     if (existingToken != null && existingToken.isNotEmpty) {
       return (
@@ -1338,10 +1290,6 @@ class ServerSyncProvider extends ChangeNotifier {
     String? authToken, {
     bool assumeLanReachable = false,
   }) async {
-    if (EmployeeModeService.instance.isActive) {
-      return hub.endpoint;
-    }
-
     final remote = hub.remoteEndpoint;
     if (!FeatureFlags.remoteAccessTunnel || remote == null) {
       return hub.endpoint;
@@ -2148,8 +2096,7 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _maybeFailOverToRemoteEndpoint(RhythmConnectionState current) {
-    if (EmployeeModeService.instance.isActive ||
-        !FeatureFlags.remoteAccessTunnel ||
+    if (!FeatureFlags.remoteAccessTunnel ||
         _remoteFailoverInProgress ||
         (current != RhythmConnectionState.reconnecting &&
             current != RhythmConnectionState.disconnected)) {
@@ -2922,7 +2869,6 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
   Future<void> pushHubCredentials(RoomSourceDto source) async {
-    if (EmployeeModeService.instance.isActive) return;
     if (!_connection.connected) return;
     await _pushHubCredentialsForSource(source);
   }
@@ -2930,7 +2876,6 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
   /// Sends empty credentials — server fills them from its environment.
   Future<bool> configureAddonHaHub() async {
-    if (EmployeeModeService.instance.isActive) return false;
     if (!_connection.connected) return false;
     await api.hubCredentials(
       hubType: 'homeassistant',
@@ -2945,7 +2890,6 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tell the server to disconnect ALL hubs — clears all credentials, runtimes,
   /// and rooms.
   Future<void> disconnectHub() async {
-    if (EmployeeModeService.instance.isActive) return;
     if (!_connection.connected) return;
     debugPrint('ServerSync: Sending hub disconnect to server');
     await api.hubDisconnect();
@@ -2953,7 +2897,6 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Disconnect a single hub by type + address.
   Future<void> disconnectOneHub(String hubType, String address) async {
-    if (EmployeeModeService.instance.isActive) return;
     if (!_connection.connected) return;
     debugPrint('ServerSync: Disconnecting hub $hubType @ $address');
     await api.hubDisconnectOne(hubType: hubType, address: address);
@@ -2997,7 +2940,6 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   Future<void> _pushHubCredentialsForSource(RoomSourceDto source) async {
-    if (EmployeeModeService.instance.isActive) return;
     final hubType = _hubTypeForSource(source);
     if (hubType == null) return;
 
@@ -3670,7 +3612,6 @@ class ServerSyncProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    EmployeeModeService.instance.removeListener(_onEmployeeModeChanged);
     _helloSub?.cancel();
     _rhythmStateSub?.cancel();
     _hubEventSub?.cancel();

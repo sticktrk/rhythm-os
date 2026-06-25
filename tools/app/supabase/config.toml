@@ -45,6 +45,3 @@ verify_jwt = false
 
 [functions.remote-access-bootstrap]
 verify_jwt = false
-
-[functions.support-access]
-verify_jwt = false

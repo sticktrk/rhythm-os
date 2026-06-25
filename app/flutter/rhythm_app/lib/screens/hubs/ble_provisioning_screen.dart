@@ -14,7 +14,6 @@ import '../../providers/home_provider.dart';
 import '../../services/account_cloud_sync_service.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
-import '../../services/employee_mode_service.dart';
 import '../../services/recent_servers_service.dart';
 import '../../widgets/solar_orbit.dart';
 import 'add_home_flow.dart';
@@ -39,15 +38,6 @@ class BleProvisioningScreen extends StatefulWidget {
   final BleDevice? initialDevice;
 
   static Future<void> show(BuildContext context, {BleDevice? initialDevice}) {
-    if (EmployeeModeService.instance.isActive) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(
-          content: Text('Hub provisioning is disabled for support sessions.'),
-        ),
-      );
-      return Future<void>.value();
-    }
-
     return Navigator.of(context).push(
       PageRouteBuilder<void>(
         opaque: false,

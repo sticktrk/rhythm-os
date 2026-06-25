@@ -6,7 +6,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../config/feature_flags.dart';
 import '../providers/server_sync_provider.dart';
-import 'employee_mode_service.dart';
 
 enum ResolvedServerEndpointSource {
   lan,
@@ -42,30 +41,8 @@ class ResolvedServerEndpoint {
     );
   }
 
-  RhythmConfigApi configApi({
-    Duration connectTimeout = const Duration(seconds: 10),
-    Duration receiveTimeout = const Duration(seconds: 10),
-    String? authToken,
-  }) {
-    return RhythmConfigApi(
-      baseUrl: baseUrl,
-      authToken: authToken ?? hub.token,
-    );
-  }
-
   RhythmAuthApi authApi({String? authToken}) {
     return RhythmAuthApi(
-      baseUrl: baseUrl,
-      authToken: authToken ?? hub.token,
-    );
-  }
-
-  RhythmMatterApi matterApi({
-    Duration connectTimeout = const Duration(seconds: 5),
-    Duration receiveTimeout = const Duration(seconds: 45),
-    String? authToken,
-  }) {
-    return RhythmMatterApi(
       baseUrl: baseUrl,
       authToken: authToken ?? hub.token,
     );
@@ -94,10 +71,6 @@ class ServerEndpointResolver {
         lanReachability,
     Future<List<ConnectivityResult>> Function()? connectivityCheck,
   }) async {
-    if (EmployeeModeService.instance.isActive) {
-      return _resolved(hub, hub.endpoint, ResolvedServerEndpointSource.remote);
-    }
-
     final remote = FeatureFlags.remoteAccessTunnel ? hub.remoteEndpoint : null;
     if (remote == null || remote == hub.endpoint) {
       return _resolved(hub, hub.endpoint, ResolvedServerEndpointSource.lan);

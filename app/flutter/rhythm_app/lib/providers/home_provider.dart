@@ -7,10 +7,8 @@ import '../data/local_data_source.dart';
 import '../repositories/home_repository.dart';
 import '../services/account_cloud_sync_service.dart';
 import '../services/auth_service.dart';
-import '../services/employee_mode_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/settings_service.dart';
-import '../services/support_access_service.dart';
 
 /// Resolved location with source indicator for debugging.
 typedef ResolvedLocation = ({
@@ -188,10 +186,6 @@ class HomeProvider extends ChangeNotifier {
   StreamSubscription<List<Home>>? _homesSubscription;
   StreamSubscription<List<Hub>>? _hubsSubscription;
   Timer? _accountCloudSyncDebounce;
-  void Function()? _removeDemoEnabledHook;
-  void Function()? _removeDemoDisabledHook;
-  void Function()? _removeEmployeeEnabledHook;
-  void Function()? _removeEmployeeDisabledHook;
 
   // Initialization tracking
   Completer<void>? _initCompleter;
@@ -256,14 +250,12 @@ class HomeProvider extends ChangeNotifier {
         localDataSource: _localDataSource,
       );
 
-      await _deleteEmployeeEnvironmentRecords();
-
       // Load initial data
       _loadHomes();
 
       // On web, there's no onboarding flow to create a Home.
       // Ensure a default one exists so hub pairing works.
-      if (kIsWeb && _homes.isEmpty && !EmployeeModeService.instance.isActive) {
+      if (kIsWeb && _homes.isEmpty) {
         debugPrint(
             'HomeProvider: Web platform with no homes, creating default');
         final home = await _repository.createHome(
@@ -277,7 +269,6 @@ class HomeProvider extends ChangeNotifier {
       // On web, auto-detect if we're served by a rhythm-server / HA addon.
       // Use Uri.base so the health check goes through ingress when applicable.
       if (kIsWeb &&
-          !EmployeeModeService.instance.isActive &&
           getFirstHubOfType(HubType.server) == null &&
           _currentHome != null) {
         try {
@@ -303,24 +294,11 @@ class HomeProvider extends ChangeNotifier {
       // Demo-mode hooks: auto-seed/cleanup the demo home + server hub so the
       // App Store demo user reaches the same surfaces as a real user without
       // any manual setup.
-      _removeDemoEnabledHook =
-          HueServiceLocator.onDemoEnabled(_seedDemoEnvironment);
-      _removeDemoDisabledHook =
-          HueServiceLocator.onDemoDisabled(_clearDemoEnvironment);
-      _removeEmployeeEnabledHook =
-          EmployeeModeService.instance.onEmployeeModeEnabled(
-        _seedEmployeeEnvironment,
-      );
-      _removeEmployeeDisabledHook =
-          EmployeeModeService.instance.onEmployeeModeDisabled(
-        _clearEmployeeEnvironment,
-      );
+      HueServiceLocator.onDemoEnabled(_seedDemoEnvironment);
+      HueServiceLocator.onDemoDisabled(_clearDemoEnvironment);
       if (HueServiceLocator.isDemoMode) {
         // Already in demo mode (e.g. hot restart) — seed now.
         unawaited(_seedDemoEnvironment());
-      }
-      if (EmployeeModeService.instance.isActive) {
-        unawaited(_seedEmployeeEnvironment());
       }
 
       _isLoading = false;
@@ -490,7 +468,7 @@ class HomeProvider extends ChangeNotifier {
     final home = _repository.getHome(id);
     try {
       await _repository.deleteHome(id);
-      if (home != null && !EmployeeModeService.instance.isActive) {
+      if (home != null) {
         unawaited(
           AccountCloudSyncService.instance.deleteHome(
             homeId: home.id,
@@ -789,12 +767,6 @@ class HomeProvider extends ChangeNotifier {
     required String bridgeIp,
     required String appKey,
   }) async {
-    if (EmployeeModeService.instance.isActive) {
-      _error = 'Hub setup is disabled for support sessions';
-      notifyListeners();
-      return null;
-    }
-
     if (_currentHome == null) {
       _error = 'No home selected';
       notifyListeners();
@@ -826,12 +798,6 @@ class HomeProvider extends ChangeNotifier {
     int port = 54448,
     String? token,
   }) async {
-    if (EmployeeModeService.instance.isActive) {
-      _error = 'Hub setup is disabled for support sessions';
-      notifyListeners();
-      return null;
-    }
-
     if (_currentHome == null) {
       _error = 'No home selected';
       notifyListeners();
@@ -867,12 +833,6 @@ class HomeProvider extends ChangeNotifier {
     HomeLocation? location,
     String? timezone,
   }) async {
-    if (EmployeeModeService.instance.isActive) {
-      _error = 'Hub setup is disabled for support sessions';
-      notifyListeners();
-      return null;
-    }
-
     final userId = currentUserId;
     if (userId == null) {
       _error = 'User not signed in';
@@ -900,15 +860,13 @@ class HomeProvider extends ChangeNotifier {
       );
       final activatedHub = await activateServerHub(hub);
       final savedHub = activatedHub ?? hub;
-      if (!EmployeeModeService.instance.isActive) {
-        unawaited(
-          AccountCloudSyncService.instance.syncHomeAndServerHubs(
-            home: home,
-            hubs: [savedHub],
-            reason: 'server_hub_added',
-          ),
-        );
-      }
+      unawaited(
+        AccountCloudSyncService.instance.syncHomeAndServerHubs(
+          home: home,
+          hubs: [savedHub],
+          reason: 'server_hub_added',
+        ),
+      );
       return savedHub;
     } catch (e) {
       if (home != null) {
@@ -950,7 +908,7 @@ class HomeProvider extends ChangeNotifier {
     final hub = _repository.getHub(hubId);
     try {
       await _repository.deleteHub(hubId);
-      if (hub != null && !EmployeeModeService.instance.isActive) {
+      if (hub != null) {
         unawaited(
           AccountCloudSyncService.instance.deleteHub(
             hubId: hub.id,
@@ -1036,8 +994,6 @@ class HomeProvider extends ChangeNotifier {
 
   static const _demoHomeOwnerId = 'demo-user';
   static const _demoServerHost = 'demo.rhythm.local';
-  static const _employeeHomeOwnerId = 'employee-support';
-  static const _legacyEmployeeProxyHost = 'support-proxy.rhythm.local';
 
   /// Ensure the demo user has a Home + RhythmServer hub so they can reach
   /// surfaces like Matter pairing without manual setup.
@@ -1082,137 +1038,6 @@ class HomeProvider extends ChangeNotifier {
   }
 
   // ============================================================
-  // Employee support seeding
-  // ============================================================
-
-  Future<void> _seedEmployeeEnvironment() async {
-    final session = EmployeeModeService.instance.session;
-    if (session == null) return;
-    final auth = AuthService();
-    if (!auth.isSignedIn || auth.isAnonymous) {
-      await _clearEmployeeEnvironment();
-      return;
-    }
-
-    try {
-      final staffMember =
-          await SupportAccessService.instance.currentStaffMember();
-      if (staffMember == null) {
-        debugPrint('Employee mode: signed-in user is not active staff.');
-        await _clearEmployeeEnvironment();
-        return;
-      }
-    } catch (error, stackTrace) {
-      debugPrint('Employee mode: staff preflight failed: $error');
-      debugPrint('$stackTrace');
-      await _clearEmployeeEnvironment();
-      return;
-    }
-
-    var directHostname = session.hostname;
-    var directToken = session.directToken;
-    var directTokenId = session.directTokenId;
-    var directExpiresAt = session.expiresAt;
-    if (directHostname == null ||
-        directHostname.trim().isEmpty ||
-        directToken == null ||
-        directToken.trim().isEmpty) {
-      try {
-        final directSession = await SupportAccessService.instance
-            .openDirectSession(session.grantId);
-        directHostname = directSession.hostname;
-        directToken = directSession.token;
-        directTokenId = directSession.tokenId;
-        directExpiresAt = directSession.expiresAt;
-        EmployeeModeService.instance.attachDirectAccess(
-          hostname: directSession.hostname,
-          token: directSession.token,
-          tokenId: directSession.tokenId,
-          expiresAt: directSession.expiresAt,
-        );
-      } catch (error, stackTrace) {
-        debugPrint('Employee mode: direct session failed: $error');
-        debugPrint('$stackTrace');
-        await _clearEmployeeEnvironment();
-        return;
-      }
-    }
-
-    await _clearEmployeeEnvironment(notify: false);
-
-    final home = await _repository.createHome(
-      name: session.homeName ?? 'Support Session',
-      ownerId: _employeeHomeOwnerId,
-    );
-    _loadHomes();
-    _setCurrentHome(home);
-
-    final hostname = directHostname.trim();
-    if (hostname.isEmpty) {
-      debugPrint('Employee mode: missing direct session hostname');
-      await _clearEmployeeEnvironment();
-      return;
-    }
-    final hub = await _repository.createServerHub(
-      homeId: home.id,
-      name: session.hubName ?? session.displayName,
-      host: hostname,
-      port: 443,
-      token: directToken,
-    );
-    await _repository.updateHub(
-      hub.copyWith(
-        endpoint: hub.endpoint.copyWith(useSsl: true),
-        lastConnected: DateTime.now(),
-        pendingSync: false,
-      ),
-    );
-    debugPrint(
-      'Employee mode: direct session token ${directTokenId ?? 'unknown'} '
-      'expires at ${directExpiresAt?.toIso8601String() ?? 'unknown'}',
-    );
-    _loadCurrentHomeHubs();
-    notifyListeners();
-  }
-
-  Future<void> _clearEmployeeEnvironment({bool notify = true}) async {
-    await _deleteEmployeeEnvironmentRecords();
-    _loadHomes();
-    _loadCurrentHomeHubs();
-    if (notify) notifyListeners();
-  }
-
-  Future<void> _deleteEmployeeEnvironmentRecords() async {
-    final employeeHomeIds = _repository
-        .getAllHomes()
-        .where((h) => h.ownerId == _employeeHomeOwnerId)
-        .map((h) => h.id)
-        .toSet();
-    final employeeHubs = _repository
-        .getAllHubs()
-        .where((h) =>
-            h.endpoint.host == _legacyEmployeeProxyHost ||
-            employeeHomeIds.contains(h.homeId))
-        .toList(growable: false);
-    for (final hub in employeeHubs) {
-      await _repository.deleteHub(hub.id);
-    }
-
-    final employeeHomes = _repository
-        .getAllHomes()
-        .where((h) => h.ownerId == _employeeHomeOwnerId)
-        .toList(growable: false);
-    for (final home in employeeHomes) {
-      await _repository.deleteHome(home.id);
-    }
-
-    if (_currentHome != null && employeeHomeIds.contains(_currentHome!.id)) {
-      _currentHome = null;
-      _currentHomeHubs = [];
-    }
-  }
-
-  // ============================================================
   // Auth & Lifecycle
   // ============================================================
 
@@ -1238,14 +1063,8 @@ class HomeProvider extends ChangeNotifier {
     // a Home is now created when they pair a device (see `addServerHubInNewHome`
     // / AddHomeFlow, which also captures the location), so we no longer
     // fabricate an empty "My Home" placeholder here.
-    if (_homes.isEmpty &&
-        userId != null &&
-        !EmployeeModeService.instance.isActive) {
+    if (_homes.isEmpty && userId != null) {
       await _restoreAccountHomeIfAvailable();
-    }
-
-    if (EmployeeModeService.instance.isActive) {
-      await _seedEmployeeEnvironment();
     }
 
     debugPrint(
@@ -1258,13 +1077,10 @@ class HomeProvider extends ChangeNotifier {
     final staleHomes = _repository
         .getAllHomes()
         .where(
-          (home) =>
-              !(EmployeeModeService.instance.isActive &&
-                  home.ownerId == _employeeHomeOwnerId) &&
-              !accountHomeCanSyncForUserForTesting(
-                home: home,
-                userId: userId,
-              ),
+          (home) => !accountHomeCanSyncForUserForTesting(
+            home: home,
+            userId: userId,
+          ),
         )
         .toList(growable: false);
     if (staleHomes.isEmpty) return;
@@ -1325,7 +1141,6 @@ class HomeProvider extends ChangeNotifier {
   }
 
   void _scheduleAccountCloudSync(String reason) {
-    if (EmployeeModeService.instance.isActive) return;
     _accountCloudSyncDebounce?.cancel();
     _accountCloudSyncDebounce = Timer(const Duration(milliseconds: 500), () {
       final home = _currentHome;
@@ -1342,10 +1157,6 @@ class HomeProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _removeDemoEnabledHook?.call();
-    _removeDemoDisabledHook?.call();
-    _removeEmployeeEnabledHook?.call();
-    _removeEmployeeDisabledHook?.call();
     _homesSubscription?.cancel();
     _hubsSubscription?.cancel();
     _accountCloudSyncDebounce?.cancel();

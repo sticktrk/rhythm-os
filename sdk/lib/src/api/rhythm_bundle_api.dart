@@ -17,7 +17,6 @@ class RhythmBundleApi {
   final Uri _baseUri;
   final http.Client _httpClient;
   final String? _authToken;
-  final bool _useDioBackupTransport;
 
   RhythmBundleApi({
     required String baseUrl,
@@ -27,7 +26,6 @@ class RhythmBundleApi {
   })  : _baseUri = Uri.parse(_normalizeBaseUrl(baseUrl)),
         _httpClient = httpClient ?? http.Client(),
         _authToken = authToken,
-        _useDioBackupTransport = dio != null,
         _dio = dio ??
             Dio(
               BaseOptions(
@@ -127,10 +125,6 @@ class RhythmBundleApi {
   Future<String> fetchBackupJson({
     bool includeSecrets = false,
   }) async {
-    if (_useDioBackupTransport) {
-      return _fetchBackupJsonWithDio(includeSecrets: includeSecrets);
-    }
-
     try {
       final response = await _httpClient.get(
         _backupUri(includeSecrets: includeSecrets),
@@ -163,10 +157,6 @@ class RhythmBundleApi {
   }
 
   Future<Map<String, dynamic>> restoreBackupJson(String backupJson) async {
-    if (_useDioBackupTransport) {
-      return _restoreBackupJsonWithDio(backupJson);
-    }
-
     try {
       final response = await _httpClient.put(
         _backupUri(),
@@ -187,75 +177,6 @@ class RhythmBundleApi {
       );
     } catch (error) {
       throw _wrapHttpException(
-        error,
-        message: 'Failed to restore backup bundle',
-      );
-    }
-  }
-
-  Future<String> _fetchBackupJsonWithDio({
-    bool includeSecrets = false,
-  }) async {
-    try {
-      final response = await _dio.get(
-        'api/backup',
-        queryParameters: includeSecrets
-            ? const <String, dynamic>{'include_secrets': 'true'}
-            : null,
-        options: Options(
-          responseType: ResponseType.plain,
-          validateStatus: (_) => true,
-          headers: const {'Accept': 'application/json'},
-        ),
-      );
-      _throwForUnexpectedStatus(
-        response,
-        message: 'Failed to fetch backup bundle',
-      );
-      return _asJsonText(
-        response.data,
-        errorMessage: 'Server returned an invalid backup bundle.',
-      );
-    } on DioException catch (error) {
-      throw _wrapDioException(
-        error,
-        message: 'Failed to fetch backup bundle',
-      );
-    } catch (error) {
-      throw _wrapGenericException(
-        error,
-        message: 'Failed to fetch backup bundle',
-      );
-    }
-  }
-
-  Future<Map<String, dynamic>> _restoreBackupJsonWithDio(
-    String backupJson,
-  ) async {
-    try {
-      final response = await _dio.put(
-        'api/backup',
-        data: jsonDecode(backupJson),
-        options: Options(
-          validateStatus: (_) => true,
-          headers: const {'Content-Type': 'application/json'},
-        ),
-      );
-      _throwForUnexpectedStatus(
-        response,
-        message: 'Failed to restore backup bundle',
-      );
-      return _decodeJsonObject(
-        response.data,
-        errorMessage: 'Server returned an invalid backup response.',
-      );
-    } on DioException catch (error) {
-      throw _wrapDioException(
-        error,
-        message: 'Failed to restore backup bundle',
-      );
-    } catch (error) {
-      throw _wrapGenericException(
         error,
         message: 'Failed to restore backup bundle',
       );
@@ -412,19 +333,6 @@ class RhythmBundleApi {
       );
     }
 
-    final detail = error.toString().trim();
-    return RhythmApiException(
-      message,
-      serverMessage: detail.isEmpty ? null : detail,
-      cause: error,
-    );
-  }
-
-  RhythmApiException _wrapGenericException(
-    Object error, {
-    required String message,
-  }) {
-    if (error is RhythmApiException) return error;
     final detail = error.toString().trim();
     return RhythmApiException(
       message,

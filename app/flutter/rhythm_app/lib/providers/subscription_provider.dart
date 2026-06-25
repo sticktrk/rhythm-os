@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 
 import '../config/feature_flags.dart';
 import '../models/plan_tier.dart';
-import '../services/employee_mode_service.dart';
 import '../services/entitlements_service.dart';
 
 /// Provider façade over [EntitlementsService] so widgets can `context.watch`
@@ -15,25 +14,21 @@ class SubscriptionProvider extends ChangeNotifier {
       _tier = tier;
       notifyListeners();
     });
-    EmployeeModeService.instance.addListener(_onEmployeeModeChanged);
   }
 
   final EntitlementsService _service;
   StreamSubscription<PlanTier>? _sub;
   PlanTier _tier;
 
-  PlanTier get tier =>
-      EmployeeModeService.instance.isActive ? PlanTier.pro : _tier;
-  bool get isPro => tier == PlanTier.pro;
+  PlanTier get tier => _tier;
+  bool get isPro => _tier == PlanTier.pro;
   bool has(Entitlement e) {
     if (!FeatureFlags.entitlementsEnabled) return !e.isComingSoon;
-    if (EmployeeModeService.instance.isActive) return !e.isComingSoon;
     return _tier.grants(e) && !e.isComingSoon;
   }
 
   bool isEligibleFor(Entitlement e) {
     if (!FeatureFlags.entitlementsEnabled) return true;
-    if (EmployeeModeService.instance.isActive) return true;
     return _tier.grants(e);
   }
 
@@ -55,14 +50,9 @@ class SubscriptionProvider extends ChangeNotifier {
 
   Future<void> refresh() => _service.refresh();
 
-  void _onEmployeeModeChanged() {
-    notifyListeners();
-  }
-
   @override
   void dispose() {
     _sub?.cancel();
-    EmployeeModeService.instance.removeListener(_onEmployeeModeChanged);
     super.dispose();
   }
 }

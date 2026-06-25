@@ -41,16 +41,14 @@ class HueServiceLocator {
 
   /// Register a callback to run when demo mode flips to enabled.
   /// Used by [HomeProvider] to seed the demo home + server hub.
-  static void Function() onDemoEnabled(Future<void> Function() callback) {
+  static void onDemoEnabled(Future<void> Function() callback) {
     _onEnabled.add(callback);
-    return () => _onEnabled.remove(callback);
   }
 
   /// Register a callback to run when demo mode flips to disabled.
   /// Used by [HomeProvider] to clean up demo-seeded data on sign-out.
-  static void Function() onDemoDisabled(Future<void> Function() callback) {
+  static void onDemoDisabled(Future<void> Function() callback) {
     _onDisabled.add(callback);
-    return () => _onDisabled.remove(callback);
   }
 
   /// Set demo mode.
@@ -63,7 +61,7 @@ class HueServiceLocator {
     if (enabled) {
       DemoServerApi.instance.ensureSeeded();
       if (changed) {
-        for (final cb in List<Future<void> Function()>.of(_onEnabled)) {
+        for (final cb in _onEnabled) {
           unawaited(cb());
         }
       }
@@ -72,7 +70,7 @@ class HueServiceLocator {
       DemoServerApi.instance.reset();
       DemoHueBridgeService.instance.reset();
       if (changed) {
-        for (final cb in List<Future<void> Function()>.of(_onDisabled)) {
+        for (final cb in _onDisabled) {
           unawaited(cb());
         }
       }

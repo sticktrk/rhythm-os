@@ -8,6 +8,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmAuthApi,
         RhythmAuthStatus,
+        RhythmConfigApi,
         RhythmConnection,
         RhythmConnectionState,
         RhythmDevice,
@@ -16,8 +17,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmHubInfo,
         RhythmHubStartupRetry,
         RhythmHubStartupRetryStatus,
-        RhythmLogSource,
-        RhythmLogTailLine,
         RhythmOtaUpdateProgress,
         RhythmOtaUpdateStage,
         RhythmRoom,
@@ -29,9 +28,7 @@ import '../../widgets/stage_timeline.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
-import '../../services/account_cloud_sync_service.dart';
 import '../../services/analytics_service.dart';
-import '../../services/employee_mode_service.dart';
 import '../../services/ota_service.dart';
 import '../../services/remote_access_service.dart';
 import '../../services/server_endpoint_resolver.dart';
@@ -135,19 +132,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   // ─── Server-type-aware computed getters ────────────────────
 
-  bool get _usesManagedServerState =>
-      widget.homeManaged || EmployeeModeService.instance.isActive;
-
-  String get _serverPlatformType => _usesManagedServerState
+  String get _serverPlatformType => widget.homeManaged
       ? context.read<ServerSyncProvider>().serverPlatformType
       : _detachedServerPlatformType ?? 'desktop';
-  String get _serverContext => _usesManagedServerState
+  String get _serverContext => widget.homeManaged
       ? context.read<ServerSyncProvider>().serverPlatformContext
       : _detachedServerPlatformContext ?? 'server';
   String get _serverVersion {
     final otaVersion = _otaService.currentVersion;
     if (otaVersion != '0.0.0') return otaVersion;
-    if (!_usesManagedServerState) return '0.0.0';
+    if (!widget.homeManaged) return '0.0.0';
     return context.read<ServerSyncProvider>().firmwareVersion;
   }
 
@@ -174,7 +168,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       };
 
   Hub get _currentHub {
-    if (!_usesManagedServerState) return widget.hub;
+    if (!widget.homeManaged) return widget.hub;
     final hubs = context.read<HomeProvider>().currentHomeHubs;
     return hubs
         .where((hub) => hub.id == widget.hub.id)
@@ -203,7 +197,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Future<ResolvedServerEndpoint> _resolveServerEndpoint() {
-    if (!_usesManagedServerState) {
+    if (!widget.homeManaged) {
       return Future.value(ServerEndpointResolver.local(_currentHub));
     }
     return ServerEndpointResolver.resolve(
@@ -242,7 +236,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       // Force a full reconnect so the sync provider picks up the new
       // firmware version from GET /api/state (the poll endpoint doesn't
       // include version info).
-      if (_usesManagedServerState) {
+      if (widget.homeManaged) {
         context.read<ServerSyncProvider>().connection.reconnect();
       }
     } else if (_otaService.state == OtaState.error) {
@@ -258,18 +252,18 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     final syncProvider = context.read<ServerSyncProvider>();
     final resolved = await _resolveServerEndpoint();
     String? fallbackCurrentVersion =
-        _usesManagedServerState ? syncProvider.firmwareVersion : null;
+        widget.homeManaged ? syncProvider.firmwareVersion : null;
     String? fallbackPlatformType =
-        _usesManagedServerState ? syncProvider.serverPlatformType : null;
+        widget.homeManaged ? syncProvider.serverPlatformType : null;
     String? fallbackPlatformContext =
-        _usesManagedServerState ? syncProvider.serverPlatformContext : null;
+        widget.homeManaged ? syncProvider.serverPlatformContext : null;
 
-    if (!_usesManagedServerState) {
+    if (!widget.homeManaged) {
       try {
-        final state = await resolved
-            .configApi()
-            .getState()
-            .timeout(const Duration(seconds: 10));
+        final state = await RhythmConfigApi(
+          baseUrl: resolved.endpoint.baseUrl,
+          authToken: resolved.hub.token,
+        ).getState().timeout(const Duration(seconds: 10));
         fallbackCurrentVersion = state.version;
         fallbackPlatformType = state.platformType;
         fallbackPlatformContext = state.platformContext;
@@ -316,7 +310,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     await Future.wait([
       _checkHealth(),
       _loadOtaSupport(),
-      if (_usesManagedServerState)
+      if (widget.homeManaged)
         () async {
           // Force SSE reconnect to re-fetch /api/state (rooms, hubs, settings).
           final sync = context.read<ServerSyncProvider>();
@@ -330,7 +324,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Future<void> _handleRemoveFromHome() async {
-    if (!_usesManagedServerState) return;
+    if (!widget.homeManaged) return;
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -425,7 +419,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     // but rebuilt via ServerSyncProvider which listens to its streams).
     context.watch<ServerSyncProvider>();
     final http = context.read<RhythmConnection>();
-    final employeeMode = EmployeeModeService.instance.isActive;
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -447,18 +440,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                       const SizedBox(height: 8),
                       _buildHeroSection(http),
                       const SizedBox(height: 24),
-                      if (_usesManagedServerState && !employeeMode)
-                        _buildSettingsNavigationSection(),
-                      if (_supportsWifiChange && !employeeMode) ...[
+                      if (widget.homeManaged) _buildSettingsNavigationSection(),
+                      if (_supportsWifiChange) ...[
                         const SizedBox(height: 16),
                         _buildNetworkSection(),
                       ],
                       const SizedBox(height: 16),
                       _buildVersionSection(),
-                      if (employeeMode) ...[
-                        const SizedBox(height: 16),
-                        _buildDiagnosticsSection(),
-                      ] else if (_supportsDebugBundle) ...[
+                      if (_supportsDebugBundle) ...[
                         const SizedBox(height: 16),
                         _buildDebugSection(),
                       ],
@@ -467,7 +456,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         _buildRebootButton(),
                         const SizedBox(height: 12),
                       ],
-                      if (_usesManagedServerState && !employeeMode) ...[
+                      if (widget.homeManaged) ...[
                         _buildRemoveFromHomeButton(),
                         const SizedBox(height: 12),
                         _buildFactoryResetButton(),
@@ -528,13 +517,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   Widget _buildHeroSection(RhythmConnection http) {
-    final connState = _usesManagedServerState
+    final connState = widget.homeManaged
         ? http.connectionState
         : _isOnline
             ? RhythmConnectionState.connected
             : RhythmConnectionState.disconnected;
     final fullyOffline =
-        _usesManagedServerState ? !http.connected && !_isOnline : !_isOnline;
+        widget.homeManaged ? !http.connected && !_isOnline : !_isOnline;
     final statusText = _connectionStatusText(connState);
     final statusColor = _connectionStatusColor(connState);
     final isLive = connState == RhythmConnectionState.connected;
@@ -824,7 +813,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildNetworkSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final connected = _usesManagedServerState
+    final connected = widget.homeManaged
         ? syncProvider.connectionState == RhythmConnectionState.connected
         : _isOnline;
     final canChange = !_isChangingWifi && (connected || _isOnline);
@@ -923,10 +912,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Future<void> _handleChangeWifi() async {
     if (_isChangingWifi) return;
-    if (EmployeeModeService.instance.isActive) {
-      _showSnackBar('Wi-Fi settings are disabled for support sessions.');
-      return;
-    }
 
     FocusManager.instance.primaryFocus?.unfocus();
     final credentials = await _showWifiCredentialsDialog();
@@ -1062,7 +1047,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (!mounted) return;
     await _checkHealth();
     if (!mounted) return;
-    if (_usesManagedServerState) {
+    if (widget.homeManaged) {
       context.read<ServerSyncProvider>().connection.reconnect();
     }
   }
@@ -1081,19 +1066,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   Widget _buildVersionSection() {
     final syncProvider = context.watch<ServerSyncProvider>();
     final currentVersion = _serverVersion;
-    final employeeMode = EmployeeModeService.instance.isActive;
     final showOtaControls =
         _otaService.isLoadingSupport || _otaService.showUpdateUi;
-    final showAutoUpdateToggle = !employeeMode &&
-        _usesManagedServerState &&
-        !_isHaAddon &&
-        _otaService.isSelfPull;
-    final autoUpdateEnabled =
-        !employeeMode && _usesManagedServerState && syncProvider.autoUpdate;
+    final showAutoUpdateToggle =
+        widget.homeManaged && !_isHaAddon && _otaService.isSelfPull;
+    final autoUpdateEnabled = widget.homeManaged && syncProvider.autoUpdate;
     final allowManualUpdate = !autoUpdateEnabled || !showAutoUpdateToggle;
-    final allowInstall = !employeeMode && allowManualUpdate;
-    final showManualOtaControls =
-        showOtaControls && (employeeMode || allowManualUpdate);
 
     return _buildSection(
       title: _isBridge ? 'FIRMWARE' : 'VERSION',
@@ -1168,11 +1146,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
               if (showAutoUpdateToggle) _buildAutoUpdateRow(autoUpdateEnabled),
 
-              if (showManualOtaControls)
-                ..._buildOtaStateContent(
-                  currentVersion,
-                  allowInstall: allowInstall,
-                ),
+              if (showOtaControls && allowManualUpdate)
+                ..._buildOtaStateContent(currentVersion),
 
               // HA addon managed note
               if (_isHaAddon)
@@ -1297,114 +1272,17 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Widget _buildDiagnosticsSection() {
-    return _buildSection(
-      title: 'DIAGNOSTICS',
-      children: [
-        GestureDetector(
-          onTap: _showDiagnostics,
-          behavior: HitTestBehavior.opaque,
-          child: Container(
-            decoration: BoxDecoration(
-              color: CelestialColors.backgroundCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-              ),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: _teal.withValues(alpha: 0.16),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.terminal_rounded,
-                      color: _teal,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Diagnostics & Logs',
-                          style: TextStyle(
-                            color: CelestialColors.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        SizedBox(height: 4),
-                        Text(
-                          'Live vitals and server log streams',
-                          style: TextStyle(
-                            color: CelestialColors.textSecondary,
-                            fontSize: 13,
-                            height: 1.3,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Icon(
-                    Icons.chevron_right,
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                    size: 22,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _showDiagnostics() async {
-    try {
-      final client = await _diagnosticsClient();
-      if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => _RhythmServerDiagnosticsScreen(client: client),
-        ),
-      );
-    } catch (error, stackTrace) {
-      debugPrint('RhythmServerSettings: diagnostics open failed: $error');
-      debugPrint('$stackTrace');
-      if (mounted) {
-        _showSnackBar(
-          'Could not open diagnostics.',
-          backgroundColor: Colors.red.shade400,
-        );
-      }
-    }
-  }
-
   Future<void> _submitDebugBundle() async {
     if (_isSubmittingDebugBundle) return;
-    if (EmployeeModeService.instance.isActive) {
-      _showSnackBar('Bug reports are disabled for support sessions.');
-      return;
-    }
     setState(() => _isSubmittingDebugBundle = true);
     try {
       await showReportBugFlow(
         context,
         serverHub: _currentHub,
-        localServerOnly: !_usesManagedServerState,
-        serverVersionOverride: _usesManagedServerState ? null : _serverVersion,
+        localServerOnly: !widget.homeManaged,
+        serverVersionOverride: widget.homeManaged ? null : _serverVersion,
         serverPlatformContextOverride:
-            _usesManagedServerState ? null : _serverContext,
+            widget.homeManaged ? null : _serverContext,
       );
     } finally {
       if (mounted) {
@@ -1450,10 +1328,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  List<Widget> _buildOtaStateContent(
-    String currentVersion, {
-    required bool allowInstall,
-  }) {
+  List<Widget> _buildOtaStateContent(String currentVersion) {
     if (_otaService.isLoadingSupport) {
       return [
         _buildOtaButton(
@@ -1594,38 +1469,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ],
             ),
           ),
-          if (allowInstall)
-            _buildOtaButton(
-              label: 'Install Update',
-              icon: Icons.download_rounded,
-              onTap: () => unawaited(
-                _startOtaUpdate(currentVersion, release.version),
-              ),
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.lock_outline_rounded,
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                    size: 16,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Install disabled for support sessions',
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.7),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+          _buildOtaButton(
+            label: 'Install Update',
+            icon: Icons.download_rounded,
+            onTap: () => unawaited(
+              _startOtaUpdate(currentVersion, release.version),
             ),
+          ),
         ];
 
       case OtaState.downloading:
@@ -1819,11 +1669,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     String currentVersion,
     String targetVersion,
   ) async {
-    if (EmployeeModeService.instance.isActive) {
-      _showSnackBar('OTA installs are disabled for support sessions.');
-      return;
-    }
-
     final resolved = await _resolveServerEndpoint();
     if (!mounted) return;
 
@@ -1840,7 +1685,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     _OtaUpdateOverlay.show(
       context,
       otaService: _otaService,
-      connection: _usesManagedServerState
+      connection: widget.homeManaged
           ? context.read<ServerSyncProvider>().connection
           : null,
     );
@@ -2050,7 +1895,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (!mounted) return;
 
     if (cameBack) {
-      if (_usesManagedServerState) {
+      if (widget.homeManaged) {
         unawaited(context.read<ServerSyncProvider>().connection.reconnect());
       }
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2165,11 +2010,6 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   // ─── Factory Reset ─────────────────────────────────────────
 
   Future<void> _handleFactoryReset() async {
-    if (EmployeeModeService.instance.isActive) {
-      _showSnackBar('Factory reset is disabled for support sessions.');
-      return;
-    }
-
     final hubName = widget.hub.name;
 
     // Step 1: explain what will happen.
@@ -2275,7 +2115,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       return;
     }
 
-    if (_usesManagedServerState) {
+    if (widget.homeManaged) {
       // Tear down the local pairing — device is going away to provisioning mode.
       if (mounted) {
         await context.read<RoomProvider>().clearAllRooms();
@@ -2599,11 +2439,6 @@ class _RhythmServerAdvancedSettingsScreenState
 
   Future<void> _setRemoteAccessEnabled(bool enabled) async {
     if (_isRemoteAccessUpdating) return;
-    if (EmployeeModeService.instance.isActive) {
-      _showSnackBar(
-          'Remote access settings are disabled for support sessions.');
-      return;
-    }
 
     final remoteAccess = RemoteAccessService.instance;
     if (enabled && !remoteAccess.canUseRemoteAccess) {
@@ -2615,11 +2450,6 @@ class _RhythmServerAdvancedSettingsScreenState
     final hub = _currentHub;
     final homeProvider = context.read<HomeProvider>();
     final syncProvider = context.read<ServerSyncProvider>();
-    final currentHome = homeProvider.currentHome;
-    if (enabled && !await _ensureSupportAccessConsent(currentHome)) {
-      return;
-    }
-
     setState(() => _isRemoteAccessUpdating = true);
     try {
       if (enabled) {
@@ -2627,7 +2457,7 @@ class _RhythmServerAdvancedSettingsScreenState
             await _ensureOwnerTokenForRemoteAccess(hub, homeProvider);
         final result = await remoteAccess.enableForHub(
           tokenHub,
-          home: currentHome,
+          home: homeProvider.currentHome,
         );
         await homeProvider.updateHub(result.updatedHub);
         _showSnackBar('Remote access enabled.');
@@ -2642,73 +2472,17 @@ class _RhythmServerAdvancedSettingsScreenState
       syncProvider.connectIfAvailable();
     } catch (error) {
       _showSnackBar(
-        enabled && error is RemoteAccessSupportTokenException
-            ? 'Update this server before enabling managed remote access.'
-            : enabled && error is RemoteAccessActivationException
-                ? 'Remote access tunnel is still starting.'
-                : enabled
-                    ? 'Could not enable remote access.'
-                    : 'Could not disable remote access.',
+        enabled && error is RemoteAccessActivationException
+            ? 'Remote access tunnel is still starting.'
+            : enabled
+                ? 'Could not enable remote access.'
+                : 'Could not disable remote access.',
       );
       debugPrint('Remote access update failed: $error');
     } finally {
       if (mounted) {
         setState(() => _isRemoteAccessUpdating = false);
       }
-    }
-  }
-
-  Future<bool> _ensureSupportAccessConsent(Home? home) async {
-    if (home == null) {
-      _showSnackBar('Remote access requires a saved Home.');
-      return false;
-    }
-
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Managed Support Access',
-          style: TextStyle(color: CelestialColors.textPrimary),
-        ),
-        content: const Text(
-          'Allow Rhythm support to open time-boxed, audited sessions for this Home while it has an active managed plan. Support sessions can operate the server through the cloud proxy, except owner-only destructive actions.',
-          style: TextStyle(color: CelestialColors.textSecondary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(
-              'Cancel',
-              style: TextStyle(color: CelestialColors.textSecondary),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text(
-              'Allow',
-              style: TextStyle(color: _teal),
-            ),
-          ),
-        ],
-      ),
-    );
-    if (accepted != true || !mounted) return false;
-
-    try {
-      await AccountCloudSyncService.instance.setSupportAccessConsent(
-        homeId: home.id,
-        accepted: true,
-      );
-      return true;
-    } catch (error, stackTrace) {
-      debugPrint('Remote access support consent failed: $error');
-      debugPrint('$stackTrace');
-      if (mounted) {
-        _showSnackBar('Could not save support access consent.');
-      }
-      return false;
     }
   }
 
@@ -2762,8 +2536,7 @@ class _RhythmServerAdvancedSettingsScreenState
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const SizedBox(height: 8),
-                    if (!EmployeeModeService.instance.isActive &&
-                        FeatureFlags.remoteAccessTunnel) ...[
+                    if (FeatureFlags.remoteAccessTunnel) ...[
                       _buildRemoteAccessSection(),
                       const SizedBox(height: 16),
                     ],
@@ -3208,15 +2981,12 @@ class _RhythmServerHubManagementSectionState
   ) {
     final configuredTypes = syncProvider.configuredHubTypes;
     final hasAnyHub = configuredHubs.isNotEmpty;
-    final employeeMode = EmployeeModeService.instance.isActive;
     final haConfigured = configuredTypes.contains('homeassistant') ||
         configuredTypes.contains('home_assistant');
-    final showHa = !employeeMode &&
-        syncProvider.canConfigureHub('homeassistant') &&
-        !haConfigured;
-    final showHue = !employeeMode &&
-        syncProvider.canConfigureHub('hue') &&
-        !configuredTypes.contains('hue');
+    final showHa =
+        syncProvider.canConfigureHub('homeassistant') && !haConfigured;
+    final showHue =
+        syncProvider.canConfigureHub('hue') && !configuredTypes.contains('hue');
     final matterOptions = _buildMatterAddOptionRows(syncProvider);
     final hasMatterOptions = matterOptions.isNotEmpty;
 
@@ -4563,24 +4333,12 @@ class _RhythmServerDiagnosticsScreenState
   bool _loadingVitals = true;
 
   // Logs
-  List<Map<String, dynamic>>? _allLogs;
   List<Map<String, dynamic>>? _logs;
-  List<RhythmLogSource>? _logSources;
-  String? _selectedLogSourceId;
-  StreamSubscription<RhythmLogTailLine>? _logStreamSub;
-  String? _logStreamError;
   bool _loadingLogs = true;
   String? _categoryFilter;
 
   static const _teal = Color(0xFF00BCD4);
-  static const _legacyLogCategories = [
-    'all',
-    'conn',
-    'hub',
-    'cmd',
-    'evt',
-    'sys'
-  ];
+  static const _logCategories = ['all', 'conn', 'hub', 'cmd', 'evt', 'sys'];
 
   @override
   void initState() {
@@ -4588,193 +4346,33 @@ class _RhythmServerDiagnosticsScreenState
     _loadInitialData();
   }
 
-  @override
-  void dispose() {
-    _logStreamSub?.cancel();
-    super.dispose();
-  }
-
   Future<void> _loadInitialData() async {
     await _loadVitals();
-    if (!mounted) return;
-    // Start after vitals to avoid two concurrent diagnostic HTTP requests.
-    unawaited(_fetchLogs());
+    _fetchLogs(); // after vitals completes — avoid 2 concurrent HTTP requests
   }
 
   Future<void> _loadVitals() async {
-    try {
-      final vitals = await widget.client.getDiagVitals();
-      if (mounted) {
-        setState(() {
-          _vitals = vitals;
-          _loadingVitals = false;
-        });
-      }
-    } catch (error, stackTrace) {
-      debugPrint('RhythmServerDiagnostics: vitals load failed: $error');
-      debugPrint('$stackTrace');
-      if (!mounted) return;
+    final vitals = await widget.client.getDiagVitals();
+    if (mounted) {
       setState(() {
-        _vitals = null;
+        _vitals = vitals;
         _loadingVitals = false;
       });
     }
   }
 
   Future<void> _fetchLogs() async {
-    if (!mounted) return;
     setState(() => _loadingLogs = true);
-    await _logStreamSub?.cancel();
-    _logStreamSub = null;
-
-    try {
-      final sources = await widget.client.listDiagLogSources();
-      if (sources != null && sources.isNotEmpty) {
-        final selected = _selectedLogSourceId != null &&
-                sources.any((source) => source.id == _selectedLogSourceId)
-            ? _selectedLogSourceId!
-            : sources.first.id;
-        await _loadLogSource(sources: sources, sourceId: selected);
-        return;
-      }
-
-      final logs = await widget.client.getDiagLogs(limit: 50);
-      if (mounted) {
-        final nextFilter = _normalizeLogFilterFor(logs);
-        setState(() {
-          _logSources = sources;
-          _selectedLogSourceId = null;
-          _logStreamError = null;
-          _categoryFilter = nextFilter;
-          _allLogs = logs;
-          _logs = _filterLogs(logs, nextFilter);
-          _loadingLogs = false;
-        });
-      }
-    } catch (error, stackTrace) {
-      debugPrint('RhythmServerDiagnostics: logs load failed: $error');
-      debugPrint('$stackTrace');
-      if (!mounted) return;
-      setState(() {
-        _allLogs = const <Map<String, dynamic>>[];
-        _logs = const <Map<String, dynamic>>[];
-        _logSources = null;
-        _selectedLogSourceId = null;
-        _logStreamError = 'Could not load logs: $error';
-        _loadingLogs = false;
-      });
-    }
-  }
-
-  Future<void> _loadLogSource({
-    required List<RhythmLogSource> sources,
-    required String sourceId,
-  }) async {
-    final tail = await widget.client.tailDiagLog(sourceId, lines: 300);
-    if (!mounted) return;
-
-    final entries =
-        tail?.lines.map(_logEntryFromTailLine).toList(growable: false) ??
-            const <Map<String, dynamic>>[];
-    setState(() {
-      _logSources = sources;
-      _selectedLogSourceId = sourceId;
-      _categoryFilter = sourceId;
-      _allLogs = entries;
-      _logs = entries;
-      _logStreamError = null;
-      _loadingLogs = false;
-    });
-    _startLogStream(sourceId);
-  }
-
-  Future<void> _selectLogSource(String sourceId) async {
-    if (_selectedLogSourceId == sourceId && !_loadingLogs) return;
-    final sources = _logSources;
-    if (sources == null || sources.isEmpty) return;
-
-    setState(() => _loadingLogs = true);
-    await _logStreamSub?.cancel();
-    _logStreamSub = null;
-    try {
-      await _loadLogSource(sources: sources, sourceId: sourceId);
-    } catch (error, stackTrace) {
-      debugPrint('RhythmServerDiagnostics: log source load failed: $error');
-      debugPrint('$stackTrace');
-      if (!mounted) return;
-      setState(() {
-        _logStreamError = 'Could not load $sourceId: $error';
-        _loadingLogs = false;
-      });
-    }
-  }
-
-  void _startLogStream(String sourceId) {
-    _logStreamSub?.cancel();
-    _logStreamSub = widget.client
-        .streamDiagLog(
-      sourceId,
-      lines: 1,
-      pollInterval: const Duration(seconds: 1),
-    )
-        .listen(
-      (line) {
-        if (!mounted || _selectedLogSourceId != sourceId) return;
-        setState(() => _appendLogLine(line));
-      },
-      onError: (Object error) {
-        if (!mounted || _selectedLogSourceId != sourceId) return;
-        setState(() {
-          _logStreamError = 'Live stream stopped: $error';
-        });
-      },
+    final logs = await widget.client.getDiagLogs(
+      limit: 50,
+      category: _categoryFilter,
     );
-  }
-
-  void _appendLogLine(RhythmLogTailLine line) {
-    if (line.isReset) {
-      _allLogs = const <Map<String, dynamic>>[];
-      _logs = const <Map<String, dynamic>>[];
-      _logStreamError = null;
-      return;
+    if (mounted) {
+      setState(() {
+        _logs = logs;
+        _loadingLogs = false;
+      });
     }
-
-    final entry = _logEntryFromTailLine(line);
-    final current = _allLogs ?? const <Map<String, dynamic>>[];
-    final lineNumber = (entry['line'] as num?)?.toInt() ?? 0;
-    if (lineNumber > 0 &&
-        current.any((log) =>
-            log['cat'] == entry['cat'] &&
-            ((log['line'] as num?)?.toInt() ?? 0) == lineNumber)) {
-      return;
-    }
-
-    final next = [...current, entry];
-    const maxEntries = 1000;
-    final trimmed = next.length <= maxEntries
-        ? next
-        : next.sublist(next.length - maxEntries);
-    _allLogs = trimmed;
-    _logs = _filterLogs(trimmed, _categoryFilter);
-  }
-
-  String? _normalizeLogFilterFor(List<Map<String, dynamic>>? logs) {
-    final filter = _categoryFilter?.trim();
-    if (filter == null || filter.isEmpty) return null;
-    if (logs == null || logs.isEmpty) return filter;
-    final hasFilter =
-        logs.any((log) => (log['cat'] as String?)?.trim() == filter);
-    return hasFilter ? filter : null;
-  }
-
-  List<Map<String, dynamic>>? _filterLogs(
-    List<Map<String, dynamic>>? logs,
-    String? filter,
-  ) {
-    if (logs == null || filter == null || filter.isEmpty) return logs;
-    return logs
-        .where((log) => (log['cat'] as String?)?.trim() == filter)
-        .toList(growable: false);
   }
 
   Future<void> _handleRefresh() async {
@@ -4859,33 +4457,6 @@ class _RhythmServerDiagnosticsScreenState
 
   // ─── Log actions ─────────────────────────────────────────
 
-  Map<String, dynamic> _logEntryFromTailLine(RhythmLogTailLine line) {
-    final text = line.text.trimRight();
-    return {
-      'level': _inferLogLevel(text),
-      'cat': line.source,
-      'line': line.lineNumber,
-      'msg': line.lineNumber > 0 ? '${line.lineNumber}: $text' : text,
-    };
-  }
-
-  String _inferLogLevel(String text) {
-    final lower = text.toLowerCase();
-    if (lower.contains(' error') ||
-        lower.contains('[error]') ||
-        lower.contains('level=error') ||
-        lower.startsWith('error')) {
-      return 'error';
-    }
-    if (lower.contains(' warn') ||
-        lower.contains('[warn]') ||
-        lower.contains('level=warn') ||
-        lower.startsWith('warn')) {
-      return 'warn';
-    }
-    return 'info';
-  }
-
   void _copyAllLogs() {
     if (_logs == null || _logs!.isEmpty) return;
 
@@ -4938,7 +4509,6 @@ class _RhythmServerDiagnosticsScreenState
   }
 
   Color _catColor(String cat) {
-    final normalized = cat.toLowerCase();
     switch (cat) {
       case 'conn':
         return _teal;
@@ -4949,43 +4519,8 @@ class _RhythmServerDiagnosticsScreenState
       case 'evt':
         return Colors.purple.shade300;
       default:
-        if (normalized.contains('matter')) return Colors.amber;
-        if (normalized.contains('wifi')) return const Color(0xFF22C55E);
-        if (normalized.contains('cloudflared')) return _teal;
-        if (normalized.contains('bluetooth')) return Colors.purple.shade300;
         return CelestialColors.textSecondary;
     }
-  }
-
-  String _catLabel(String cat) {
-    final normalized = cat.toLowerCase();
-    if (normalized == 'rhythm-server.log') return 'srv';
-    if (normalized == 'rhythm-server.err.log') return 'err';
-    if (normalized == 'rhythm-matter.log') return 'mtr';
-    if (normalized == 'cloudflared.log') return 'tun';
-    if (normalized == 'bluetooth.log') return 'bt';
-    if (normalized == 'wifi.log') return 'wifi';
-    return cat.length <= 4 ? cat : cat.substring(0, 4);
-  }
-
-  List<String> _logFilterCategories() {
-    final sources = _logSources;
-    if (sources != null && sources.isNotEmpty) {
-      return sources.map((source) => source.id).toList(growable: false);
-    }
-
-    final logs = _allLogs;
-    if (logs == null || logs.isEmpty) return _legacyLogCategories;
-
-    final categories = <String>{};
-    for (final log in logs) {
-      final cat = (log['cat'] as String?)?.trim();
-      if (cat != null && cat.isNotEmpty) categories.add(cat);
-    }
-    if (categories.isEmpty) return _legacyLogCategories;
-
-    final sorted = categories.toList()..sort();
-    return ['all', ...sorted];
   }
 
   // ─── Build ────────────────────────────────────────────────
@@ -5205,8 +4740,6 @@ class _RhythmServerDiagnosticsScreenState
   // ─── Logs tab ──────────────────────────────────────────────
 
   Widget _buildLogsTab() {
-    final liveSources = _logSources != null && _logSources!.isNotEmpty;
-
     return Column(
       children: [
         // Category filter chips + copy button
@@ -5220,24 +4753,18 @@ class _RhythmServerDiagnosticsScreenState
                   child: ListView(
                     scrollDirection: Axis.horizontal,
                     padding: const EdgeInsets.only(left: 16),
-                    children: _logFilterCategories().map((cat) {
-                      final isSelected = liveSources
-                          ? _selectedLogSourceId == cat
-                          : cat == 'all'
-                              ? _categoryFilter == null
-                              : _categoryFilter == cat;
+                    children: _logCategories.map((cat) {
+                      final isSelected = cat == 'all'
+                          ? _categoryFilter == null
+                          : _categoryFilter == cat;
                       return Padding(
                         padding: const EdgeInsets.only(right: 6),
                         child: GestureDetector(
                           onTap: () {
-                            if (liveSources) {
-                              unawaited(_selectLogSource(cat));
-                              return;
-                            }
                             setState(() {
                               _categoryFilter = cat == 'all' ? null : cat;
-                              _logs = _filterLogs(_allLogs, _categoryFilter);
                             });
+                            _fetchLogs();
                           },
                           child: Container(
                             padding: const EdgeInsets.symmetric(
@@ -5255,9 +4782,7 @@ class _RhythmServerDiagnosticsScreenState
                               ),
                             ),
                             child: Text(
-                              cat == 'all'
-                                  ? 'ALL'
-                                  : _catLabel(cat).toUpperCase(),
+                              cat.toUpperCase(),
                               style: TextStyle(
                                 color: isSelected
                                     ? _teal
@@ -5320,17 +4845,6 @@ class _RhythmServerDiagnosticsScreenState
           height: 1,
           color: CelestialColors.orbitRing.withValues(alpha: 0.2),
         ),
-        if (_logStreamError != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-            child: Text(
-              _logStreamError!,
-              style: TextStyle(
-                color: Colors.amber.withValues(alpha: 0.9),
-                fontSize: 12,
-              ),
-            ),
-          ),
         Expanded(
           child: _loadingLogs
               ? const Center(
@@ -5371,7 +4885,6 @@ class _RhythmServerDiagnosticsScreenState
     final level = log['level'] as String? ?? 'info';
     final cat = log['cat'] as String? ?? 'sys';
     final msg = log['msg'] as String? ?? '';
-    final catLabel = _catLabel(cat);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -5401,7 +4914,7 @@ class _RhythmServerDiagnosticsScreenState
               color: _catColor(cat).withValues(alpha: 0.15),
             ),
             child: Text(
-              catLabel,
+              cat,
               style: TextStyle(
                 color: _catColor(cat),
                 fontSize: 9,
@@ -5908,7 +5421,6 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
     final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
     final canAddMatter = syncProvider.canAddMatterDevice;
-    final employeeMode = EmployeeModeService.instance.isActive;
     const matterActionLabel = 'Add Matter Device';
 
     return Scaffold(
@@ -6101,15 +5613,13 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                             ? () => _retryHub(hubInfo)
                             : null,
                       ),
-                      if (!employeeMode) ...[
-                        const SizedBox(height: 10),
-                        _buildActionButton(
-                          icon: Icons.link_off_rounded,
-                          label: 'Disconnect',
-                          color: Colors.red.shade400,
-                          onTap: () => _disconnectHub(),
-                        ),
-                      ],
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.link_off_rounded,
+                        label: 'Disconnect',
+                        color: Colors.red.shade400,
+                        onTap: () => _disconnectHub(),
+                      ),
                     ],
                     const SizedBox(height: 40),
                   ],
@@ -6387,17 +5897,6 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   }
 
   void _disconnectHub() async {
-    if (EmployeeModeService.instance.isActive) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Hub credential changes are disabled for support sessions.',
-          ),
-        ),
-      );
-      return;
-    }
-
     final syncProvider = context.read<ServerSyncProvider>();
     if (_type == 'matter') {
       final confirmed = await showDialog<bool>(

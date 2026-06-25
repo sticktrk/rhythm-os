@@ -34,13 +34,10 @@ import 'services/account_session_service.dart';
 import 'services/analytics_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/auth_service.dart';
-import 'services/employee_mode_service.dart';
 import 'services/hue/hue_service_locator.dart';
-import 'services/support_access_service.dart';
 import 'services/virtual_experience_service.dart';
 import 'utils/room_visibility.dart';
 import 'widgets/connect_hub_screen.dart';
-import 'widgets/employee_mode_banner.dart';
 import 'widgets/hardware_gate_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
@@ -48,8 +45,6 @@ import 'widgets/solar_orbit.dart';
 import 'widgets/virtual_experience_banner.dart';
 
 const _removed-projectAccent = Color(0xFFFEAC60);
-
-enum _EmployeeStaffCheckStatus { idle, checking, allowed, denied, error }
 
 /// Main app shell.
 ///
@@ -104,11 +99,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   RoomProvider? _pendingModeActionRoomProvider;
   VoidCallback? _pendingModeActionRoomListener;
   bool _accountActionInProgress = false;
-  bool _employeeExitInProgress = false;
-  String? _lastEmployeeGrantId;
-  String? _employeeStaffCheckKey;
-  _EmployeeStaffCheckStatus _employeeStaffCheckStatus =
-      _EmployeeStaffCheckStatus.idle;
 
   /// Sticky flag governing the [ServerDisconnectedScreen]. Set true only when
   /// we've been unable to reach the server *and* have never completed a hello
@@ -139,8 +129,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _lastEmployeeGrantId = EmployeeModeService.instance.grantId;
-    EmployeeModeService.instance.addListener(_onEmployeeModeChanged);
     _loadData();
     AnalyticsService().logScreenView('home');
   }
@@ -149,74 +137,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void dispose() {
     _cancelPendingModeActionHandoff();
     _serverConnectGraceTimer?.cancel();
-    EmployeeModeService.instance.removeListener(_onEmployeeModeChanged);
     WidgetsBinding.instance.removeObserver(this);
     _roomPageController.dispose();
     super.dispose();
-  }
-
-  void _onEmployeeModeChanged() {
-    final previousGrantId = _lastEmployeeGrantId;
-    final nextGrantId = EmployeeModeService.instance.grantId;
-    _lastEmployeeGrantId = nextGrantId;
-    _employeeStaffCheckKey = null;
-    _employeeStaffCheckStatus = _EmployeeStaffCheckStatus.idle;
-    if (!_employeeExitInProgress &&
-        previousGrantId != null &&
-        previousGrantId.trim().isNotEmpty &&
-        nextGrantId != null &&
-        previousGrantId != nextGrantId) {
-      unawaited(_revokeEmployeeGrant(previousGrantId, showFailure: false));
-    }
-
-    if (!mounted) return;
-    setState(() {});
-  }
-
-  void _ensureEmployeeStaffCheck({
-    required bool signedIn,
-    required String? userId,
-  }) {
-    final session = EmployeeModeService.instance.session;
-    final cleanUserId = userId?.trim();
-    if (session == null ||
-        !signedIn ||
-        cleanUserId == null ||
-        cleanUserId.isEmpty) {
-      _employeeStaffCheckKey = null;
-      _employeeStaffCheckStatus = _EmployeeStaffCheckStatus.idle;
-      return;
-    }
-
-    final key = '$cleanUserId:${session.grantId}';
-    if (_employeeStaffCheckKey == key &&
-        _employeeStaffCheckStatus != _EmployeeStaffCheckStatus.idle) {
-      return;
-    }
-
-    _employeeStaffCheckKey = key;
-    _employeeStaffCheckStatus = _EmployeeStaffCheckStatus.checking;
-    unawaited(_loadEmployeeStaffCheck(key));
-  }
-
-  Future<void> _loadEmployeeStaffCheck(String key) async {
-    try {
-      final staffMember =
-          await SupportAccessService.instance.currentStaffMember();
-      if (!mounted || _employeeStaffCheckKey != key) return;
-      setState(() {
-        _employeeStaffCheckStatus = staffMember == null
-            ? _EmployeeStaffCheckStatus.denied
-            : _EmployeeStaffCheckStatus.allowed;
-      });
-    } catch (error, stackTrace) {
-      debugPrint('Employee mode: staff preflight failed: $error');
-      debugPrint('$stackTrace');
-      if (!mounted || _employeeStaffCheckKey != key) return;
-      setState(() {
-        _employeeStaffCheckStatus = _EmployeeStaffCheckStatus.error;
-      });
-    }
   }
 
   /// Arm the grace timer that escalates a stalled cold connection to the
@@ -565,7 +488,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         homeProvider: context.read<HomeProvider>(),
         hubProvider: context.read<HubConnectionProvider>(),
         roomProvider: context.read<RoomProvider>(),
-        preserveEmployeeMode: EmployeeModeService.instance.isActive,
       );
     } catch (error, stackTrace) {
       debugPrint('Pre-home Log Out: Failed: $error');
@@ -609,71 +531,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(
       SnackBar(content: Text(message)),
     );
-  }
-
-  Future<void> _closeEmployeeMode() async {
-    if (_employeeExitInProgress) return;
-    final grantId = EmployeeModeService.instance.grantId;
-
-    setState(() => _employeeExitInProgress = true);
-    try {
-      await _revokeEmployeeGrant(grantId, showFailure: true);
-    } catch (error, stackTrace) {
-      debugPrint('Employee mode: support grant revoke failed: $error');
-      debugPrint('$stackTrace');
-      if (mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not revoke the support session. It will expire automatically.',
-            ),
-          ),
-        );
-      }
-    } finally {
-      EmployeeModeService.instance.exit();
-      if (mounted) {
-        setState(() => _employeeExitInProgress = false);
-      }
-    }
-  }
-
-  Future<void> _revokeEmployeeGrant(
-    String? grantId, {
-    required bool showFailure,
-  }) async {
-    final cleanGrantId = grantId?.trim();
-    if (cleanGrantId == null || cleanGrantId.isEmpty) return;
-
-    try {
-      await SupportAccessService.instance.revokeGrant(cleanGrantId);
-    } catch (error, stackTrace) {
-      debugPrint('Employee mode: support grant revoke failed: $error');
-      debugPrint('$stackTrace');
-      if (showFailure && mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Could not revoke the support session. It will expire automatically.',
-            ),
-          ),
-        );
-      }
-    }
-  }
-
-  String _employeeBannerLabel(EmployeeModeSession? session) {
-    final label = session?.displayName ?? 'Support';
-    final expiresAt = session?.expiresAt?.toLocal();
-    if (expiresAt == null) return label;
-
-    final remaining = expiresAt.difference(DateTime.now());
-    if (!remaining.isNegative && remaining < const Duration(hours: 1)) {
-      final minutes = math.max(1, remaining.inMinutes + 1);
-      return '$label - expires in ${minutes}m';
-    }
-
-    return '$label - expires ${TimeOfDay.fromDateTime(expiresAt).format(context)}';
   }
 
   void _cancelPendingModeActionHandoff() {
@@ -839,15 +696,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // step a fresh user lands on. Mirror the same conditions used inside
     // `_buildHomeTab` so the two stay aligned.
     final hasRooms = context.select<RoomProvider, bool>((r) => r.hasRooms);
-    final employeeMode = EmployeeModeService.instance;
-    final isEmployeeMode = employeeMode.isActive;
     final showingHardwareGate = _currentTab == MainNavTab.home &&
         !hasServerHub &&
         !hasRooms &&
-        !HueServiceLocator.isDemoMode &&
-        !isEmployeeMode;
-    final showingEmployeeGate =
-        _currentTab == MainNavTab.home && !hasServerHub && isEmployeeMode;
+        !HueServiceLocator.isDemoMode;
 
     // The "Entering Home…" handshake takes over the full Home-tab body. Like
     // the hardware gate, it's a blocking full-screen state — drop the bottom
@@ -856,8 +708,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         context.select<ServerSyncProvider, bool>(
           (s) => s.hasHomeEntryRefreshGate,
         );
-    final hideChrome =
-        showingHardwareGate || showingEmployeeGate || enteringHome;
+    final hideChrome = showingHardwareGate || enteringHome;
     final hasCurrentHome = context.select<HomeProvider, bool>(
       (homeProvider) => homeProvider.currentHome != null,
     );
@@ -904,16 +755,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       canPop: false,
       onPopInvokedWithResult: (didPop, _) => _handlePopInvoked(didPop),
       child: ListenableBuilder(
-        listenable: Listenable.merge([
-          VirtualExperienceService.instance,
-          EmployeeModeService.instance,
-        ]),
+        listenable: VirtualExperienceService.instance,
         builder: (context, _) {
           final isVirtual = VirtualExperienceService.instance.isActive;
-          final showEmployeeBanner = isEmployeeMode;
-          final bannerVisible = showEmployeeBanner || isVirtual;
           final showPreHomeAccountControl =
-              !isVirtual && !showEmployeeBanner && accountControlCandidate;
+              !isVirtual && accountControlCandidate;
           return AnimatedSwitcher(
             duration: const Duration(milliseconds: 650),
             switchInCurve: Curves.easeOutBack,
@@ -926,15 +772,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 children: [
                   Column(
                     children: [
-                      if (isVirtual && !showEmployeeBanner)
+                      if (isVirtual)
                         VirtualExperienceBanner(
                           onExit: VirtualExperienceService.instance.exit,
-                        ),
-                      if (showEmployeeBanner)
-                        EmployeeModeBanner(
-                          label: _employeeBannerLabel(employeeMode.session),
-                          closing: _employeeExitInProgress,
-                          onExit: () => unawaited(_closeEmployeeMode()),
                         ),
                       Expanded(
                         // Banner already consumed the status-bar inset; the tab
@@ -942,7 +782,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         // double-pad.
                         child: MediaQuery.removePadding(
                           context: context,
-                          removeTop: bannerVisible,
+                          removeTop: isVirtual,
                           child: Stack(
                             fit: StackFit.expand,
                             children: List.generate(
@@ -1153,12 +993,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           if (_serverLostConnection) {
             return ServerDisconnectedScreen(
               serverHub: serverHub,
-              onChooseHome: EmployeeModeService.instance.isActive
-                  ? null
-                  : () => ConnectHubScreen.show(
-                        context,
-                        mode: ConnectHubMode.rhythmServer,
-                      ),
+              onChooseHome: () => ConnectHubScreen.show(
+                context,
+                mode: ConnectHubMode.rhythmServer,
+              ),
             );
           }
 
@@ -1185,9 +1023,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         if (!roomProvider.hasRooms) {
           if (HueServiceLocator.isDemoMode) {
             return _buildServerConnectingState();
-          }
-          if (EmployeeModeService.instance.isActive) {
-            return _buildEmployeeModeGate();
           }
           return _buildNoRoomsLayout(ConnectHubMode.rhythmServer);
         }
@@ -1224,12 +1059,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   : null),
           onModeSelected: _setActiveMode,
           onActiveModeDoubleTap: _confirmReapplyActiveMode,
-          onHomeChooserTap: EmployeeModeService.instance.isActive
-              ? null
-              : () => ConnectHubScreen.show(
-                    context,
-                    mode: ConnectHubMode.rhythmServer,
-                  ),
+          onHomeChooserTap: () => ConnectHubScreen.show(
+            context,
+            mode: ConnectHubMode.rhythmServer,
+          ),
         );
       },
     );
@@ -1260,12 +1093,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             },
       // Escape hatch so a hung handshake never traps the user: drop the gate
       // and open the Home chooser.
-      onChooseHome: EmployeeModeService.instance.isActive
-          ? null
-          : () {
-              serverSync.cancelHomeEntryRefresh();
-              ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);
-            },
+      onChooseHome: () {
+        serverSync.cancelHomeEntryRefresh();
+        ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);
+      },
     );
   }
 
@@ -1323,92 +1154,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           onLogOut: _logOutFromPreHome,
         ),
       ),
-    );
-  }
-
-  Widget _buildEmployeeModeGate() {
-    return StreamBuilder<AuthUser?>(
-      stream: AuthService().authStateChanges,
-      initialData: AuthService().currentUser,
-      builder: (context, snapshot) {
-        final user = snapshot.data;
-        final signedIn = user != null && !user.isAnonymous;
-        _ensureEmployeeStaffCheck(signedIn: signedIn, userId: user?.id);
-
-        final title = switch (_employeeStaffCheckStatus) {
-          _EmployeeStaffCheckStatus.denied => 'Staff access required',
-          _EmployeeStaffCheckStatus.error => 'Could not verify staff access',
-          _EmployeeStaffCheckStatus.checking => 'Checking staff access',
-          _EmployeeStaffCheckStatus.allowed => 'Opening support session',
-          _EmployeeStaffCheckStatus.idle =>
-            signedIn ? 'Checking staff access' : 'Staff sign-in required',
-        };
-        final subtitle = switch (_employeeStaffCheckStatus) {
-          _EmployeeStaffCheckStatus.denied =>
-            'This account is not active for support access',
-          _EmployeeStaffCheckStatus.error =>
-            'Check your connection and sign in again',
-          _EmployeeStaffCheckStatus.checking =>
-            'Verifying your support account',
-          _EmployeeStaffCheckStatus.allowed =>
-            'Connecting to the remote LightBox',
-          _EmployeeStaffCheckStatus.idle => signedIn
-              ? 'Verifying your support account'
-              : 'Sign in with a staff account',
-        };
-        final showAccountButton = !signedIn ||
-            _employeeStaffCheckStatus == _EmployeeStaffCheckStatus.denied ||
-            _employeeStaffCheckStatus == _EmployeeStaffCheckStatus.error;
-
-        return SafeArea(
-          bottom: false,
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 36),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _PulsingIcon(
-                    icon: Icons.admin_panel_settings_rounded,
-                    color: CelestialColors.accentBlue,
-                  ),
-                  const SizedBox(height: 24),
-                  Text(
-                    title,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    subtitle,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.72),
-                      fontSize: 15,
-                      height: 1.45,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  if (showAccountButton) ...[
-                    const SizedBox(height: 24),
-                    _PreHomeAccountButton(
-                      isBusy: _accountActionInProgress,
-                      onSignIn: _showPreHomeSignIn,
-                      onLogOut: _logOutFromPreHome,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 }
