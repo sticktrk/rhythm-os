@@ -70,13 +70,14 @@ class HubAdapter extends TypeAdapter<Hub> {
       updatedAt: fields[10] as DateTime,
       pendingSync: fields[11] as bool,
       remoteEndpoint: fields[12] as HubEndpoint?,
+      serverInstanceId: fields[13] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, Hub obj) {
     writer
-      ..writeByte(13)
+      ..writeByte(14)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -102,7 +103,9 @@ class HubAdapter extends TypeAdapter<Hub> {
       ..writeByte(11)
       ..write(obj.pendingSync)
       ..writeByte(12)
-      ..write(obj.remoteEndpoint);
+      ..write(obj.remoteEndpoint)
+      ..writeByte(13)
+      ..write(obj.serverInstanceId);
   }
 
   @override

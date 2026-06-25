@@ -9,6 +9,7 @@ void main() {
       name: 'Rhythm',
       host: '192.168.1.10',
       token: 'owner-token',
+      serverInstanceId: 'srv-kitchen',
       remoteEndpoint: const HubEndpoint(
         host: 'hub.devices.rhythm.lighting',
         port: 443,
@@ -21,6 +22,7 @@ void main() {
     expect(decoded.remoteEndpoint?.host, 'hub.devices.rhythm.lighting');
     expect(decoded.remoteEndpoint?.port, 443);
     expect(decoded.remoteEndpoint?.useSsl, isTrue);
+    expect(decoded.serverInstanceId, 'srv-kitchen');
   });
 
   test('Hub Supabase conversion preserves remote endpoint', () {
@@ -41,6 +43,7 @@ void main() {
       },
       'enabled': true,
       'token': 'owner-token',
+      'server_instance_id': 'srv-kitchen',
       'created_at': DateTime.utc(2026).toIso8601String(),
       'updated_at': DateTime.utc(2026).toIso8601String(),
     };
@@ -49,10 +52,12 @@ void main() {
     final encoded = hub.toSupabase();
 
     expect(hub.remoteEndpoint?.host, 'hub.devices.rhythm.lighting');
+    expect(hub.serverInstanceId, 'srv-kitchen');
     expect(encoded['remote_endpoint'], {
       'host': 'hub.devices.rhythm.lighting',
       'port': 443,
       'useSsl': true,
     });
+    expect(encoded['server_instance_id'], 'srv-kitchen');
   });
 }

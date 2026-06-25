@@ -8,7 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmAuthApi, RhythmDiagnosticsApi;
+    show RhythmAuthApi, RhythmConfigApi, RhythmDiagnosticsApi;
 
 import '../../providers/home_provider.dart';
 import '../../services/account_cloud_sync_service.dart';
@@ -563,10 +563,15 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   Future<void> _persistServerHub(String ip, String? ownerToken) async {
     final homeProvider = context.read<HomeProvider>();
     final displayName = _provisionedBoxName;
+    final serverInstanceId = await _serverInstanceIdFor(
+      ip: ip,
+      ownerToken: ownerToken,
+    );
     final existingHome = _homeEntryForServerEndpoint(
       homeProvider: homeProvider,
       ip: ip,
       ownerToken: ownerToken,
+      serverInstanceId: serverInstanceId,
     );
     if (existingHome != null) {
       final hub = await homeProvider.enterHome(existingHome);
@@ -575,6 +580,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         host: ip,
         port: 54448,
         token: ownerToken ?? hub?.token,
+        serverInstanceId: serverInstanceId ?? hub?.serverInstanceId,
       );
       return;
     }
@@ -589,6 +595,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       host: ip,
       port: 54448,
       token: ownerToken,
+      serverInstanceId: serverInstanceId,
       location: home.location,
       timezone: home.timezone,
     );
@@ -597,33 +604,82 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       host: ip,
       port: 54448,
       token: ownerToken ?? hub?.token,
+      serverInstanceId: serverInstanceId ?? hub?.serverInstanceId,
     );
+  }
+
+  Future<String?> _serverInstanceIdFor({
+    required String ip,
+    required String? ownerToken,
+  }) async {
+    try {
+      final state = await RhythmConfigApi(
+        baseUrl: 'http://$ip:54448/',
+        authToken: ownerToken,
+      ).getState().timeout(const Duration(seconds: 4));
+      final serverInstanceId = state.serverInstanceId?.trim();
+      return serverInstanceId != null && serverInstanceId.isNotEmpty
+          ? serverInstanceId
+          : null;
+    } catch (error) {
+      debugPrint(
+          '[BLE] server identity unavailable after provisioning: $error');
+      return null;
+    }
   }
 
   AccountHomeServerHubs? _homeEntryForServerEndpoint({
     required HomeProvider homeProvider,
     required String ip,
     required String? ownerToken,
+    required String? serverInstanceId,
   }) {
+    final cleanServerInstanceId = serverInstanceId?.trim();
+    final cleanOwnerToken = ownerToken?.trim();
     for (final snapshot in homeProvider.homeServerHubSnapshots) {
       final nextHubs = <Hub>[];
       var matched = false;
       for (final hub in snapshot.serverHubs) {
-        final matches = hub.type == HubType.server &&
-            hub.endpoint.host == ip &&
-            hub.endpoint.port == 54448;
+        final hubServerInstanceId = hub.serverInstanceId?.trim();
+        final bothHaveServerIdentity = cleanServerInstanceId != null &&
+            cleanServerInstanceId.isNotEmpty &&
+            hubServerInstanceId != null &&
+            hubServerInstanceId.isNotEmpty;
+        var matches = hub.type == HubType.server &&
+            bothHaveServerIdentity &&
+            hubServerInstanceId == cleanServerInstanceId;
+        if (!matches && !bothHaveServerIdentity) {
+          matches = hub.type == HubType.server &&
+              hub.endpoint.host == ip &&
+              hub.endpoint.port == 54448;
+          final hubToken = hub.token?.trim();
+          if (matches &&
+              cleanOwnerToken != null &&
+              cleanOwnerToken.isNotEmpty &&
+              hubToken != null &&
+              hubToken.isNotEmpty &&
+              cleanOwnerToken != hubToken) {
+            matches = false;
+          }
+        }
         if (!matches) {
           nextHubs.add(hub);
           continue;
         }
 
         matched = true;
-        final token = ownerToken?.trim();
         final hasSavedToken = hub.token?.trim().isNotEmpty == true;
         nextHubs.add(
-          token != null && token.isNotEmpty && !hasSavedToken
-              ? hub.copyWith(token: token)
-              : hub,
+          hub.copyWith(
+            token: cleanOwnerToken != null &&
+                    cleanOwnerToken.isNotEmpty &&
+                    !hasSavedToken
+                ? cleanOwnerToken
+                : hub.token,
+            serverInstanceId: cleanServerInstanceId,
+            updatedAt: DateTime.now(),
+            pendingSync: true,
+          ),
         );
       }
 

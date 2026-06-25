@@ -90,7 +90,8 @@ class HomeRepository {
   }
 
   /// Update home sleep schedule.
-  Future<Home?> updateHomeSleepSchedule(String homeId, SleepSchedule schedule) async {
+  Future<Home?> updateHomeSleepSchedule(
+      String homeId, SleepSchedule schedule) async {
     final home = _localDataSource.getHome(homeId);
     if (home == null) return null;
 
@@ -98,7 +99,8 @@ class HomeRepository {
   }
 
   /// Update home curve config.
-  Future<Home?> updateHomeCurveConfig(String homeId, CurveConfigDto curveConfig) async {
+  Future<Home?> updateHomeCurveConfig(
+      String homeId, CurveConfigDto curveConfig) async {
     final home = _localDataSource.getHome(homeId);
     if (home == null) return null;
 
@@ -187,6 +189,7 @@ class HomeRepository {
     required String host,
     int port = 54448,
     String? token,
+    String? serverInstanceId,
   }) async {
     final hub = Hub.server(
       id: _uuid.v4(),
@@ -195,6 +198,7 @@ class HomeRepository {
       host: host,
       port: port,
       token: token,
+      serverInstanceId: serverInstanceId,
     );
 
     await _localDataSource.saveHub(hub);
@@ -270,9 +274,9 @@ class HomeRepository {
   Hub? findHubByEndpoint(String host, int port) {
     final hubs = getAllHubs();
     return hubs.cast<Hub?>().firstWhere(
-      (hub) => hub!.endpoint.host == host && hub.endpoint.port == port,
-      orElse: () => null,
-    );
+          (hub) => hub!.endpoint.host == host && hub.endpoint.port == port,
+          orElse: () => null,
+        );
   }
 
   /// Check if a hub with the given endpoint already exists.

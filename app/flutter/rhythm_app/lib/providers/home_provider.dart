@@ -104,6 +104,9 @@ bool _cloudServerHubMatchesLocalHubForHome({
   required Hub cloudHub,
   required String homeId,
 }) {
+  if (_sameNonEmptyServerInstanceId(localHub, cloudHub)) return true;
+  if (_differentNonEmptyServerInstanceIds(localHub, cloudHub)) return false;
+
   return localHub.id == cloudHub.id ||
       localHub.id ==
           _homeScopedServerHubId(
@@ -797,6 +800,7 @@ class HomeProvider extends ChangeNotifier {
     required String host,
     int port = 54448,
     String? token,
+    String? serverInstanceId,
   }) async {
     if (_currentHome == null) {
       _error = 'No home selected';
@@ -811,6 +815,7 @@ class HomeProvider extends ChangeNotifier {
         host: host,
         port: port,
         token: token,
+        serverInstanceId: serverInstanceId,
       );
 
       _loadCurrentHomeHubs();
@@ -830,6 +835,7 @@ class HomeProvider extends ChangeNotifier {
     required String host,
     int port = 54448,
     String? token,
+    String? serverInstanceId,
     HomeLocation? location,
     String? timezone,
   }) async {
@@ -857,6 +863,7 @@ class HomeProvider extends ChangeNotifier {
         host: host,
         port: port,
         token: token,
+        serverInstanceId: serverInstanceId,
       );
       final activatedHub = await activateServerHub(hub);
       final savedHub = activatedHub ?? hub;
@@ -1179,8 +1186,15 @@ Hub mergeCloudServerHubForLocalStorageForTesting({
   existing ??= existingHubs.cast<Hub?>().firstWhere(
         (hub) =>
             hub?.type == cloudHub.type &&
-            hub?.endpoint.host == cloudHub.endpoint.host &&
-            hub?.endpoint.port == cloudHub.endpoint.port,
+            _sameNonEmptyServerInstanceId(hub!, cloudHub),
+        orElse: () => null,
+      );
+  existing ??= existingHubs.cast<Hub?>().firstWhere(
+        (hub) =>
+            hub?.type == cloudHub.type &&
+            !_differentNonEmptyServerInstanceIds(hub!, cloudHub) &&
+            hub.endpoint.host == cloudHub.endpoint.host &&
+            hub.endpoint.port == cloudHub.endpoint.port,
         orElse: () => null,
       );
   if (existing == null) return cloudHub;
@@ -1192,5 +1206,26 @@ Hub mergeCloudServerHubForLocalStorageForTesting({
         : cloudHub.token,
     lastConnected: cloudHub.lastConnected ?? existing.lastConnected,
     remoteEndpoint: cloudHub.remoteEndpoint ?? existing.remoteEndpoint,
+    serverInstanceId: cloudHub.serverInstanceId ?? existing.serverInstanceId,
   );
+}
+
+bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
+  final leftId = left.serverInstanceId?.trim();
+  final rightId = right.serverInstanceId?.trim();
+  return leftId != null &&
+      leftId.isNotEmpty &&
+      rightId != null &&
+      rightId.isNotEmpty &&
+      leftId == rightId;
+}
+
+bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
+  final leftId = left.serverInstanceId?.trim();
+  final rightId = right.serverInstanceId?.trim();
+  return leftId != null &&
+      leftId.isNotEmpty &&
+      rightId != null &&
+      rightId.isNotEmpty &&
+      leftId != rightId;
 }

@@ -45,11 +45,7 @@ class HubEndpoint {
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      'host': host,
-      'port': port,
-      'useSsl': useSsl,
-    };
+    return {'host': host, 'port': port, 'useSsl': useSsl};
   }
 
   /// Get the base URL for HTTP requests.
@@ -64,11 +60,7 @@ class HubEndpoint {
     return '$scheme://$host:$port';
   }
 
-  HubEndpoint copyWith({
-    String? host,
-    int? port,
-    bool? useSsl,
-  }) {
+  HubEndpoint copyWith({String? host, int? port, bool? useSsl}) {
     return HubEndpoint(
       host: host ?? this.host,
       port: port ?? this.port,
@@ -146,6 +138,13 @@ class Hub {
   @HiveField(12)
   final HubEndpoint? remoteEndpoint;
 
+  /// Stable Rhythm OS appliance identity from `/api/state.server_instance_id`.
+  ///
+  /// Network endpoints are mutable locators; this value is the identity used to
+  /// reconnect a physical Box to its existing Home when its IP changes.
+  @HiveField(13)
+  final String? serverInstanceId;
+
   const Hub({
     required this.id,
     required this.homeId,
@@ -160,6 +159,7 @@ class Hub {
     required this.updatedAt,
     this.pendingSync = false,
     this.remoteEndpoint,
+    this.serverInstanceId,
   });
 
   /// Create a new Hub with default values.
@@ -172,6 +172,7 @@ class Hub {
     bool enabled = true,
     String? token,
     HubEndpoint? remoteEndpoint,
+    String? serverInstanceId,
   }) {
     final now = DateTime.now();
     return Hub(
@@ -188,6 +189,7 @@ class Hub {
       updatedAt: now,
       pendingSync: true,
       remoteEndpoint: remoteEndpoint,
+      serverInstanceId: _cleanOptional(serverInstanceId),
     );
   }
 
@@ -238,6 +240,7 @@ class Hub {
     int port = 54448,
     String? token,
     HubEndpoint? remoteEndpoint,
+    String? serverInstanceId,
   }) {
     return Hub.create(
       id: id,
@@ -247,6 +250,7 @@ class Hub {
       endpoint: HubEndpoint(host: host, port: port, useSsl: false),
       token: token,
       remoteEndpoint: remoteEndpoint,
+      serverInstanceId: serverInstanceId,
     );
   }
 
@@ -268,8 +272,8 @@ class Hub {
       token: json['token'] as String?,
       lastConnected: json['lastConnected'] != null
           ? (json['lastConnected'] is DateTime
-              ? json['lastConnected'] as DateTime
-              : DateTime.parse(json['lastConnected'] as String))
+                ? json['lastConnected'] as DateTime
+                : DateTime.parse(json['lastConnected'] as String))
           : null,
       createdAt: json['createdAt'] is DateTime
           ? json['createdAt'] as DateTime
@@ -278,6 +282,10 @@ class Hub {
           ? json['updatedAt'] as DateTime
           : DateTime.parse(json['updatedAt'] as String),
       pendingSync: json['pendingSync'] as bool? ?? false,
+      serverInstanceId: _cleanOptional(
+        json['serverInstanceId'] as String? ??
+            json['server_instance_id'] as String?,
+      ),
     );
   }
 
@@ -289,6 +297,7 @@ class Hub {
       'name': name,
       'endpoint': endpoint.toJson(),
       if (remoteEndpoint != null) 'remoteEndpoint': remoteEndpoint!.toJson(),
+      if (serverInstanceId != null) 'serverInstanceId': serverInstanceId,
       'enabled': enabled,
       'requiresCredentials': requiresCredentials,
       if (token != null) 'token': token,
@@ -308,6 +317,7 @@ class Hub {
       'name': name,
       'endpoint': endpoint.toJson(),
       if (remoteEndpoint != null) 'remoteEndpoint': remoteEndpoint!.toJson(),
+      if (serverInstanceId != null) 'serverInstanceId': serverInstanceId,
       'enabled': enabled,
       'requiresCredentials': requiresCredentials,
       if (token != null) 'token': token,
@@ -327,6 +337,7 @@ class Hub {
       'name': name,
       'endpoint': endpoint.toJson(),
       if (remoteEndpoint != null) 'remote_endpoint': remoteEndpoint!.toJson(),
+      if (serverInstanceId != null) 'server_instance_id': serverInstanceId,
       'enabled': enabled,
       if (token != null) 'token': token,
       if (lastConnected != null)
@@ -350,6 +361,7 @@ class Hub {
       remoteEndpoint: row['remote_endpoint'] is Map<String, dynamic>
           ? HubEndpoint.fromJson(row['remote_endpoint'] as Map<String, dynamic>)
           : null,
+      serverInstanceId: _cleanOptional(row['server_instance_id'] as String?),
       enabled: row['enabled'] as bool? ?? true,
       requiresCredentials: row['type'] != 'server',
       token: row['token'] as String?,
@@ -376,6 +388,7 @@ class Hub {
     DateTime? createdAt,
     DateTime? updatedAt,
     bool? pendingSync,
+    String? serverInstanceId,
     bool clearRemoteEndpoint = false,
   }) {
     return Hub(
@@ -384,8 +397,9 @@ class Hub {
       type: type ?? this.type,
       name: name ?? this.name,
       endpoint: endpoint ?? this.endpoint,
-      remoteEndpoint:
-          clearRemoteEndpoint ? null : remoteEndpoint ?? this.remoteEndpoint,
+      remoteEndpoint: clearRemoteEndpoint
+          ? null
+          : remoteEndpoint ?? this.remoteEndpoint,
       enabled: enabled ?? this.enabled,
       requiresCredentials: requiresCredentials ?? this.requiresCredentials,
       token: token ?? this.token,
@@ -393,6 +407,8 @@ class Hub {
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       pendingSync: pendingSync ?? this.pendingSync,
+      serverInstanceId:
+          _cleanOptional(serverInstanceId) ?? this.serverInstanceId,
     );
   }
 
@@ -407,10 +423,7 @@ class Hub {
 
   /// Mark this hub as needing sync.
   Hub markPendingSync() {
-    return copyWith(
-      updatedAt: DateTime.now(),
-      pendingSync: true,
-    );
+    return copyWith(updatedAt: DateTime.now(), pendingSync: true);
   }
 
   /// Mark this hub as synced.
@@ -432,6 +445,11 @@ class Hub {
       case HubType.server:
         return 'Rhythm Server';
     }
+  }
+
+  static String? _cleanOptional(String? value) {
+    final clean = value?.trim();
+    return clean != null && clean.isNotEmpty ? clean : null;
   }
 
   @override

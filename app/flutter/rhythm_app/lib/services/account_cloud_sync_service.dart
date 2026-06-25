@@ -50,7 +50,11 @@ class AccountCloudSyncService {
   static final AccountCloudSyncService instance = AccountCloudSyncService._();
 
   static const _serverHubColumns =
+      'id,home_id,type,name,endpoint,enabled,token,encrypted_token,remote_endpoint,server_instance_id,last_connected,created_at,updated_at';
+  static const _serverHubColumnsWithoutServerInstanceId =
       'id,home_id,type,name,endpoint,enabled,token,encrypted_token,remote_endpoint,last_connected,created_at,updated_at';
+  static const _legacyServerHubColumnsWithServerInstanceId =
+      'id,home_id,type,name,endpoint,enabled,token,remote_endpoint,server_instance_id,last_connected,created_at,updated_at';
   static const _legacyServerHubColumns =
       'id,home_id,type,name,endpoint,enabled,token,remote_endpoint,last_connected,created_at,updated_at';
 
@@ -241,6 +245,7 @@ class AccountCloudSyncService {
     Map<String, dynamic>? encryptedToken,
     bool useLegacyEncryptedTokenStorage = false,
     bool clearRemoteEndpoint = false,
+    bool includeServerInstanceId = true,
   }) {
     if (hub.type != HubType.server) {
       throw ArgumentError(
@@ -254,6 +259,8 @@ class AccountCloudSyncService {
       'name': hub.name,
       'endpoint': hub.endpoint.toJson(),
       'enabled': hub.enabled,
+      if (includeServerInstanceId && hub.serverInstanceId != null)
+        'server_instance_id': hub.serverInstanceId,
       if (hub.remoteEndpoint != null || clearRemoteEndpoint)
         'remote_endpoint': hub.remoteEndpoint?.toJson(),
       'token': useLegacyEncryptedTokenStorage && encryptedToken != null
@@ -299,16 +306,37 @@ class AccountCloudSyncService {
     SupabaseClient client,
     List<String> homeIds,
   ) async {
-    try {
-      return await _selectServerHubRows(client, homeIds, _serverHubColumns);
-    } catch (error) {
-      if (!_isMissingColumnError(error, 'encrypted_token')) rethrow;
-      debugPrint(
-        'AccountCloudSyncService: encrypted_token column unavailable; '
-        'loading legacy encrypted token storage',
-      );
-      return _selectServerHubRows(client, homeIds, _legacyServerHubColumns);
+    final attempts = <({String columns, String label})>[
+      (columns: _serverHubColumns, label: 'current'),
+      (
+        columns: _serverHubColumnsWithoutServerInstanceId,
+        label: 'without server_instance_id',
+      ),
+      (
+        columns: _legacyServerHubColumnsWithServerInstanceId,
+        label: 'legacy token with server_instance_id',
+      ),
+      (columns: _legacyServerHubColumns, label: 'legacy token'),
+    ];
+
+    Object? lastMissingColumnError;
+    for (final attempt in attempts) {
+      try {
+        return await _selectServerHubRows(client, homeIds, attempt.columns);
+      } catch (error) {
+        if (!_isMissingColumnError(error, 'encrypted_token') &&
+            !_isMissingColumnError(error, 'server_instance_id')) {
+          rethrow;
+        }
+        lastMissingColumnError = error;
+        debugPrint(
+          'AccountCloudSyncService: ${attempt.label} hub columns unavailable; '
+          'trying compatibility fallback',
+        );
+      }
     }
+    throw lastMissingColumnError ??
+        StateError('No compatible account hub column set available');
   }
 
   Future<Iterable<Map>> _selectServerHubRows(
@@ -330,29 +358,61 @@ class AccountCloudSyncService {
     Hub hub,
     Map<String, dynamic>? encryptedToken,
   ) async {
-    try {
-      await client.from('hubs').upsert(
-            serverHubSnapshotPayload(
-              hub,
-              encryptedToken: encryptedToken,
-            ),
-            onConflict: 'id',
-          );
-    } catch (error) {
-      if (!_isMissingColumnError(error, 'encrypted_token')) rethrow;
-      debugPrint(
-        'AccountCloudSyncService: encrypted_token column unavailable; '
-        'saving encrypted token envelope in legacy token column',
-      );
-      await client.from('hubs').upsert(
-            serverHubSnapshotPayload(
-              hub,
-              encryptedToken: encryptedToken,
-              useLegacyEncryptedTokenStorage: true,
-            ),
-            onConflict: 'id',
-          );
+    final attempts = <({
+      bool includeServerInstanceId,
+      bool useLegacyEncryptedTokenStorage,
+      String label,
+    })>[
+      (
+        includeServerInstanceId: true,
+        useLegacyEncryptedTokenStorage: false,
+        label: 'current',
+      ),
+      (
+        includeServerInstanceId: false,
+        useLegacyEncryptedTokenStorage: false,
+        label: 'without server_instance_id',
+      ),
+      (
+        includeServerInstanceId: true,
+        useLegacyEncryptedTokenStorage: true,
+        label: 'legacy token with server_instance_id',
+      ),
+      (
+        includeServerInstanceId: false,
+        useLegacyEncryptedTokenStorage: true,
+        label: 'legacy token',
+      ),
+    ];
+
+    Object? lastMissingColumnError;
+    for (final attempt in attempts) {
+      try {
+        await client.from('hubs').upsert(
+              serverHubSnapshotPayload(
+                hub,
+                encryptedToken: encryptedToken,
+                includeServerInstanceId: attempt.includeServerInstanceId,
+                useLegacyEncryptedTokenStorage:
+                    attempt.useLegacyEncryptedTokenStorage,
+              ),
+              onConflict: 'id',
+            );
+        return;
+      } catch (error) {
+        if (!_isMissingColumnError(error, 'encrypted_token') &&
+            !_isMissingColumnError(error, 'server_instance_id')) {
+          rethrow;
+        }
+        lastMissingColumnError = error;
+        debugPrint(
+          'AccountCloudSyncService: ${attempt.label} hub upsert unavailable; '
+          'trying compatibility fallback',
+        );
+      }
     }
+    throw lastMissingColumnError ??
+        StateError('No compatible account hub upsert payload available');
   }
 
   Map<String, dynamic>? _encryptedEnvelopeFromLegacyToken(Object? token) {
@@ -405,7 +465,6 @@ bool accountHomeBelongsToUserForTesting({
   return home.ownerId == cleanUserId || home.memberIds.contains(cleanUserId);
 }
 
-@visibleForTesting
 bool accountHomeCanSyncForUserForTesting({
   required Home home,
   required String? userId,
@@ -448,6 +507,9 @@ List<AccountHomeServerHubs> accountHomeServerHubsFromRowsForTesting({
 }
 
 bool _accountServerHubsRepresentSameBox(Hub left, Hub right) {
+  if (_sameNonEmptyServerInstanceId(left, right)) return true;
+  if (_differentNonEmptyServerInstanceIds(left, right)) return false;
+
   if (left.id == right.id) return true;
   if (_sameEndpoint(left.endpoint, right.endpoint)) return true;
   final leftRemote = left.remoteEndpoint;
@@ -481,6 +543,7 @@ Hub _mergeAccountServerHubRows(Hub base, Hub incoming) {
     updatedAt: _latestDate(base.updatedAt, incoming.updatedAt),
     enabled: base.enabled || incoming.enabled,
     remoteEndpoint: winner.remoteEndpoint ?? fallback.remoteEndpoint,
+    serverInstanceId: winner.serverInstanceId ?? fallback.serverInstanceId,
   );
 }
 
@@ -498,6 +561,26 @@ bool _sameNonEmptyToken(String? left, String? right) {
       cleanRight != null &&
       cleanRight.isNotEmpty &&
       cleanLeft == cleanRight;
+}
+
+bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
+  final leftId = left.serverInstanceId?.trim();
+  final rightId = right.serverInstanceId?.trim();
+  return leftId != null &&
+      leftId.isNotEmpty &&
+      rightId != null &&
+      rightId.isNotEmpty &&
+      leftId == rightId;
+}
+
+bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
+  final leftId = left.serverInstanceId?.trim();
+  final rightId = right.serverInstanceId?.trim();
+  return leftId != null &&
+      leftId.isNotEmpty &&
+      rightId != null &&
+      rightId.isNotEmpty &&
+      leftId != rightId;
 }
 
 DateTime _latestDate(DateTime left, DateTime right) {

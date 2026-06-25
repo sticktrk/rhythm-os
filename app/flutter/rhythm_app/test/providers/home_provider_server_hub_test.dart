@@ -135,6 +135,40 @@ void main() {
       expect(merged.remoteEndpoint?.host, 'rpiz-a.rhythm.lighting');
     });
 
+    test('cloud server hub import merges by server identity when IP changed',
+        () {
+      final local = _serverHub(
+        id: 'local-rpiz-a',
+        host: '192.168.5.10',
+        token: 'local-owner-token',
+        enabled: true,
+        serverInstanceId: 'srv-rpiz-a',
+      );
+      final cloud = Hub(
+        id: 'cloud-rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Remote Server',
+        endpoint: const HubEndpoint(host: '192.168.5.99', port: 54448),
+        enabled: true,
+        requiresCredentials: false,
+        token: 'cloud-owner-token',
+        serverInstanceId: 'srv-rpiz-a',
+        createdAt: DateTime.utc(2026, 6, 2),
+        updatedAt: DateTime.utc(2026, 6, 2),
+      );
+
+      final merged = mergeCloudServerHubForLocalStorageForTesting(
+        cloudHub: cloud,
+        existingHubs: [local],
+      );
+
+      expect(merged.id, cloud.id);
+      expect(merged.endpoint.host, '192.168.5.99');
+      expect(merged.token, 'local-owner-token');
+      expect(merged.serverInstanceId, 'srv-rpiz-a');
+    });
+
     test('cloud server hub import uses decrypted cloud owner token', () {
       final cloud = Hub(
         id: 'rpiz-a',
@@ -206,6 +240,7 @@ Hub _serverHub({
   required String token,
   required bool enabled,
   DateTime? updatedAt,
+  String? serverInstanceId,
 }) {
   final timestamp = updatedAt ?? DateTime.utc(2026, 6, 1);
   return Hub(
@@ -217,6 +252,7 @@ Hub _serverHub({
     enabled: enabled,
     requiresCredentials: false,
     token: token,
+    serverInstanceId: serverInstanceId,
     createdAt: timestamp,
     updatedAt: timestamp,
   );
