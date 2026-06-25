@@ -151,8 +151,11 @@ class RemoteAccessService {
       initialStatus: initialStatus,
     );
 
+    final stableServerInstanceId =
+        serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
     final updatedHub = serverHub.copyWith(
       remoteEndpoint: remoteEndpoint,
+      serverInstanceId: stableServerInstanceId,
       updatedAt: DateTime.now(),
       pendingSync: true,
     );
@@ -210,8 +213,11 @@ class RemoteAccessService {
       serverInstanceId: serverInstanceId,
     );
 
+    final stableServerInstanceId =
+        serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
     return serverHub.copyWith(
       clearRemoteEndpoint: true,
+      serverInstanceId: stableServerInstanceId,
       updatedAt: DateTime.now(),
       pendingSync: true,
     );

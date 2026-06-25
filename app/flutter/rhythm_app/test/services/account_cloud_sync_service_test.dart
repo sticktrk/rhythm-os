@@ -109,6 +109,7 @@ void main() {
         name: 'Kitchen Server',
         host: '192.168.5.123',
         token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
         remoteEndpoint: const HubEndpoint(
           host: 'hub.devices.rhythm.lighting',
           port: 443,
@@ -133,6 +134,7 @@ void main() {
       );
 
       expect(payload['type'], 'server');
+      expect(payload['server_instance_id'], 'srv-kitchen');
       expect(payload['token'], isNull);
       expect(payload['encrypted_token'], isA<Map<String, dynamic>>());
       expect(payload['encrypted_token'].toString(), isNot(contains(hub.token)));
@@ -154,6 +156,24 @@ void main() {
         keyMaterial: 'signed-in-user-key-material',
       );
       expect(restored, 'owner-token');
+    });
+
+    test('server hub payload can omit server identity for old schemas', () {
+      final hub = Hub.server(
+        id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
+        homeId: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Kitchen Server',
+        host: '192.168.5.123',
+        token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+
+      final payload = AccountCloudSyncService.serverHubSnapshotPayload(
+        hub,
+        includeServerInstanceId: false,
+      );
+
+      expect(payload, isNot(contains('server_instance_id')));
     });
 
     test('server hub payload preserves cloud tunnel when local has none', () {
@@ -276,6 +296,7 @@ void main() {
         name: 'Kitchen Box',
         host: '192.168.5.123',
         token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
         remoteEndpoint: null,
       );
       final remoteHub = Hub.server(
@@ -284,6 +305,7 @@ void main() {
         name: 'Kitchen Box',
         host: '100.64.0.12',
         token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
         remoteEndpoint: const HubEndpoint(
           host: 'kitchen.devices.rhythm.lighting',
           port: 443,
@@ -300,6 +322,75 @@ void main() {
       final hub = snapshots.single.serverHubs.single;
       expect(hub.remoteEndpoint?.host, 'kitchen.devices.rhythm.lighting');
       expect(hub.token, 'owner-token');
+      expect(hub.serverInstanceId, 'srv-kitchen');
+    });
+
+    test(
+        'collapses account Box rows by server identity across endpoint changes',
+        () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Main Home',
+        ownerId: '8f075ac1-e4e7-40f7-817c-4a27424307f4',
+      );
+      final oldEndpointHub = Hub.server(
+        id: '11111111-1111-4111-8111-111111111111',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+        token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+      final newEndpointHub = Hub.server(
+        id: '22222222-2222-4222-8222-222222222222',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.99',
+        token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+
+      final snapshots = accountHomeServerHubsFromRowsForTesting(
+        homes: [home],
+        serverHubs: [oldEndpointHub, newEndpointHub],
+      );
+
+      expect(snapshots.single.serverHubs, hasLength(1));
+      expect(
+          snapshots.single.serverHubs.single.serverInstanceId, 'srv-kitchen');
+    });
+
+    test(
+        'keeps known-different account Box identities separate at same endpoint',
+        () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Main Home',
+        ownerId: '8f075ac1-e4e7-40f7-817c-4a27424307f4',
+      );
+      final firstHub = Hub.server(
+        id: '11111111-1111-4111-8111-111111111111',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.123',
+        token: 'first-owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+      final secondHub = Hub.server(
+        id: '22222222-2222-4222-8222-222222222222',
+        homeId: home.id,
+        name: 'Garage Box',
+        host: '192.168.5.123',
+        token: 'second-owner-token',
+        serverInstanceId: 'srv-garage',
+      );
+
+      final snapshots = accountHomeServerHubsFromRowsForTesting(
+        homes: [home],
+        serverHubs: [firstHub, secondHub],
+      );
+
+      expect(snapshots.single.serverHubs, hasLength(2));
     });
 
     test('keeps same-named account Box rows separate without shared identity',

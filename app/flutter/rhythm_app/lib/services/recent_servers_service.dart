@@ -16,6 +16,7 @@ class RecentServer {
   final String host;
   final int port;
   final String? token;
+  final String? serverInstanceId;
   final DateTime lastConnected;
 
   const RecentServer({
@@ -24,6 +25,7 @@ class RecentServer {
     required this.port,
     required this.lastConnected,
     this.token,
+    this.serverInstanceId,
   });
 
   String get id => '$host:$port';
@@ -31,6 +33,7 @@ class RecentServer {
   RecentServer copyWith({
     String? name,
     String? token,
+    String? serverInstanceId,
     DateTime? lastConnected,
   }) {
     return RecentServer(
@@ -38,6 +41,8 @@ class RecentServer {
       host: host,
       port: port,
       token: token ?? this.token,
+      serverInstanceId:
+          _cleanOptional(serverInstanceId) ?? this.serverInstanceId,
       lastConnected: lastConnected ?? this.lastConnected,
     );
   }
@@ -47,6 +52,7 @@ class RecentServer {
         'host': host,
         'port': port,
         if (token != null) 'token': token,
+        if (serverInstanceId != null) 'serverInstanceId': serverInstanceId,
         'lastConnected': lastConnected.toIso8601String(),
       };
 
@@ -67,6 +73,10 @@ class RecentServer {
       token: (json['token'] as String?)?.trim().isNotEmpty == true
           ? (json['token'] as String).trim()
           : null,
+      serverInstanceId: _cleanOptional(
+        json['serverInstanceId'] as String? ??
+            json['server_instance_id'] as String?,
+      ),
       lastConnected: lastConnected,
     );
   }
@@ -137,6 +147,7 @@ class RecentServersService extends ChangeNotifier {
     required String host,
     required int port,
     String? token,
+    String? serverInstanceId,
   }) async {
     if (!_initialized) await initialize();
     final id = '$host:$port';
@@ -144,12 +155,19 @@ class RecentServersService extends ChangeNotifier {
     final existingIndex = _servers.indexWhere((s) => s.id == id);
     final displayName = name.trim().isNotEmpty ? name.trim() : 'RhythmServer';
     final cleanToken = token?.trim();
+    final cleanServerInstanceId = _cleanOptional(serverInstanceId);
 
     final RecentServer updated;
     if (existingIndex >= 0) {
-      updated = _servers[existingIndex].copyWith(
+      final existing = _servers[existingIndex];
+      updated = RecentServer(
         name: displayName,
-        token: cleanToken != null && cleanToken.isNotEmpty ? cleanToken : null,
+        host: existing.host,
+        port: existing.port,
+        token: cleanToken != null && cleanToken.isNotEmpty
+            ? cleanToken
+            : existing.token,
+        serverInstanceId: cleanServerInstanceId,
         lastConnected: now,
       );
     } else {
@@ -158,6 +176,7 @@ class RecentServersService extends ChangeNotifier {
         host: host,
         port: port,
         token: cleanToken != null && cleanToken.isNotEmpty ? cleanToken : null,
+        serverInstanceId: cleanServerInstanceId,
         lastConnected: now,
       );
     }
@@ -213,4 +232,9 @@ class RecentServersService extends ChangeNotifier {
     final encoded = jsonEncode(_servers.map((s) => s.toJson()).toList());
     await _dataSource.saveSettingsValue(_storageKey, encoded);
   }
+}
+
+String? _cleanOptional(String? value) {
+  final clean = value?.trim();
+  return clean != null && clean.isNotEmpty ? clean : null;
 }

@@ -78,11 +78,13 @@ bool rhythmDiscoveredServerIsRepresentedByHomeForTesting({
   required DiscoveredHub server,
   required Iterable<AccountHomeServerHubs> homes,
   String? authToken,
+  String? serverInstanceId,
 }) =>
     _discoveredServerIsRepresentedByHome(
       server,
       homes,
       authToken: authToken,
+      serverInstanceId: serverInstanceId,
     );
 
 @visibleForTesting
@@ -90,11 +92,13 @@ AccountHomeServerHubs? rhythmHomeEntryForDiscoveredServerForTesting({
   required DiscoveredHub server,
   required Iterable<AccountHomeServerHubs> homes,
   String? authToken,
+  String? serverInstanceId,
 }) =>
     _homeEntryForDiscoveredServer(
       server: server,
       homes: homes,
       authToken: authToken,
+      serverInstanceId: serverInstanceId,
     );
 
 @visibleForTesting
@@ -241,6 +245,9 @@ bool _homeEntriesRepresentSameHome(
 String _normalizedHomeName(String name) => name.trim().toLowerCase();
 
 bool _serverHubsRepresentSameBox(Hub left, Hub right) {
+  if (_sameNonEmptyServerInstanceId(left, right)) return true;
+  if (_differentNonEmptyServerInstanceIds(left, right)) return false;
+
   if (left.id == right.id) return true;
   if (_sameHubEndpoint(left.endpoint, right.endpoint)) return true;
   final leftRemote = left.remoteEndpoint;
@@ -271,6 +278,31 @@ bool _sameNonEmptyToken(String? left, String? right) {
       cleanLeft == cleanRight;
 }
 
+bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
+  final leftId = left.serverInstanceId?.trim();
+  final rightId = right.serverInstanceId?.trim();
+  return leftId != null &&
+      leftId.isNotEmpty &&
+      rightId != null &&
+      rightId.isNotEmpty &&
+      leftId == rightId;
+}
+
+bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
+  final leftId = left.serverInstanceId?.trim();
+  final rightId = right.serverInstanceId?.trim();
+  return leftId != null &&
+      leftId.isNotEmpty &&
+      rightId != null &&
+      rightId.isNotEmpty &&
+      leftId != rightId;
+}
+
+String? _cleanServerInstanceId(String? value) {
+  final clean = value?.trim();
+  return clean != null && clean.isNotEmpty ? clean : null;
+}
+
 Set<String> _homeIdsRepresentedBy({
   required AccountHomeServerHubs snapshot,
   required Iterable<AccountHomeServerHubs> localHomes,
@@ -289,8 +321,14 @@ bool _recentServerIsRepresentedByHome(
   RecentServer server,
   Iterable<AccountHomeServerHubs> homes,
 ) {
+  final serverInstanceId = _cleanServerInstanceId(server.serverInstanceId);
   for (final home in homes) {
     for (final hub in home.serverHubs) {
+      final hubServerInstanceId = _cleanServerInstanceId(hub.serverInstanceId);
+      if (serverInstanceId != null && hubServerInstanceId != null) {
+        if (serverInstanceId == hubServerInstanceId) return true;
+        continue;
+      }
       if (hub.endpoint.host == server.host &&
           hub.endpoint.port == server.port) {
         return true;
@@ -304,11 +342,13 @@ bool _discoveredServerIsRepresentedByHome(
   DiscoveredHub server,
   Iterable<AccountHomeServerHubs> homes, {
   String? authToken,
+  String? serverInstanceId,
 }) {
   return _homeEntryForDiscoveredServer(
         server: server,
         homes: homes,
         authToken: authToken,
+        serverInstanceId: serverInstanceId,
       ) !=
       null;
 }
@@ -317,6 +357,7 @@ AccountHomeServerHubs? _homeEntryForDiscoveredServer({
   required DiscoveredHub server,
   required Iterable<AccountHomeServerHubs> homes,
   String? authToken,
+  String? serverInstanceId,
 }) {
   for (final home in homes) {
     final nextHubs = <Hub>[];
@@ -326,12 +367,14 @@ AccountHomeServerHubs? _homeEntryForDiscoveredServer({
         hub,
         server,
         authToken: authToken,
+        serverInstanceId: serverInstanceId,
       )) {
         matched = true;
         nextHubs.add(_serverHubForDiscoveredServer(
           hub: hub,
           server: server,
           authToken: authToken,
+          serverInstanceId: serverInstanceId,
         ));
       } else {
         nextHubs.add(hub);
@@ -352,8 +395,15 @@ bool _serverHubMatchesDiscoveredServer(
   Hub hub,
   DiscoveredHub server, {
   String? authToken,
+  String? serverInstanceId,
 }) {
   if (hub.type != HubType.server) return false;
+  final cleanServerInstanceId = _cleanServerInstanceId(serverInstanceId);
+  final hubServerInstanceId = _cleanServerInstanceId(hub.serverInstanceId);
+  if (cleanServerInstanceId != null && hubServerInstanceId != null) {
+    return cleanServerInstanceId == hubServerInstanceId;
+  }
+
   final cleanAuthToken = authToken?.trim();
   final hubToken = hub.token?.trim();
   if (hub.endpoint.host == server.address && hub.endpoint.port == server.port) {
@@ -378,6 +428,7 @@ Hub _serverHubForDiscoveredServer({
   required Hub hub,
   required DiscoveredHub server,
   required String? authToken,
+  required String? serverInstanceId,
 }) {
   final token = authToken?.trim();
   final name = _displayNameForDiscoveredServer(server);
@@ -389,6 +440,7 @@ Hub _serverHubForDiscoveredServer({
       useSsl: false,
     ),
     token: token != null && token.isNotEmpty ? token : hub.token,
+    serverInstanceId: serverInstanceId,
     updatedAt: DateTime.now(),
     pendingSync: true,
   );
@@ -405,6 +457,7 @@ String _displayNameForDiscoveredServer(DiscoveredHub server) {
 Hub _detachedServerHubForDiscoveredServer(
   DiscoveredHub server, {
   String? authToken,
+  String? serverInstanceId,
 }) {
   final endpointKey = _rhythmServerEndpointKey(server.address, server.port);
   return Hub.create(
@@ -418,6 +471,7 @@ Hub _detachedServerHubForDiscoveredServer(
       useSsl: false,
     ),
     token: authToken,
+    serverInstanceId: serverInstanceId,
   ).copyWith(pendingSync: false);
 }
 
@@ -1311,6 +1365,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     if (!mounted) return;
 
     if (isHealthy) {
+      final serverInstanceId =
+          await _serverInstanceIdForDiscoveredHub(hub, authToken: authToken);
+
       if (!LocalRhythmServerService.instance
           .isLocalEndpoint(hub.address, hub.port)) {
         try {
@@ -1322,7 +1379,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
       final Hub? result;
       try {
-        result = await _persistDiscoveredServerHub(hub, authToken);
+        result = await _persistDiscoveredServerHub(
+          hub,
+          authToken,
+          serverInstanceId: serverInstanceId,
+        );
       } on _HomeNameCancelledException {
         if (!mounted) return;
         setState(() {
@@ -1352,6 +1413,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         host: hub.address,
         port: hub.port,
         token: authToken ?? result.token,
+        serverInstanceId: serverInstanceId ?? result.serverInstanceId,
       );
 
       if (!mounted) return;
@@ -1443,11 +1505,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       return;
     }
 
+    final serverInstanceId =
+        await _serverInstanceIdForDiscoveredHub(hub, authToken: authToken);
+
     await RecentServersService.instance.record(
       name: _displayNameForDiscoveredServer(hub),
       host: hub.address,
       port: hub.port,
       token: authToken,
+      serverInstanceId: serverInstanceId,
     );
 
     if (!mounted) return;
@@ -1461,6 +1527,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       hub: _detachedServerHubForDiscoveredServer(
         hub,
         authToken: authToken,
+        serverInstanceId: serverInstanceId,
       ),
       headerTitleOverride: _displayNameForDiscoveredServer(hub),
       homeManaged: false,
@@ -1469,13 +1536,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   Future<Hub?> _persistDiscoveredServerHub(
     DiscoveredHub discovered,
-    String? authToken,
-  ) async {
+    String? authToken, {
+    String? serverInstanceId,
+  }) async {
     final homeProvider = context.read<HomeProvider>();
     final existingHome = _homeEntryForDiscoveredServer(
       server: discovered,
       homes: _visibleHomeEntries(homeProvider),
       authToken: authToken,
+      serverInstanceId: serverInstanceId,
     );
     if (existingHome != null) {
       return homeProvider.enterHome(existingHome);
@@ -1492,6 +1561,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       host: discovered.address,
       port: discovered.port,
       token: authToken,
+      serverInstanceId: serverInstanceId,
       location: home.location,
       timezone: home.timezone,
     );
@@ -1556,9 +1626,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         name: 'This Mac',
         type: HubType.server,
       );
+      final serverInstanceId =
+          await _serverInstanceIdForDiscoveredHub(hub, authToken: null);
       final Hub? result;
       try {
-        result = await _persistDiscoveredServerHub(hub, null);
+        result = await _persistDiscoveredServerHub(
+          hub,
+          null,
+          serverInstanceId: serverInstanceId,
+        );
       } on _HomeNameCancelledException {
         if (!mounted) return;
         setState(() => _isStartingLocalServer = false);
@@ -1579,6 +1655,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         host: localRhythmServerHost,
         port: localRhythmServerDefaultPort,
         token: result.token,
+        serverInstanceId: serverInstanceId ?? result.serverInstanceId,
       );
 
       if (!mounted) return;
@@ -1613,9 +1690,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Future<String?> _resolveAuthTokenForDiscoveredHub(DiscoveredHub hub) async {
     final baseUrl = 'http://${hub.address}:${hub.port}';
     final status = await _serverAuthStatus(baseUrl, hub.address);
-    final shouldClaimToken = status != null &&
-        status.claimAvailable &&
-        (status.requiresAuth || FeatureFlags.remoteAccessTunnel);
+    final shouldClaimToken = status?.claimAvailable == true;
     if (status?.requiresAuth != true && !shouldClaimToken) return null;
 
     final storedToken = await _storedServerTokenFor(hub, baseUrl: baseUrl);
@@ -1624,11 +1699,28 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     if (shouldClaimToken) {
-      final claim = await RhythmAuthApi(baseUrl: baseUrl).claimOwnerToken();
-      return claim.token;
+      return _requestOwnerTokenViaBle(hub);
     }
 
     return _requestOwnerTokenViaBle(hub);
+  }
+
+  Future<String?> _serverInstanceIdForDiscoveredHub(
+    DiscoveredHub hub, {
+    required String? authToken,
+  }) async {
+    try {
+      final state = await RhythmConfigApi(
+        baseUrl: 'http://${hub.address}:${hub.port}/',
+        authToken: authToken,
+      ).getState().timeout(const Duration(seconds: 4));
+      return _cleanServerInstanceId(state.serverInstanceId);
+    } catch (error) {
+      debugPrint(
+        'Server identity unavailable for ${hub.address}:${hub.port}: $error',
+      );
+      return null;
+    }
   }
 
   Future<RhythmAuthStatus?> _serverAuthStatus(
@@ -2990,7 +3082,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     return GestureDetector(
-      onTap: _isConnecting ? null : () => _openDiscoveredDevice(hub),
+      onTap: _isConnecting ? null : () => _connectToDevice(hub),
       onLongPress: () => _confirmForgetRecent(server),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -3103,7 +3195,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildSetUpHomeButton(hub),
+                  _buildInspectServerButton(hub),
                   const SizedBox(width: 2),
                   Icon(
                     Icons.arrow_forward_rounded,
@@ -3118,9 +3210,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
   }
 
-  Widget _buildSetUpHomeButton(DiscoveredHub hub) {
+  Widget _buildInspectServerButton(DiscoveredHub hub) {
     return Tooltip(
-      message: 'Set up Home',
+      message: 'Server settings',
       child: SizedBox(
         width: 32,
         height: 32,
@@ -3129,11 +3221,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           constraints: const BoxConstraints.tightFor(width: 32, height: 32),
           splashRadius: 18,
           icon: Icon(
-            Icons.add_home_rounded,
+            Icons.settings_rounded,
             color: _teal.withValues(alpha: 0.72),
             size: 18,
           ),
-          onPressed: _isConnecting ? null : () => _connectToDevice(hub),
+          onPressed: _isConnecting ? null : () => _openDiscoveredDevice(hub),
         ),
       ),
     );
@@ -3182,7 +3274,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     final b = _breathe.value;
 
     return GestureDetector(
-      onTap: _isConnecting ? null : () => _openDiscoveredDevice(hub),
+      onTap: _isConnecting ? null : () => _connectToDevice(hub),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
@@ -3299,7 +3391,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildSetUpHomeButton(hub),
+                  _buildInspectServerButton(hub),
                   const SizedBox(width: 2),
                   Icon(
                     Icons.arrow_forward_rounded,

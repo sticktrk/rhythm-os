@@ -404,6 +404,54 @@ void main() {
       );
     });
 
+    test('uses recent server identity before endpoint reuse', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+        serverInstanceId: 'srv-kitchen',
+      );
+      final sameBoxAtNewIp = RecentServer(
+        name: 'Kitchen Box',
+        host: '192.168.5.99',
+        port: rhythmServerDefaultPort,
+        serverInstanceId: 'srv-kitchen',
+        lastConnected: DateTime.utc(2026, 6, 6),
+      );
+      final differentBoxAtOldIp = RecentServer(
+        name: 'Garage Box',
+        host: '192.168.5.10',
+        port: rhythmServerDefaultPort,
+        serverInstanceId: 'srv-garage',
+        lastConnected: DateTime.utc(2026, 6, 6),
+      );
+
+      final homes = [
+        AccountHomeServerHubs(home: home, serverHubs: [hub]),
+      ];
+
+      expect(
+        rhythmRecentServerIsRepresentedByHomeForTesting(
+          server: sameBoxAtNewIp,
+          homes: homes,
+        ),
+        isTrue,
+      );
+      expect(
+        rhythmRecentServerIsRepresentedByHomeForTesting(
+          server: differentBoxAtOldIp,
+          homes: homes,
+        ),
+        isFalse,
+      );
+    });
+
     test('hides discovered hardware already represented by a Home', () {
       final home = Home.create(
         id: 'home-1',
@@ -487,6 +535,79 @@ void main() {
       expect(updatedHub.endpoint.port, rhythmServerDefaultPort);
       expect(updatedHub.token, 'owner-token');
       expect(updatedHub.pendingSync, isTrue);
+    });
+
+    test('updates existing Home entry by server identity when IP changed', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.10',
+        token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+      final discovered = DiscoveredHub(
+        host: '192.168.5.99',
+        address: '192.168.5.99',
+        port: rhythmServerDefaultPort,
+        name: 'RhythmServer',
+        type: HubType.server,
+      );
+
+      final entry = rhythmHomeEntryForDiscoveredServerForTesting(
+        server: discovered,
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        serverInstanceId: 'srv-kitchen',
+      );
+
+      expect(entry, isNotNull);
+      final updatedHub = entry!.serverHubs.single;
+      expect(updatedHub.id, hub.id);
+      expect(updatedHub.endpoint.host, '192.168.5.99');
+      expect(updatedHub.serverInstanceId, 'srv-kitchen');
+      expect(updatedHub.token, 'owner-token');
+    });
+
+    test('keeps known-different server identity separate at the same endpoint',
+        () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.123',
+        token: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+      final discovered = DiscoveredHub(
+        host: '192.168.5.123',
+        address: '192.168.5.123',
+        port: rhythmServerDefaultPort,
+        name: 'Garage Box',
+        type: HubType.server,
+      );
+
+      final entry = rhythmHomeEntryForDiscoveredServerForTesting(
+        server: discovered,
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        authToken: 'owner-token',
+        serverInstanceId: 'srv-garage',
+      );
+
+      expect(entry, isNull);
     });
 
     test(
