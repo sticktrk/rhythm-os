@@ -378,6 +378,10 @@ fn group_light_node_id(room_id: &str, hub_key: &HubKey, hub_room_id: &str) -> St
     )
 }
 
+fn hub_supports_device_dispatch(hub_key: &HubKey) -> bool {
+    hub_key.hub_type.as_str() != crate::hub::HubType::HUE
+}
+
 impl TopologyRoom {
     /// Create a new empty room.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
@@ -1942,7 +1946,7 @@ impl RoomTopologyStore {
         rhythm_room_id
     }
 
-    fn device_dispatch_route(
+    fn light_device_endpoint_route(
         &self,
         node: &TopologyDeviceNode,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
@@ -1960,18 +1964,36 @@ impl RoomTopologyStore {
         ))
     }
 
+    fn device_dispatch_route(
+        &self,
+        node: &TopologyDeviceNode,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Option<(HubKey, HubDispatchTarget)> {
+        let (hub_key, target) = self.light_device_endpoint_route(node, canonical_registry)?;
+        if hub_supports_device_dispatch(&hub_key) {
+            Some((hub_key, target))
+        } else {
+            None
+        }
+    }
+
     fn attached_light_dispatch_route(
         &self,
         node: &TopologyDeviceNode,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
     ) -> Option<(HubKey, HubDispatchTarget)> {
         let parent_id = node.parent_id.as_deref()?;
-        let (hub_key, device_target) = self.device_dispatch_route(node, canonical_registry)?;
-        let target = self
+        let (hub_key, device_target) =
+            self.light_device_endpoint_route(node, canonical_registry)?;
+        let target = match self
             .rooms
             .get(parent_id)
             .and_then(|room| room.grouped_dispatch_target_for_hub(&hub_key))
-            .unwrap_or(device_target);
+        {
+            Some(group_target) => group_target,
+            None if hub_supports_device_dispatch(&hub_key) => device_target,
+            None => return None,
+        };
         Some((hub_key, target))
     }
 
@@ -2948,6 +2970,65 @@ mod tests {
         assert_eq!(store.periodic_light_nodes(&registry), expected_nodes);
         assert!(!store.attached_light_uses_parent_dispatch(&light_one_id, &registry));
         assert!(store.light_node_uses_device_dispatch(&light_one_id, &registry));
+    }
+
+    #[test]
+    fn standalone_matter_light_remains_periodic_routable() {
+        let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &matter_key(),
+            make_identity(
+                "matter-light-1",
+                "",
+                "",
+                "Standalone Lamp",
+                DeviceType::Light,
+            ),
+        );
+        store.ensure_standalone_device(&light_id);
+
+        assert_eq!(
+            store.composite_routing(&registry).get(&light_id),
+            Some(&vec![(
+                matter_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["matter-light-1".to_string()],
+                },
+            )])
+        );
+        assert_eq!(
+            store.periodic_light_nodes(&registry),
+            vec![TopologyLightNode {
+                id: light_id.clone(),
+                source_node_id: light_id.clone(),
+                emit_node_id: light_id.clone(),
+            }]
+        );
+        assert!(store.light_node_uses_device_dispatch(&light_id, &registry));
+    }
+
+    #[test]
+    fn standalone_hue_light_without_group_dispatch_is_not_periodic_routable() {
+        let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "5761f9a0-bf64-4aac-aa92-ad6335c2451f",
+                "",
+                "",
+                "Hue color lamp 32",
+                DeviceType::Light,
+            ),
+        );
+        store.ensure_standalone_device(&light_id);
+
+        assert!(!store.composite_routing(&registry).contains_key(&light_id));
+        assert!(store.periodic_light_nodes(&registry).is_empty());
+        assert!(!store.light_node_uses_device_dispatch(&light_id, &registry));
     }
 
     #[test]
