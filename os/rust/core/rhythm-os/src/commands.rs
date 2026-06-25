@@ -1752,22 +1752,30 @@ fn mood_scene_display_output(
     (output.power == LightScenePower::On).then_some(output)
 }
 
+/// Fold the active mood scene's output into the node's display values.
+///
+/// Returns the scene's RGB when it renders a direct color (`Rgb`/`RgbXy`). A
+/// `kelvin` field alone cannot express a saturated mood color, so without this
+/// the node state reported the rhythm-curve kelvin while the bulbs showed the
+/// mood color — leaving the app's mood indicator mismatched with the lights.
 fn apply_mood_scene_display_values(
     s: &AppState,
     snap: &rhythm_core::NodeSnapshot,
     room_state: RoomModeState,
     brightness: &mut u8,
     kelvin: &mut u16,
-) {
-    let Some(output) = mood_scene_display_output(s, snap, room_state) else {
-        return;
-    };
+) -> Option<Rgb> {
+    let output = mood_scene_display_output(s, snap, room_state)?;
     *brightness = output.brightness;
-    if let Some(LightSceneColor::Kelvin {
-        kelvin: scene_kelvin,
-    }) = output.color
-    {
-        *kelvin = scene_kelvin.clamp(500, 25_000);
+    match output.color {
+        Some(LightSceneColor::Kelvin {
+            kelvin: scene_kelvin,
+        }) => {
+            *kelvin = scene_kelvin.clamp(500, 25_000);
+            None
+        }
+        Some(LightSceneColor::Rgb { rgb }) | Some(LightSceneColor::RgbXy { rgb, .. }) => Some(rgb),
+        Some(LightSceneColor::Xy { .. }) | None => None,
     }
 }
 
@@ -1836,7 +1844,7 @@ fn build_node_state_dto_from_snapshot_parts(
             brightness_offset: snap.brightness_offset,
         },
     );
-    apply_mood_scene_display_values(ctx.state, snap, state, &mut brightness, &mut kelvin);
+    let color = apply_mood_scene_display_values(ctx.state, snap, state, &mut brightness, &mut kelvin);
 
     let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
         if let Some(ms) = ctx.motion_snapshots.get(&snap.id) {
@@ -1893,6 +1901,7 @@ fn build_node_state_dto_from_snapshot_parts(
         pending_dispatch: ctx.pending_dispatch_nodes.contains(&snap.id),
         brightness,
         kelvin,
+        color,
         mood_enabled,
         mood_active,
         standby_enabled: snap.standby_enabled,
@@ -1922,6 +1931,7 @@ pub fn build_node_state_event(
         transitioning,
         brightness,
         kelvin,
+        color,
         hub_types,
         mood_enabled,
         mood_active,
@@ -1988,7 +1998,8 @@ pub fn build_node_state_event(
                     brightness_offset: snap.brightness_offset,
                 },
             );
-        apply_mood_scene_display_values(&s, snap, room_state, &mut curve_brightness, &mut kelvin);
+        let color =
+            apply_mood_scene_display_values(&s, snap, room_state, &mut curve_brightness, &mut kelvin);
         (
             mode,
             room_state,
@@ -1996,6 +2007,7 @@ pub fn build_node_state_event(
             transitioning,
             curve_brightness,
             kelvin,
+            color,
             hub_types,
             mood_enabled,
             mood_active,
@@ -2016,6 +2028,7 @@ pub fn build_node_state_event(
             pending_dispatch,
             brightness,
             kelvin,
+            color,
             mood_enabled,
             mood_active,
             standby_enabled,
@@ -14998,6 +15011,44 @@ mod tests {
         let event = build_node_state_event(&state, &snap);
         assert_eq!(event.brightness, 37);
         assert_eq!(event.kelvin, 3200);
+    }
+
+    #[test]
+    fn scene_backed_mood_state_reports_scene_rgb_color() {
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let mood_rgb = Rgb::new(57, 38, 255);
+        // Custom mood colors are stored as direct (rgb_xy) scene colors, which a
+        // `kelvin` field cannot express. Bind one as the room's mood scene.
+        let mut scene = scene_for_light_with_output("blue-mood", &device_id, 100, 3000);
+        if let Some(layer) = scene.light.as_mut() {
+            layer.entries[0].output.color = Some(crate::scenes::LightSceneColor::RgbXy {
+                rgb: mood_rgb,
+                xy: rhythm_core::rgb_to_xy(mood_rgb),
+            });
+        }
+        do_scene_upsert(&state, scene).unwrap();
+        do_scene_apply(
+            &state,
+            "blue-mood",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        // The node state must surface the mood scene's RGB, not the rhythm-curve
+        // kelvin — otherwise the app's mood indicator shows a warm white while
+        // the bulbs render the saturated mood color (issue #12).
+        let node_state = build_node_state(&state, "room1").unwrap();
+        assert_eq!(node_state.state, RoomModeState::Mood);
+        assert_eq!(node_state.color, Some(mood_rgb));
+
+        let snap = rhythm_core::NodeSnapshot::from_room_snapshot(
+            runtime.engine_room_snapshot("room1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snap);
+        assert_eq!(event.color, Some(mood_rgb));
     }
 
     #[test]

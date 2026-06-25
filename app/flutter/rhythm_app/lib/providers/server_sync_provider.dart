@@ -844,7 +844,14 @@ class ServerSyncProvider extends ChangeNotifier {
   void _syncServerMoodProfiles(Iterable<RhythmRoom> nodes) {
     if (_profiles.isEmpty) return;
     for (final node in nodes) {
-      _roomProvider.setMoodColorFromServer(node.id, _moodColorForNode(node));
+      // Only override the cached mood color when this node actually resolves a
+      // mood *profile* color. Scene-based moods carry their color on the live
+      // node state instead, so pushing a null here would clobber it and leave
+      // the mood indicator stuck on the rhythm-curve white (issue #12).
+      final moodColor = _moodColorForNode(node);
+      if (moodColor != null) {
+        _roomProvider.setMoodColorFromServer(node.id, moodColor);
+      }
       _roomProvider.setMoodBrightnessFromServer(
         node.id,
         _moodBrightnessForNode(node),
