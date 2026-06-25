@@ -354,12 +354,19 @@ bool _serverHubMatchesDiscoveredServer(
   String? authToken,
 }) {
   if (hub.type != HubType.server) return false;
+  final cleanAuthToken = authToken?.trim();
+  final hubToken = hub.token?.trim();
   if (hub.endpoint.host == server.address && hub.endpoint.port == server.port) {
+    if (cleanAuthToken != null &&
+        cleanAuthToken.isNotEmpty &&
+        hubToken != null &&
+        hubToken.isNotEmpty &&
+        cleanAuthToken != hubToken) {
+      return false;
+    }
     return true;
   }
 
-  final cleanAuthToken = authToken?.trim();
-  final hubToken = hub.token?.trim();
   return cleanAuthToken != null &&
       cleanAuthToken.isNotEmpty &&
       hubToken != null &&
