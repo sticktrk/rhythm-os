@@ -287,6 +287,14 @@ impl ApiResponse {
         }
     }
 
+    pub fn forbidden(msg: &str) -> Self {
+        Self {
+            status: 403,
+            body: msg.to_string(),
+            content_type: "text/plain",
+        }
+    }
+
     pub fn server_error(e: impl Display) -> Self {
         Self {
             status: 500,
