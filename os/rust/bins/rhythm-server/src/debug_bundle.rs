@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fs;
-use std::io::{BufRead, Cursor, Write};
+use std::io::{BufRead, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
 use std::time::SystemTime;
@@ -33,6 +33,8 @@ const LOG_BASENAMES: &[&str] = &[
     "bluetooth.log",
     "cloudflared.log",
 ];
+const DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT: u64 = 1024 * 1024;
+const DEBUG_BUNDLE_LOG_CAPTURE_ROTATION_LIMIT: u32 = 1;
 const EXACT_PERSISTED_FILES: &[&str] = &["topology.json", "canonical_registry.json", "rooms.json"];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
@@ -433,6 +435,10 @@ struct CapturedFileEntry {
     source_path: String,
     bytes: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     modified_at: Option<String>,
 }
 
@@ -673,8 +679,10 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
             .context("building Matter controller debug snapshot")?;
 
     let log_artifacts = discover_log_artifacts(&searched_log_dirs, &mut diagnostics);
-    let log_summary_json = build_log_summary_json(&log_artifacts, created_at, &mut diagnostics)
-        .context("building log summary snapshot")?;
+    let captured_log_artifacts = log_artifacts_for_bundle_capture(&log_artifacts);
+    let log_summary_json =
+        build_log_summary_json(&captured_log_artifacts, created_at, &mut diagnostics)
+            .context("building log summary snapshot")?;
     let persisted_artifacts = discover_persisted_artifacts(&runtime, &mut diagnostics);
 
     let encoder = flate2::write::GzEncoder::new(Vec::<u8>::new(), flate2::Compression::default());
@@ -737,8 +745,8 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
     )?;
 
     let mut captured_logs = Vec::<CapturedFileEntry>::new();
-    for artifact in &log_artifacts {
-        if let Some((captured, bytes)) = capture_artifact(artifact, &mut diagnostics) {
+    for artifact in &captured_log_artifacts {
+        if let Some((captured, bytes)) = capture_log_artifact(artifact, &mut diagnostics) {
             append_bytes(&mut builder, &artifact.archive_path, &bytes, 0o644)?;
             captured_logs.push(captured);
         }
@@ -1402,6 +1410,106 @@ fn matches_log_name(file_name: &str) -> bool {
     })
 }
 
+fn log_artifacts_for_bundle_capture(log_artifacts: &[FileArtifact]) -> Vec<FileArtifact> {
+    log_artifacts
+        .iter()
+        .filter(|artifact| should_capture_log_artifact(artifact))
+        .cloned()
+        .collect()
+}
+
+fn should_capture_log_artifact(artifact: &FileArtifact) -> bool {
+    artifact
+        .source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(log_rotation_index)
+        .is_some_and(|rotation| rotation <= DEBUG_BUNDLE_LOG_CAPTURE_ROTATION_LIMIT)
+}
+
+fn log_rotation_index(file_name: &str) -> Option<u32> {
+    for base_name in LOG_BASENAMES {
+        if file_name == *base_name {
+            return Some(0);
+        }
+
+        let Some(suffix) = file_name.strip_prefix(base_name) else {
+            continue;
+        };
+        let Some(rotation) = suffix.strip_prefix('.') else {
+            continue;
+        };
+        if rotation.is_empty() || !rotation.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(rotation) = rotation.parse::<u32>() {
+            return Some(rotation);
+        }
+    }
+
+    None
+}
+
+fn capture_log_artifact(
+    artifact: &FileArtifact,
+    diagnostics: &mut BundleDiagnostics,
+) -> Option<(CapturedFileEntry, Vec<u8>)> {
+    let mut file = match fs::File::open(&artifact.source_path) {
+        Ok(file) => file,
+        Err(err) => {
+            diagnostics.record_file_error("open", artifact.source_path.display().to_string(), &err);
+            diagnostics.add_warning(format!("Failed to open {}", artifact.source_path.display()));
+            return None;
+        }
+    };
+    let source_bytes = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(err) => {
+            diagnostics.record_file_error(
+                "metadata",
+                artifact.source_path.display().to_string(),
+                &err,
+            );
+            diagnostics.add_warning(format!(
+                "Failed to read metadata for {}",
+                artifact.source_path.display()
+            ));
+            return None;
+        }
+    };
+
+    let read_start = source_bytes.saturating_sub(DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT);
+    if read_start > 0 {
+        if let Err(err) = file.seek(SeekFrom::Start(read_start)) {
+            diagnostics.record_file_error("seek", artifact.source_path.display().to_string(), &err);
+            diagnostics.add_warning(format!("Failed to seek {}", artifact.source_path.display()));
+            return None;
+        }
+    }
+
+    let capture_len = source_bytes.saturating_sub(read_start) as usize;
+    let mut bytes = Vec::with_capacity(capture_len);
+    if let Err(err) = file.read_to_end(&mut bytes) {
+        diagnostics.record_file_error("read", artifact.source_path.display().to_string(), &err);
+        diagnostics.add_warning(format!("Failed to read {}", artifact.source_path.display()));
+        return None;
+    }
+
+    let modified_at = path_modified_rfc3339(&artifact.source_path, diagnostics);
+    let truncated = read_start > 0;
+    Some((
+        CapturedFileEntry {
+            archive_path: artifact.archive_path.clone(),
+            source_path: artifact.source_path.display().to_string(),
+            bytes: bytes.len(),
+            source_bytes: truncated.then_some(source_bytes),
+            truncated: truncated.then_some(true),
+            modified_at,
+        },
+        bytes,
+    ))
+}
+
 fn capture_artifact(
     artifact: &FileArtifact,
     diagnostics: &mut BundleDiagnostics,
@@ -1421,6 +1529,8 @@ fn capture_artifact(
             archive_path: artifact.archive_path.clone(),
             source_path: artifact.source_path.display().to_string(),
             bytes: bytes.len(),
+            source_bytes: None,
+            truncated: None,
             modified_at,
         },
         bytes,
@@ -3009,6 +3119,93 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("interior NUL byte")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_debug_bundle_caps_raw_log_tails_and_skips_deep_rotations() {
+        let root = unique_test_dir("bundle-log-cap");
+        let data_dir = root.join("data");
+        let log_dir = data_dir.join("log");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let limit = DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT as usize;
+        let mut active_log = b"DROP-ACTIVE-PREFIX\n".to_vec();
+        active_log.extend(std::iter::repeat(b'a').take(limit));
+        active_log.extend_from_slice(b"ACTIVE-TAIL\n");
+        fs::write(log_dir.join("rhythm-server.log"), &active_log).unwrap();
+
+        let mut rotated_log = b"DROP-ROTATED-PREFIX\n".to_vec();
+        rotated_log.extend(std::iter::repeat(b'b').take(limit));
+        rotated_log.extend_from_slice(b"ROTATED-TAIL\n");
+        fs::write(log_dir.join("rhythm-server.log.1"), &rotated_log).unwrap();
+        fs::write(
+            log_dir.join("rhythm-server.log.2"),
+            b"deep rotation should not be scanned or archived\n",
+        )
+        .unwrap();
+        fs::write(
+            log_dir.join("rhythm-matter.log.2"),
+            b"matter deep rotation should not be scanned or archived\n",
+        )
+        .unwrap();
+
+        let state: SharedState =
+            std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
+        {
+            let mut guard = state.lock().unwrap();
+            guard.firmware_version = "1.2.3";
+            guard.platform_type = "appliance";
+            guard.platform_context = "rpiz";
+            guard.data_dir = data_dir.display().to_string();
+        }
+
+        let bundle = build_debug_bundle(&state).unwrap();
+        let files = unpack_bundle(&bundle.bytes);
+
+        let active_capture = files.get("logs/rhythm-server.log").unwrap();
+        assert_eq!(active_capture.len(), limit);
+        let active_text = String::from_utf8_lossy(active_capture);
+        assert!(active_text.ends_with("ACTIVE-TAIL\n"));
+        assert!(!active_text.contains("DROP-ACTIVE-PREFIX"));
+
+        let rotated_capture = files.get("logs/rhythm-server.log.1").unwrap();
+        assert_eq!(rotated_capture.len(), limit);
+        let rotated_text = String::from_utf8_lossy(rotated_capture);
+        assert!(rotated_text.ends_with("ROTATED-TAIL\n"));
+        assert!(!rotated_text.contains("DROP-ROTATED-PREFIX"));
+
+        assert!(!files.contains_key("logs/rhythm-server.log.2"));
+        assert!(!files.contains_key("logs/rhythm-matter.log.2"));
+
+        let manifest: Value = serde_json::from_slice(files.get("manifest.json").unwrap()).unwrap();
+        let captured_logs = manifest["captured_logs"].as_array().unwrap();
+        assert_eq!(captured_logs.len(), 2);
+        assert!(captured_logs
+            .iter()
+            .all(|entry| !entry["archive_path"].as_str().unwrap().ends_with(".2")));
+        let active_entry = captured_logs
+            .iter()
+            .find(|entry| entry["archive_path"] == "logs/rhythm-server.log")
+            .unwrap();
+        assert_eq!(active_entry["bytes"], Value::from(limit as u64));
+        assert_eq!(
+            active_entry["source_bytes"],
+            Value::from(active_log.len() as u64)
+        );
+        assert_eq!(active_entry["truncated"], true);
+
+        let log_summary: Value =
+            serde_json::from_slice(files.get("log_summary.json").unwrap()).unwrap();
+        let summary_paths = log_summary["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["archive_path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(!summary_paths.contains(&"logs/rhythm-server.log.2"));
+        assert!(!summary_paths.contains(&"logs/rhythm-matter.log.2"));
 
         let _ = fs::remove_dir_all(root);
     }

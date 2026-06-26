@@ -306,11 +306,16 @@ The archive currently includes:
 - `manifest.json` with bundle metadata and the exact log files captured
 - `state.json` from the normal redacted state snapshot
 - `profile_bundle.json` from the normal profile-bundle export
-- matching files from `/data/log`, including rotated variants for:
-- `rhythm-server.log`, `rhythm-server.log.1`, ...
-- `rhythm-matter.log`, `rhythm-matter.log.1`, ...
-- `wifi.log`, `wifi.log.1`, ...
-- `bluetooth.log`, `bluetooth.log.1`, ...
+- `log_summary.json`, which scans the same active and `.1` log files captured
+  in the bundle and keeps bounded recent warnings/errors/tail excerpts
+- capped raw log tails from `/data/log`: only the active file and `.1` rotation
+  are archived for each known log family, and each archived log is limited to
+  the newest 1 MiB:
+- `rhythm-server.log`, `rhythm-server.log.1`
+- `rhythm-matter.log`, `rhythm-matter.log.1`
+- `wifi.log`, `wifi.log.1`
+- `bluetooth.log`, `bluetooth.log.1`
+- `cloudflared.log`, `cloudflared.log.1`
 
 The endpoint only bundles file-backed appliance logs. It does not include hub
 credentials, Wi-Fi passwords, or a secrets-included backup bundle.
