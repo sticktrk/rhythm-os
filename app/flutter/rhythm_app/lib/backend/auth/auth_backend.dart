@@ -90,6 +90,9 @@ abstract class AuthBackend {
   /// Throws if user is not signed in or email already exists.
   Future<AuthUser?> linkWithEmailPassword(String email, String password);
 
+  /// Send an email sign-in link to an existing user.
+  Future<void> sendEmailSignInLink(String email);
+
   /// Send a password reset email.
   Future<void> sendPasswordResetEmail(String email);
 

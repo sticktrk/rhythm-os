@@ -92,6 +92,11 @@ class OfflineAuthBackend implements AuthBackend {
   }
 
   @override
+  Future<void> sendEmailSignInLink(String email) async {
+    throw UnsupportedError('Email login links require an online connection');
+  }
+
+  @override
   Future<void> sendPasswordResetEmail(String email) async {
     throw UnsupportedError('Password reset requires an online connection');
   }
