@@ -434,6 +434,34 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         let (node_id, _endpoint) = crate::lifecycle::parse_device_id(&device_id)
             .ok_or_else(|| anyhow::anyhow!("Invalid Matter device ID: {}", device_id))?;
 
+        if force {
+            match get_hub_data(state) {
+                Ok(hub_data) => {
+                    warn!(
+                        target: "pair",
+                        "Matter: force-removing node {} locally without decommission RPC",
+                        node_id
+                    );
+                    hub_data.finish_decommission(node_id, true);
+                }
+                Err(error) => {
+                    warn!(
+                        target: "pair",
+                        "Matter: force-removing node {} locally without connected hub data: {:#}",
+                        node_id,
+                        error
+                    );
+                }
+            }
+
+            return Ok(UnpairingResult {
+                hub_type: "matter".to_string(),
+                status: PairingStatus::Complete,
+                device_id: Some(device_id.to_string()),
+                error: None,
+            });
+        }
+
         let transport = get_transport(state)?;
         let hub_data = get_hub_data(state)?;
 
@@ -463,7 +491,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             });
         }
 
-        match transport.decommission_device(node_id, force) {
+        match transport.decommission_device(node_id, false) {
             Ok(()) => {
                 info!(target: "sys", "Matter: decommissioned node {}", node_id);
                 hub_data.finish_decommission(node_id, true);
@@ -477,21 +505,6 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             }
             Err(e) => {
                 log::error!(target: "pair", "Matter decommission error: {:#}", e);
-                if force {
-                    log::warn!(
-                        target: "pair",
-                        "Matter: force-removing node {} locally after decommission failed",
-                        node_id
-                    );
-                    hub_data.finish_decommission(node_id, true);
-                    return Ok(UnpairingResult {
-                        hub_type: "matter".to_string(),
-                        status: PairingStatus::Complete,
-                        device_id: Some(device_id.to_string()),
-                        error: None,
-                    });
-                }
-
                 hub_data.finish_decommission(node_id, false);
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
@@ -1138,6 +1151,13 @@ mod tests {
             ),
             "Matter transport not initialized"
         );
+        let result = integration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({ "device_id": "matter-42-2", "force": true }),
+            )
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Complete);
     }
 
     #[test]
@@ -1156,10 +1176,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, PairingStatus::Complete);
         assert_eq!(result.device_id.as_deref(), Some("matter-42-2"));
-        assert_eq!(
-            transport.decommission_calls.lock().unwrap().as_slice(),
-            &[(42, true)]
-        );
+        assert!(transport.decommission_calls.lock().unwrap().is_empty());
         assert!(data.is_recently_decommissioned(42));
 
         let result = integration
@@ -1169,7 +1186,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.status, PairingStatus::Complete);
-        assert_eq!(transport.decommission_calls.lock().unwrap().len(), 1);
+        assert!(transport.decommission_calls.lock().unwrap().is_empty());
 
         assert!(data.begin_decommission(77));
         let result = integration
@@ -1188,6 +1205,10 @@ mod tests {
         assert_eq!(result.status, PairingStatus::Failed);
         assert_eq!(result.error.as_deref(), Some("sidecar rejected request"));
         assert!(!data.is_recently_decommissioned(88));
+        assert_eq!(
+            transport.decommission_calls.lock().unwrap().as_slice(),
+            &[(88, false)]
+        );
 
         let result = integration
             .start_unpairing(
@@ -1199,10 +1220,23 @@ mod tests {
         assert_eq!(result.device_id.as_deref(), Some("matter-89"));
         assert_eq!(result.error, None);
         assert!(data.is_recently_decommissioned(89));
-        assert!(transport
-            .decommission_calls
-            .lock()
-            .unwrap()
-            .contains(&(89, true)));
+        assert_eq!(
+            transport.decommission_calls.lock().unwrap().as_slice(),
+            &[(88, false)]
+        );
+
+        assert!(data.begin_decommission(90));
+        let result = integration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({ "device_id": "matter-90", "force": true }),
+            )
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Complete);
+        assert!(data.is_recently_decommissioned(90));
+        assert_eq!(
+            transport.decommission_calls.lock().unwrap().as_slice(),
+            &[(88, false)]
+        );
     }
 }
