@@ -846,7 +846,8 @@ void main() {
       expect(connection.reconnectCalls, 1);
     });
 
-    test('returns false when Home Assistant credentials do not connect on server',
+    test(
+        'returns false when Home Assistant credentials do not connect on server',
         () async {
       api.hubCredentialsResult = false;
       final homeProvider = _TestHomeProvider([
@@ -3946,6 +3947,71 @@ void main() {
     expect(provider.standbyEnabledForNode('room-1'), isTrue);
   });
 
+  testWidgets('room settings hides motion timeout rows without motion behavior',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['matter'],
+            'device_ids': ['light-1'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Settings');
+
+    expect(find.text('Off Behavior'), findsOneWidget);
+    expect(find.text('DAY PROFILE'), findsNothing);
+    expect(find.text('SLEEP PROFILE'), findsNothing);
+    expect(find.text('Motion Timeout'), findsNothing);
+    expect(find.byType(Slider), findsNothing);
+  });
+
   testWidgets('room settings rhythm tab pushes day and sleep motion timeouts',
       (tester) async {
     _registerWidgetCleanup(tester);
@@ -4009,6 +4075,7 @@ void main() {
         receivedAt: DateTime.now(),
       ),
     );
+    roomProvider.markNodeHasSensor('room-1');
     await _pumpRoomSettingsSheet(
       tester,
       roomProvider: roomProvider,

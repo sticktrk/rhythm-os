@@ -280,6 +280,9 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 
   Widget _buildRhythmContent(BuildContext context) {
     final syncProvider = context.watch<ServerSyncProvider>();
+    final hasMotionBehavior = context.select<RoomProvider, bool>(
+      (provider) => provider.hasMotionSensor(room.id),
+    );
     final node = syncProvider.nodeById(room.id);
     final settings = node?.profileSettings;
     final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
@@ -298,8 +301,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               eyebrow: 'OFF BEHAVIOR',
               accentColor: Color(0xFF7C83FF),
               iconSize: 15,
-              message:
-                  'What this room does when it switches off. Off cuts the '
+              message: 'What this room does when it switches off. Off cuts the '
                   'lights fully. Standby keeps them in a low, ready state '
                   'instead of going dark.',
             ),
@@ -310,22 +312,24 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             onTap: () => _setStandbyEnabled(context, !standbyEnabled),
           ),
         ]),
-        const SizedBox(height: 16),
-        _buildSettingsGroup('Day Profile', [
-          _buildMotionTimeoutRow(
-            context,
-            mode: RhythmMode.day,
-            profileSettings: settings,
-          ),
-        ]),
-        const SizedBox(height: 16),
-        _buildSettingsGroup('Sleep Profile', [
-          _buildMotionTimeoutRow(
-            context,
-            mode: RhythmMode.sleep,
-            profileSettings: settings,
-          ),
-        ]),
+        if (hasMotionBehavior) ...[
+          const SizedBox(height: 16),
+          _buildSettingsGroup('Day Profile', [
+            _buildMotionTimeoutRow(
+              context,
+              mode: RhythmMode.day,
+              profileSettings: settings,
+            ),
+          ]),
+          const SizedBox(height: 16),
+          _buildSettingsGroup('Sleep Profile', [
+            _buildMotionTimeoutRow(
+              context,
+              mode: RhythmMode.sleep,
+              profileSettings: settings,
+            ),
+          ]),
+        ],
       ],
     );
   }
