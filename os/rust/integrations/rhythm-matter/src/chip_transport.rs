@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -32,7 +33,10 @@ const CHIP_EXAMPLE_STORAGE_EXT: &str = "ini";
 const CHIPD_LOGFILE_ENV: &str = "RHYTHM_MATTER_LOGFILE";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(not(test))]
 const RPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const RPC_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
 const BLE_RECOVERY_COOLDOWN: Duration = Duration::from_secs(3);
 
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
@@ -241,6 +245,9 @@ impl ChipTransport {
                 }
                 Err(rpc_error) => Err(rpc_error),
             },
+            Err(first_error) if is_control_rpc_response_timeout(&request, &first_error) => {
+                Err(first_error)
+            }
             Err(first_error) => {
                 self.initialized.store(false, Ordering::SeqCst);
                 self.set_sidecar_health(SidecarHealth::Unavailable);
@@ -695,6 +702,26 @@ fn is_uninitialized_controller_error(error: &anyhow::Error) -> bool {
         .unwrap_or_else(|| {
             ChipRpcError::from_message(format!("{:#}", error)).is_controller_uninitialized()
         })
+}
+
+fn is_rpc_response_timeout(error: &anyhow::Error) -> bool {
+    let reading_response = error
+        .chain()
+        .any(|cause| cause.to_string().contains("reading CHIP RPC response"));
+    if !reading_response {
+        return false;
+    }
+
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .map(|error| matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock))
+            .unwrap_or(false)
+    })
+}
+
+fn is_control_rpc_response_timeout(request: &ChipRpcRequest, error: &anyhow::Error) -> bool {
+    rpc_timeout_for_request(request) == RPC_CONTROL_TIMEOUT && is_rpc_response_timeout(error)
 }
 
 fn is_recoverable_ble_commissioning_error(error: &anyhow::Error) -> bool {
@@ -1258,6 +1285,22 @@ mod tests {
         handle
     }
 
+    fn spawn_hanging_server(socket_path: PathBuf, hold_for: Duration) -> thread::JoinHandle<()> {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ = fs::remove_file(&socket_path);
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            ready_tx.send(()).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            std::thread::sleep(hold_for);
+        });
+        ready_rx.recv().unwrap();
+        handle
+    }
+
     fn on_network_commission_request() -> MatterCommissionRequest {
         MatterCommissionRequest {
             setup_payload: "12345678901".to_string(),
@@ -1343,6 +1386,39 @@ mod tests {
         assert!(error.to_string().contains("response id mismatch"));
         server.join().unwrap();
         let _ = fs::remove_file(mismatch_socket);
+    }
+
+    #[test]
+    fn rpc_response_timeout_does_not_mark_sidecar_unavailable() {
+        let socket_path = temp_socket_path("response-timeout");
+        let server = spawn_hanging_server(
+            socket_path.clone(),
+            RPC_CONTROL_TIMEOUT + Duration::from_millis(50),
+        );
+        let transport = ChipTransport::for_test(socket_path.clone());
+
+        let error = transport.set_on_off(1, 1, true).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("reading CHIP RPC response"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            is_rpc_response_timeout(&error),
+            "expected timeout classifier to match: {error:#}"
+        );
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::Ready,
+            "an offline device response timeout should not make the CHIP sidecar look dead"
+        );
+        assert!(
+            transport.initialized.load(Ordering::SeqCst),
+            "an offline device response timeout should not drop the initialized controller flag"
+        );
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
     }
 
     #[test]
