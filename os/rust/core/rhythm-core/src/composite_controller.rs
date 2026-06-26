@@ -48,6 +48,7 @@ const DISPATCH_WARN_MS: u128 = 1000;
 const DEFAULT_HUB_QUEUE_CAPACITY: usize = 16;
 const DEFAULT_HUB_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_HUB_TIMEOUT_COOLDOWN: Duration = Duration::from_secs(30);
+const DEFAULT_MATTER_TIMEOUT_COOLDOWN: Duration = Duration::from_secs(120);
 const DISPATCH_RECEIPT_GRACE: Duration = Duration::from_millis(250);
 
 /// Whether a command caller waits for the hub transport to complete.
@@ -57,6 +58,15 @@ pub enum HubDispatchCompletion {
     Wait,
     /// Return after the hub worker accepts the command.
     Enqueue,
+}
+
+/// Scope of the cooldown applied after a physical dispatch timeout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HubDispatchTimeoutScope {
+    /// Only reject retries for the same target.
+    Target,
+    /// Reject all jobs for this hub while the timed-out job may still be alive.
+    Hub,
 }
 
 /// Per-hub command queue policy.
@@ -74,6 +84,8 @@ pub struct HubDispatchPolicy {
     pub dispatch_timeout: Duration,
     /// How long to reject commands to the same target after a worker timeout.
     pub timeout_cooldown: Duration,
+    /// Whether timeout cooldown applies to one target or the whole hub.
+    pub timeout_scope: HubDispatchTimeoutScope,
 }
 
 impl HubDispatchPolicy {
@@ -86,7 +98,8 @@ impl HubDispatchPolicy {
                 requires_staggering: false,
                 min_dispatch_spacing: Duration::ZERO,
                 dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
-                timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
+                timeout_cooldown: DEFAULT_MATTER_TIMEOUT_COOLDOWN,
+                timeout_scope: HubDispatchTimeoutScope::Hub,
             },
             "hue" => Self {
                 queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
@@ -95,6 +108,7 @@ impl HubDispatchPolicy {
                 min_dispatch_spacing: Duration::ZERO,
                 dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
                 timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
+                timeout_scope: HubDispatchTimeoutScope::Target,
             },
             _ => Self {
                 queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
@@ -103,6 +117,7 @@ impl HubDispatchPolicy {
                 min_dispatch_spacing: Duration::ZERO,
                 dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
                 timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
+                timeout_scope: HubDispatchTimeoutScope::Target,
             },
         }
     }
@@ -371,6 +386,7 @@ fn run_hub_dispatch_worker(
 ) {
     let mut next_dispatch_at: Option<Instant> = None;
     let mut cooldowns: HashMap<String, Instant> = HashMap::new();
+    let mut hub_cooldown_until: Option<Instant> = None;
     while let Ok(job) = rx.recv() {
         let PreparedHubDispatchJob {
             target_label,
@@ -379,6 +395,28 @@ fn run_hub_dispatch_worker(
         } = job.prepare();
 
         let now = Instant::now();
+        if hub_cooldown_until.is_some_and(|cooldown_until| cooldown_until <= now) {
+            hub_cooldown_until = None;
+        }
+        if let Some(cooldown_until) = hub_cooldown_until {
+            let remaining_ms = cooldown_until.saturating_duration_since(now).as_millis();
+            let result = Err(LightControlError::Timeout(format!(
+                "Hub {} dispatch is cooling down for {}ms after a timeout",
+                hub_key, remaining_ms
+            )));
+            warn!(
+                target: "composite",
+                "hub {} dispatch to '{}' skipped during hub timeout cooldown ({}ms remaining)",
+                hub_key,
+                target_label,
+                remaining_ms
+            );
+            if let Some(result_tx) = result_tx {
+                let _ = result_tx.send(result);
+            }
+            continue;
+        }
+
         cooldowns.retain(|_, cooldown_until| *cooldown_until > now);
         if let Some(cooldown_until) = cooldowns.get(&target_label).copied() {
             let remaining_ms = cooldown_until.saturating_duration_since(now).as_millis();
@@ -417,18 +455,31 @@ fn run_hub_dispatch_worker(
 
         let latency_ms = started.elapsed().as_millis();
         if timed_out {
-            cooldowns.insert(
-                target_label.clone(),
-                Instant::now() + policy.timeout_cooldown,
-            );
-            warn!(
-                target: "composite",
-                "hub {} dispatch to '{}' timed out after {}ms; cooling target for {}ms",
-                hub_key,
-                target_label,
-                latency_ms,
-                policy.timeout_cooldown.as_millis()
-            );
+            let cooldown_until = Instant::now() + policy.timeout_cooldown;
+            match policy.timeout_scope {
+                HubDispatchTimeoutScope::Target => {
+                    cooldowns.insert(target_label.clone(), cooldown_until);
+                    warn!(
+                        target: "composite",
+                        "hub {} dispatch to '{}' timed out after {}ms; cooling target for {}ms",
+                        hub_key,
+                        target_label,
+                        latency_ms,
+                        policy.timeout_cooldown.as_millis()
+                    );
+                }
+                HubDispatchTimeoutScope::Hub => {
+                    hub_cooldown_until = Some(cooldown_until);
+                    warn!(
+                        target: "composite",
+                        "hub {} dispatch to '{}' timed out after {}ms; cooling hub for {}ms",
+                        hub_key,
+                        target_label,
+                        latency_ms,
+                        policy.timeout_cooldown.as_millis()
+                    );
+                }
+            }
         } else if let Err(e) = &result {
             warn!(
                 target: "composite",
@@ -1213,6 +1264,14 @@ mod tests {
             min_dispatch_spacing: Duration::ZERO,
             dispatch_timeout: Duration::from_millis(75),
             timeout_cooldown: Duration::from_millis(500),
+            timeout_scope: HubDispatchTimeoutScope::Target,
+        }
+    }
+
+    fn short_hub_wait_policy() -> HubDispatchPolicy {
+        HubDispatchPolicy {
+            timeout_scope: HubDispatchTimeoutScope::Hub,
+            ..short_wait_policy()
         }
     }
 
@@ -1275,13 +1334,23 @@ mod tests {
 
         assert_eq!(hue.policy.completion, HubDispatchCompletion::Wait);
         assert!(hue.policy.requires_staggering);
+        assert_eq!(hue.policy.timeout_scope, HubDispatchTimeoutScope::Target);
         assert_eq!(matter.policy.completion, HubDispatchCompletion::Enqueue);
         assert!(!matter.policy.requires_staggering);
+        assert_eq!(matter.policy.timeout_scope, HubDispatchTimeoutScope::Hub);
+        assert_eq!(
+            matter.policy.timeout_cooldown,
+            DEFAULT_MATTER_TIMEOUT_COOLDOWN
+        );
         assert_eq!(
             home_assistant.policy.completion,
             HubDispatchCompletion::Wait
         );
         assert!(!home_assistant.policy.requires_staggering);
+        assert_eq!(
+            home_assistant.policy.timeout_scope,
+            HubDispatchTimeoutScope::Target
+        );
     }
 
     #[test]
@@ -1294,6 +1363,7 @@ mod tests {
             min_dispatch_spacing: Duration::from_millis(250),
             dispatch_timeout: Duration::from_secs(2),
             timeout_cooldown: Duration::from_secs(5),
+            timeout_scope: HubDispatchTimeoutScope::Hub,
         };
         composite.register_controller_with_policy(
             "custom@hub",
@@ -1559,6 +1629,80 @@ mod tests {
             other.1
         );
         assert_eq!(controller.turn_on_count_for("other"), 1);
+    }
+
+    #[test]
+    fn hub_scoped_timeout_cools_down_all_targets() {
+        let controller = Arc::new(SelectiveBlockingController::new("blocked"));
+        let composite = Arc::new(CompositeController::new());
+        composite.register_controller_with_policy(
+            "matter@local",
+            controller.clone(),
+            short_hub_wait_policy(),
+        );
+        composite.update_routing(HashMap::from([
+            (
+                "blocked".to_string(),
+                vec![(
+                    "matter@local".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "blocked".to_string(),
+                        control_id: "blocked".to_string(),
+                    },
+                )],
+            ),
+            (
+                "other".to_string(),
+                vec![(
+                    "matter@local".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "other".to_string(),
+                        control_id: "other".to_string(),
+                    },
+                )],
+            ),
+        ]));
+
+        let first = turn_on_with_deadline(
+            composite.clone(),
+            "blocked",
+            LightingCommand::new(80, 4000),
+            Duration::from_millis(500),
+        )
+        .unwrap_or_else(|_| {
+            controller.release();
+            panic!("first blocked dispatch did not release the caller");
+        });
+        assert!(first.0.is_err());
+        assert!(
+            controller.wait_blocked_started_timeout(Duration::from_millis(250)),
+            "blocked target dispatch should have started"
+        );
+
+        let other = turn_on_with_deadline(
+            composite,
+            "other",
+            LightingCommand::new(70, 3500),
+            Duration::from_millis(250),
+        )
+        .unwrap_or_else(|_| {
+            controller.release();
+            panic!("hub cooldown retry did not fail fast");
+        });
+        controller.release();
+
+        assert!(other.0.is_err());
+        assert!(
+            other.1 < Duration::from_millis(150),
+            "hub cooldown retry took {:?}",
+            other.1
+        );
+        assert_eq!(controller.turn_on_count_for("blocked"), 1);
+        assert_eq!(
+            controller.turn_on_count_for("other"),
+            0,
+            "hub cooldown should not start another job while the timed-out job may still be alive"
+        );
     }
 
     // ── any_lights_on OR semantics ───────────────────────────────────
