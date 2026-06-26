@@ -704,7 +704,7 @@ fn appliance_delete_unpair_request(
 
     Ok(native_id.map(|device_id| crate::pairing::UnpairingRequest {
         hub_type: "matter".to_string(),
-        params: serde_json::json!({ "device_id": device_id }),
+        params: serde_json::json!({ "device_id": device_id, "force": true }),
     }))
 }
 
@@ -4987,6 +4987,7 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, "matter");
         assert_eq!(recorded[0].1["device_id"], "matter-100");
+        assert_eq!(recorded[0].1["force"], true);
         drop(recorded);
 
         let s = state.lock().unwrap();

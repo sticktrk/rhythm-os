@@ -476,8 +476,23 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 })
             }
             Err(e) => {
-                hub_data.finish_decommission(node_id, false);
                 log::error!(target: "pair", "Matter decommission error: {:#}", e);
+                if force {
+                    log::warn!(
+                        target: "pair",
+                        "Matter: force-removing node {} locally after decommission failed",
+                        node_id
+                    );
+                    hub_data.finish_decommission(node_id, true);
+                    return Ok(UnpairingResult {
+                        hub_type: "matter".to_string(),
+                        status: PairingStatus::Complete,
+                        device_id: Some(device_id.to_string()),
+                        error: None,
+                    });
+                }
+
+                hub_data.finish_decommission(node_id, false);
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
                     status: PairingStatus::Failed,
@@ -1173,5 +1188,21 @@ mod tests {
         assert_eq!(result.status, PairingStatus::Failed);
         assert_eq!(result.error.as_deref(), Some("sidecar rejected request"));
         assert!(!data.is_recently_decommissioned(88));
+
+        let result = integration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({ "device_id": "matter-89", "force": true }),
+            )
+            .unwrap();
+        assert_eq!(result.status, PairingStatus::Complete);
+        assert_eq!(result.device_id.as_deref(), Some("matter-89"));
+        assert_eq!(result.error, None);
+        assert!(data.is_recently_decommissioned(89));
+        assert!(transport
+            .decommission_calls
+            .lock()
+            .unwrap()
+            .contains(&(89, true)));
     }
 }
