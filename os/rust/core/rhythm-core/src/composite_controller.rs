@@ -31,7 +31,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,9 @@ use crate::room::Room;
 
 const DISPATCH_WARN_MS: u128 = 1000;
 const DEFAULT_HUB_QUEUE_CAPACITY: usize = 16;
+const DEFAULT_HUB_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_HUB_TIMEOUT_COOLDOWN: Duration = Duration::from_secs(30);
+const DISPATCH_RECEIPT_GRACE: Duration = Duration::from_millis(250);
 
 /// Whether a command caller waits for the hub transport to complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +70,10 @@ pub struct HubDispatchPolicy {
     pub requires_staggering: bool,
     /// Worker-local minimum spacing between commands.
     pub min_dispatch_spacing: Duration,
+    /// Maximum time a single physical dispatch may occupy the hub worker.
+    pub dispatch_timeout: Duration,
+    /// How long to reject commands to the same target after a worker timeout.
+    pub timeout_cooldown: Duration,
 }
 
 impl HubDispatchPolicy {
@@ -78,18 +85,24 @@ impl HubDispatchPolicy {
                 completion: HubDispatchCompletion::Enqueue,
                 requires_staggering: false,
                 min_dispatch_spacing: Duration::ZERO,
+                dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
+                timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
             },
             "hue" => Self {
                 queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
                 completion: HubDispatchCompletion::Wait,
                 requires_staggering: true,
                 min_dispatch_spacing: Duration::ZERO,
+                dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
+                timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
             },
             _ => Self {
                 queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
                 completion: HubDispatchCompletion::Wait,
                 requires_staggering: false,
                 min_dispatch_spacing: Duration::ZERO,
+                dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
+                timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
             },
         }
     }
@@ -132,6 +145,14 @@ fn hub_worker_thread_name(hub_key: &str) -> String {
     format!("hub-dispatch-{sanitized}")
 }
 
+fn hub_job_thread_name(hub_key: &str, target_label: &str) -> String {
+    let sanitized: String = format!("{hub_key}-{target_label}")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("hub-dispatch-job-{sanitized}")
+}
+
 enum HubDispatchJob {
     TurnOn {
         target: HubDispatchTarget,
@@ -145,21 +166,89 @@ enum HubDispatchJob {
     },
 }
 
+enum HubDispatchAction {
+    TurnOn {
+        target: HubDispatchTarget,
+        command: LightingCommand,
+    },
+    TurnOff {
+        target: HubDispatchTarget,
+        transition_ms: Option<u32>,
+    },
+}
+
+struct PreparedHubDispatchJob {
+    target_label: String,
+    action: HubDispatchAction,
+    result_tx: Option<mpsc::Sender<LightControlResult<()>>>,
+}
+
+impl HubDispatchJob {
+    fn prepare(self) -> PreparedHubDispatchJob {
+        match self {
+            Self::TurnOn {
+                target,
+                command,
+                result_tx,
+            } => PreparedHubDispatchJob {
+                target_label: target.label(),
+                action: HubDispatchAction::TurnOn { target, command },
+                result_tx,
+            },
+            Self::TurnOff {
+                target,
+                transition_ms,
+                result_tx,
+            } => PreparedHubDispatchJob {
+                target_label: target.label(),
+                action: HubDispatchAction::TurnOff {
+                    target,
+                    transition_ms,
+                },
+                result_tx,
+            },
+        }
+    }
+}
+
+impl HubDispatchAction {
+    fn dispatch(self, controller: Arc<dyn HubLightController>) -> LightControlResult<()> {
+        match self {
+            Self::TurnOn { target, command } => {
+                sync_block_on(controller.turn_on_target(&target, command))
+            }
+            Self::TurnOff {
+                target,
+                transition_ms,
+            } => sync_block_on(controller.turn_off_target(&target, transition_ms)),
+        }
+    }
+}
+
 enum HubDispatchReceipt {
     Enqueued,
-    Waiting(Receiver<LightControlResult<()>>),
+    Waiting {
+        rx: Receiver<LightControlResult<()>>,
+        timeout: Duration,
+    },
 }
 
 impl HubDispatchReceipt {
     fn wait(self, hub_key: &str) -> LightControlResult<()> {
         match self {
             Self::Enqueued => Ok(()),
-            Self::Waiting(rx) => rx.recv().unwrap_or_else(|_| {
-                Err(LightControlError::Internal(format!(
+            Self::Waiting { rx, timeout } => match rx.recv_timeout(timeout) {
+                Ok(result) => result,
+                Err(RecvTimeoutError::Timeout) => Err(LightControlError::Timeout(format!(
+                    "Hub {} dispatch did not complete within {}ms",
+                    hub_key,
+                    timeout.as_millis()
+                ))),
+                Err(RecvTimeoutError::Disconnected) => Err(LightControlError::Internal(format!(
                     "Hub {} dispatch worker stopped before returning a result",
                     hub_key
-                )))
-            }),
+                ))),
+            },
         }
     }
 }
@@ -243,7 +332,13 @@ impl HubDispatchWorker {
         match self.policy.completion {
             HubDispatchCompletion::Wait => {
                 let (tx, rx) = mpsc::channel();
-                (Some(tx), HubDispatchReceipt::Waiting(rx))
+                (
+                    Some(tx),
+                    HubDispatchReceipt::Waiting {
+                        rx,
+                        timeout: self.policy.dispatch_timeout + DISPATCH_RECEIPT_GRACE,
+                    },
+                )
             }
             HubDispatchCompletion::Enqueue => (None, HubDispatchReceipt::Enqueued),
         }
@@ -275,7 +370,35 @@ fn run_hub_dispatch_worker(
     rx: Receiver<HubDispatchJob>,
 ) {
     let mut next_dispatch_at: Option<Instant> = None;
+    let mut cooldowns: HashMap<String, Instant> = HashMap::new();
     while let Ok(job) = rx.recv() {
+        let PreparedHubDispatchJob {
+            target_label,
+            action,
+            result_tx,
+        } = job.prepare();
+
+        let now = Instant::now();
+        cooldowns.retain(|_, cooldown_until| *cooldown_until > now);
+        if let Some(cooldown_until) = cooldowns.get(&target_label).copied() {
+            let remaining_ms = cooldown_until.saturating_duration_since(now).as_millis();
+            let result = Err(LightControlError::Timeout(format!(
+                "Hub {} dispatch to '{}' is cooling down for {}ms after a timeout",
+                hub_key, target_label, remaining_ms
+            )));
+            warn!(
+                target: "composite",
+                "hub {} dispatch to '{}' skipped during timeout cooldown ({}ms remaining)",
+                hub_key,
+                target_label,
+                remaining_ms
+            );
+            if let Some(result_tx) = result_tx {
+                let _ = result_tx.send(result);
+            }
+            continue;
+        }
+
         if let Some(deadline) = next_dispatch_at {
             let now = Instant::now();
             if deadline > now {
@@ -284,29 +407,29 @@ fn run_hub_dispatch_worker(
         }
 
         let started = Instant::now();
-        let (target_label, result_tx, result) = match job {
-            HubDispatchJob::TurnOn {
-                target,
-                command,
-                result_tx,
-            } => {
-                let target_label = target.label();
-                let result = sync_block_on(controller.turn_on_target(&target, command));
-                (target_label, result_tx, result)
-            }
-            HubDispatchJob::TurnOff {
-                target,
-                transition_ms,
-                result_tx,
-            } => {
-                let target_label = target.label();
-                let result = sync_block_on(controller.turn_off_target(&target, transition_ms));
-                (target_label, result_tx, result)
-            }
-        };
+        let (timed_out, result) = run_hub_dispatch_job_with_timeout(
+            &hub_key,
+            &target_label,
+            controller.clone(),
+            action,
+            policy.dispatch_timeout,
+        );
 
         let latency_ms = started.elapsed().as_millis();
-        if let Err(e) = &result {
+        if timed_out {
+            cooldowns.insert(
+                target_label.clone(),
+                Instant::now() + policy.timeout_cooldown,
+            );
+            warn!(
+                target: "composite",
+                "hub {} dispatch to '{}' timed out after {}ms; cooling target for {}ms",
+                hub_key,
+                target_label,
+                latency_ms,
+                policy.timeout_cooldown.as_millis()
+            );
+        } else if let Err(e) = &result {
             warn!(
                 target: "composite",
                 "hub {} dispatch to '{}' failed after {}ms: {}",
@@ -333,6 +456,52 @@ fn run_hub_dispatch_worker(
         if policy.min_dispatch_spacing > Duration::ZERO {
             next_dispatch_at = Some(Instant::now() + policy.min_dispatch_spacing);
         }
+    }
+}
+
+fn run_hub_dispatch_job_with_timeout(
+    hub_key: &str,
+    target_label: &str,
+    controller: Arc<dyn HubLightController>,
+    action: HubDispatchAction,
+    timeout: Duration,
+) -> (bool, LightControlResult<()>) {
+    let (tx, rx) = mpsc::channel();
+    let thread_name = hub_job_thread_name(hub_key, target_label);
+    if let Err(e) = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let result = action.dispatch(controller);
+            let _ = tx.send(result);
+        })
+    {
+        return (
+            false,
+            Err(LightControlError::Internal(format!(
+                "Failed to spawn hub {} dispatch job for '{}': {}",
+                hub_key, target_label, e
+            ))),
+        );
+    }
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => (false, result),
+        Err(RecvTimeoutError::Timeout) => (
+            true,
+            Err(LightControlError::Timeout(format!(
+                "Hub {} dispatch to '{}' exceeded {}ms",
+                hub_key,
+                target_label,
+                timeout.as_millis()
+            ))),
+        ),
+        Err(RecvTimeoutError::Disconnected) => (
+            false,
+            Err(LightControlError::Internal(format!(
+                "Hub {} dispatch job for '{}' stopped before returning a result",
+                hub_key, target_label
+            ))),
+        ),
     }
 }
 
@@ -760,6 +929,15 @@ mod tests {
             }
         }
 
+        fn wait_started_timeout(&self, timeout: Duration) -> bool {
+            let (lock, cvar) = &self.started;
+            let started = lock.lock().unwrap();
+            let (started, _) = cvar
+                .wait_timeout_while(started, timeout, |started| !*started)
+                .unwrap();
+            *started
+        }
+
         fn release(&self) {
             let (lock, cvar) = &self.release;
             *lock.lock().unwrap() = true;
@@ -817,6 +995,105 @@ mod tests {
 
         fn name(&self) -> &str {
             "blocking"
+        }
+    }
+
+    struct SelectiveBlockingController {
+        blocked_label: String,
+        turn_on_calls: Mutex<Vec<String>>,
+        blocked_started: (Mutex<bool>, Condvar),
+        release: (Mutex<bool>, Condvar),
+    }
+
+    impl SelectiveBlockingController {
+        fn new(blocked_label: &str) -> Self {
+            Self {
+                blocked_label: blocked_label.to_string(),
+                turn_on_calls: Mutex::new(Vec::new()),
+                blocked_started: (Mutex::new(false), Condvar::new()),
+                release: (Mutex::new(false), Condvar::new()),
+            }
+        }
+
+        fn wait_blocked_started_timeout(&self, timeout: Duration) -> bool {
+            let (lock, cvar) = &self.blocked_started;
+            let started = lock.lock().unwrap();
+            let (started, _) = cvar
+                .wait_timeout_while(started, timeout, |started| !*started)
+                .unwrap();
+            *started
+        }
+
+        fn release(&self) {
+            let (lock, cvar) = &self.release;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+
+        fn turn_on_count_for(&self, label: &str) -> usize {
+            self.turn_on_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| seen.as_str() == label)
+                .count()
+        }
+    }
+
+    #[async_trait]
+    impl HubLightController for SelectiveBlockingController {
+        async fn turn_on_target(
+            &self,
+            target: &HubDispatchTarget,
+            _command: LightingCommand,
+        ) -> LightControlResult<()> {
+            let target_label = target.label();
+            self.turn_on_calls
+                .lock()
+                .unwrap()
+                .push(target_label.clone());
+
+            if target_label == self.blocked_label {
+                {
+                    let (lock, cvar) = &self.blocked_started;
+                    *lock.lock().unwrap() = true;
+                    cvar.notify_all();
+                }
+                let (lock, cvar) = &self.release;
+                let mut release = lock.lock().unwrap();
+                while !*release {
+                    release = cvar.wait(release).unwrap();
+                }
+            }
+
+            Ok(())
+        }
+
+        async fn turn_off_target(
+            &self,
+            _target: &HubDispatchTarget,
+            _transition_ms: Option<u32>,
+        ) -> LightControlResult<()> {
+            Ok(())
+        }
+
+        async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
+            Ok(Vec::new())
+        }
+
+        async fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn any_lights_on_target(
+            &self,
+            _target: &HubDispatchTarget,
+        ) -> LightControlResult<bool> {
+            Ok(false)
+        }
+
+        fn name(&self) -> &str {
+            "selective-blocking"
         }
     }
 
@@ -928,6 +1205,33 @@ mod tests {
         }
     }
 
+    fn short_wait_policy() -> HubDispatchPolicy {
+        HubDispatchPolicy {
+            queue_capacity: 4,
+            completion: HubDispatchCompletion::Wait,
+            requires_staggering: false,
+            min_dispatch_spacing: Duration::ZERO,
+            dispatch_timeout: Duration::from_millis(75),
+            timeout_cooldown: Duration::from_millis(500),
+        }
+    }
+
+    fn turn_on_with_deadline(
+        composite: Arc<CompositeController>,
+        room_id: &str,
+        command: LightingCommand,
+        deadline: Duration,
+    ) -> Result<(LightControlResult<()>, Duration), std::sync::mpsc::RecvTimeoutError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let room_id = room_id.to_string();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let result = block_on(composite.turn_on(&room_id, command));
+            let _ = tx.send((result, started.elapsed()));
+        });
+        rx.recv_timeout(deadline)
+    }
+
     // ── Registration ─────────────────────────────────────────────────
 
     #[test]
@@ -988,6 +1292,8 @@ mod tests {
             completion: HubDispatchCompletion::Wait,
             requires_staggering: true,
             min_dispatch_spacing: Duration::from_millis(250),
+            dispatch_timeout: Duration::from_secs(2),
+            timeout_cooldown: Duration::from_secs(5),
         };
         composite.register_controller_with_policy(
             "custom@hub",
@@ -1114,6 +1420,145 @@ mod tests {
         blocking.wait_started();
         assert_eq!(blocking.turn_on_count(), 1);
         blocking.release();
+    }
+
+    #[test]
+    fn wait_policy_turn_on_times_out_instead_of_waiting_forever() {
+        let blocking = Arc::new(BlockingController::new());
+        let composite = Arc::new(CompositeController::new());
+        composite.register_controller_with_policy(
+            "hue@bridge",
+            blocking.clone(),
+            short_wait_policy(),
+        );
+        composite.update_routing(HashMap::from([(
+            "room1".to_string(),
+            vec![(
+                "hue@bridge".to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "room1".to_string(),
+                    control_id: "room1".to_string(),
+                },
+            )],
+        )]));
+
+        let outcome = turn_on_with_deadline(
+            composite,
+            "room1",
+            LightingCommand::new(80, 4000),
+            Duration::from_millis(500),
+        )
+        .unwrap_or_else(|_| {
+            blocking.release();
+            panic!("wait-policy dispatch did not release the caller before the deadline");
+        });
+
+        let started = blocking.wait_started_timeout(Duration::from_millis(250));
+        blocking.release();
+
+        assert!(
+            outcome.0.is_err(),
+            "timed-out dispatch should report failure"
+        );
+        assert!(
+            outcome.1 < Duration::from_millis(500),
+            "dispatch held caller for {:?}",
+            outcome.1
+        );
+        assert!(started, "blocking controller job should have started");
+        assert_eq!(blocking.turn_on_count(), 1);
+    }
+
+    #[test]
+    fn timed_out_target_cools_down_without_blocking_other_targets() {
+        let controller = Arc::new(SelectiveBlockingController::new("blocked"));
+        let composite = Arc::new(CompositeController::new());
+        composite.register_controller_with_policy(
+            "hue@bridge",
+            controller.clone(),
+            short_wait_policy(),
+        );
+        composite.update_routing(HashMap::from([
+            (
+                "blocked".to_string(),
+                vec![(
+                    "hue@bridge".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "blocked".to_string(),
+                        control_id: "blocked".to_string(),
+                    },
+                )],
+            ),
+            (
+                "other".to_string(),
+                vec![(
+                    "hue@bridge".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "other".to_string(),
+                        control_id: "other".to_string(),
+                    },
+                )],
+            ),
+        ]));
+
+        let first = turn_on_with_deadline(
+            composite.clone(),
+            "blocked",
+            LightingCommand::new(80, 4000),
+            Duration::from_millis(500),
+        )
+        .unwrap_or_else(|_| {
+            controller.release();
+            panic!("first blocked dispatch did not release the caller");
+        });
+        assert!(first.0.is_err());
+        assert!(
+            controller.wait_blocked_started_timeout(Duration::from_millis(250)),
+            "blocked target dispatch should have started"
+        );
+        assert_eq!(controller.turn_on_count_for("blocked"), 1);
+
+        let retry = turn_on_with_deadline(
+            composite.clone(),
+            "blocked",
+            LightingCommand::new(80, 4000),
+            Duration::from_millis(250),
+        )
+        .unwrap_or_else(|_| {
+            controller.release();
+            panic!("cooldown retry did not fail fast");
+        });
+        assert!(retry.0.is_err());
+        assert!(
+            retry.1 < Duration::from_millis(150),
+            "cooldown retry took {:?}",
+            retry.1
+        );
+        assert_eq!(
+            controller.turn_on_count_for("blocked"),
+            1,
+            "cooldown should not start another job for the stuck target"
+        );
+
+        let other = turn_on_with_deadline(
+            composite,
+            "other",
+            LightingCommand::new(70, 3500),
+            Duration::from_millis(250),
+        )
+        .unwrap_or_else(|_| {
+            controller.release();
+            panic!("other target was blocked behind the stuck target");
+        });
+        controller.release();
+
+        other.0.unwrap();
+        assert!(
+            other.1 < Duration::from_millis(150),
+            "other target dispatch took {:?}",
+            other.1
+        );
+        assert_eq!(controller.turn_on_count_for("other"), 1);
     }
 
     // ── any_lights_on OR semantics ───────────────────────────────────
