@@ -636,6 +636,24 @@ pub fn handle_get_nodes_state(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_history(
+    state: &SharedState,
+    params: &std::collections::HashMap<String, String>,
+) -> ApiResponse {
+    let query = crate::activity::LightActivityQuery {
+        limit: params
+            .get("limit")
+            .and_then(|value| value.parse::<usize>().ok()),
+        area: params.get("area").cloned(),
+        source: params.get("source").cloned(),
+        action: params.get("action").cloned(),
+    };
+    match crate::activity::build_light_activity_history(state, query) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 fn perform_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
@@ -1236,8 +1254,24 @@ pub fn handle_put_mode(state: &SharedState, body: &Value) -> ApiResponse {
             return ApiResponse::bad_request(&e.to_string());
         }
     }
+    let previous_mode = state.lock().ok().map(|s| s.active_mode);
     match commands::do_mode_set(state, active_mode, modes) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            if let Some(next_mode) = active_mode {
+                let mut record = crate::activity::LightActivityRecord::app("global", "set_mode");
+                record.change = Some(crate::activity::LightValueChange {
+                    axis: Some("mode".to_string()),
+                    before: previous_mode.map(|mode| json!(mode)),
+                    after: Some(json!(next_mode)),
+                });
+                record.payload = Some(json!({
+                    "previous_mode": previous_mode,
+                    "next_mode": next_mode,
+                }));
+                crate::activity::record_light_activity(state, record);
+            }
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -1293,7 +1327,13 @@ pub fn handle_put_transitions(state: &SharedState, body: &Value) -> ApiResponse 
 
 pub fn handle_post_transition_trigger(state: &SharedState, transition_id: &str) -> ApiResponse {
     match commands::do_trigger_transition(state, transition_id) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            let mut record =
+                crate::activity::LightActivityRecord::app("global", "trigger_transition");
+            record.payload = Some(json!({"transition_id": transition_id}));
+            crate::activity::record_light_activity(state, record);
+            ApiResponse::json_ok(json)
+        }
         Err(e) if e.to_string().contains("Unknown transition") => {
             ApiResponse::bad_request(&e.to_string())
         }
@@ -1515,21 +1555,49 @@ pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value
         Ok(request) => request,
         Err(e) => return ApiResponse::bad_request(&format!("Invalid scene apply request: {}", e)),
     };
+    let target_id = request.target_id.clone();
     match commands::do_scene_apply(state, scene_id, request) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            let mut record = crate::activity::LightActivityRecord::app(&target_id, "apply_scene");
+            record.payload = Some(json!({"scene_id": scene_id}));
+            crate::activity::record_light_activity(state, record);
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
 
-pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
+pub fn handle_post_scene_preview(
+    state: &SharedState,
+    scene_id: &str,
+    body: &Value,
+) -> ApiResponse {
     let request: crate::scenes::ScenePreviewRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
         Err(e) => {
             return ApiResponse::bad_request(&format!("Invalid scene preview request: {}", e));
         }
     };
+    let duration_ms = request.duration_ms;
     match commands::do_scene_preview(state, scene_id, request) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            if let Ok(response) =
+                serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json)
+            {
+                let mut record = crate::activity::LightActivityRecord::app(
+                    &response.target_id,
+                    "preview_scene",
+                );
+                record.payload = Some(json!({
+                    "scene_id": response.scene_id,
+                    "preview_id": response.preview_id,
+                    "affected_node_ids": response.affected_node_ids,
+                    "duration_ms": duration_ms,
+                }));
+                crate::activity::record_light_activity(state, record);
+            }
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
@@ -1545,22 +1613,74 @@ pub fn handle_post_scene_draft_preview(state: &SharedState, body: &Value) -> Api
                 ));
             }
         };
+    let duration_ms = request.duration_ms;
     match commands::do_scene_draft_preview(state, request) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            if let Ok(response) =
+                serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json)
+            {
+                let mut record = crate::activity::LightActivityRecord::app(
+                    &response.target_id,
+                    "preview_draft_scene",
+                );
+                record.payload = Some(json!({
+                    "scene_id": response.scene_id,
+                    "preview_id": response.preview_id,
+                    "affected_node_ids": response.affected_node_ids,
+                    "duration_ms": duration_ms,
+                }));
+                crate::activity::record_light_activity(state, record);
+            }
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
 
 pub fn handle_post_scene_preview_commit(state: &SharedState, preview_id: &str) -> ApiResponse {
     match commands::do_scene_preview_commit(state, preview_id) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            if let Ok(response) =
+                serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json)
+            {
+                let mut record = crate::activity::LightActivityRecord::app(
+                    &response.target_id,
+                    "commit_scene_preview",
+                );
+                record.payload = Some(json!({
+                    "scene_id": response.scene_id,
+                    "preview_id": preview_id,
+                    "affected_node_ids": response.affected_node_ids,
+                }));
+                crate::activity::record_light_activity(state, record);
+            }
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
 
 pub fn handle_post_scene_preview_cancel(state: &SharedState, preview_id: &str) -> ApiResponse {
+    let preview = state
+        .lock()
+        .ok()
+        .and_then(|s| s.light_scene_previews.get(preview_id).cloned());
     match commands::do_scene_preview_cancel(state, preview_id) {
-        Ok(json) => ApiResponse::json_ok(json),
+        Ok(json) => {
+            if let Some(preview) = preview {
+                let mut record = crate::activity::LightActivityRecord::app(
+                    &preview.target_node_id,
+                    "cancel_scene_preview",
+                );
+                record.payload = Some(json!({
+                    "scene_id": preview.scene_id,
+                    "preview_id": preview_id,
+                    "affected_node_ids": preview.affected_node_ids,
+                }));
+                crate::activity::record_light_activity(state, record);
+            }
+            ApiResponse::json_ok(json)
+        }
         Err(e) => ApiResponse::bad_request(&e.to_string()),
     }
 }
@@ -1739,6 +1859,14 @@ pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> A
         {
             return ApiResponse::server_error(e);
         }
+        for (node_id, action) in &actions {
+            let mut record = crate::activity::LightActivityRecord::app(
+                node_id,
+                crate::activity::http_action_id(action),
+            );
+            record.payload = Some(json!({"request_action": action}));
+            crate::activity::record_light_activity(state, record);
+        }
         return nodes_response(results, batch, dispatch_spacing);
     }
 
@@ -1751,6 +1879,12 @@ pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> A
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
+        let mut record = crate::activity::LightActivityRecord::app(
+            node_id,
+            crate::activity::http_action_id(action),
+        );
+        record.payload = Some(json!({"request_action": action}));
+        crate::activity::record_light_activity(state, record);
     }
 
     nodes_response(results, batch, dispatch_spacing)
@@ -1838,6 +1972,18 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
         ) {
             return ApiResponse::server_error(e);
         }
+        for (node_id, brightness) in &updates {
+            let mut record =
+                crate::activity::LightActivityRecord::app(node_id, "set_brightness");
+            record.brightness = Some((*brightness).clamp(1, 100));
+            record.change = Some(crate::activity::LightValueChange {
+                axis: Some("brightness".to_string()),
+                before: None,
+                after: Some(json!((*brightness).clamp(1, 100))),
+            });
+            record.payload = Some(json!({"brightness": (*brightness).clamp(1, 100)}));
+            crate::activity::record_light_activity(state, record);
+        }
         return nodes_response(results, batch, dispatch_spacing);
     }
 
@@ -1850,6 +1996,15 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
+        let mut record = crate::activity::LightActivityRecord::app(node_id, "set_brightness");
+        record.brightness = Some((*brightness).clamp(1, 100));
+        record.change = Some(crate::activity::LightValueChange {
+            axis: Some("brightness".to_string()),
+            before: None,
+            after: Some(json!((*brightness).clamp(1, 100))),
+        });
+        record.payload = Some(json!({"brightness": (*brightness).clamp(1, 100)}));
+        crate::activity::record_light_activity(state, record);
     }
 
     nodes_response(results, batch, dispatch_spacing)
@@ -1892,10 +2047,36 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
             Err(e) => return ApiResponse::server_error(e),
         }
     }
-    if let Err(e) =
-        commands::queue_set_node_curve_modifier_batch(state, updates, persist, dispatch_spacing)
-    {
+    if let Err(e) = commands::queue_set_node_curve_modifier_batch(
+        state,
+        updates.clone(),
+        persist,
+        dispatch_spacing,
+    ) {
         return ApiResponse::server_error(e);
+    }
+    for (node_id, modifier) in &updates {
+        let (axis, value) = match *modifier {
+            commands::NodeCurveModifier::Brightness(brightness) => {
+                ("brightness", json!(brightness.clamp(1, 100)))
+            }
+            commands::NodeCurveModifier::ColorTemperature { kelvin, .. } => {
+                ("color_temperature", json!(kelvin.clamp(500, 25_000)))
+            }
+        };
+        let mut record = crate::activity::LightActivityRecord::app(node_id, "set_curve");
+        if axis == "brightness" {
+            record.brightness = value.as_u64().map(|value| value as u8);
+        } else {
+            record.kelvin = value.as_u64().map(|value| value as u16);
+        }
+        record.change = Some(crate::activity::LightValueChange {
+            axis: Some(axis.to_string()),
+            before: None,
+            after: Some(value.clone()),
+        });
+        record.payload = Some(json!({"axis": axis, "value": value}));
+        crate::activity::record_light_activity(state, record);
     }
 
     nodes_response(results, true, dispatch_spacing)
@@ -1941,6 +2122,26 @@ pub fn handle_set_node_color(state: &SharedState, body: &Value, persist: bool) -
             Ok(node) => results.push(node),
             Err(e) => return ApiResponse::server_error(e),
         }
+        let mut record = crate::activity::LightActivityRecord::app(
+            &node_id,
+            match update.scope {
+                commands::NodeColorScope::Mood => "set_mood_color",
+                commands::NodeColorScope::Preview => "preview_color",
+                commands::NodeColorScope::Auto => "set_color",
+            },
+        );
+        record.brightness = update.brightness.map(|brightness| brightness.clamp(1, 100));
+        record.payload = Some(json!({
+            "rgb": {"r": update.rgb.r, "g": update.rgb.g, "b": update.rgb.b},
+            "brightness": update.brightness.map(|brightness| brightness.clamp(1, 100)),
+            "transition_ms": update.transition_ms,
+            "scope": match update.scope {
+                commands::NodeColorScope::Mood => "mood",
+                commands::NodeColorScope::Preview => "preview",
+                commands::NodeColorScope::Auto => "auto",
+            },
+        }));
+        crate::activity::record_light_activity(state, record);
     }
 
     nodes_response(results, false, dispatch_spacing)
@@ -1975,6 +2176,15 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
         }
+        let mut record =
+            crate::activity::LightActivityRecord::app(&room_id, "set_curve_position");
+        record.change = Some(crate::activity::LightValueChange {
+            axis: Some("time_offset_minutes".to_string()),
+            before: None,
+            after: Some(json!(time_offset)),
+        });
+        record.payload = Some(json!({"time_offset_minutes": time_offset}));
+        crate::activity::record_light_activity(state, record);
     }
 
     if batch && persist {
@@ -2047,6 +2257,17 @@ pub fn handle_set_node_time_offset(
             Err(e) => return ApiResponse::server_error(e),
         }
     }
+    for (node_id, time_offset) in &updates {
+        let mut record =
+            crate::activity::LightActivityRecord::app(node_id, "set_curve_position");
+        record.change = Some(crate::activity::LightValueChange {
+            axis: Some("time_offset_minutes".to_string()),
+            before: None,
+            after: Some(json!(time_offset)),
+        });
+        record.payload = Some(json!({"time_offset_minutes": time_offset}));
+        crate::activity::record_light_activity(state, record);
+    }
 
     nodes_response_with_dispatch_count(results, Some(dispatch_count), dispatch_spacing)
 }
@@ -2106,6 +2327,32 @@ pub fn handle_put_room_preferences(
         ) {
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
+        }
+        if rhythm_enabled.is_some()
+            || standby_enabled.is_some()
+            || room_state.is_some()
+            || room_profile.is_some()
+        {
+            let action_id = room_state
+                .map(|_| "set_room_state".to_string())
+                .or_else(|| {
+                    rhythm_enabled.map(|enabled| {
+                        if enabled {
+                            "circadian_on".to_string()
+                        } else {
+                            "circadian_off".to_string()
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "set_light_preferences".to_string());
+            let mut record = crate::activity::LightActivityRecord::app(&room_id, action_id);
+            record.payload = Some(json!({
+                "rhythm_enabled": rhythm_enabled,
+                "standby_enabled": standby_enabled,
+                "state": room_state.map(|state| state.as_api_str()),
+                "profile_settings_touched": room_profile.is_some(),
+            }));
+            crate::activity::record_light_activity(state, record);
         }
     }
 
@@ -2182,10 +2429,43 @@ pub fn handle_put_node_preferences(
     } else {
         dispatch_spacing
     };
-    if let Err(e) =
-        commands::queue_node_preferences_batch(state, updates, persist, queue_dispatch_spacing)
-    {
+    if let Err(e) = commands::queue_node_preferences_batch(
+        state,
+        updates.clone(),
+        persist,
+        queue_dispatch_spacing,
+    ) {
         return ApiResponse::server_error(e);
+    }
+    for update in &updates {
+        if update.rhythm_enabled.is_some()
+            || update.standby_enabled.is_some()
+            || update.target_state.is_some()
+            || update.room_profile.is_some()
+        {
+            let action_id = update
+                .target_state
+                .map(|_| "set_room_state".to_string())
+                .or_else(|| {
+                    update.rhythm_enabled.map(|enabled| {
+                        if enabled {
+                            "circadian_on".to_string()
+                        } else {
+                            "circadian_off".to_string()
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "set_light_preferences".to_string());
+            let mut record =
+                crate::activity::LightActivityRecord::app(&update.node_id, action_id);
+            record.payload = Some(json!({
+                "rhythm_enabled": update.rhythm_enabled,
+                "standby_enabled": update.standby_enabled,
+                "state": update.target_state.map(|state| state.as_api_str()),
+                "profile_settings_touched": update.room_profile.is_some(),
+            }));
+            crate::activity::record_light_activity(state, record);
+        }
     }
     nodes_response(results, true, queue_dispatch_spacing)
 }

@@ -102,6 +102,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/factory-reset", post(post_factory_reset))
         .route("/api/backup", get(get_backup).put(put_backup))
         .route("/api/nodes/state", get(get_nodes_state))
+        .route("/api/history", get(get_history))
         .route("/api/events", get(sse_events))
         .route("/api/devices", delete(delete_device))
         .route("/api/config", get(get_config).put(put_config))
@@ -350,6 +351,13 @@ async fn put_backup(State(state): State<SharedState>, Json(body): Json<Value>) -
 
 async fn get_nodes_state(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_nodes_state(&state)
+}
+
+async fn get_history(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    handlers::handle_get_history(&state, &params)
 }
 
 async fn delete_device(

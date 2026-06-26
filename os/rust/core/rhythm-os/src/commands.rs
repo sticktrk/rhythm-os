@@ -10190,6 +10190,7 @@ pub fn do_node_preferences_set(
     })
 }
 
+#[derive(Clone)]
 pub struct QueuedNodePreferencesPatch {
     pub node_id: String,
     pub rhythm_enabled: Option<bool>,

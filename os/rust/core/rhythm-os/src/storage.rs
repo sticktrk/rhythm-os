@@ -57,6 +57,17 @@ pub trait Storage: Send + Sync {
     fn save_light_runtime_state(&self, _state: &StoredLightRuntimeState) -> Result<()> {
         Ok(())
     }
+    fn load_light_activity_history(
+        &self,
+    ) -> Result<Option<crate::activity::LightActivityHistory>> {
+        Ok(None)
+    }
+    fn save_light_activity_history(
+        &self,
+        _history: &crate::activity::LightActivityHistory,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>>;
     fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()>;
     fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>>;
@@ -800,6 +811,40 @@ impl Storage for FileStorage {
         self.write_atomic("light_runtime_state.json", data.as_bytes())
     }
 
+    fn load_light_activity_history(
+        &self,
+    ) -> Result<Option<crate::activity::LightActivityHistory>> {
+        let path = self.file_path("activity_history.json");
+        match self.read_json::<crate::activity::LightActivityHistory>("activity_history.json") {
+            Ok(v) => Ok(Some(v.normalized())),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load activity history {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted activity history at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_light_activity_history(
+        &self,
+        history: &crate::activity::LightActivityHistory,
+    ) -> Result<()> {
+        let data = serde_json::to_string_pretty(history)?;
+        self.write_atomic("activity_history.json", data.as_bytes())
+    }
+
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
         let path = self.file_path("hub_credentials.json");
         if !path.exists() {
@@ -1095,6 +1140,7 @@ impl Storage for FileStorage {
             "scenes.json",
             "motion_timers.json",
             "light_runtime_state.json",
+            "activity_history.json",
             "hub_credentials.json",
             "canonical_registry.json",
             "topology.json",
@@ -1279,6 +1325,21 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             Ok(None) => {}
             Err(e) => {
                 debug!(target: "sys", "No persisted light runtime state loaded: {}", e);
+            }
+        }
+    }
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_light_activity_history() {
+            Ok(Some(history)) => {
+                let history = history.normalized();
+                let count = history.activities.len();
+                s.light_activity = history.activities;
+                info!(target: "sys", "Loaded light activity history: {} events", count);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!(target: "sys", "No persisted light activity history loaded: {}", e);
             }
         }
     }

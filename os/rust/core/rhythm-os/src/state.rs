@@ -12,6 +12,7 @@ use rhythm_core::{
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
+use crate::activity::LightActivityEvent;
 use crate::auth::StoredApiAuth;
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
@@ -439,6 +440,9 @@ pub struct AppState {
     /// polls "beta" and only updates on an explicit `POST /api/ota/update`.
     pub auto_update: bool,
 
+    /// Recent user-intent light interactions for app-less history and graphs.
+    pub light_activity: Vec<LightActivityEvent>,
+
     // ---- Local API auth ----
     /// Persisted local API bearer tokens. Raw token material is never stored.
     pub api_auth: StoredApiAuth,
@@ -734,6 +738,7 @@ impl Default for AppState {
             power_save: factory_default_power_save(),
             light_breaker_enabled: true,
             auto_update: factory_default_auto_update(),
+            light_activity: Vec::new(),
             api_auth: StoredApiAuth::default(),
             require_api_auth: false,
             storage: None,
