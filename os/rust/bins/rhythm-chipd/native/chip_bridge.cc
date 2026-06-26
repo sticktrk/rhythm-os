@@ -111,6 +111,16 @@ CHIP_ERROR DecodeRhythmIpk(const char * ipkHex, RhythmIpk & out)
     return CHIP_NO_ERROR;
 }
 
+uint64_t ReadBigEndianUint64(const uint8_t * bytes)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < sizeof(uint64_t); ++i)
+    {
+        value = (value << 8) | bytes[i];
+    }
+    return value;
+}
+
 class RhythmOperationalCredentialsIssuer final : public ExampleOperationalCredentialsIssuer
 {
 public:
@@ -918,6 +928,12 @@ public:
         CHIP_ERROR err = CHIP_NO_ERROR;
         ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err]() { err = InitializeCommissioner(); }));
         return err;
+    }
+
+    uint64_t CompressedFabricId()
+    {
+        std::lock_guard<std::mutex> lock(mMutex);
+        return mCompressedFabricId;
     }
 
     CHIP_ERROR CommissionLight(const rhythm_chip_bridge_commission_request & request, rhythm_chip_bridge_device & device)
@@ -1735,6 +1751,7 @@ public:
         mStoragePath.clear();
         mFabricId.clear();
         mOperationalFabricId = 0;
+        mCompressedFabricId  = 0;
         mIpk                 = {};
         mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
     }
@@ -1888,6 +1905,8 @@ private:
         uint8_t compressedFabricId[sizeof(uint64_t)] = { 0 };
         chip::MutableByteSpan compressedFabricIdSpan(compressedFabricId);
         ReturnErrorOnFailure(commissioner->GetCompressedFabricIdBytes(compressedFabricIdSpan));
+        VerifyOrReturnError(compressedFabricIdSpan.size() == sizeof(uint64_t), CHIP_ERROR_INCORRECT_STATE);
+        mCompressedFabricId = ReadBigEndianUint64(compressedFabricId);
 
         const chip::ByteSpan rhythmIpk(mIpk.data(), mIpk.size());
         ReturnErrorOnFailure(chip::Credentials::SetSingleIpkEpochKey(
@@ -2335,6 +2354,7 @@ private:
     std::string mStoragePath;
     std::string mFabricId;
     uint64_t mOperationalFabricId = 0;
+    uint64_t mCompressedFabricId  = 0;
     RhythmIpk mIpk                = {};
     uint16_t mControllerVendorId = static_cast<uint16_t>(kDefaultControllerVendorId);
     bool mFactoryInitialized = false;
@@ -2397,12 +2417,18 @@ const char * rhythm_chip_bridge_link_mode(void)
 
 bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, uint64_t operational_fabric_id,
                              const char * ipk_hex, bool has_ble_controller, uint16_t ble_controller,
-                             uint16_t controller_vendor_id, char * error_message, size_t error_message_size)
+                             uint16_t controller_vendor_id, uint64_t * out_compressed_fabric_id, char * error_message,
+                             size_t error_message_size)
 {
-    return HandleBridgeResult(
-        gContext.Init(storage_path, fabric_id, operational_fabric_id, ipk_hex, has_ble_controller, ble_controller,
-                      controller_vendor_id),
-        error_message, error_message_size, "initializing CHIP controller bridge");
+    CHIP_ERROR err = gContext.Init(storage_path, fabric_id, operational_fabric_id, ipk_hex, has_ble_controller,
+                                   ble_controller, controller_vendor_id);
+    const bool success =
+        HandleBridgeResult(err, error_message, error_message_size, "initializing CHIP controller bridge");
+    if (success && out_compressed_fabric_id != nullptr)
+    {
+        *out_compressed_fabric_id = gContext.CompressedFabricId();
+    }
+    return success;
 }
 
 bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commission_request * request,

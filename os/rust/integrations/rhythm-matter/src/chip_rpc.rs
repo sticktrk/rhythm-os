@@ -29,6 +29,8 @@ pub struct ChipInitControllerRequest {
 pub struct ChipInitControllerResponse {
     pub fabric_id: String,
     pub operational_fabric_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compressed_fabric_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

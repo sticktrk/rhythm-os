@@ -8,6 +8,7 @@ use rhythm_matter::transport::{
 use crate::service::CommissioningState;
 
 pub struct ChipFfiController {
+    compressed_fabric_id: Option<String>,
     #[cfg(not(rhythm_chipd_chip_ffi))]
     mode: ChipBridgeMode,
 }
@@ -20,19 +21,26 @@ impl ChipFfiController {
     ) -> Result<Self> {
         #[cfg(not(rhythm_chipd_chip_ffi))]
         let _ = (state, ble_controller);
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        let compressed_fabric_id = None;
         #[cfg(rhythm_chipd_chip_ffi)]
-        ffi_probe::initialize_bridge(
+        let compressed_fabric_id = Some(ffi_probe::initialize_bridge(
             &state.storage_path,
             &state.fabric_id,
             state.operational_fabric_id,
             &state.ipk_hex,
             ble_controller,
-        )?;
+        )?);
 
         Ok(Self {
+            compressed_fabric_id,
             #[cfg(not(rhythm_chipd_chip_ffi))]
             mode: ChipBridgeMode::stub(),
         })
+    }
+
+    pub fn compressed_fabric_id(&self) -> Option<&str> {
+        self.compressed_fabric_id.as_deref()
     }
 
     pub fn commission_light(
@@ -692,6 +700,7 @@ mod ffi_probe {
             has_ble_controller: bool,
             ble_controller: c_ushort,
             controller_vendor_id: c_ushort,
+            out_compressed_fabric_id: *mut u64,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -883,13 +892,14 @@ mod ffi_probe {
         operational_fabric_id: u64,
         ipk_hex: &str,
         ble_controller: Option<u16>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let storage_path = CString::new(storage_path.display().to_string())
             .context("encoding CHIP storage path")?;
         let fabric_id = CString::new(fabric_id).context("encoding CHIP fabric id")?;
         let ipk_hex = CString::new(ipk_hex).context("encoding CHIP IPK")?;
         let controller_vendor_id = controller_vendor_id()?;
         let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let mut compressed_fabric_id = 0u64;
 
         let success = unsafe {
             rhythm_chip_bridge_init(
@@ -900,13 +910,14 @@ mod ffi_probe {
                 ble_controller.is_some(),
                 ble_controller.unwrap_or_default(),
                 controller_vendor_id,
+                &mut compressed_fabric_id,
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )
         };
 
         if success {
-            return Ok(());
+            return Ok(format!("{compressed_fabric_id:016X}"));
         }
 
         Err(read_error_buffer(&error_buffer))

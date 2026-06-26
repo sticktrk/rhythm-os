@@ -1431,6 +1431,7 @@ mod tests {
                 ChipInitControllerResponse {
                     fabric_id: "other".to_string(),
                     operational_fabric_id: 1,
+                    compressed_fabric_id: None,
                 },
             )
         });
@@ -1448,6 +1449,7 @@ mod tests {
                 ChipInitControllerResponse {
                     fabric_id: "test".to_string(),
                     operational_fabric_id: 2,
+                    compressed_fabric_id: None,
                 },
             )
         });
@@ -1918,6 +1920,7 @@ mod tests {
                     ChipInitControllerResponse {
                         fabric_id: "test".to_string(),
                         operational_fabric_id: 1,
+                        compressed_fabric_id: None,
                     },
                 ),
                 other => panic!("unexpected RPC during recovery test: {:?}", other),
@@ -1968,6 +1971,7 @@ mod tests {
                     ChipInitControllerResponse {
                         fabric_id: "test".to_string(),
                         operational_fabric_id: 1,
+                        compressed_fabric_id: None,
                     },
                 ),
                 ChipRpcRequest::SetOnOff { .. } => {
@@ -2036,6 +2040,7 @@ mod tests {
                     ChipInitControllerResponse {
                         fabric_id: "test".to_string(),
                         operational_fabric_id: 1,
+                        compressed_fabric_id: None,
                     },
                 ),
                 other => panic!("unexpected RPC during recovery test: {:?}", other),
@@ -2186,6 +2191,7 @@ mod tests {
                     ChipInitControllerResponse {
                         fabric_id: "test".to_string(),
                         operational_fabric_id: 1,
+                        compressed_fabric_id: None,
                     },
                 ),
                 other => panic!("unexpected RPC during recovery test: {:?}", other),
