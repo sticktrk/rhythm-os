@@ -1705,8 +1705,11 @@ version = "0.6.121-beta"
 dependencies = [
  "anyhow",
  "cc",
+ "flume",
+ "mdns-sd",
  "pkg-config",
  "rhythm-matter",
+ "serde",
  "serde_json",
 ]
 

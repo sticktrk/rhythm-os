@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use rhythm_matter::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
@@ -13,6 +15,13 @@ use rhythm_matter::chip_rpc::{
 use rhythm_matter::transport::{CommissionedDevice, MatterDeviceInfo};
 
 use crate::backend::ChipControllerBackend;
+
+const DEVICE_STORE_SCHEMA_VERSION: u32 = 1;
+const MATTER_OPERATIONAL_SERVICE_TYPE: &str = "_matter._tcp.local.";
+#[cfg(not(test))]
+const LEGACY_DEVICE_STORE_MDNS_SCAN_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const LEGACY_DEVICE_STORE_MDNS_SCAN_TIMEOUT: Duration = Duration::from_secs(0);
 
 #[derive(Debug, Clone)]
 pub struct CommissioningState {
@@ -288,6 +297,8 @@ impl ChipControllerService {
         let response = self
             .backend
             .init_controller(&state, ble_controller, &existing_devices)?;
+        self.device_store
+            .ensure_controller_fabric(response.compressed_fabric_id.as_deref())?;
         self.state = Some(state);
         Ok(response)
     }
@@ -302,20 +313,56 @@ impl ChipControllerService {
 #[derive(Default)]
 struct DeviceStore {
     path: Option<PathBuf>,
+    compressed_fabric_id: Option<String>,
     devices: BTreeMap<u64, CommissionedDevice>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeviceStoreFile {
+    schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compressed_fabric_id: Option<String>,
+    devices: Vec<CommissionedDevice>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DeviceStoreOnDisk {
+    V1(DeviceStoreFile),
+    Legacy(Vec<CommissionedDevice>),
 }
 
 impl DeviceStore {
     fn configure(&mut self, path: PathBuf) -> Result<()> {
         self.path = Some(path.clone());
-        let loaded = match fs::read_to_string(&path) {
-            Ok(json) => serde_json::from_str::<Vec<CommissionedDevice>>(&json)
-                .with_context(|| format!("decoding {}", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        let (compressed_fabric_id, loaded) = match fs::read_to_string(&path) {
+            Ok(json) => match serde_json::from_str::<DeviceStoreOnDisk>(&json)
+                .with_context(|| format!("decoding {}", path.display()))?
+            {
+                DeviceStoreOnDisk::V1(file) => {
+                    if file.schema_version != DEVICE_STORE_SCHEMA_VERSION {
+                        anyhow::bail!(
+                            "Unsupported Matter device store schema version {} in {}",
+                            file.schema_version,
+                            path.display()
+                        );
+                    }
+                    (
+                        file.compressed_fabric_id
+                            .as_deref()
+                            .map(normalize_compressed_fabric_id)
+                            .transpose()?,
+                        file.devices,
+                    )
+                }
+                DeviceStoreOnDisk::Legacy(devices) => (None, devices),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, Vec::new()),
             Err(error) => {
                 return Err(error).with_context(|| format!("reading {}", path.display()));
             }
         };
+        self.compressed_fabric_id = compressed_fabric_id;
         self.devices = loaded
             .into_iter()
             .map(|device| (device.node_id, device))
@@ -349,6 +396,73 @@ impl DeviceStore {
         self.flush()
     }
 
+    fn ensure_controller_fabric(
+        &mut self,
+        controller_compressed_fabric_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(controller_id) = controller_compressed_fabric_id else {
+            return Ok(());
+        };
+        let controller_id = normalize_compressed_fabric_id(controller_id)?;
+
+        if let Some(stored_id) = &self.compressed_fabric_id {
+            if stored_id != &controller_id {
+                anyhow::bail!(
+                    "Matter device store belongs to compressed fabric {}, but current controller initialized fabric {}; clear Matter devices and recommission them onto the current fabric",
+                    stored_id,
+                    controller_id
+                );
+            }
+            return Ok(());
+        }
+
+        if self.ensure_legacy_devices_do_not_advertise_other_fabric(&controller_id)? {
+            self.compressed_fabric_id = Some(controller_id);
+            self.flush()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_legacy_devices_do_not_advertise_other_fabric(
+        &self,
+        controller_id: &str,
+    ) -> Result<bool> {
+        if self.devices.is_empty() {
+            return Ok(true);
+        }
+
+        match scan_matter_operational_fabrics(
+            self.devices.keys().copied().collect(),
+            LEGACY_DEVICE_STORE_MDNS_SCAN_TIMEOUT,
+        ) {
+            Ok(observed) => {
+                let mut saw_current_fabric = false;
+                for (node_id, fabrics) in observed {
+                    if fabrics.contains(controller_id) {
+                        saw_current_fabric = true;
+                        continue;
+                    }
+                    if let Some(other_id) = fabrics.iter().next() {
+                        anyhow::bail!(
+                            "Matter cached node {} is advertising on compressed fabric {}, but current controller initialized fabric {}; clear Matter devices and recommission them onto the current fabric",
+                            node_id,
+                            other_id,
+                            controller_id
+                        );
+                    }
+                }
+                Ok(saw_current_fabric)
+            }
+            Err(error) => {
+                eprintln!(
+                    "rhythm-chipd warning: skipped legacy Matter fabric mDNS check: {error:#}"
+                );
+                Ok(false)
+            }
+        }
+    }
+
     fn flush(&self) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -356,10 +470,82 @@ impl DeviceStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let json = serde_json::to_string_pretty(&self.devices())?;
+        let file = DeviceStoreFile {
+            schema_version: DEVICE_STORE_SCHEMA_VERSION,
+            compressed_fabric_id: self.compressed_fabric_id.clone(),
+            devices: self.devices(),
+        };
+        let json = serde_json::to_string_pretty(&file)?;
         fs::write(path, json).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
+}
+
+fn normalize_compressed_fabric_id(value: &str) -> Result<String> {
+    let trimmed = value
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
+    if trimmed.len() > 16 || trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        anyhow::bail!("Invalid Matter compressed fabric id '{}'", value);
+    }
+    Ok(format!("{:0>16}", trimmed).to_ascii_uppercase())
+}
+
+fn scan_matter_operational_fabrics(
+    node_ids: HashSet<u64>,
+    timeout: Duration,
+) -> Result<HashMap<u64, HashSet<String>>> {
+    if node_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if timeout.is_zero() {
+        return Ok(HashMap::new());
+    }
+
+    let daemon = mdns_sd::ServiceDaemon::new().context("creating Matter mDNS daemon")?;
+    let receiver = daemon
+        .browse(MATTER_OPERATIONAL_SERVICE_TYPE)
+        .context("browsing Matter operational mDNS service")?;
+    let deadline = Instant::now() + timeout;
+    let mut observed: HashMap<u64, HashSet<String>> = HashMap::new();
+
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let poll = remaining.min(Duration::from_millis(100));
+        match receiver.recv_timeout(poll) {
+            Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                if let Some((fabric_id, node_id)) =
+                    parse_matter_operational_instance(info.get_fullname())?
+                {
+                    if node_ids.contains(&node_id) {
+                        observed.entry(node_id).or_default().insert(fabric_id);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(flume::RecvTimeoutError::Timeout) => {}
+            Err(flume::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = daemon.stop_browse(MATTER_OPERATIONAL_SERVICE_TYPE);
+    Ok(observed)
+}
+
+fn parse_matter_operational_instance(fullname: &str) -> Result<Option<(String, u64)>> {
+    let Some(instance) = fullname.split("._matter._tcp").next() else {
+        return Ok(None);
+    };
+    let Some((fabric, node)) = instance.rsplit_once('-') else {
+        return Ok(None);
+    };
+    let fabric = normalize_compressed_fabric_id(fabric)?;
+    let node = normalize_compressed_fabric_id(node)?;
+    let node_id = u64::from_str_radix(&node, 16)
+        .with_context(|| format!("parsing Matter operational node id from {}", fullname))?;
+    Ok(Some((fabric, node_id)))
 }
 
 #[cfg(test)]
@@ -485,9 +671,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(commissioned.device.node_id, 42);
-        assert!(fs::read_to_string(&devices_path)
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&devices_path).unwrap()).unwrap();
+        assert!(persisted["devices"]
+            .as_array()
             .unwrap()
-            .contains("\"node_id\": 42"));
+            .iter()
+            .any(|device| device["node_id"] == 42));
 
         let _: ChipRpcEmpty = serde_json::from_value(
             service
@@ -724,9 +914,13 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(!fs::read_to_string(&devices_path)
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&devices_path).unwrap()).unwrap();
+        assert!(!persisted["devices"]
+            .as_array()
             .unwrap()
-            .contains("\"node_id\": 42"));
+            .iter()
+            .any(|device| device["node_id"] == 42));
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -755,8 +949,44 @@ mod tests {
 
         store.remove(2).unwrap();
         assert_eq!(store.devices().len(), 0);
-        assert_eq!(fs::read_to_string(&devices_path).unwrap(), "[]");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&devices_path).unwrap()).unwrap();
+        assert_eq!(persisted["devices"].as_array().unwrap().len(), 0);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn device_store_rejects_mismatched_compressed_fabric() {
+        let dir = unique_test_dir("store-fabric-mismatch");
+        let devices_path = dir.join("devices.json");
+        fs::write(
+            &devices_path,
+            serde_json::to_string(&DeviceStoreFile {
+                schema_version: DEVICE_STORE_SCHEMA_VERSION,
+                compressed_fabric_id: Some("D6B252ACB7133A7E".to_string()),
+                devices: vec![commissioned_device(100, 1)],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut store = DeviceStore::default();
+        store.configure(devices_path).unwrap();
+        let error = string_error(store.ensure_controller_fabric(Some("399026E03C18B2D2")));
+        assert!(error.contains("device store belongs to compressed fabric D6B252ACB7133A7E"));
+        assert!(error.contains("current controller initialized fabric 399026E03C18B2D2"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_matter_operational_instance_names() {
+        let parsed = parse_matter_operational_instance(
+            "D6B252ACB7133A7E-0000000000000067._matter._tcp.local.",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed, ("D6B252ACB7133A7E".to_string(), 103));
     }
 }

@@ -105,7 +105,8 @@ struct rhythm_chip_bridge_attribute_report
 const char * rhythm_chip_bridge_link_mode(void);
 bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, uint64_t operational_fabric_id,
                              const char * ipk_hex, bool has_ble_controller, uint16_t ble_controller,
-                             uint16_t controller_vendor_id, char * error_message, size_t error_message_size);
+                             uint16_t controller_vendor_id, uint64_t * out_compressed_fabric_id,
+                             char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commission_request * request,
                                          struct rhythm_chip_bridge_device * device, char * error_message,
                                          size_t error_message_size);

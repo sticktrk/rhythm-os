@@ -141,10 +141,12 @@ impl ChipControllerBackend for NativeChipBackend {
         let controller =
             chip_ffi::ChipFfiController::initialize(state, ble_controller, existing_devices)
                 .context("initializing direct CHIP controller bridge")?;
+        let compressed_fabric_id = controller.compressed_fabric_id().map(str::to_string);
         self.controller = Some(controller);
         Ok(ChipInitControllerResponse {
             fabric_id: state.fabric_id.clone(),
             operational_fabric_id: state.operational_fabric_id,
+            compressed_fabric_id,
         })
     }
 
@@ -394,6 +396,10 @@ impl ChipControllerBackend for FakeChipBackend {
         Ok(ChipInitControllerResponse {
             fabric_id: state.fabric_id.clone(),
             operational_fabric_id: state.operational_fabric_id,
+            compressed_fabric_id: Some(format!(
+                "{:016X}",
+                state.operational_fabric_id ^ 0xA5A5_A5A5_A5A5_A5A5
+            )),
         })
     }
 
