@@ -98,6 +98,33 @@ impl MatterHubData {
         }
     }
 
+    /// Mark whether a cached Matter node is currently reachable.
+    pub fn mark_node_reachable(&self, node_id: u64, reachable: bool) {
+        if let Ok(mut list) = self.commissioned.lock() {
+            if let Some(device) = list.iter_mut().find(|device| device.node_id == node_id) {
+                device.reachable = reachable;
+            }
+        }
+    }
+
+    /// Upsert basic cached Matter device info without treating it as a live
+    /// probe success.
+    pub fn record_device_info(&self, info: &MatterDeviceInfo, reachable: bool) {
+        let mut updated = info.clone();
+        updated.reachable = reachable;
+
+        if let Ok(mut list) = self.commissioned.lock() {
+            if let Some(existing) = list
+                .iter_mut()
+                .find(|device| device.node_id == info.node_id)
+            {
+                *existing = updated;
+            } else {
+                list.push(updated);
+            }
+        }
+    }
+
     /// Mark a Matter node as actively decommissioning.
     ///
     /// Returns `false` if another unpair request is already in progress for the

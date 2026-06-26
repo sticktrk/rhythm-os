@@ -1,6 +1,6 @@
 //! Matter hub lifecycle — connect, disconnect, runtime creation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,8 +23,8 @@ use crate::transport::{
 /// up and fall back to basic device info. Reachable devices respond in well
 /// under a second; an unreachable one would otherwise block the connect path on
 /// a ~35s CHIP timeout, delaying the whole Matter integration from loading.
-/// The on-demand probe in `device_metadata` fills in real capabilities later
-/// once the device becomes reachable. See #169.
+/// A later successful rediscovery fills in real capabilities once the device
+/// becomes reachable. See #169.
 const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connect to the local Matter fabric.
@@ -42,6 +42,7 @@ pub fn connect_matter(
         &cloud_profiles,
         CONNECT_PROBE_TIMEOUT,
     );
+    let commissioned = commissioned_with_reachability(commissioned, &initial_metadata);
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -130,14 +131,15 @@ struct InitialDeviceMetadata {
     device_caps: HashMap<String, LightCapabilities>,
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
     subscription_targets: Vec<MatterSubscriptionTarget>,
+    unreachable_nodes: HashSet<u64>,
 }
 
 /// Probe a node but give up after `timeout`, so a single unreachable device
 /// cannot stall the whole hub bootstrap on a serial ~35s CHIP timeout. The
 /// probe runs on a detached thread; on timeout we return an error and let the
-/// caller fall back to basic device info (and the on-demand probe in
-/// `device_metadata` recover real capabilities later). See #169.
-fn probe_light_with_deadline(
+/// caller fall back to basic device info until rediscovery can recover real
+/// capabilities later. See #169.
+pub(crate) fn probe_light_with_deadline(
     transport: &Arc<dyn MatterTransport>,
     node_id: u64,
     timeout: Duration,
@@ -170,6 +172,7 @@ fn load_initial_device_metadata(
     let mut device_caps = HashMap::new();
     let mut device_quirks = HashMap::new();
     let mut subscription_targets = Vec::new();
+    let mut unreachable_nodes = HashSet::new();
     let local_overrides = crate::local_quirks::load_overrides_for_state(state);
 
     for info in commissioned {
@@ -195,14 +198,16 @@ fn load_initial_device_metadata(
             Err(error) => {
                 warn!(
                     target: "sys",
-                    "Matter: failed to probe node {} during connect: {}",
+                    "Matter: failed to probe node {} during connect, using fallback metadata and skipping live subscriptions until rediscovery: {}",
                     info.node_id,
                     error
                 );
-                subscription_targets.push(MatterSubscriptionTarget {
-                    node_id: info.node_id,
-                    endpoint: 1,
-                });
+                let device_id = format_device_id(info.node_id, 1);
+                device_caps
+                    .entry(device_id.clone())
+                    .or_insert_with(crate::commissioning::fallback_device_capabilities);
+                device_quirks.entry(device_id).or_default();
+                unreachable_nodes.insert(info.node_id);
             }
         }
     }
@@ -211,7 +216,23 @@ fn load_initial_device_metadata(
         device_caps,
         device_quirks,
         subscription_targets,
+        unreachable_nodes,
     }
+}
+
+fn commissioned_with_reachability(
+    commissioned: Vec<MatterDeviceInfo>,
+    metadata: &InitialDeviceMetadata,
+) -> Vec<MatterDeviceInfo> {
+    commissioned
+        .into_iter()
+        .map(|mut device| {
+            if metadata.unreachable_nodes.contains(&device.node_id) {
+                device.reachable = false;
+            }
+            device
+        })
+        .collect()
 }
 
 fn start_attribute_report_loop(
@@ -555,11 +576,22 @@ mod tests {
         let data = hub.data::<Arc<MatterHubData>>().unwrap();
         assert_eq!(data.fabric_id, "fabric-test");
         assert_eq!(data.commissioned.lock().unwrap().len(), 2);
+        assert!(
+            !data
+                .commissioned
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|device| device.node_id == 12)
+                .unwrap()
+                .reachable
+        );
         assert_eq!(
             data.next_node_id.load(std::sync::atomic::Ordering::SeqCst),
             13
         );
         assert!(data.device_caps.lock().unwrap().contains_key("matter-10-2"));
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-12"));
         assert!(!data.device_caps.lock().unwrap().contains_key("matter-12-2"));
 
         let event = event_rx
@@ -615,11 +647,14 @@ mod tests {
             "bootstrap probe blocked on unreachable device: {:?}",
             elapsed
         );
-        // Reachable device pre-warmed; unreachable device deferred to the
-        // on-demand probe but still gets a subscription target (endpoint 1).
+        // Reachable device pre-warmed; unreachable device gets fallback
+        // metadata but no subscription target, so background subscriptions
+        // cannot occupy chipd on a known-bad node.
         assert!(metadata.device_caps.contains_key("matter-10-2"));
+        assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(!metadata.device_caps.contains_key("matter-12-2"));
-        assert!(metadata
+        assert!(metadata.unreachable_nodes.contains(&12));
+        assert!(!metadata
             .subscription_targets
             .iter()
             .any(|target| target.node_id == 12 && target.endpoint == 1));

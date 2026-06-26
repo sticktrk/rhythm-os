@@ -41,6 +41,28 @@ enum MatterOnOffRead {
     Suppressed,
 }
 
+fn initial_connectivity_backoff(
+    hub_data: &MatterHubData,
+) -> HashMap<(u64, u16), MatterOnOffReadBackoff> {
+    let suppress_until = Instant::now() + MATTER_ON_OFF_READ_BACKOFF;
+    hub_data
+        .commissioned
+        .lock()
+        .map(|commissioned| {
+            commissioned
+                .iter()
+                .filter(|device| !device.reachable)
+                .map(|device| {
+                    (
+                        (device.node_id, 1),
+                        MatterOnOffReadBackoff { suppress_until },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Format the hub-native control ID used for a Matter group.
 pub fn format_group_control_id(group_id: u16) -> String {
     format!("{}{}", MATTER_GROUP_CONTROL_PREFIX, group_id)
@@ -65,10 +87,11 @@ pub struct MatterLightController {
 impl MatterLightController {
     /// Create a new Matter light controller.
     pub fn new(transport: Arc<dyn MatterTransport>, hub_data: Arc<MatterHubData>) -> Self {
+        let on_off_read_backoff = Mutex::new(initial_connectivity_backoff(&hub_data));
         Self {
             transport,
             hub_data,
-            on_off_read_backoff: Mutex::new(HashMap::new()),
+            on_off_read_backoff,
             group_fanout_only: Self::group_fanout_only_enabled(),
         }
     }
@@ -336,6 +359,7 @@ impl MatterLightController {
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.remove(&(node_id, endpoint));
         }
+        self.hub_data.mark_node_reachable(node_id, true);
     }
 
     fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16) {
@@ -347,6 +371,7 @@ impl MatterLightController {
                 },
             );
         }
+        self.hub_data.mark_node_reachable(node_id, false);
     }
 
     fn connectivity_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
@@ -1498,6 +1523,55 @@ mod tests {
             "Kitchen",
             &format_group_control_id(group_id),
             &["matter-42".to_string(), "matter-43".to_string()],
+        );
+    }
+
+    #[test]
+    fn turn_on_skips_nodes_marked_unreachable_at_boot() {
+        let spy = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("r1", "Room", "r1", &["matter-42".to_string()]);
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("r1", vec!["matter-42".to_string()]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let hub_data = Arc::new(crate::hub_state::MatterHubData {
+            transport: std::sync::OnceLock::new(),
+            capture_dir: std::sync::OnceLock::new(),
+            registry,
+            fabric_id: "test".to_string(),
+            commissioned: std::sync::Mutex::new(vec![crate::transport::MatterDeviceInfo {
+                node_id: 42,
+                vendor_name: "Vendor".to_string(),
+                product_name: "Lamp".to_string(),
+                reachable: false,
+            }]),
+            next_node_id: std::sync::atomic::AtomicU64::new(100),
+            device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
+                "matter-42".to_string(),
+                LightCapabilities::defaults_for(LightType::ExtendedColor),
+            )])),
+            device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cloud_profiles: std::sync::Mutex::new(
+                crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            ),
+            decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
+            recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            event_tx: tx,
+        });
+        let controller = MatterLightController::new(spy.clone(), hub_data);
+
+        let result = block_on(controller.turn_on("r1", LightingCommand::new(50, 3000)));
+
+        assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
+        assert!(
+            spy.operations().is_empty(),
+            "unreachable boot node should not receive Matter writes"
         );
     }
 

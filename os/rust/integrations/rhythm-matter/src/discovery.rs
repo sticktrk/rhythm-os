@@ -1,6 +1,7 @@
 //! Matter device discovery for room sync.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use log::warn;
@@ -10,6 +11,8 @@ use rhythm_os::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 
 use crate::hub_state::MatterHubData;
 use crate::transport::{CommissionedDevice, MatterDeviceInfo, MatterTransport};
+
+const SYNC_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Matter hub discovery.
 ///
@@ -76,8 +79,12 @@ impl HubDiscovery for MatterDiscovery {
                 continue;
             }
 
-            let commissioned = match self.transport.probe_light(info.node_id) {
-                Ok(device) => device,
+            let (commissioned, used_fallback) = match crate::lifecycle::probe_light_with_deadline(
+                &self.transport,
+                info.node_id,
+                SYNC_PROBE_TIMEOUT,
+            ) {
+                Ok(device) => (device, false),
                 Err(error) => {
                     warn!(
                         target: "room_sync",
@@ -85,7 +92,7 @@ impl HubDiscovery for MatterDiscovery {
                         info.node_id,
                         error
                     );
-                    Self::fallback_commissioned(&info)
+                    (Self::fallback_commissioned(&info), true)
                 }
             };
 
@@ -96,22 +103,36 @@ impl HubDiscovery for MatterDiscovery {
                 continue;
             }
 
-            self.hub_data.record_commissioned_device(&commissioned);
+            if used_fallback {
+                self.hub_data.record_device_info(&info, false);
+            } else {
+                self.hub_data.record_commissioned_device(&commissioned);
+            }
 
             let device_id = crate::lifecycle::format_device_id(
                 commissioned.node_id,
                 commissioned.light_endpoint,
             );
-            crate::commissioning::store_device_metadata(&self.hub_data, &commissioned, &device_id);
-            if let Err(error) =
-                crate::capture::persist_device_capture(&self.hub_data, &commissioned, "sync_probe")
-            {
-                warn!(
-                    target: "room_sync",
-                    "Matter: failed to persist sync probe capture for {}: {}",
-                    device_id,
-                    error
+            if used_fallback {
+                crate::commissioning::store_fallback_device_metadata(&self.hub_data, &device_id);
+            } else {
+                crate::commissioning::store_device_metadata(
+                    &self.hub_data,
+                    &commissioned,
+                    &device_id,
                 );
+                if let Err(error) = crate::capture::persist_device_capture(
+                    &self.hub_data,
+                    &commissioned,
+                    "sync_probe",
+                ) {
+                    warn!(
+                        target: "room_sync",
+                        "Matter: failed to persist sync probe capture for {}: {}",
+                        device_id,
+                        error
+                    );
+                }
             }
 
             identities.push(Self::device_identity(&commissioned));

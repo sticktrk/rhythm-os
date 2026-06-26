@@ -411,6 +411,28 @@ pub(crate) fn store_device_metadata(
     }
 }
 
+pub(crate) fn fallback_device_capabilities() -> rhythm_devices::LightCapabilities {
+    rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
+}
+
+pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, device_id: &str) {
+    if let Ok(mut device_caps) = hub_data.device_caps.lock() {
+        if !device_caps.contains_key(device_id) {
+            device_caps.insert(device_id.to_string(), fallback_device_capabilities());
+            info!(
+                target: "sys",
+                "Matter: stored fallback caps for {} ({} devices tracked)",
+                device_id,
+                device_caps.len()
+            );
+        }
+    }
+
+    if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
+        device_quirks.entry(device_id.to_string()).or_default();
+    }
+}
+
 pub(crate) fn build_device_capabilities(
     device: &CommissionedDevice,
 ) -> rhythm_devices::LightCapabilities {
