@@ -1,9 +1,11 @@
 -- Staff/admin access for customer support tooling.
 --
 -- This adds a private allow-list of Rhythm staff users. Staff accounts can
--- read customer records across RLS-protected tables. Admin accounts can also
--- write operational customer records needed by support/admin tools. This
--- migration does not grant client-side write access to staff membership.
+-- read customer support records across RLS-protected tables. Secret-bearing
+-- tables use sanitized support views instead of raw staff SELECT policies.
+-- Admin accounts can also write operational customer records needed by
+-- support/admin tools. This migration does not grant client-side write access
+-- to staff membership.
 --
 -- Grant access manually with the Supabase service role, for example:
 -- INSERT INTO public.rhythm_staff (user_id, role)
@@ -69,7 +71,7 @@ DROP POLICY IF EXISTS "Staff can read own staff status"
   ON public.rhythm_staff;
 CREATE POLICY "Staff can read own staff status"
   ON public.rhythm_staff FOR SELECT TO authenticated
-  USING (user_id = auth.uid() OR public.is_rhythm_staff());
+  USING (user_id = auth.uid() OR public.is_rhythm_admin());
 
 -- No INSERT/UPDATE/DELETE staff policies are defined on purpose. Staff grants
 -- must be managed with the Supabase service role or dashboard.
@@ -82,11 +84,32 @@ CREATE POLICY "Staff can view all homes"
   ON public.homes FOR SELECT TO authenticated
   USING (public.is_rhythm_staff());
 
+DROP VIEW IF EXISTS public.rhythm_support_hubs;
+CREATE VIEW public.rhythm_support_hubs
+WITH (security_barrier = true)
+AS
+SELECT
+  id,
+  home_id,
+  type,
+  name,
+  endpoint,
+  enabled,
+  remote_endpoint,
+  server_instance_id,
+  last_connected,
+  created_at,
+  updated_at,
+  token IS NOT NULL AND token <> '' AS has_legacy_token,
+  encrypted_token IS NOT NULL AS has_encrypted_token
+FROM public.hubs
+WHERE public.is_rhythm_staff();
+
+REVOKE ALL ON public.rhythm_support_hubs FROM PUBLIC;
+GRANT SELECT ON public.rhythm_support_hubs TO authenticated;
+
 DROP POLICY IF EXISTS "Staff can view all hubs"
   ON public.hubs;
-CREATE POLICY "Staff can view all hubs"
-  ON public.hubs FOR SELECT TO authenticated
-  USING (public.is_rhythm_staff());
 
 DROP POLICY IF EXISTS "Staff can view all remote access records"
   ON public.hub_remote_access;
@@ -94,11 +117,33 @@ CREATE POLICY "Staff can view all remote access records"
   ON public.hub_remote_access FOR SELECT TO authenticated
   USING (public.is_rhythm_staff());
 
+DROP VIEW IF EXISTS public.rhythm_support_cloud_snapshots;
+CREATE VIEW public.rhythm_support_cloud_snapshots
+WITH (security_barrier = true)
+AS
+SELECT
+  user_id,
+  source_hub_id,
+  source_hub_type,
+  source_hub_name,
+  source_hub_host,
+  source_hub_port,
+  home_id,
+  home_name,
+  captured_at,
+  created_at,
+  updated_at,
+  octet_length(configuration_bundle::TEXT) AS configuration_bundle_bytes,
+  octet_length(backup_bundle::TEXT) AS backup_bundle_bytes,
+  octet_length(app_settings_bundle::TEXT) AS app_settings_bundle_bytes
+FROM public.user_cloud_snapshots
+WHERE public.is_rhythm_staff();
+
+REVOKE ALL ON public.rhythm_support_cloud_snapshots FROM PUBLIC;
+GRANT SELECT ON public.rhythm_support_cloud_snapshots TO authenticated;
+
 DROP POLICY IF EXISTS "Staff can view all cloud snapshots"
   ON public.user_cloud_snapshots;
-CREATE POLICY "Staff can view all cloud snapshots"
-  ON public.user_cloud_snapshots FOR SELECT TO authenticated
-  USING (public.is_rhythm_staff());
 
 DROP POLICY IF EXISTS "Staff can view all subscriptions"
   ON public.subscriptions;
@@ -194,41 +239,64 @@ CREATE POLICY "Admin staff can delete remote access records"
 
 DROP POLICY IF EXISTS "Admin staff can create cloud snapshots"
   ON public.user_cloud_snapshots;
-CREATE POLICY "Admin staff can create cloud snapshots"
-  ON public.user_cloud_snapshots FOR INSERT TO authenticated
-  WITH CHECK (public.is_rhythm_admin());
-
 DROP POLICY IF EXISTS "Admin staff can update cloud snapshots"
   ON public.user_cloud_snapshots;
-CREATE POLICY "Admin staff can update cloud snapshots"
-  ON public.user_cloud_snapshots FOR UPDATE TO authenticated
-  USING (public.is_rhythm_admin())
-  WITH CHECK (public.is_rhythm_admin());
-
 DROP POLICY IF EXISTS "Admin staff can delete cloud snapshots"
   ON public.user_cloud_snapshots;
-CREATE POLICY "Admin staff can delete cloud snapshots"
-  ON public.user_cloud_snapshots FOR DELETE TO authenticated
-  USING (public.is_rhythm_admin());
 
 DROP POLICY IF EXISTS "Admin staff can create subscriptions"
   ON public.subscriptions;
-CREATE POLICY "Admin staff can create subscriptions"
-  ON public.subscriptions FOR INSERT TO authenticated
-  WITH CHECK (public.is_rhythm_admin());
-
 DROP POLICY IF EXISTS "Admin staff can update subscriptions"
   ON public.subscriptions;
-CREATE POLICY "Admin staff can update subscriptions"
-  ON public.subscriptions FOR UPDATE TO authenticated
-  USING (public.is_rhythm_admin())
-  WITH CHECK (public.is_rhythm_admin());
-
 DROP POLICY IF EXISTS "Admin staff can delete subscriptions"
   ON public.subscriptions;
-CREATE POLICY "Admin staff can delete subscriptions"
-  ON public.subscriptions FOR DELETE TO authenticated
-  USING (public.is_rhythm_admin());
+
+CREATE OR REPLACE FUNCTION public.set_rhythm_subscription_tier(
+  target_user_id UUID,
+  target_tier public.subscription_tier
+)
+RETURNS public.subscriptions
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  new_subscription public.subscriptions;
+BEGIN
+  IF NOT public.is_rhythm_admin() THEN
+    RAISE EXCEPTION 'not authorized'
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE public.subscriptions
+  SET
+    status = 'canceled',
+    ended_at = NOW()
+  WHERE user_id = target_user_id
+    AND status = 'active';
+
+  INSERT INTO public.subscriptions (
+    user_id,
+    tier,
+    status,
+    source
+  )
+  VALUES (
+    target_user_id,
+    target_tier,
+    'active',
+    'manual'
+  )
+  RETURNING * INTO new_subscription;
+
+  RETURN new_subscription;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.set_rhythm_subscription_tier(UUID, public.subscription_tier)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.set_rhythm_subscription_tier(UUID, public.subscription_tier)
+  TO authenticated;
 
 DROP POLICY IF EXISTS "Admin staff can update debug bundle submissions"
   ON public.support_debug_bundle_submissions;
@@ -277,3 +345,9 @@ COMMENT ON FUNCTION public.is_rhythm_staff() IS
   'Returns true when auth.uid() is an enabled Rhythm staff account';
 COMMENT ON FUNCTION public.is_rhythm_admin() IS
   'Returns true when auth.uid() is an enabled Rhythm admin account';
+COMMENT ON VIEW public.rhythm_support_hubs IS
+  'Sanitized support view of hubs that omits token and encrypted_token values';
+COMMENT ON VIEW public.rhythm_support_cloud_snapshots IS
+  'Sanitized support view of cloud snapshot metadata that omits backup payloads';
+COMMENT ON FUNCTION public.set_rhythm_subscription_tier(UUID, public.subscription_tier) IS
+  'Admin-only subscription tier change that cancels prior active rows before inserting the new active row';
