@@ -85,6 +85,11 @@ fn resolve_unpair_device_id(state: &SharedState, device_id: &str) -> Result<Stri
     Ok(endpoint.native_id.clone())
 }
 
+fn remove_persisted_device_cache_entry(state: &SharedState, node_id: u64) -> Result<bool> {
+    let data_path = matter_data_path(state)?;
+    crate::device_store::remove_commissioned_node(data_path, node_id)
+}
+
 /// Connect to the local Matter fabric and store the hub in state.
 pub fn connect_and_start(state: SharedState, _key: &HubKey) -> Result<Receiver<HubEvent>> {
     let data_path = matter_data_path(&state)?;
@@ -435,6 +440,38 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             .ok_or_else(|| anyhow::anyhow!("Invalid Matter device ID: {}", device_id))?;
 
         if force {
+            let persistent_removed = match remove_persisted_device_cache_entry(state, node_id) {
+                Ok(removed) => removed,
+                Err(error) => {
+                    log::error!(
+                        target: "pair",
+                        "Matter: failed to force-remove node {} from persistent device cache: {:#}",
+                        node_id,
+                        error
+                    );
+                    return Ok(UnpairingResult {
+                        hub_type: "matter".to_string(),
+                        status: PairingStatus::Failed,
+                        device_id: Some(device_id.to_string()),
+                        error: Some(format!("{:#}", error)),
+                    });
+                }
+            };
+
+            if persistent_removed {
+                warn!(
+                    target: "pair",
+                    "Matter: force-removed node {} from persistent device cache without decommission RPC",
+                    node_id
+                );
+            } else {
+                warn!(
+                    target: "pair",
+                    "Matter: node {} was not present in persistent device cache during force remove",
+                    node_id
+                );
+            }
+
             match get_hub_data(state) {
                 Ok(hub_data) => {
                     warn!(
@@ -676,6 +713,21 @@ mod tests {
 
     fn state() -> SharedState {
         Arc::new(Mutex::new(rhythm_os::state::AppState::default()))
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rhythm-matter-desktop-lifecycle-{name}-{nanos}"))
+    }
+
+    fn set_data_dir(state: &SharedState, name: &str) -> std::path::PathBuf {
+        let dir = unique_test_dir(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        state.lock().unwrap().data_dir = dir.display().to_string();
+        dir
     }
 
     fn commissioned_device(node_id: u64) -> CommissionedDevice {
@@ -1129,6 +1181,7 @@ mod tests {
     #[test]
     fn start_unpairing_validates_params_and_missing_transport() {
         let state = state();
+        let data_dir = set_data_dir(&state, "unpair-validation");
         let integration = MatterIntegration;
 
         assert_eq!(
@@ -1158,11 +1211,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.status, PairingStatus::Complete);
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
     fn start_unpairing_tracks_success_recent_suppression_in_progress_and_failure() {
         let state = state();
+        let data_dir = set_data_dir(&state, "unpair-tracking");
         let data = hub_data();
         let transport = install_transport(&data, Arc::new(FakeMatterTransport::default()));
         install_hub(&state, data.clone());
@@ -1238,5 +1294,41 @@ mod tests {
             transport.decommission_calls.lock().unwrap().as_slice(),
             &[(88, false)]
         );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn forced_unpair_removes_persisted_device_without_connected_hub() {
+        let state = state();
+        let data_dir = set_data_dir(&state, "force-persistent-remove");
+        let matter_dir = data_dir.join("matter");
+        let devices_path = matter_dir.join("chip").join("devices.json");
+        std::fs::create_dir_all(devices_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &devices_path,
+            serde_json::to_string_pretty(&vec![commissioned_device(102), commissioned_device(103)])
+                .unwrap(),
+        )
+        .unwrap();
+
+        let result = MatterIntegration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({ "device_id": "matter-102", "force": true }),
+            )
+            .unwrap();
+
+        assert_eq!(result.status, PairingStatus::Complete);
+        assert_eq!(result.device_id.as_deref(), Some("matter-102"));
+
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&devices_path).unwrap()).unwrap();
+        assert_eq!(persisted["schema_version"], 1);
+        let devices = persisted["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["node_id"], 103);
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

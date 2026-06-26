@@ -18,6 +18,7 @@ pub mod cloud_profiles;
 pub mod clusters;
 pub mod commissioning;
 pub mod controller;
+pub mod device_store;
 pub mod discovery;
 pub mod events;
 pub mod groups;
