@@ -657,7 +657,7 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
 
     expect(find.text('Server Unreachable'), findsOneWidget);
-    expect(find.text('Waiting to Retry...'), findsOneWidget);
+    expect(find.text('Connecting...'), findsOneWidget);
     expect(find.text('Trying local'), findsNothing);
     expect(find.text('Trying remote'), findsNothing);
     expect(find.text('Retry Now'), findsNothing);
@@ -701,6 +701,44 @@ void main() {
     retryCompleter.complete();
     await tester.pump();
     expect(find.text('Waiting to Retry...'), findsOneWidget);
+  });
+
+  testWidgets('server unreachable screen follows provider connecting state',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider([_serverHub(remote: true)]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connecting,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pumpWidget(
+      ChangeNotifierProvider<ServerSyncProvider>.value(
+        value: serverSync,
+        child: MaterialApp(
+          home: ServerDisconnectedScreen(
+            serverHub: _serverHub(remote: true),
+            autoRetry: false,
+            retryInterval: const Duration(minutes: 1),
+            onChooseHome: () {},
+          ),
+        ),
+      ),
+    );
+
+    await tester.pump();
+
+    expect(find.text('Connecting...'), findsOneWidget);
+    expect(find.text('Waiting to Retry...'), findsNothing);
   });
 
   testWidgets('pops pushed routes when the paired server hub is removed',
