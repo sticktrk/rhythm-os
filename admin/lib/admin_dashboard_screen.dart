@@ -5,11 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:rhythm_core/rhythm_core.dart' show Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDeviceType, RhythmHello;
+import 'package:rhythm_app/backend/backend.dart';
+import 'package:rhythm_app/services/account_cloud_sync_service.dart';
+import 'package:rhythm_app/services/auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../backend/backend.dart';
-import '../services/account_cloud_sync_service.dart';
-import '../services/auth_service.dart';
 import 'admin_support_data_service.dart';
 
 class _AdminColors {
@@ -127,8 +127,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   StreamSubscription<AuthUser?>? _authSubscription;
 
   final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
   final Map<String, _LightBoxLiveStatus> _liveStatuses = {};
+  AuthUser? _currentUser;
   List<String> _recentHomeIds = const [];
 
   int _statusCheckGeneration = 0;
@@ -144,18 +146,22 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     _supportFuture = _loadSupportSnapshot();
     unawaited(_loadRecentHomes());
     _searchController.addListener(_onSearchChanged);
-    final currentEmail = AuthService().currentUser?.email;
+    _currentUser = AuthService().currentUser;
+    final currentEmail = _currentUser?.email;
     if (currentEmail != null) {
       _emailController.text = currentEmail;
     }
     _authSubscription = AuthService().authStateChanges.listen((user) {
       if (!mounted) return;
       setState(() {
+        _currentUser = user;
         if (user?.email != null) {
           _emailController.text = user!.email!;
         }
-        _authError = null;
-        _authNotice = null;
+        if (!_isAuthWorking) {
+          _authError = null;
+          _authNotice = null;
+        }
         _selectedHomeId = null;
         _supportFuture = _loadSupportSnapshot();
         _liveStatuses.clear();
@@ -168,6 +174,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   void dispose() {
     _authSubscription?.cancel();
     _emailController.dispose();
+    _passwordController.dispose();
     _searchController
       ..removeListener(_onSearchChanged)
       ..dispose();
@@ -409,11 +416,19 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
-  Future<void> _sendLoginLink() async {
+  Future<void> _signInWithPassword() async {
     final email = _emailController.text.trim();
+    final password = _passwordController.text;
     if (email.isEmpty) {
       setState(() {
         _authError = 'Enter an email address.';
+        _authNotice = null;
+      });
+      return;
+    }
+    if (password.isEmpty) {
+      setState(() {
+        _authError = 'Enter a password.';
         _authNotice = null;
       });
       return;
@@ -425,10 +440,28 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       _authNotice = null;
     });
     try {
-      await AuthService().sendEmailSignInLink(email);
+      await AuthService().signInWithEmailPassword(email, password);
+      final staffStatus =
+          await AdminSupportDataService.instance.loadCurrentStaffStatus();
+      if (!staffStatus.isActive) {
+        await AuthService().signOut();
+        if (!mounted) return;
+        setState(() {
+          _currentUser = null;
+          _authError =
+              'Access denied. Sign in with an enabled Rhythm staff account.';
+          _authNotice = null;
+          _supportFuture = _loadSupportSnapshot();
+          _liveStatuses.clear();
+        });
+        return;
+      }
       if (!mounted) return;
       setState(() {
-        _authNotice = 'Check your email for a Rhythm login link.';
+        _currentUser = AuthService().currentUser;
+        _passwordController.clear();
+        _authNotice = null;
+        _supportFuture = _loadSupportSnapshot();
       });
     } catch (error) {
       if (!mounted) return;
@@ -445,18 +478,26 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   Future<void> _signOut() async {
+    debugPrint('RhythmAdmin: sign out tapped');
     setState(() {
       _isAuthWorking = true;
+      _currentUser = null;
+      _selectedHomeId = null;
+      _liveStatuses.clear();
+      _supportFuture = _loadSupportSnapshot();
       _authError = null;
       _authNotice = null;
     });
     try {
-      await AuthService().signOut();
-      _refresh();
+      await BackendProvider.instance.auth.signOut();
+      debugPrint('RhythmAdmin: sign out completed');
     } catch (error) {
+      debugPrint('RhythmAdmin: sign out failed: $error');
       if (!mounted) return;
       setState(() {
-        _authError = _friendlyAuthError(error);
+        _authNotice = null;
+        _authError = 'Signed out locally. Remote session cleanup failed: '
+            '${_friendlyAuthError(error)}';
       });
     } finally {
       if (mounted) {
@@ -477,8 +518,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final auth = AuthService();
-    final cloudSync = AccountCloudSyncService.instance;
+    final signedIn = _currentUser != null;
 
     return Scaffold(
       backgroundColor: _AdminColors.background,
@@ -492,19 +532,20 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _Header(
-                    user: auth.currentUser,
+                    user: _currentUser,
                     isWorking: _isAuthWorking,
                     onRefresh: _refresh,
                     onSignOut: _signOut,
                   ),
-                  if (!auth.isSignedIn) ...[
+                  if (!signedIn) ...[
                     const SizedBox(height: 16),
                     _AuthPanel(
                       emailController: _emailController,
+                      passwordController: _passwordController,
                       isWorking: _isAuthWorking,
                       error: _authError,
                       notice: _authNotice,
-                      onSendLoginLink: _sendLoginLink,
+                      onSignIn: _signInWithPassword,
                     ),
                   ],
                   const SizedBox(height: 18),
@@ -525,7 +566,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                             ),
                           );
                         }
-                        if (!auth.isSignedIn) {
+                        if (!signedIn) {
                           return const _Panel(
                             child: _EmptyState(
                               title: 'Signed out',
@@ -533,17 +574,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                             ),
                           );
                         }
-                        if (!cloudSync.canUseSignedInCloudFeatures) {
+                        final support =
+                            snapshot.data ?? AdminSupportSnapshot.empty;
+                        if (!support.staffStatus.isActive) {
                           return const _Panel(
                             child: _EmptyState(
-                              title: 'Cloud account access is not active',
+                              title: 'Staff access required',
                               detail:
-                                  'Sign in with a non-anonymous account to view homes saved in Supabase.',
+                                  'Sign in with an enabled Rhythm staff account to view customer support data.',
                             ),
                           );
                         }
-                        final support =
-                            snapshot.data ?? AdminSupportSnapshot.empty;
                         return _SupportWorkspace(
                           support: support,
                           searchController: _searchController,
@@ -646,111 +687,86 @@ class _HeaderActions extends StatelessWidget {
       alignment: WrapAlignment.end,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        if (signedInUser != null)
-          _AdminIdentityChip(
-            email: signedInUser.email ?? 'Signed in',
-            isWorking: isWorking,
-            onRefresh: onRefresh,
-            onSignOut: onSignOut,
+        IconButton(
+          tooltip: 'Refresh data',
+          onPressed: isWorking ? null : onRefresh,
+          style: IconButton.styleFrom(
+            backgroundColor: _AdminColors.surface,
+            foregroundColor: _AdminColors.text,
+            disabledForegroundColor: _AdminColors.dim,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+              side: const BorderSide(color: _AdminColors.borderMuted),
+            ),
           ),
+          icon: const Icon(Icons.refresh_rounded),
+        ),
+        if (signedInUser != null) ...[
+          _AdminIdentityChip(email: signedInUser.email ?? 'Signed in'),
+          FilledButton.icon(
+            onPressed: isWorking ? null : onSignOut,
+            style: FilledButton.styleFrom(
+              backgroundColor: _AdminColors.surface,
+              foregroundColor: _AdminColors.text,
+              disabledBackgroundColor: _AdminColors.border,
+              disabledForegroundColor: _AdminColors.dim,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: const BorderSide(color: _AdminColors.borderMuted),
+              ),
+            ),
+            icon: isWorking
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.logout_rounded),
+            label: const Text('Sign out'),
+          ),
+        ],
       ],
     );
   }
 }
 
-enum _AccountMenuAction {
-  refresh,
-  signOut,
-}
-
 class _AdminIdentityChip extends StatelessWidget {
-  const _AdminIdentityChip({
-    required this.email,
-    required this.isWorking,
-    required this.onRefresh,
-    required this.onSignOut,
-  });
+  const _AdminIdentityChip({required this.email});
 
   final String email;
-  final bool isWorking;
-  final VoidCallback onRefresh;
-  final VoidCallback onSignOut;
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<_AccountMenuAction>(
-      enabled: !isWorking,
-      color: _AdminColors.surface,
-      surfaceTintColor: Colors.transparent,
-      tooltip: 'Account',
-      offset: const Offset(0, 8),
-      shape: RoundedRectangleBorder(
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _AdminColors.surface,
         borderRadius: BorderRadius.circular(8),
-        side: const BorderSide(color: _AdminColors.border),
+        border: Border.all(color: _AdminColors.borderMuted),
       ),
-      onSelected: (action) {
-        switch (action) {
-          case _AccountMenuAction.refresh:
-            onRefresh();
-          case _AccountMenuAction.signOut:
-            onSignOut();
-        }
-      },
-      itemBuilder: (context) => const [
-        PopupMenuItem(
-          value: _AccountMenuAction.refresh,
-          child: _AccountMenuItem(
-            icon: Icons.refresh_rounded,
-            label: 'Refresh data',
-          ),
-        ),
-        PopupMenuDivider(height: 1),
-        PopupMenuItem(
-          value: _AccountMenuAction.signOut,
-          child: _AccountMenuItem(
-            icon: Icons.logout_rounded,
-            label: 'Sign out',
-          ),
-        ),
-      ],
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: _AdminColors.surface,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: _AdminColors.borderMuted),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(
-                Icons.verified_user_outlined,
-                color: _AdminColors.muted,
-                size: 18,
-              ),
-              const SizedBox(width: 8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 280),
-                child: Text(
-                  email,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: _AdminColors.text,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                  ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.verified_user_outlined,
+              color: _AdminColors.muted,
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 280),
+              child: Text(
+                email,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _AdminColors.text,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
-              const SizedBox(width: 6),
-              const Icon(
-                Icons.keyboard_arrow_down_rounded,
-                color: _AdminColors.muted,
-                size: 18,
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -1679,17 +1695,19 @@ class _Panel extends StatelessWidget {
 class _AuthPanel extends StatelessWidget {
   const _AuthPanel({
     required this.emailController,
+    required this.passwordController,
     required this.isWorking,
     required this.error,
     required this.notice,
-    required this.onSendLoginLink,
+    required this.onSignIn,
   });
 
   final TextEditingController emailController;
+  final TextEditingController passwordController;
   final bool isWorking;
   final String? error;
   final String? notice;
-  final VoidCallback onSendLoginLink;
+  final VoidCallback onSignIn;
 
   @override
   Widget build(BuildContext context) {
@@ -1697,10 +1715,11 @@ class _AuthPanel extends StatelessWidget {
       padding: const EdgeInsets.all(14),
       child: _SignInForm(
         emailController: emailController,
+        passwordController: passwordController,
         isWorking: isWorking,
         error: error,
         notice: notice,
-        onSendLoginLink: onSendLoginLink,
+        onSignIn: onSignIn,
       ),
     );
   }
@@ -1709,17 +1728,19 @@ class _AuthPanel extends StatelessWidget {
 class _SignInForm extends StatelessWidget {
   const _SignInForm({
     required this.emailController,
+    required this.passwordController,
     required this.isWorking,
     required this.error,
     required this.notice,
-    required this.onSendLoginLink,
+    required this.onSignIn,
   });
 
   final TextEditingController emailController;
+  final TextEditingController passwordController;
   final bool isWorking;
   final String? error;
   final String? notice;
-  final VoidCallback onSendLoginLink;
+  final VoidCallback onSignIn;
 
   @override
   Widget build(BuildContext context) {
@@ -1731,12 +1752,19 @@ class _SignInForm extends StatelessWidget {
           label: 'Email',
           keyboardType: TextInputType.emailAddress,
           enabled: !isWorking,
-          onSubmitted: (_) => onSendLoginLink(),
+          onSubmitted: (_) => onSignIn(),
+        );
+        final passwordField = _AdminTextField(
+          controller: passwordController,
+          label: 'Password',
+          enabled: !isWorking,
+          obscureText: true,
+          onSubmitted: (_) => onSignIn(),
         );
         final signInButton = SizedBox(
           height: 48,
           child: FilledButton.icon(
-            onPressed: isWorking ? null : onSendLoginLink,
+            onPressed: isWorking ? null : onSignIn,
             style: FilledButton.styleFrom(
               backgroundColor: _AdminColors.surfaceMuted,
               foregroundColor: _AdminColors.text,
@@ -1752,7 +1780,7 @@ class _SignInForm extends StatelessWidget {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.login_rounded),
-            label: const Text('Email me a login link'),
+            label: const Text('Sign in'),
           ),
         );
 
@@ -1765,12 +1793,16 @@ class _SignInForm extends StatelessWidget {
                     children: [
                       emailField,
                       const SizedBox(height: 10),
+                      passwordField,
+                      const SizedBox(height: 10),
                       signInButton,
                     ],
                   )
                 : Row(
                     children: [
                       Expanded(child: emailField),
+                      const SizedBox(width: 10),
+                      Expanded(child: passwordField),
                       const SizedBox(width: 10),
                       signInButton,
                     ],
@@ -1808,6 +1840,7 @@ class _AdminTextField extends StatelessWidget {
     required this.label,
     required this.enabled,
     this.keyboardType,
+    this.obscureText = false,
     this.onSubmitted,
   });
 
@@ -1815,6 +1848,7 @@ class _AdminTextField extends StatelessWidget {
   final String label;
   final bool enabled;
   final TextInputType? keyboardType;
+  final bool obscureText;
   final ValueChanged<String>? onSubmitted;
 
   @override
@@ -1823,6 +1857,7 @@ class _AdminTextField extends StatelessWidget {
       controller: controller,
       enabled: enabled,
       keyboardType: keyboardType,
+      obscureText: obscureText,
       onSubmitted: onSubmitted,
       style: const TextStyle(color: _AdminColors.text),
       decoration: InputDecoration(
@@ -1843,35 +1878,6 @@ class _AdminTextField extends StatelessWidget {
           borderSide: const BorderSide(color: _AdminColors.borderMuted),
         ),
       ),
-    );
-  }
-}
-
-class _AccountMenuItem extends StatelessWidget {
-  const _AccountMenuItem({
-    required this.icon,
-    required this.label,
-  });
-
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, color: _AdminColors.muted, size: 18),
-        const SizedBox(width: 10),
-        Text(
-          label,
-          style: const TextStyle(
-            color: _AdminColors.text,
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
     );
   }
 }

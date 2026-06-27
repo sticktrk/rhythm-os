@@ -1,10 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_app/backend/backend.dart';
+import 'package:rhythm_app/services/account_cloud_sync_service.dart';
+import 'package:rhythm_app/services/auth_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-
-import '../backend/backend.dart';
-import '../services/account_cloud_sync_service.dart';
-import '../services/auth_service.dart';
 
 class AdminSupportSnapshot {
   const AdminSupportSnapshot({
@@ -82,6 +81,19 @@ class AdminSupportDataService {
 
   static final AdminSupportDataService instance = AdminSupportDataService._();
 
+  Future<SupportStaffStatus> loadCurrentStaffStatus() async {
+    final auth = AuthService();
+    final client = _client;
+    final currentUserId = auth.currentUserId;
+    if (client == null ||
+        !auth.isSignedIn ||
+        auth.isAnonymous ||
+        currentUserId == null) {
+      return const SupportStaffStatus.none();
+    }
+    return _loadStaffStatus(client, currentUserId);
+  }
+
   Future<AdminSupportSnapshot> loadCustomersAndServerHubs() async {
     final auth = AuthService();
     final client = _client;
@@ -93,6 +105,15 @@ class AdminSupportDataService {
       return AdminSupportSnapshot.empty;
     }
     final staffStatus = await _loadStaffStatus(client, currentUserId);
+    if (!staffStatus.isActive) {
+      debugPrint(
+        'AdminSupportDataService: staff=${staffStatus.label} access denied',
+      );
+      return AdminSupportSnapshot(
+        customers: const [],
+        staffStatus: staffStatus,
+      );
+    }
 
     final homeRows = await client
         .from('homes')

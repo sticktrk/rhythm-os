@@ -12,7 +12,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show Level, RhythmConnection, RhythmSdk;
 
 import 'app_shell.dart';
-import 'admin/admin_dashboard_screen.dart';
 import 'backend/backend.dart';
 import 'models/config_model.dart';
 import 'api/hybrid_client.dart';
@@ -34,7 +33,6 @@ import 'providers/server_sync_provider.dart';
 import 'providers/subscription_provider.dart';
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
-import 'utils/admin_route.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -152,10 +150,6 @@ class RhythmApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final adminRoute = isAdminRouteRequest(
-      Uri.base,
-      WidgetsBinding.instance.platformDispatcher.defaultRouteName,
-    );
     final theme = ThemeData(
       useMaterial3: true,
       brightness: Brightness.dark,
@@ -166,15 +160,6 @@ class RhythmApp extends StatelessWidget {
       scaffoldBackgroundColor: const Color(0xFF1A1A2E),
       cardColor: const Color(0xFF16213E),
     );
-
-    if (adminRoute) {
-      return MaterialApp(
-        title: 'Rhythm Customer Support',
-        debugShowCheckedModeBanner: false,
-        theme: theme,
-        home: const AdminDashboardScreen(),
-      );
-    }
 
     // Show error screen if initialization failed
     if (initError != null || client == null) {

@@ -564,30 +564,6 @@ class SupabaseAuthBackend implements AuthBackend {
   }
 
   @override
-  Future<void> sendEmailSignInLink(String email) async {
-    try {
-      debugPrint(
-          'SupabaseAuthBackend: Email sign-in redirect: $_emailSignInRedirectTo');
-      await client.auth.signInWithOtp(
-        email: email,
-        emailRedirectTo: _emailSignInRedirectTo,
-        shouldCreateUser: false,
-      );
-      debugPrint('SupabaseAuthBackend: Sent email sign-in link: $email');
-    } catch (e) {
-      debugPrint('SupabaseAuthBackend: Email sign-in link failed: $e');
-      rethrow;
-    }
-  }
-
-  String? get _emailSignInRedirectTo {
-    if (kIsWeb) {
-      return Uri.base.toString();
-    }
-    return 'rhythmapp://login';
-  }
-
-  @override
   Future<void> sendPasswordResetEmail(String email) async {
     try {
       debugPrint(

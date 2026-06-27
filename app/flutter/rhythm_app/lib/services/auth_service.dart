@@ -97,11 +97,6 @@ class AuthService {
     return await _auth!.linkWithEmailPassword(email, password);
   }
 
-  /// Send an email sign-in link to an existing user.
-  Future<void> sendEmailSignInLink(String email) async {
-    await _auth!.sendEmailSignInLink(email);
-  }
-
   /// Send a password reset email.
   Future<void> sendPasswordResetEmail(String email) async {
     await _auth!.sendPasswordResetEmail(email);

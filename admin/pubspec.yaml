@@ -1,0 +1,31 @@
+name: rhythm_admin
+description: Employee-only Rhythm customer support portal.
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  rhythm_app:
+    path: ../app/flutter/rhythm_app
+  rhythm_core:
+    path: ../app/flutter/rhythm_core
+  rhythm_sdk:
+    path: ../sdk
+
+  http: ^1.2.0
+  shared_preferences: ^2.2.2
+  supabase_flutter: ^2.12.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

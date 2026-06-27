@@ -1,1 +1,0 @@
-bool isAdminRouteRequestOnPlatform() => false;
