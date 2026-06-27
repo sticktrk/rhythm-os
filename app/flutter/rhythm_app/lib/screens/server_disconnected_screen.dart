@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/models/hub.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../widgets/solar_orbit.dart';
 import '../providers/server_sync_provider.dart';
 
@@ -241,14 +242,28 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
   }
 
   Widget _buildRetryStatus() {
+    final providerState = _watchConnectionState();
+    final connectionAttemptActive =
+        providerState == RhythmConnectionState.connecting ||
+            providerState == RhythmConnectionState.reconnecting;
+    final retrying = _retryInFlight || connectionAttemptActive;
+
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 180),
       child: _RetryStatusChip(
-        key: ValueKey(_retryInFlight),
+        key: ValueKey(retrying),
         color: _accent,
-        retrying: _retryInFlight,
+        retrying: retrying,
       ),
     );
+  }
+
+  RhythmConnectionState? _watchConnectionState() {
+    try {
+      return context.watch<ServerSyncProvider>().connectionState;
+    } on ProviderNotFoundException {
+      return null;
+    }
   }
 
   /// Non-destructive way off this screen.
