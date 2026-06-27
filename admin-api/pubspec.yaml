@@ -1,0 +1,19 @@
+name: rhythm_admin_api
+description: Staff-only HTTP API for the Rhythm admin dashboard.
+publish_to: 'none'
+
+version: 0.1.0
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  http: ^1.2.0
+  rhythm_sdk:
+    path: ../sdk
+  shelf: ^1.4.2
+  shelf_router: ^1.1.4
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.24.0
