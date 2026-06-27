@@ -2,22 +2,15 @@ import 'rhythm_curve_config.dart';
 import 'rhythm_room.dart' show RhythmMode;
 
 const rhythmAdaptiveLightRuntimeId = 'rhythm-adaptive';
-const removed-projectCircadianLightRuntimeId = 'removed-circadian';
 
 enum RhythmLightRuntime {
-  rhythmAdaptive,
-  removed-projectCircadian;
+  rhythmAdaptive;
 
   String get id => switch (this) {
         RhythmLightRuntime.rhythmAdaptive => rhythmAdaptiveLightRuntimeId,
-        RhythmLightRuntime.removed-projectCircadian => removed-projectCircadianLightRuntimeId,
       };
 
   static RhythmLightRuntime fromId(String? value) => switch (value) {
-        removed-projectCircadianLightRuntimeId ||
-        'removed-project-circadian' ||
-        'removed-circadian' =>
-          RhythmLightRuntime.removed-projectCircadian,
         rhythmAdaptiveLightRuntimeId ||
         'rhythm' ||
         'rhythm_adaptive' =>
@@ -27,18 +20,13 @@ enum RhythmLightRuntime {
 }
 
 extension RhythmLightRuntimePresentation on RhythmLightRuntime {
-  bool get usesRuntimeShell => this == RhythmLightRuntime.removed-projectCircadian;
-
   String get defaultDayProfileId => switch (this) {
-        RhythmLightRuntime.removed-projectCircadian => 'expert',
         RhythmLightRuntime.rhythmAdaptive => 'rhythm',
       };
 }
 
-RhythmLightRuntime _lightRuntimeFromLegacyProfileId(String? profileId) {
-  return profileId == 'expert'
-      ? RhythmLightRuntime.removed-projectCircadian
-      : RhythmLightRuntime.rhythmAdaptive;
+RhythmLightRuntime _lightRuntimeFromLegacyProfileId(String? _) {
+  return RhythmLightRuntime.rhythmAdaptive;
 }
 
 class RhythmLightRuntimeState {
@@ -60,6 +48,7 @@ class RhythmLightRuntimeState {
       availableRuntimes: ((json['available_runtime_ids'] as List<dynamic>?) ??
               const <dynamic>[])
           .map((value) => RhythmLightRuntime.fromId(value as String?))
+          .toSet()
           .toList(growable: false),
       initialApply: json['initial_apply'] is Map
           ? RhythmLightRuntimeInitialApply.fromJson(
@@ -70,8 +59,6 @@ class RhythmLightRuntimeState {
   }
 
   String get runtimeId => runtime.id;
-
-  bool get usesRuntimeShell => runtime.usesRuntimeShell;
 
   Map<String, dynamic> toJson() => {
         'runtime_id': runtime.id,

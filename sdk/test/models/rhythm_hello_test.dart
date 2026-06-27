@@ -323,12 +323,12 @@ void main() {
       final hello = RhythmHello.fromJson({
         'settings': {
           'auto_update': true,
-          'light_runtime': 'removed-circadian',
+          'light_runtime': 'rhythm-adaptive',
         },
       });
 
-      expect(hello.settings?.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
-      expect(hello.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(hello.settings?.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
+      expect(hello.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
       expect(hello.hasLightRuntime, isTrue);
     });
 

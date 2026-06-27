@@ -334,7 +334,7 @@ pub struct RuntimeEndpointSpec {
     /// Runtime-relative path mounted below `/api/light-runtimes/{runtime_id}`.
     ///
     /// For example, `/settings` becomes
-    /// `/api/light-runtimes/removed-circadian/settings`.
+    /// `/api/light-runtimes/{runtime_id}/settings`.
     pub path: String,
     #[serde(default)]
     pub description: Option<String>,

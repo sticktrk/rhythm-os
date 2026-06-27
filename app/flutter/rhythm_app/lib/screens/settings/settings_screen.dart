@@ -9,7 +9,6 @@ import '../../providers/settings_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/settings_row.dart';
-import '../../features/circadian_expert/circadian_expert_screen.dart';
 import '../power_usage_screen.dart';
 import 'sections/account_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
@@ -23,16 +22,7 @@ import 'sections/rhythm_app_section.dart';
 /// - "Settings" title centered
 /// - Scrollable content with grouped card rows
 class SettingsScreen extends StatelessWidget {
-  final bool runtimeShellActive;
-  final VoidCallback? onSelectremoved-projectCircadianRuntime;
-  final VoidCallback? onSelectRhythmAdaptiveRuntime;
-
-  const SettingsScreen({
-    super.key,
-    this.runtimeShellActive = false,
-    this.onSelectremoved-projectCircadianRuntime,
-    this.onSelectRhythmAdaptiveRuntime,
-  });
+  const SettingsScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -103,20 +93,6 @@ class SettingsScreen extends StatelessWidget {
         const SettingsSectionHeader(title: 'App'),
         SettingsGroup(
           children: [
-            SettingsRow(
-              icon: runtimeShellActive
-                  ? Icons.dashboard_customize_outlined
-                  : Icons.tune_rounded,
-              iconColor: runtimeShellActive
-                  ? CelestialColors.accentBlue
-                  : const Color(0xFFFEAC60),
-              label:
-                  runtimeShellActive ? 'Basic Mode' : 'Circadian Expert Mode',
-              onTap: runtimeShellActive
-                  ? onSelectRhythmAdaptiveRuntime
-                  : (onSelectremoved-projectCircadianRuntime ??
-                      () => CircadianExpertScreen.show(context)),
-            ),
             SettingsRow(
               icon: Icons.apps_rounded,
               iconColor: CelestialColors.accentBlue,

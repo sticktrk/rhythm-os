@@ -13,6 +13,4 @@ rhythm-os = { path = "../../../os/rust/core/rhythm-os" }
 rhythm-core = { path = "../../../os/rust/core/rhythm-core" }
 rhythm-runtime-api = { path = "../rhythm-runtime-api" }
 rhythm-adaptive = { path = "../rhythm-adaptive" }
-removed-circadian = { path = "../removed-circadian" }
 anyhow = "1.0"
-chrono = "0.4"

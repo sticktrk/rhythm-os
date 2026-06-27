@@ -130,6 +130,7 @@ pub fn start_event_translator(
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
     on_unknown_button: Option<Arc<dyn Fn(&RawButtonEvent) + Send + Sync>>,
     on_unknown_motion: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_unknown_contact: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 ) -> Receiver<HubEvent> {
     rhythm_os::lifecycle::start_event_translator(
         ws_rx,
@@ -140,6 +141,9 @@ pub fn start_event_translator(
                 .as_ref()
                 .map(|f| f.as_ref() as &dyn Fn(&RawButtonEvent));
             let unknown_motion_ref: Option<&dyn Fn(&str)> = on_unknown_motion
+                .as_ref()
+                .map(|f| f.as_ref() as &dyn Fn(&str));
+            let unknown_contact_ref: Option<&dyn Fn(&str)> = on_unknown_contact
                 .as_ref()
                 .map(|f| f.as_ref() as &dyn Fn(&str));
 
@@ -153,6 +157,7 @@ pub fn start_event_translator(
                         activity_ref,
                         unknown_button_ref,
                         unknown_motion_ref,
+                        unknown_contact_ref,
                     )
                 }
                 HaWsEvent::Heartbeat => vec![HubEvent::Heartbeat { hub_key: None }],
@@ -307,6 +312,7 @@ mod tests {
             rx,
             registry,
             Arc::new(AtomicBool::new(false)),
+            None,
             None,
             None,
             None,

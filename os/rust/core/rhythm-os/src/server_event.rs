@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, RhythmMode, Rgb, RoomModeState};
+use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, Rgb, RhythmMode, RoomModeState};
 
 use crate::api_types::{LightBreakerDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto};
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
@@ -197,6 +197,22 @@ pub enum InputEventResource {
         source_room_id: Option<String>,
         native_sensor_id: String,
         detected: bool,
+    },
+    Contact {
+        epoch_ms: i64,
+        route: InputEventRoute,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hub_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_node_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_node_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_room_id: Option<String>,
+        native_sensor_id: String,
+        open: bool,
     },
 }
 
@@ -450,6 +466,36 @@ mod tests {
         assert_eq!(parsed["data"]["source_room_id"], "ha-area-1");
         assert_eq!(parsed["data"]["native_sensor_id"], "binary_sensor.motion_1");
         assert_eq!(parsed["data"]["detected"], false);
+    }
+
+    #[test]
+    fn server_event_input_contact_serializes_as_generic_input_event() {
+        let event = ServerEvent::InputEvent(InputEventResource::Contact {
+            epoch_ms: 1778058932588,
+            route: InputEventRoute::NodeControl,
+            hub_type: Some("ha".into()),
+            address: Some("homeassistant.local".into()),
+            source_node_id: Some("contact-1".into()),
+            target_node_id: Some("room-1".into()),
+            source_room_id: Some("ha-area-1".into()),
+            native_sensor_id: "binary_sensor.front_door".into(),
+            open: true,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "input_event");
+        assert_eq!(parsed["data"]["kind"], "contact");
+        assert_eq!(parsed["data"]["route"], "node_control");
+        assert_eq!(parsed["data"]["hub_type"], "ha");
+        assert_eq!(parsed["data"]["address"], "homeassistant.local");
+        assert_eq!(parsed["data"]["source_node_id"], "contact-1");
+        assert_eq!(parsed["data"]["target_node_id"], "room-1");
+        assert_eq!(parsed["data"]["source_room_id"], "ha-area-1");
+        assert_eq!(
+            parsed["data"]["native_sensor_id"],
+            "binary_sensor.front_door"
+        );
+        assert_eq!(parsed["data"]["open"], true);
     }
 
     #[test]

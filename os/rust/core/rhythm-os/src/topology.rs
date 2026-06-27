@@ -77,6 +77,7 @@ impl NodeControlKind {
         match device_type {
             DeviceType::Motion => Some(Self::Motion),
             DeviceType::Button => Some(Self::Button),
+            DeviceType::Contact => Some(Self::Switch),
             DeviceType::Light => None,
         }
     }

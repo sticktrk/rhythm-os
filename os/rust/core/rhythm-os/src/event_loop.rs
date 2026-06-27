@@ -174,6 +174,16 @@ struct MotionInputEventFields<'a> {
     route: InputEventRoute,
 }
 
+struct ContactInputEventFields<'a> {
+    hub_key: Option<&'a HubKey>,
+    source_node_id: Option<&'a str>,
+    target_node_id: Option<&'a str>,
+    source_room_id: Option<&'a str>,
+    native_sensor_id: &'a str,
+    open: bool,
+    route: InputEventRoute,
+}
+
 fn emit_motion_input_event(state: &SharedState, fields: MotionInputEventFields<'_>) {
     let MotionInputEventFields {
         hub_key,
@@ -197,6 +207,33 @@ fn emit_motion_input_event(state: &SharedState, fields: MotionInputEventFields<'
             source_room_id: source_room_id.map(str::to_string),
             native_sensor_id: native_sensor_id.to_string(),
             detected,
+        }),
+    );
+}
+
+fn emit_contact_input_event(state: &SharedState, fields: ContactInputEventFields<'_>) {
+    let ContactInputEventFields {
+        hub_key,
+        source_node_id,
+        target_node_id,
+        source_room_id,
+        native_sensor_id,
+        open,
+        route,
+    } = fields;
+    let (hub_type, address) = hub_event_fields(hub_key);
+    crate::state::emit_server_event(
+        state,
+        ServerEvent::InputEvent(InputEventResource::Contact {
+            epoch_ms: input_event_epoch_ms(),
+            route,
+            hub_type,
+            address,
+            source_node_id: source_node_id.map(str::to_string),
+            target_node_id: target_node_id.map(str::to_string),
+            source_room_id: source_room_id.map(str::to_string),
+            native_sensor_id: native_sensor_id.to_string(),
+            open,
         }),
     );
 }
@@ -1380,6 +1417,154 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     target_node_id
                 );
             }
+        }
+
+        HubEvent::Contact {
+            ref hub_key,
+            ref room_id,
+            ref sensor_id,
+            open,
+        } => {
+            let light_breaker_enabled = crate::state::light_breaker_enabled(state);
+            let action = if open {
+                ButtonAction::OnPress
+            } else {
+                ButtonAction::OffPress
+            };
+            let Some(hub_key) = hub_key.as_ref() else {
+                emit_contact_input_event(
+                    state,
+                    ContactInputEventFields {
+                        hub_key: None,
+                        source_node_id: None,
+                        target_node_id: None,
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        open,
+                        route: InputEventRoute::Unresolved,
+                    },
+                );
+                info!(
+                    target: "evt",
+                    "Contact: sensor {} has no hub key, ignoring",
+                    sensor_id
+                );
+                return;
+            };
+            let Some(source_node_id) =
+                commands::resolve_input_source_node_id(state, hub_key, sensor_id)
+            else {
+                emit_contact_input_event(
+                    state,
+                    ContactInputEventFields {
+                        hub_key: Some(hub_key),
+                        source_node_id: None,
+                        target_node_id: None,
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        open,
+                        route: InputEventRoute::Unresolved,
+                    },
+                );
+                info!(
+                    target: "evt",
+                    "Contact: sensor {} could not resolve canonical source node, ignoring",
+                    sensor_id
+                );
+                return;
+            };
+            let Some(target_node_id) = commands::resolve_node_control_target_for_source(
+                state,
+                &source_node_id,
+                &NodeControlKind::Switch,
+            ) else {
+                emit_contact_input_event(
+                    state,
+                    ContactInputEventFields {
+                        hub_key: Some(hub_key),
+                        source_node_id: Some(source_node_id.as_str()),
+                        target_node_id: None,
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        open,
+                        route: InputEventRoute::Unroutable,
+                    },
+                );
+                info!(
+                    target: "evt",
+                    "Contact: sensor {} has no control target, ignoring",
+                    sensor_id
+                );
+                return;
+            };
+            emit_contact_input_event(
+                state,
+                ContactInputEventFields {
+                    hub_key: Some(hub_key),
+                    source_node_id: Some(source_node_id.as_str()),
+                    target_node_id: Some(target_node_id.as_str()),
+                    source_room_id: Some(room_id.as_str()),
+                    native_sensor_id: sensor_id,
+                    open,
+                    route: InputEventRoute::NodeControl,
+                },
+            );
+            tracing::info!(
+                target: "evt",
+                event = "contact_ingress",
+                action = ?action,
+                target_node_id = %target_node_id,
+                source_node_id = %source_node_id,
+                source_room_id = %room_id,
+                native_sensor_id = %sensor_id,
+                open,
+                "Contact event received"
+            );
+            if !light_breaker_enabled {
+                tracing::info!(
+                    target: "evt",
+                    event = "contact_node_control_suppressed",
+                    action = ?action,
+                    source_node_id = %source_node_id,
+                    target_node_id = %target_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    open,
+                    reason = "light_breaker_disabled",
+                    "Contact node control suppressed while light breaker is disabled"
+                );
+                return;
+            }
+
+            let command_id = logging::next_command_id("contact");
+            if !motion.admit_button(&target_node_id, action, Some(sensor_id.as_str())) {
+                tracing::info!(
+                    target: "evt",
+                    event = "contact_debounced",
+                    command_id = %command_id,
+                    action = ?action,
+                    target_node_id = %target_node_id,
+                    native_sensor_id = %sensor_id,
+                    debounce_ms = BUTTON_DEBOUNCE_WINDOW.as_millis() as u64,
+                    "Dropping bounce-duplicate contact event"
+                );
+                return;
+            }
+            motion.motion_owned.remove(&target_node_id);
+            motion.motion_turn_on_requested.remove(&target_node_id);
+            motion.warning_active.remove(&target_node_id);
+            motion
+                .sensors
+                .retain(|_, source| source.target_node_id != target_node_id);
+
+            spawn_button_ingress_action(
+                state,
+                target_node_id,
+                action,
+                Some(sensor_id.clone()),
+                command_id,
+                true,
+            );
         }
 
         HubEvent::LightPower {
@@ -4320,12 +4505,13 @@ mod tests {
         // hub sync would have, but WITHOUT canonicalizing the switch.
         {
             let mut room = TopologyRoom::new("queen-room", "Queen");
-            room.hub_room_bindings.push(crate::topology::HubRoomBinding {
-                hub_key: hub_key.clone(),
-                hub_room_id: "queen".into(),
-                control_id: "queen".into(),
-                light_device_ids: vec![],
-            });
+            room.hub_room_bindings
+                .push(crate::topology::HubRoomBinding {
+                    hub_key: hub_key.clone(),
+                    hub_room_id: "queen".into(),
+                    control_id: "queen".into(),
+                    light_device_ids: vec![],
+                });
             state.lock().unwrap().topology.insert_room(room);
         }
 

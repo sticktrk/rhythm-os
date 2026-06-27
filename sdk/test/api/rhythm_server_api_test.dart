@@ -796,16 +796,15 @@ void main() {
             requestOptions: RequestOptions(path: 'api/light-runtime'),
             statusCode: 200,
             data: {
-              'runtime_id': 'removed-circadian',
-              'available_runtime_ids': ['rhythm-adaptive', 'removed-circadian'],
+              'runtime_id': 'rhythm-adaptive',
+              'available_runtime_ids': ['rhythm-adaptive'],
             },
           ));
 
       final state = await api.getLightRuntime();
 
       expect(state, isNotNull);
-      expect(state!.runtime, RhythmLightRuntime.removed-projectCircadian);
-      expect(state.usesRuntimeShell, isTrue);
+      expect(state!.runtime, RhythmLightRuntime.rhythmAdaptive);
       verify(() => dio.get('api/light-runtime')).called(1);
     });
 
@@ -814,21 +813,21 @@ void main() {
           .thenAnswer((_) async => Response(
                 requestOptions: RequestOptions(path: 'api/light-runtime'),
                 statusCode: 200,
-                data: {'runtime_id': 'removed-circadian'},
+                data: {'runtime_id': 'rhythm-adaptive'},
               ));
 
       final state = await api.setLightRuntime(
-        RhythmLightRuntime.removed-projectCircadian,
+        RhythmLightRuntime.rhythmAdaptive,
         transitionMs: 3000,
       );
 
-      expect(state?.runtime, RhythmLightRuntime.removed-projectCircadian);
+      expect(state?.runtime, RhythmLightRuntime.rhythmAdaptive);
       final captured = verify(() => dio.put(
             'api/light-runtime',
             data: captureAny(named: 'data'),
           )).captured.single;
       expect(captured, {
-        'runtime_id': 'removed-circadian',
+        'runtime_id': 'rhythm-adaptive',
         'transition_ms': 3000,
       });
     });

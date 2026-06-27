@@ -468,6 +468,15 @@ impl HubDeviceRegistry {
         }
     }
 
+    /// Get the room ID for a contact sensor (for event routing).
+    pub fn get_room_for_contact_sensor(&self, sensor_id: &str) -> Option<String> {
+        if self.device_types.get(sensor_id) == Some(&DeviceType::Contact) {
+            self.device_rooms.get(sensor_id).cloned()
+        } else {
+            None
+        }
+    }
+
     /// Get room IDs that have at least one motion sensor mapped.
     pub fn rooms_with_motion_sensors(&self) -> Vec<String> {
         let set: std::collections::HashSet<&str> = self
@@ -1073,6 +1082,21 @@ mod tests {
         reg.remove_device("ms1");
         assert_eq!(reg.get_room_for_motion_sensor("ms1"), None);
         assert!(reg.rooms_with_motion_sensors().is_empty());
+    }
+
+    #[test]
+    fn contact_sensor_crud() {
+        let mut reg = HubDeviceRegistry::new();
+
+        reg.upsert_device("contact1", Some("r1"), &[], DeviceType::Contact);
+        assert_eq!(
+            reg.get_room_for_contact_sensor("contact1"),
+            Some("r1".to_string())
+        );
+        assert_eq!(reg.get_room_for_motion_sensor("contact1"), None);
+
+        reg.remove_device("contact1");
+        assert_eq!(reg.get_room_for_contact_sensor("contact1"), None);
     }
 
     #[test]

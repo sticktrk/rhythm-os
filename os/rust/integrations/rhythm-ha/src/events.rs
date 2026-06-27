@@ -153,6 +153,38 @@ pub(crate) fn register_unknown_motion_from_cache(
     }
 }
 
+pub(crate) fn register_unknown_contact_from_cache(
+    sensor_id: &str,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    let area_id = match device_area_cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(sensor_id).cloned())
+    {
+        Some(a) => a,
+        None => {
+            info!(
+                target: "evt",
+                "Contact sensor {} not in area cache, cannot auto-register",
+                sensor_id
+            );
+            return;
+        }
+    };
+
+    if let Ok(mut reg) = registry.lock() {
+        reg.upsert_device(sensor_id, Some(&area_id), &[], DeviceType::Contact);
+        info!(
+            target: "evt",
+            "On-demand registered contact sensor {} for room {}",
+            sensor_id,
+            area_id
+        );
+    }
+}
+
 /// Translate a ZHA event from Home Assistant.
 ///
 /// Uses on-demand discovery: if the device is unknown, looks up the HA
@@ -393,12 +425,16 @@ fn translate_state_changed(
     let on_unknown_motion = |sensor_id: &str| {
         register_unknown_motion_from_cache(sensor_id, registry, cache);
     };
+    let on_unknown_contact = |sensor_id: &str| {
+        register_unknown_contact_from_cache(sensor_id, registry, cache);
+    };
     translate_state_changed_with_hooks(
         event_data,
         registry,
         None,
         Some(&on_unknown_button),
         Some(&on_unknown_motion),
+        Some(&on_unknown_contact),
     )
 }
 
@@ -408,6 +444,7 @@ fn translate_state_changed_with_hooks(
     on_activity: Option<&dyn Fn()>,
     on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
     on_unknown_motion: Option<&dyn Fn(&str)>,
+    on_unknown_contact: Option<&dyn Fn(&str)>,
 ) -> Vec<HubEvent> {
     let entity_id = match event_data.get("entity_id").and_then(|v| v.as_str()) {
         Some(id) => id,
@@ -432,52 +469,71 @@ fn translate_state_changed_with_hooks(
         return Vec::new();
     }
 
-    // Check if this entity is a registered motion sensor
-    let room_id = {
+    let registered_type_and_room = {
         let reg = match registry.lock() {
             Ok(r) => r,
             Err(_) => return Vec::new(),
         };
         reg.get_room_for_motion_sensor(entity_id)
+            .map(|room| (DeviceType::Motion, room))
+            .or_else(|| {
+                reg.get_room_for_contact_sensor(entity_id)
+                    .map(|room| (DeviceType::Contact, room))
+            })
     };
 
-    let room_id = match room_id {
-        Some(r) => {
+    let (device_type, room_id) = match registered_type_and_room {
+        Some(found) => {
             if let Some(cb) = on_activity {
                 cb();
             }
-            r
+            found
         }
         None => {
-            // On-demand discovery: check if this is a motion/occupancy sensor
+            // On-demand discovery: check if this is a known sensor class.
             let device_class = event_data
                 .get("new_state")
                 .and_then(|s| s.get("attributes"))
                 .and_then(|a| a.get("device_class"))
                 .and_then(|v| v.as_str());
 
-            if !matches!(device_class, Some("motion") | Some("occupancy")) {
+            let device_type = if is_motion_device_class(device_class) {
+                DeviceType::Motion
+            } else if is_contact_device_class(device_class) {
+                DeviceType::Contact
+            } else {
                 return Vec::new();
-            }
+            };
 
             if let Some(cb) = on_activity {
                 cb();
             }
 
-            if let Some(cb) = on_unknown_motion {
-                cb(entity_id);
+            match &device_type {
+                DeviceType::Motion => {
+                    if let Some(cb) = on_unknown_motion {
+                        cb(entity_id);
+                    }
+                }
+                DeviceType::Contact => {
+                    if let Some(cb) = on_unknown_contact {
+                        cb(entity_id);
+                    }
+                }
+                _ => {}
             }
 
-            match registry
-                .lock()
-                .ok()
-                .and_then(|r| r.get_room_for_motion_sensor(entity_id))
-            {
-                Some(r) => r,
+            let room_id = registry.lock().ok().and_then(|r| match &device_type {
+                DeviceType::Motion => r.get_room_for_motion_sensor(entity_id),
+                DeviceType::Contact => r.get_room_for_contact_sensor(entity_id),
+                _ => None,
+            });
+            match room_id {
+                Some(r) => (device_type, r),
                 None => {
                     info!(
                         target: "evt",
-                        "Motion sensor {} (class={:?}) still unknown after discovery",
+                        "Binary sensor {} (class={:?}) still unknown after discovery",
                         entity_id,
                         device_class
                     );
@@ -499,17 +555,35 @@ fn translate_state_changed_with_hooks(
 
     let detected = new_state == "on";
 
-    info!(target: "evt",
-        "Motion: {} -> detected={} for room {}",
-        entity_id, detected, room_id
-    );
+    match device_type {
+        DeviceType::Motion => {
+            info!(target: "evt",
+                "Motion: {} -> detected={} for room {}",
+                entity_id, detected, room_id
+            );
 
-    vec![HubEvent::Motion {
-        hub_key: None,
-        room_id,
-        sensor_id: entity_id.to_string(),
-        detected,
-    }]
+            vec![HubEvent::Motion {
+                hub_key: None,
+                room_id,
+                sensor_id: entity_id.to_string(),
+                detected,
+            }]
+        }
+        DeviceType::Contact => {
+            info!(target: "evt",
+                "Contact: {} -> open={} for room {}",
+                entity_id, detected, room_id
+            );
+
+            vec![HubEvent::Contact {
+                hub_key: None,
+                room_id,
+                sensor_id: entity_id.to_string(),
+                open: detected,
+            }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Translate a `state_changed` event for an `event.*` entity (HA button event).
@@ -618,6 +692,17 @@ fn parse_button_number(entity_id: &str) -> u8 {
     1 // default to button 1
 }
 
+fn is_motion_device_class(device_class: Option<&str>) -> bool {
+    matches!(device_class, Some("motion") | Some("occupancy"))
+}
+
+fn is_contact_device_class(device_class: Option<&str>) -> bool {
+    matches!(
+        device_class,
+        Some("door") | Some("window") | Some("opening") | Some("garage_door")
+    )
+}
+
 /// Translate a raw HA WebSocket event into hub-agnostic events.
 ///
 /// Dispatches based on event type:
@@ -655,6 +740,7 @@ pub(crate) fn translate_ws_event_with_hooks(
     on_activity: Option<&dyn Fn()>,
     on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
     on_unknown_motion: Option<&dyn Fn(&str)>,
+    on_unknown_contact: Option<&dyn Fn(&str)>,
 ) -> Vec<HubEvent> {
     match event_type {
         "hue_event" => {
@@ -669,6 +755,7 @@ pub(crate) fn translate_ws_event_with_hooks(
             on_activity,
             on_unknown_button,
             on_unknown_motion,
+            on_unknown_contact,
         ),
         _ => {
             let reg = match registry.lock() {
@@ -939,10 +1026,9 @@ mod tests {
     }
 
     #[test]
-    fn test_motion_sensor_non_motion_binary_sensor_ignored() {
+    fn test_contact_sensor_on_demand_registration() {
         let (registry, cache) = make_registry_and_cache();
 
-        // Cache has the entity, but it's a door sensor (not motion)
         cache.lock().unwrap().insert(
             "binary_sensor.front_door".to_string(),
             "living_room".to_string(),
@@ -953,6 +1039,75 @@ mod tests {
             "new_state": {
                 "state": "on",
                 "attributes": { "device_class": "door" }
+            },
+            "old_state": { "state": "off" }
+        });
+
+        let results = translate_state_changed(&event_data, &registry, &cache);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            HubEvent::Contact {
+                room_id,
+                sensor_id,
+                open,
+                ..
+            } => {
+                assert_eq!(room_id, "living_room");
+                assert_eq!(sensor_id, "binary_sensor.front_door");
+                assert!(*open);
+            }
+            _ => panic!("Expected Contact event"),
+        }
+
+        let reg = registry.lock().unwrap();
+        assert_eq!(
+            reg.get_room_for_contact_sensor("binary_sensor.front_door"),
+            Some("living_room".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_contact_sensor_known_skips_discovery() {
+        let (registry, cache) = make_registry_and_cache();
+
+        registry.lock().unwrap().upsert_device(
+            "binary_sensor.back_door",
+            Some("kitchen"),
+            &[],
+            DeviceType::Contact,
+        );
+
+        let event_data = json!({
+            "entity_id": "binary_sensor.back_door",
+            "new_state": { "state": "off" },
+            "old_state": { "state": "on" }
+        });
+
+        let results = translate_state_changed(&event_data, &registry, &cache);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            HubEvent::Contact { room_id, open, .. } => {
+                assert_eq!(room_id, "kitchen");
+                assert!(!*open);
+            }
+            _ => panic!("Expected Contact event"),
+        }
+    }
+
+    #[test]
+    fn test_non_motion_contact_binary_sensor_ignored() {
+        let (registry, cache) = make_registry_and_cache();
+
+        cache.lock().unwrap().insert(
+            "binary_sensor.front_door_battery".to_string(),
+            "living_room".to_string(),
+        );
+
+        let event_data = json!({
+            "entity_id": "binary_sensor.front_door_battery",
+            "new_state": {
+                "state": "on",
+                "attributes": { "device_class": "battery" }
             },
             "old_state": { "state": "off" }
         });

@@ -1,16 +1,11 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show
-        RhythmConnectionState,
-        RhythmLightRuntime,
-        RhythmLightRuntimePresentation,
-        RhythmMode;
+    show RhythmConnectionState, RhythmMode;
 import 'models/config_model.dart';
 import 'backend/auth/auth_user.dart';
 import 'providers/room_provider.dart';
@@ -26,7 +21,6 @@ import 'screens/settings/light_screen.dart';
 import 'screens/settings/sections/lights_devices_section.dart';
 import 'screens/settings/settings_screen.dart';
 import 'screens/sun_position_screen.dart';
-import 'features/circadian_expert/circadian_expert_screen.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
 import 'main.dart';
@@ -44,8 +38,6 @@ import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
 import 'widgets/solar_orbit.dart';
 import 'widgets/virtual_experience_banner.dart';
-
-const _removed-projectAccent = Color(0xFFFEAC60);
 
 /// Main app shell.
 ///
@@ -70,14 +62,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     MainNavTab.settings,
   ];
 
-  static const _runtimeShellTabs = [
-    MainNavTab.runtimeHome,
-    MainNavTab.runtimeRhythm,
-    MainNavTab.runtimeMoments,
-    MainNavTab.runtimeControls,
-    MainNavTab.runtimeSettings,
-  ];
-
   int _tabIndex = 0;
   // Keyed by tab identity (not index) so swapping tab sets doesn't strand
   // a tab's Navigator state on the wrong screen — the initial route attached
@@ -92,9 +76,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final PageController _roomPageController = PageController();
   bool _hadServerHub = false;
   bool _serverRemovalCleanupPending = false;
-  bool _runtimeShellActive = false;
-  bool _lightRuntimeSwitching = false;
-  bool? _lightRuntimeSwitchTarget;
   RhythmMode? _pendingModeAction;
   Timer? _pendingModeActionClearTimer;
   RoomProvider? _pendingModeActionRoomProvider;
@@ -117,8 +98,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _serverConnectGrace = Duration(seconds: 5);
   Timer? _serverConnectGraceTimer;
 
-  List<MainNavTab> get _activeTabs =>
-      _runtimeShellActive ? _runtimeShellTabs : _rhythmAdaptiveTabs;
+  List<MainNavTab> get _activeTabs => _rhythmAdaptiveTabs;
 
   MainNavTab get _currentTab {
     final tabs = _activeTabs;
@@ -255,152 +235,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         MainNavTab.automations => 'automations',
         MainNavTab.devices => 'devices',
         MainNavTab.settings => 'settings',
-        MainNavTab.runtimeHome => 'runtime_home',
-        MainNavTab.runtimeRhythm => 'runtime_rhythm',
-        MainNavTab.runtimeMoments => 'runtime_moments',
-        MainNavTab.runtimeControls => 'runtime_controls',
-        MainNavTab.runtimeSettings => 'runtime_settings',
       };
-
-  void _showremoved-projectRuntimeHome() {
-    setState(() {
-      _runtimeShellActive = true;
-      _tabIndex = 0;
-      _builtTabs.add(MainNavTab.runtimeHome);
-    });
-    AnalyticsService().logScreenView(_screenNameFor(MainNavTab.runtimeHome));
-  }
-
-  void _showRhythmAdaptiveRuntimeHome() {
-    setState(() {
-      _runtimeShellActive = false;
-      _tabIndex = 0;
-      _builtTabs.add(MainNavTab.home);
-    });
-    AnalyticsService().logScreenView(_screenNameFor(MainNavTab.home));
-  }
-
-  void _syncLightRuntimeUiFromServer(
-    RhythmLightRuntime lightRuntime,
-    bool serverSynced,
-  ) {
-    if (_lightRuntimeSwitching) return;
-    if (!serverSynced && !HueServiceLocator.isDemoMode) return;
-    final shouldUseRuntimeShell = lightRuntime.usesRuntimeShell;
-    if (_runtimeShellActive == shouldUseRuntimeShell) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _runtimeShellActive == shouldUseRuntimeShell) return;
-      if (shouldUseRuntimeShell) {
-        _showremoved-projectRuntimeHome();
-      } else {
-        _showRhythmAdaptiveRuntimeHome();
-      }
-    });
-  }
-
-  Future<bool> _confirmLightRuntimeSwitch({
-    required bool toremoved-projectRuntime,
-  }) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: CelestialColors.backgroundCard,
-        title: Text(
-          toremoved-projectRuntime
-              ? 'Switch to Circadian Expert Mode?'
-              : 'Switch to Basic Mode?',
-        ),
-        content: Text(
-          toremoved-projectRuntime
-              ? 'Your Basic settings stay saved. Lights will transition to the expert sigmoid profile.'
-              : 'Your Expert settings stay saved. Lights will transition back to the Basic super-Gaussian profile.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child:
-                Text(toremoved-projectRuntime ? 'Switch to Expert' : 'Switch to Basic'),
-          ),
-        ],
-      ),
-    );
-    return confirmed == true;
-  }
-
-  void _showLightRuntimeSwitchError(bool toremoved-projectRuntime) {
-    if (!mounted) return;
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(
-        content: Text(
-          toremoved-projectRuntime
-              ? 'Could not switch to Expert Mode.'
-              : 'Could not switch to Basic Mode.',
-        ),
-      ),
-    );
-  }
-
-  Future<void> _selectremoved-projectRuntime() async {
-    if (_runtimeShellActive || _lightRuntimeSwitching) return;
-    final confirmed = await _confirmLightRuntimeSwitch(toremoved-projectRuntime: true);
-    if (!confirmed || !mounted) return;
-
-    setState(() {
-      _lightRuntimeSwitching = true;
-      _lightRuntimeSwitchTarget = true;
-    });
-    HapticFeedback.heavyImpact();
-    try {
-      final success = await context
-          .read<ServerSyncProvider>()
-          .dispatchSetLightRuntime(RhythmLightRuntime.removed-projectCircadian);
-      if (!success) {
-        _showLightRuntimeSwitchError(true);
-        return;
-      }
-      if (mounted) _showremoved-projectRuntimeHome();
-    } finally {
-      if (mounted) {
-        setState(() {
-          _lightRuntimeSwitching = false;
-          _lightRuntimeSwitchTarget = null;
-        });
-      }
-    }
-  }
-
-  Future<void> _selectRhythmAdaptiveRuntime() async {
-    if (!_runtimeShellActive || _lightRuntimeSwitching) return;
-    final confirmed = await _confirmLightRuntimeSwitch(toremoved-projectRuntime: false);
-    if (!confirmed || !mounted) return;
-
-    setState(() {
-      _lightRuntimeSwitching = true;
-      _lightRuntimeSwitchTarget = false;
-    });
-    HapticFeedback.mediumImpact();
-    try {
-      final success = await context
-          .read<ServerSyncProvider>()
-          .dispatchSetLightRuntime(RhythmLightRuntime.rhythmAdaptive);
-      if (!success) {
-        _showLightRuntimeSwitchError(false);
-        return;
-      }
-      if (mounted) _showRhythmAdaptiveRuntimeHome();
-    } finally {
-      if (mounted) {
-        setState(() {
-          _lightRuntimeSwitching = false;
-          _lightRuntimeSwitchTarget = null;
-        });
-      }
-    }
-  }
 
   /// Intercepts the system back button:
   ///   1. pop the active tab's nested stack if possible,
@@ -415,10 +250,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     if (_tabIndex != 0) {
       setState(() => _tabIndex = 0);
-      return;
-    }
-    if (_runtimeShellActive) {
-      await _selectRhythmAdaptiveRuntime();
       return;
     }
     await SystemNavigator.pop();
@@ -440,7 +271,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         navKey.currentState?.popUntil((route) => route.isFirst);
       }
       setState(() {
-        _runtimeShellActive = false;
         _tabIndex = _rhythmAdaptiveTabs.indexOf(MainNavTab.home);
         _builtTabs.add(MainNavTab.home);
         _serverLostConnection = false;
@@ -729,10 +559,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final serverSynced = context.select<ServerSyncProvider, bool>(
       (s) => s.hasBeenSynced,
     );
-    final lightRuntime = context.select<ServerSyncProvider, RhythmLightRuntime>(
-      (s) => s.lightRuntime,
-    );
-    _syncLightRuntimeUiFromServer(lightRuntime, serverSynced);
     final visibleTabs = _computeVisibleTabs(serverSynced: serverSynced);
     final disabledTabs = _computeDisabledTabs(serverSynced: serverSynced);
 
@@ -765,9 +591,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             duration: const Duration(milliseconds: 650),
             switchInCurve: Curves.easeOutBack,
             switchOutCurve: Curves.easeInCubic,
-            transitionBuilder: _lightRuntimeFlipTransition,
             child: Scaffold(
-              key: ValueKey<bool>(_runtimeShellActive),
               backgroundColor: CelestialColors.backgroundDark,
               body: Stack(
                 children: [
@@ -847,13 +671,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         onLogOut: _logOutFromPreHome,
                       ),
                     ),
-                  if (_lightRuntimeSwitching)
-                    Positioned.fill(
-                      child: _LightRuntimeSwitchOverlay(
-                        toremoved-projectRuntime:
-                            _lightRuntimeSwitchTarget ?? !_runtimeShellActive,
-                      ),
-                    ),
                 ],
               ),
               bottomNavigationBar: hideChrome
@@ -866,32 +683,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           );
         },
       ),
-    );
-  }
-
-  Widget _lightRuntimeFlipTransition(
-    Widget child,
-    Animation<double> animation,
-  ) {
-    final incoming = child.key == ValueKey<bool>(_runtimeShellActive);
-    return AnimatedBuilder(
-      animation: animation,
-      child: child,
-      builder: (context, child) {
-        final turn = 1 - animation.value;
-        final angle = turn * math.pi * 0.5 * (incoming ? 1 : -1);
-        final scale = 0.94 + animation.value * 0.06;
-        return Transform(
-          alignment: Alignment.center,
-          transform: Matrix4.identity()
-            ..setEntry(3, 2, 0.0015)
-            ..rotateY(angle),
-          child: Transform.scale(
-            scale: scale,
-            child: child,
-          ),
-        );
-      },
     );
   }
 
@@ -908,7 +699,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// `hasBeenSynced` signal so the disabled state doesn't flicker on
   /// transient reconnects.
   Set<MainNavTab> _computeDisabledTabs({required bool serverSynced}) {
-    if (_runtimeShellActive) return const {};
     return {
       if (!serverSynced) MainNavTab.automations,
     };
@@ -938,24 +728,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       MainNavTab.automations => _buildAutomationsTab(),
       MainNavTab.devices =>
         const LightsDevicesDetailScreen(showBackButton: false),
-      MainNavTab.settings => SettingsScreen(
-          onSelectremoved-projectCircadianRuntime: () {
-            unawaited(_selectremoved-projectRuntime());
-          },
-        ),
-      MainNavTab.runtimeHome => const CircadianExpertScreen(
-          showBackButton: false,
-          showToolStrip: false,
-        ),
-      MainNavTab.runtimeRhythm => const CircadianExpertRhythmScreen(),
-      MainNavTab.runtimeMoments => const CircadianExpertMomentsTabScreen(),
-      MainNavTab.runtimeControls => const CircadianExpertControlsTabScreen(),
-      MainNavTab.runtimeSettings => SettingsScreen(
-          runtimeShellActive: true,
-          onSelectRhythmAdaptiveRuntime: () {
-            unawaited(_selectRhythmAdaptiveRuntime());
-          },
-        ),
+      MainNavTab.settings => const SettingsScreen(),
     };
   }
 
@@ -968,7 +741,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       onTabSelected: _handleTabSelected,
       tabs: visibleTabs,
       disabledTabs: disabledTabs,
-      runtimeShellActive: _runtimeShellActive,
     );
   }
 
@@ -1193,82 +965,6 @@ class _TabNavigator extends StatelessWidget {
       key: navigatorKey,
       onGenerateRoute: (settings) =>
           MaterialPageRoute(builder: builder, settings: settings),
-    );
-  }
-}
-
-class _LightRuntimeSwitchOverlay extends StatelessWidget {
-  final bool toremoved-projectRuntime;
-
-  const _LightRuntimeSwitchOverlay({required this.toremoved-projectRuntime});
-
-  @override
-  Widget build(BuildContext context) {
-    final title =
-        toremoved-projectRuntime ? 'Applying Expert profile' : 'Applying Basic profile';
-    return AbsorbPointer(
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: CelestialColors.backgroundDark.withValues(alpha: 0.90),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _PulsingIcon(
-                    icon: toremoved-projectRuntime
-                        ? Icons.auto_awesome_rounded
-                        : Icons.lightbulb_rounded,
-                    color: toremoved-projectRuntime
-                        ? _removed-projectAccent
-                        : CelestialColors.accentBlue,
-                  ),
-                  const SizedBox(height: 24),
-                  Text(
-                    title,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Syncing lights',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.78),
-                      fontSize: 15,
-                      height: 1.45,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.4,
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        (toremoved-projectRuntime
-                                ? _removed-projectAccent
-                                : CelestialColors.accentBlue)
-                            .withValues(alpha: 0.86),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

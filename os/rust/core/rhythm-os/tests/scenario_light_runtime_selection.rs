@@ -2,16 +2,13 @@
 //!
 //! Verifies that the production OS host can run multiple light runtimes
 //! against the same synced topology, controller dispatch path, and app-state
-//! store. `rhythm-adaptive` is the default Basic runtime; `removed-circadian`
-//! is selected for Expert mode and can be switched back without keeping an
-//! embedded removed-project runtime alive.
+//! store. `rhythm-adaptive` is the default runtime, and externally registered
+//! runtimes can be selected and switched back without leaking private state.
 
 mod harness;
 
 use harness::*;
-use rhythm_os::light_runtime::{
-    self, LightRuntimeKind, removed_circadian_RUNTIME_ID, RHYTHM_ADAPTIVE_RUNTIME_ID,
-};
+use rhythm_os::light_runtime::{self, LightRuntimeKind, RHYTHM_ADAPTIVE_RUNTIME_ID};
 use rhythm_os::{commands, handlers};
 use rhythm_runtime_api::{
     DispatchCommand, DispatchTarget, InputAction, LightRuntime, LightingCommand, RuntimeEvent,
@@ -269,9 +266,10 @@ fn selected_light_runtimes_share_os_host_interfaces() {
     let harness = harness.with_discovery(rooms, devices);
     harness.sync();
     let kitchen = harness.resolve("kitchen");
+    register_scenario_external_runtime(&harness.state);
 
-    // Basic mode is the default and runs Rhythm's adaptive planner through the
-    // neutral light-runtime host.
+    // The default runtime runs Rhythm's adaptive planner through the neutral
+    // light-runtime host.
     let report = light_runtime::run_selected_light_runtime_event(
         &harness.state,
         input_event(&kitchen, InputAction::On),
@@ -284,10 +282,13 @@ fn selected_light_runtimes_share_os_host_interfaces() {
     );
     assert_eq!(spy.turn_on_count(), 1);
 
-    // Expert mode selects removed-project. It uses the same OS host/controller path,
-    // and its private runtime state is isolated under the removed-project runtime id.
-    commands::do_light_runtime_settings_set(&harness.state, LightRuntimeKind::removed_circadian())
-        .unwrap();
+    // A custom runtime uses the same OS host/controller path, and its private
+    // runtime state is isolated under its own runtime id.
+    commands::do_light_runtime_settings_set(
+        &harness.state,
+        LightRuntimeKind::new(SCENARIO_EXTERNAL_RUNTIME_ALIAS),
+    )
+    .unwrap();
     spy.reset();
 
     let report = light_runtime::run_selected_light_runtime_event(
@@ -301,24 +302,25 @@ fn selected_light_runtimes_share_os_host_interfaces() {
         let state = harness.state.lock().unwrap();
         assert_eq!(
             state.light_runtime_kind,
-            LightRuntimeKind::removed_circadian()
+            LightRuntimeKind::new(SCENARIO_EXTERNAL_RUNTIME_ID)
         );
-        assert!(state.light_runtime.is_some());
-        assert!(
-            state.light_runtime_state[removed_circadian_RUNTIME_ID][&kitchen]
-                .contains_key("removed-project_area_runtime_state")
+        assert!(state.light_runtime.is_none());
+        assert_eq!(
+            state.light_runtime_state[SCENARIO_EXTERNAL_RUNTIME_ID][&kitchen]
+                ["scenario_external_runtime"],
+            serde_json::json!("handled")
         );
         assert!(
             !state
                 .light_runtime_state
                 .get(RHYTHM_ADAPTIVE_RUNTIME_ID)
                 .is_some_and(|runtime_state| runtime_state.contains_key(&kitchen)),
-            "removed-project writes must not leak into rhythm-adaptive state"
+            "custom runtime writes must not leak into rhythm-adaptive state"
         );
     }
 
-    // Returning to Basic mode clears the cached removed-project runtime and dispatches
-    // back through Rhythm's adaptive runtime against the same topology.
+    // Returning to the built-in runtime dispatches back through Rhythm's
+    // adaptive runtime against the same topology.
     commands::do_light_runtime_settings_set(&harness.state, LightRuntimeKind::rhythm_adaptive())
         .unwrap();
     spy.reset();
@@ -338,6 +340,6 @@ fn selected_light_runtimes_share_os_host_interfaces() {
     );
     assert!(
         state.light_runtime.is_none(),
-        "Basic mode must not retain the removed-project runtime instance"
+        "built-in rhythm-adaptive runtime must not retain a custom runtime instance"
     );
 }

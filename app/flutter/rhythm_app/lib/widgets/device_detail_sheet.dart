@@ -385,6 +385,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       RhythmDeviceType.light => 'Light',
       RhythmDeviceType.button => 'Button',
       RhythmDeviceType.motion => 'Motion Sensor',
+      RhythmDeviceType.contact => 'Contact Sensor',
     };
 
     final rhythmId = _canonicalData?['id'] as String?;
@@ -797,7 +798,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
   bool _canLeaveUnassigned(ServerSyncProvider syncProvider) {
     return switch (widget.device.type) {
-      RhythmDeviceType.button || RhythmDeviceType.motion => true,
+      RhythmDeviceType.button ||
+      RhythmDeviceType.motion ||
+      RhythmDeviceType.contact =>
+        true,
       RhythmDeviceType.light =>
         _matterNativeId != null && syncProvider.supportsMatterRoomlessDevices,
     };
@@ -858,6 +862,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         RhythmDeviceType.motion => (
             Icons.sensors_outlined,
             const Color(0xFF81C784)
+          ),
+        RhythmDeviceType.contact => (
+            Icons.sensor_door_outlined,
+            const Color(0xFFFFB74D)
           ),
       };
 }

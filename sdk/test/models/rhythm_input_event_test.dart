@@ -45,5 +45,25 @@ void main() {
       expect(motion.nativeSensorId, 'native-motion');
       expect(motion.detected, isTrue);
     });
+
+    test('parses contact input events', () {
+      final event = RhythmInputEvent.fromJson({
+        'kind': 'contact',
+        'epoch_ms': 1778058934000,
+        'route': 'node_control',
+        'source_node_id': 'contact-1',
+        'target_node_id': 'room-1',
+        'native_sensor_id': 'binary_sensor.front_door',
+        'open': true,
+      });
+
+      expect(event, isA<RhythmContactInputEvent>());
+      expect(event.isContact, isTrue);
+      final contact = event as RhythmContactInputEvent;
+      expect(contact.sourceNodeId, 'contact-1');
+      expect(contact.targetNodeId, 'room-1');
+      expect(contact.nativeSensorId, 'binary_sensor.front_door');
+      expect(contact.open, isTrue);
+    });
   });
 }

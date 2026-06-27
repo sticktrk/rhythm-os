@@ -52,6 +52,13 @@ pub enum HubEvent {
         sensor_id: String,
         detected: bool,
     },
+    /// A contact sensor reported open or closed in a room.
+    Contact {
+        hub_key: Option<HubKey>,
+        room_id: String,
+        sensor_id: String,
+        open: bool,
+    },
     /// A light endpoint reported a live power-state change.
     LightPower {
         hub_key: Option<HubKey>,
@@ -93,6 +100,7 @@ impl HubEvent {
             HubEvent::Connected { hub_key } => hub_key.as_ref(),
             HubEvent::Button { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::Contact { hub_key, .. } => hub_key.as_ref(),
             HubEvent::LightPower { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
             HubEvent::Disconnected { hub_key, .. } => hub_key.as_ref(),
@@ -107,6 +115,7 @@ impl HubEvent {
             HubEvent::Connected { hub_key } => *hub_key = Some(key),
             HubEvent::Button { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::Contact { hub_key, .. } => *hub_key = Some(key),
             HubEvent::LightPower { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),
             HubEvent::Disconnected { hub_key, .. } => *hub_key = Some(key),

@@ -36,8 +36,8 @@ void main() {
   group('RhythmLightRuntimeState', () {
     test('parses initial apply metadata', () {
       final state = RhythmLightRuntimeState.fromJson({
-        'runtime_id': 'removed-circadian',
-        'available_runtime_ids': ['rhythm-adaptive', 'removed-circadian'],
+        'runtime_id': 'rhythm-adaptive',
+        'available_runtime_ids': ['rhythm-adaptive'],
         'initial_apply': {
           'queued': true,
           'dispatch_count': 4,
@@ -46,7 +46,7 @@ void main() {
         },
       });
 
-      expect(state.runtime, RhythmLightRuntime.removed-projectCircadian);
+      expect(state.runtime, RhythmLightRuntime.rhythmAdaptive);
       expect(state.initialApply?.queued, isTrue);
       expect(state.initialApply?.dispatchCount, 4);
       expect(state.initialApply?.estimatedDuration,
@@ -228,35 +228,35 @@ void main() {
       expect(mode.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
     });
 
-    test('parses explicit removed-project light runtime', () {
+    test('falls back to adaptive for unknown light runtime', () {
       final mode = RhythmModeResource.fromJson({
         'active': 'day',
-        'light_runtime': 'removed-circadian',
+        'light_runtime': 'custom-runtime',
         'configs': [
           {
             'mode': 'day',
-            'active_profile_id': 'expert',
+            'active_profile_id': 'custom',
           },
         ],
       });
 
-      expect(mode.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(mode.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
       expect(mode.hasLightRuntime, isTrue);
-      expect(mode.activeConfig?.activeProfileId, 'expert');
+      expect(mode.activeConfig?.activeProfileId, 'custom');
     });
 
-    test('infers removed-project light runtime from active day profile', () {
+    test('does not infer runtime from legacy day profile', () {
       final mode = RhythmModeResource.fromJson({
         'active': 'day',
         'configs': [
           {
             'mode': 'day',
-            'active_profile_id': 'expert',
+            'active_profile_id': 'custom',
           },
         ],
       });
 
-      expect(mode.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(mode.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
       expect(mode.hasLightRuntime, isFalse);
     });
 

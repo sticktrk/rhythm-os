@@ -35,6 +35,15 @@ pub struct HaMotionSensor {
     pub area_id: String,
 }
 
+/// A contact sensor discovered from HA entity registry or state attributes.
+#[derive(Clone, Debug)]
+pub struct HaContactSensor {
+    /// Entity ID (e.g. "binary_sensor.front_door").
+    pub entity_id: String,
+    /// Area this sensor belongs to.
+    pub area_id: String,
+}
+
 /// A HA control source that should become a canonical Button device.
 #[derive(Clone, Debug)]
 struct HaButtonDevice {
@@ -57,6 +66,8 @@ pub struct AreaDiscoveryResult {
     pub device_area_map: HashMap<String, String>,
     /// Motion sensors (binary_sensor.* with motion/occupancy device class).
     pub motion_sensors: Vec<HaMotionSensor>,
+    /// Contact sensors (binary_sensor.* with door/window/opening device class).
+    pub contact_sensors: Vec<HaContactSensor>,
     /// entity_id → area_id for ALL binary_sensor entities.
     ///
     /// Used to populate the event cache for on-demand motion sensor discovery.
@@ -134,6 +145,8 @@ struct FullRegistryData {
     virtual_entity_ids: std::collections::HashSet<String>,
     /// Motion sensors with current state from `get_states`: (entity_id, area_id, is_active).
     prefetched_motion: Vec<(String, String, bool)>,
+    /// Contact sensors classified from `get_states`: (entity_id, area_id, is_open).
+    prefetched_contact: Vec<(String, String, bool)>,
     /// Button/control devices that can emit HA events.
     button_devices: Vec<HaButtonDevice>,
 }
@@ -385,10 +398,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         .iter()
         .filter(|e| {
             e.entity_id.starts_with("binary_sensor.")
-                && matches!(
-                    e.original_device_class.as_deref(),
-                    Some("motion") | Some("occupancy")
-                )
+                && is_motion_device_class(e.original_device_class.as_deref())
         })
         .filter_map(|e| {
             let area_id = e
@@ -408,14 +418,44 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         })
         .collect();
 
+    let contact_sensors: Vec<HaContactSensor> = entities
+        .iter()
+        .filter(|e| {
+            e.entity_id.starts_with("binary_sensor.")
+                && is_contact_device_class(e.original_device_class.as_deref())
+        })
+        .filter_map(|e| {
+            let area_id = e
+                .area_id
+                .as_ref()
+                .filter(|a| !a.is_empty())
+                .cloned()
+                .or_else(|| {
+                    e.device_id
+                        .as_ref()
+                        .and_then(|did| device_area_map.get(did).cloned())
+                })?;
+            Some(HaContactSensor {
+                entity_id: e.entity_id.clone(),
+                area_id,
+            })
+        })
+        .collect();
+
     let mut motion_device_ids: HashSet<String> = entities
         .iter()
         .filter(|e| {
             e.entity_id.starts_with("binary_sensor.")
-                && matches!(
-                    e.original_device_class.as_deref(),
-                    Some("motion") | Some("occupancy")
-                )
+                && is_motion_device_class(e.original_device_class.as_deref())
+        })
+        .filter_map(|e| e.device_id.as_ref().filter(|d| !d.is_empty()).cloned())
+        .collect();
+
+    let mut contact_device_ids: HashSet<String> = entities
+        .iter()
+        .filter(|e| {
+            e.entity_id.starts_with("binary_sensor.")
+                && is_contact_device_class(e.original_device_class.as_deref())
         })
         .filter_map(|e| e.device_id.as_ref().filter(|d| !d.is_empty()).cloned())
         .collect();
@@ -464,8 +504,9 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
     // Prefetch motion sensor states from get_states response.
     // Filters states_json for binary_sensors that are in binary_sensor_areas
     // and whose runtime attributes.device_class is "motion" or "occupancy".
-    let prefetched_motion: Vec<(String, String, bool)> = states_json
-        .unwrap_or_default()
+    let states = states_json.unwrap_or_default();
+
+    let prefetched_motion: Vec<(String, String, bool)> = states
         .iter()
         .filter_map(|state_obj| {
             let entity_id = state_obj.get("entity_id")?.as_str()?;
@@ -474,7 +515,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
                 .get("attributes")
                 .and_then(|a| a.get("device_class"))
                 .and_then(|v| v.as_str());
-            if !matches!(device_class, Some("motion") | Some("occupancy")) {
+            if !is_motion_device_class(device_class) {
                 return None;
             }
             let is_active = state_obj.get("state").and_then(|v| v.as_str()) == Some("on");
@@ -482,8 +523,30 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         })
         .collect();
 
+    let prefetched_contact: Vec<(String, String, bool)> = states
+        .iter()
+        .filter_map(|state_obj| {
+            let entity_id = state_obj.get("entity_id")?.as_str()?;
+            let area_id = binary_sensor_areas.get(entity_id)?;
+            let device_class = state_obj
+                .get("attributes")
+                .and_then(|a| a.get("device_class"))
+                .and_then(|v| v.as_str());
+            if !is_contact_device_class(device_class) {
+                return None;
+            }
+            let is_open = state_obj.get("state").and_then(|v| v.as_str()) == Some("on");
+            Some((entity_id.to_string(), area_id.clone(), is_open))
+        })
+        .collect();
+
     motion_device_ids.extend(
         prefetched_motion
+            .iter()
+            .filter_map(|(entity_id, _, _)| entity_device_map.get(entity_id).cloned()),
+    );
+    contact_device_ids.extend(
+        prefetched_contact
             .iter()
             .filter_map(|(entity_id, _, _)| entity_device_map.get(entity_id).cloned()),
     );
@@ -495,16 +558,18 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         &event_entity_areas,
         &light_device_ids,
         &motion_device_ids,
+        &contact_device_ids,
     );
 
     info!(target: "area_sync",
-        "Discovered {} areas with lights, {} device-area mappings, {} motion sensors, {} binary_sensor entities, {} event entities, {} prefetched motion states",
-        result.len(), device_area_map.len(), motion_sensors.len(), binary_sensor_areas.len(), event_entity_areas.len(), prefetched_motion.len());
+        "Discovered {} areas with lights, {} device-area mappings, {} motion sensors, {} contact sensors, {} binary_sensor entities, {} event entities, {} prefetched motion states, {} prefetched contact states",
+        result.len(), device_area_map.len(), motion_sensors.len(), contact_sensors.len(), binary_sensor_areas.len(), event_entity_areas.len(), prefetched_motion.len(), prefetched_contact.len());
     Ok(FullRegistryData {
         result: AreaDiscoveryResult {
             areas: result,
             device_area_map,
             motion_sensors,
+            contact_sensors,
             binary_sensor_areas,
             event_entity_areas,
         },
@@ -514,6 +579,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         light_entity_areas,
         virtual_entity_ids,
         prefetched_motion,
+        prefetched_contact,
         button_devices,
     })
 }
@@ -616,6 +682,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
         let data = self.get_or_fetch()?;
         let mut devices = Vec::new();
         let mut seen_motion = HashSet::new();
+        let mut seen_contact = HashSet::new();
 
         for sensor in data.result.motion_sensors {
             if seen_motion.insert(sensor.entity_id.clone()) {
@@ -635,6 +702,28 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
                     room_id: Some(area_id),
                     buttons: vec![],
                     device_type: DeviceType::Motion,
+                });
+            }
+        }
+
+        for sensor in data.result.contact_sensors {
+            if seen_contact.insert(sensor.entity_id.clone()) {
+                devices.push(rhythm_os::discovery::DiscoveredDevice {
+                    device_id: sensor.entity_id,
+                    room_id: Some(sensor.area_id),
+                    buttons: vec![],
+                    device_type: DeviceType::Contact,
+                });
+            }
+        }
+
+        for (entity_id, area_id, _) in data.prefetched_contact {
+            if seen_contact.insert(entity_id.clone()) {
+                devices.push(rhythm_os::discovery::DiscoveredDevice {
+                    device_id: entity_id,
+                    room_id: Some(area_id),
+                    buttons: vec![],
+                    device_type: DeviceType::Contact,
                 });
             }
         }
@@ -701,6 +790,18 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             }
         }
 
+        let mut seen_contact = HashSet::new();
+        for sensor in &data.result.contact_sensors {
+            if seen_contact.insert(sensor.entity_id.clone()) {
+                push_contact_identity(&data, &mut identities, &sensor.entity_id, &sensor.area_id);
+            }
+        }
+        for (entity_id, area_id, _) in &data.prefetched_contact {
+            if seen_contact.insert(entity_id.clone()) {
+                push_contact_identity(&data, &mut identities, entity_id, area_id);
+            }
+        }
+
         // Button/control devices → DiscoveredIdentity with DeviceType::Button
         for button in &data.button_devices {
             let room_name = data.area_names.get(&button.area_id).cloned();
@@ -730,13 +831,18 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             .iter()
             .filter(|i| i.device_type == DeviceType::Button)
             .count();
+        let contact_count = identities
+            .iter()
+            .filter(|i| i.device_type == DeviceType::Contact)
+            .count();
         info!(
             target: "area_sync",
-            "Discovered {} device identities ({} lights, {} buttons, {} motion) from HA",
+            "Discovered {} device identities ({} lights, {} buttons, {} motion, {} contact) from HA",
             identities.len(),
             light_count,
             button_count,
-            motion_count
+            motion_count,
+            contact_count
         );
 
         Ok(identities)
@@ -775,6 +881,7 @@ fn build_button_devices(
     event_entity_areas: &HashMap<String, String>,
     light_device_ids: &HashSet<String>,
     motion_device_ids: &HashSet<String>,
+    contact_device_ids: &HashSet<String>,
 ) -> Vec<HaButtonDevice> {
     let mut by_native: HashMap<String, HaButtonDevice> = HashMap::new();
     let mut event_parent_device_ids: HashSet<String> = HashSet::new();
@@ -828,6 +935,7 @@ fn build_button_devices(
     for (device_id, area_id) in device_area_map {
         if light_device_ids.contains(device_id)
             || motion_device_ids.contains(device_id)
+            || contact_device_ids.contains(device_id)
             || event_parent_device_ids.contains(device_id)
         {
             continue;
@@ -948,6 +1056,38 @@ fn push_motion_identity(
         manufacturer,
         model,
     });
+}
+
+fn push_contact_identity(
+    data: &FullRegistryData,
+    identities: &mut Vec<DiscoveredIdentity>,
+    entity_id: &str,
+    area_id: &str,
+) {
+    let room_name = data.area_names.get(area_id).cloned();
+    let (name, hw_ids, manufacturer, model) = enrich_from_device(data, entity_id);
+
+    identities.push(DiscoveredIdentity {
+        native_id: entity_id.to_string(),
+        room_id: Some(area_id.to_string()),
+        room_name,
+        name,
+        device_type: DeviceType::Contact,
+        hardware_ids: hw_ids,
+        manufacturer,
+        model,
+    });
+}
+
+fn is_motion_device_class(device_class: Option<&str>) -> bool {
+    matches!(device_class, Some("motion") | Some("occupancy"))
+}
+
+fn is_contact_device_class(device_class: Option<&str>) -> bool {
+    matches!(
+        device_class,
+        Some("door") | Some("window") | Some("opening") | Some("garage_door")
+    )
 }
 
 /// Look up the parent device for an entity and return enriched fields.
@@ -1140,8 +1280,10 @@ mod tests {
                     {"entity_id": "light.office_virtual", "area_id": "office", "device_id": "dev-nohw"},
                     {"entity_id": "binary_sensor.kitchen_motion", "device_id": "dev-motion", "original_device_class": "motion"},
                     {"entity_id": "binary_sensor.kitchen_occupancy", "area_id": "kitchen", "original_device_class": "occupancy"},
+                    {"entity_id": "binary_sensor.kitchen_door", "device_id": "dev-contact", "original_device_class": "door"},
                     {"entity_id": "binary_sensor.kitchen_battery", "area_id": "kitchen"},
                     {"entity_id": "binary_sensor.office_hue_motion", "device_id": "dev-hue-motion"},
+                    {"entity_id": "binary_sensor.office_window", "device_id": "dev-window"},
                     {"entity_id": "event.kitchen_remote_button_1", "device_id": "dev-remote", "platform": "zha"},
                     {"entity_id": "event.kitchen_remote_button_2", "device_id": "dev-remote", "platform": "zha"}
                 ]),
@@ -1176,6 +1318,22 @@ mod tests {
                         "manufacturer": "Signify",
                         "model": "SML002",
                         "identifiers": [["zha", "00:17:88:01:04:05:06:07"]]
+                    },
+                    {
+                        "id": "dev-contact",
+                        "area_id": "kitchen",
+                        "name": "Kitchen Door",
+                        "manufacturer": "Aqara",
+                        "model": "Door Sensor",
+                        "serial_number": "door-123"
+                    },
+                    {
+                        "id": "dev-window",
+                        "area_id": "office",
+                        "name": "Office Window",
+                        "manufacturer": "Aqara",
+                        "model": "Window Sensor",
+                        "serial_number": "window-456"
                     },
                     {
                         "id": "dev-remote",
@@ -1219,6 +1377,11 @@ mod tests {
                         "entity_id": "binary_sensor.office_hue_motion",
                         "state": "off",
                         "attributes": {"device_class": "motion"}
+                    },
+                    {
+                        "entity_id": "binary_sensor.office_window",
+                        "state": "on",
+                        "attributes": {"device_class": "window"}
                     }
                 ]),
             )))
@@ -1324,6 +1487,16 @@ mod tests {
                 && device.room_id.as_deref() == Some("office")
         }));
         assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Contact
+                && device.device_id == "binary_sensor.kitchen_door"
+                && device.room_id.as_deref() == Some("kitchen")
+        }));
+        assert!(devices.iter().any(|device| {
+            device.device_type == DeviceType::Contact
+                && device.device_id == "binary_sensor.office_window"
+                && device.room_id.as_deref() == Some("office")
+        }));
+        assert!(devices.iter().any(|device| {
             device.device_type == DeviceType::Button
                 && device.device_id == "00:17:88:01:0a:b2:c3:d4"
                 && device.buttons
@@ -1361,6 +1534,18 @@ mod tests {
                 && identity.native_id == "binary_sensor.office_hue_motion"
                 && identity.name == "Office Hue Motion"
                 && identity.hardware_ids == vec![HardwareId::mac("00:17:88:01:04:05:06:07")]
+        }));
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Contact
+                && identity.native_id == "binary_sensor.kitchen_door"
+                && identity.name == "Kitchen Door"
+                && identity.hardware_ids == vec![HardwareId::serial("door-123")]
+        }));
+        assert!(identities.iter().any(|identity| {
+            identity.device_type == DeviceType::Contact
+                && identity.native_id == "binary_sensor.office_window"
+                && identity.name == "Office Window"
+                && identity.hardware_ids == vec![HardwareId::serial("window-456")]
         }));
         assert!(identities.iter().any(|identity| {
             identity.device_type == DeviceType::Button
