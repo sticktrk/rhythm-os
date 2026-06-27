@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{info, warn};
@@ -64,6 +64,9 @@ pub fn connect_matter(
     let commissioned_for_closure = commissioned.clone();
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
+    let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
+    let node_proof_of_life_for_loop = node_proof_of_life.clone();
+    let node_proof_of_life_for_closure = node_proof_of_life.clone();
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let _ = event_tx.send(HubEvent::Connected {
@@ -73,6 +76,7 @@ pub fn connect_matter(
         hub_key.clone(),
         transport.clone(),
         initial_metadata.subscription_targets.clone(),
+        node_proof_of_life_for_loop,
         event_tx.clone(),
     );
 
@@ -101,6 +105,7 @@ pub fn connect_matter(
                 cloud_profiles: std::sync::Mutex::new(cloud_profiles.clone()),
                 decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
                 recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+                node_proof_of_life: node_proof_of_life_for_closure.clone(),
                 event_tx,
             }))
         },
@@ -239,6 +244,7 @@ fn start_attribute_report_loop(
     hub_key: HubKey,
     transport: Arc<dyn MatterTransport>,
     targets: Vec<MatterSubscriptionTarget>,
+    node_proof_of_life: Arc<Mutex<HashMap<u64, Instant>>>,
     event_tx: Sender<HubEvent>,
 ) {
     if targets.is_empty() {
@@ -271,6 +277,9 @@ fn start_attribute_report_loop(
                 match transport.drain_attribute_reports() {
                     Ok(reports) => {
                         for report in reports {
+                            if let Ok(mut proof) = node_proof_of_life.lock() {
+                                proof.insert(report.node_id, Instant::now());
+                            }
                             if let Some(event) = crate::events::translate_report(&report) {
                                 if event_tx.send(event.with_hub_key(hub_key.clone())).is_err() {
                                     return;

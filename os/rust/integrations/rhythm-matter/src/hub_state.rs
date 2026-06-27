@@ -39,6 +39,8 @@ pub struct MatterHubData {
     pub decommissioning: Mutex<HashSet<u64>>,
     /// Matter nodes recently decommissioned and temporarily ignored by sync.
     pub recently_decommissioned: Mutex<HashMap<u64, Instant>>,
+    /// Last time each node produced any successful Matter interaction.
+    pub node_proof_of_life: Arc<Mutex<HashMap<u64, Instant>>>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -105,6 +107,23 @@ impl MatterHubData {
                 device.reachable = reachable;
             }
         }
+    }
+
+    /// Record that a node responded or emitted a live report.
+    pub fn record_node_proof_of_life(&self, node_id: u64) {
+        if let Ok(mut proof) = self.node_proof_of_life.lock() {
+            proof.insert(node_id, Instant::now());
+        }
+        self.mark_node_reachable(node_id, true);
+    }
+
+    /// Whether a node has proven alive after a specific failure/cooldown mark.
+    pub fn has_node_proof_of_life_after(&self, node_id: u64, marked_at: Instant) -> bool {
+        self.node_proof_of_life
+            .lock()
+            .ok()
+            .and_then(|proof| proof.get(&node_id).copied())
+            .is_some_and(|proof_at| proof_at > marked_at)
     }
 
     /// Upsert basic cached Matter device info without treating it as a live
@@ -234,6 +253,7 @@ mod tests {
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
+            node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
         }
     }

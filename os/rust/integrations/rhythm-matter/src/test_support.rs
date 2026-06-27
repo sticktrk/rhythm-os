@@ -252,6 +252,7 @@ pub struct SpyTransport {
     groups: Mutex<HashMap<u16, MatterGroup>>,
     failing_nodes: Mutex<HashSet<u64>>,
     failing_read_nodes: Mutex<HashSet<u64>>,
+    timing_out_nodes: Mutex<HashSet<u64>>,
     failing_groups: Mutex<HashSet<u16>>,
     commission_result: Mutex<Result<CommissionedDevice>>,
     commission_requests: Mutex<Vec<MatterCommissionRequest>>,
@@ -268,6 +269,7 @@ impl SpyTransport {
             groups: Mutex::new(HashMap::new()),
             failing_nodes: Mutex::new(HashSet::new()),
             failing_read_nodes: Mutex::new(HashSet::new()),
+            timing_out_nodes: Mutex::new(HashSet::new()),
             failing_groups: Mutex::new(HashSet::new()),
             commission_result: Mutex::new(Ok(default_device(99))),
             commission_requests: Mutex::new(Vec::new()),
@@ -320,6 +322,18 @@ impl SpyTransport {
         self.failing_read_nodes.lock().unwrap().insert(node_id);
     }
 
+    pub fn allow_read_node(&self, node_id: u64) {
+        self.failing_read_nodes.lock().unwrap().remove(&node_id);
+    }
+
+    pub fn timeout_node_commands(&self, node_id: u64) {
+        self.timing_out_nodes.lock().unwrap().insert(node_id);
+    }
+
+    pub fn allow_node_commands(&self, node_id: u64) {
+        self.timing_out_nodes.lock().unwrap().remove(&node_id);
+    }
+
     pub fn fail_group_commands(&self, group_id: u16) {
         self.failing_groups.lock().unwrap().insert(group_id);
     }
@@ -342,6 +356,17 @@ impl SpyTransport {
 
     fn should_fail_read(&self, node_id: u64) -> bool {
         self.failing_read_nodes.lock().unwrap().contains(&node_id)
+    }
+
+    fn should_timeout(&self, node_id: u64) -> bool {
+        self.timing_out_nodes.lock().unwrap().contains(&node_id)
+    }
+
+    fn timeout_error(node_id: u64) -> anyhow::Error {
+        anyhow::anyhow!(
+            "setting Matter command for node {}: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout",
+            node_id
+        )
     }
 
     fn should_fail_group(&self, group_id: u16) -> bool {
@@ -413,11 +438,15 @@ impl MatterTransport for SpyTransport {
         if self.should_fail(node_id) {
             anyhow::bail!("device {} not found in registry", node_id);
         }
+        let timeout = self.should_timeout(node_id);
         self.record(RecordedOperation::SetOnOff {
             node_id,
             endpoint,
             on,
         });
+        if timeout {
+            return Err(Self::timeout_error(node_id));
+        }
         self.on_off_state.lock().unwrap().insert(node_id, on);
         Ok(())
     }
@@ -555,11 +584,15 @@ impl MatterTransport for SpyTransport {
         if self.should_fail(node_id) {
             anyhow::bail!("device {} not found in registry", node_id);
         }
+        let timeout = self.should_timeout(node_id);
         self.record(RecordedOperation::IdentifyLight {
             node_id,
             endpoint,
             duration_secs,
         });
+        if timeout {
+            return Err(Self::timeout_error(node_id));
+        }
         Ok(())
     }
 
@@ -573,12 +606,16 @@ impl MatterTransport for SpyTransport {
         if self.should_fail(node_id) {
             anyhow::bail!("device {} not found in registry", node_id);
         }
+        let timeout = self.should_timeout(node_id);
         self.record(RecordedOperation::SetBrightness {
             node_id,
             endpoint,
             level,
             transition_ms,
         });
+        if timeout {
+            return Err(Self::timeout_error(node_id));
+        }
         self.on_off_state.lock().unwrap().insert(node_id, level > 0);
         Ok(())
     }
@@ -593,12 +630,16 @@ impl MatterTransport for SpyTransport {
         if self.should_fail(node_id) {
             anyhow::bail!("device {} not found in registry", node_id);
         }
+        let timeout = self.should_timeout(node_id);
         self.record(RecordedOperation::SetColorTemperature {
             node_id,
             endpoint,
             kelvin,
             transition_ms,
         });
+        if timeout {
+            return Err(Self::timeout_error(node_id));
+        }
         Ok(())
     }
 
@@ -613,6 +654,7 @@ impl MatterTransport for SpyTransport {
         if self.should_fail(node_id) {
             anyhow::bail!("device {} not found in registry", node_id);
         }
+        let timeout = self.should_timeout(node_id);
         self.record(RecordedOperation::SetXy {
             node_id,
             endpoint,
@@ -620,6 +662,9 @@ impl MatterTransport for SpyTransport {
             y,
             transition_ms,
         });
+        if timeout {
+            return Err(Self::timeout_error(node_id));
+        }
         Ok(())
     }
 
@@ -634,6 +679,7 @@ impl MatterTransport for SpyTransport {
         if self.should_fail(node_id) {
             anyhow::bail!("device {} not found in registry", node_id);
         }
+        let timeout = self.should_timeout(node_id);
         self.record(RecordedOperation::SetHueSaturation {
             node_id,
             endpoint,
@@ -641,6 +687,9 @@ impl MatterTransport for SpyTransport {
             saturation,
             transition_ms,
         });
+        if timeout {
+            return Err(Self::timeout_error(node_id));
+        }
         Ok(())
     }
 

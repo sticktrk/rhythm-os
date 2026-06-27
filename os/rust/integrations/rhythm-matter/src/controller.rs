@@ -31,7 +31,9 @@ const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug)]
 struct MatterOnOffReadBackoff {
+    marked_at: Instant,
     suppress_until: Instant,
+    suppress_commands: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +46,8 @@ enum MatterOnOffRead {
 fn initial_connectivity_backoff(
     hub_data: &MatterHubData,
 ) -> HashMap<(u64, u16), MatterOnOffReadBackoff> {
-    let suppress_until = Instant::now() + MATTER_ON_OFF_READ_BACKOFF;
+    let marked_at = Instant::now();
+    let suppress_until = marked_at + MATTER_ON_OFF_READ_BACKOFF;
     hub_data
         .commissioned
         .lock()
@@ -55,7 +58,11 @@ fn initial_connectivity_backoff(
                 .map(|device| {
                     (
                         (device.node_id, 1),
-                        MatterOnOffReadBackoff { suppress_until },
+                        MatterOnOffReadBackoff {
+                            marked_at,
+                            suppress_until,
+                            suppress_commands: false,
+                        },
                     )
                 })
                 .collect()
@@ -359,27 +366,42 @@ impl MatterLightController {
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.remove(&(node_id, endpoint));
         }
-        self.hub_data.mark_node_reachable(node_id, true);
+        self.hub_data.record_node_proof_of_life(node_id);
     }
 
-    fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16) {
+    fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16, suppress_commands: bool) {
+        let marked_at = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.insert(
                 (node_id, endpoint),
                 MatterOnOffReadBackoff {
-                    suppress_until: Instant::now() + MATTER_ON_OFF_READ_BACKOFF,
+                    marked_at,
+                    suppress_until: marked_at + MATTER_ON_OFF_READ_BACKOFF,
+                    suppress_commands,
                 },
             );
         }
         self.hub_data.mark_node_reachable(node_id, false);
     }
 
-    fn connectivity_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
+    fn connectivity_backoff_active(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        include_read_only: bool,
+    ) -> bool {
         let now = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             match backoff.get(&(node_id, endpoint)).copied() {
                 Some(entry) if entry.suppress_until > now => {
-                    return true;
+                    if self
+                        .hub_data
+                        .has_node_proof_of_life_after(node_id, entry.marked_at)
+                    {
+                        backoff.remove(&(node_id, endpoint));
+                        return false;
+                    }
+                    return include_read_only || entry.suppress_commands;
                 }
                 Some(_) => {
                     backoff.remove(&(node_id, endpoint));
@@ -390,21 +412,30 @@ impl MatterLightController {
         false
     }
 
+    fn read_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
+        self.connectivity_backoff_active(node_id, endpoint, true)
+    }
+
+    fn command_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
+        self.connectivity_backoff_active(node_id, endpoint, false)
+    }
+
     fn note_connectivity_failure(
         &self,
         node_id: u64,
         endpoint: u16,
         error: &anyhow::Error,
+        suppress_commands: bool,
     ) -> bool {
         let connectivity_timeout = Self::looks_like_connectivity_timeout(error);
         if connectivity_timeout {
-            self.mark_connectivity_failed(node_id, endpoint);
+            self.mark_connectivity_failed(node_id, endpoint, suppress_commands);
         }
         connectivity_timeout
     }
 
     fn read_on_off_with_backoff(&self, node_id: u64, endpoint: u16) -> Result<MatterOnOffRead> {
-        if self.connectivity_backoff_active(node_id, endpoint) {
+        if self.read_backoff_active(node_id, endpoint) {
             return Ok(MatterOnOffRead::Suppressed);
         }
 
@@ -418,7 +449,7 @@ impl MatterLightController {
                 Ok(MatterOnOffRead::Off)
             }
             Err(e) => {
-                self.note_connectivity_failure(node_id, endpoint, &e);
+                self.note_connectivity_failure(node_id, endpoint, &e, false);
                 Err(e)
             }
         }
@@ -449,7 +480,7 @@ impl MatterLightController {
                 failed_devices += 1;
                 continue;
             };
-            if self.connectivity_backoff_active(node_id, endpoint) {
+            if self.command_backoff_active(node_id, endpoint) {
                 tracing::debug!(
                     target: "cmd",
                     event = "matter_command_backoff_skip",
@@ -494,7 +525,7 @@ impl MatterLightController {
                         e
                     );
                     command_failures += 1;
-                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
+                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
                 } else {
                     command_successes += 1;
                     already_sent_on = true;
@@ -522,7 +553,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
+                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
                     } else {
                         command_successes += 1;
                     }
@@ -539,7 +570,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
+                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
                     } else {
                         command_successes += 1;
                     }
@@ -558,7 +589,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e);
+                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
                     } else {
                         command_successes += 1;
                     }
@@ -582,7 +613,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        self.note_connectivity_failure(node_id, endpoint, &e);
+                        self.note_connectivity_failure(node_id, endpoint, &e, true);
                     } else {
                         command_successes += 1;
                     }
@@ -596,7 +627,7 @@ impl MatterLightController {
                             e
                         );
                         command_failures += 1;
-                        self.note_connectivity_failure(node_id, endpoint, &e);
+                        self.note_connectivity_failure(node_id, endpoint, &e, true);
                     } else {
                         command_successes += 1;
                     }
@@ -958,7 +989,7 @@ impl MatterLightController {
                 failed_devices += 1;
                 continue;
             };
-            if self.connectivity_backoff_active(node_id, endpoint) {
+            if self.command_backoff_active(node_id, endpoint) {
                 tracing::debug!(
                     target: "cmd",
                     event = "matter_command_backoff_skip",
@@ -973,7 +1004,7 @@ impl MatterLightController {
 
             if let Err(e) = self.transport.set_on_off(node_id, endpoint, false) {
                 warn!(target: "cmd", "Matter: off command failed for node {}: {}", node_id, e);
-                self.note_connectivity_failure(node_id, endpoint, &e);
+                self.note_connectivity_failure(node_id, endpoint, &e, true);
                 failed_devices += 1;
             } else {
                 successful_devices += 1;
@@ -1156,6 +1187,7 @@ impl MatterLightController {
                     e
                 );
                 failed_devices += 1;
+                self.note_connectivity_failure(node_id, endpoint, &e, true);
             } else {
                 successful_devices += 1;
                 self.clear_connectivity_backoff(node_id, endpoint);
@@ -1511,6 +1543,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
 
@@ -1527,8 +1560,24 @@ mod tests {
         );
     }
 
+    fn write_count_for_node(operations: &[RecordedOperation], expected_node_id: u64) -> usize {
+        operations
+            .iter()
+            .filter(|operation| match operation {
+                RecordedOperation::SetOnOff { node_id, .. }
+                | RecordedOperation::SetBrightness { node_id, .. }
+                | RecordedOperation::SetColorTemperature { node_id, .. }
+                | RecordedOperation::SetXy { node_id, .. }
+                | RecordedOperation::SetHueSaturation { node_id, .. } => {
+                    *node_id == expected_node_id
+                }
+                _ => false,
+            })
+            .count()
+    }
+
     #[test]
-    fn turn_on_skips_nodes_marked_unreachable_at_boot() {
+    fn turn_on_breaks_read_only_backoff_for_nodes_marked_unreachable_at_boot() {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
@@ -1563,16 +1612,30 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
 
-        let result = block_on(controller.turn_on("r1", LightingCommand::new(50, 3000)));
-
-        assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
+        assert!(!block_on(controller.any_lights_on("r1")).unwrap());
         assert!(
             spy.operations().is_empty(),
-            "unreachable boot node should not receive Matter writes"
+            "boot-unreachable node should suppress on/off reads while in read backoff"
+        );
+
+        block_on(controller.turn_on("r1", LightingCommand::new(50, 3000))).unwrap();
+
+        assert!(spy.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+        )));
+        assert!(spy.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetBrightness { node_id: 42, .. }
+        )));
+        assert!(
+            block_on(controller.any_lights_on("r1")).unwrap(),
+            "successful command should clear read backoff and refresh observed power"
         );
     }
 
@@ -2267,6 +2330,74 @@ mod tests {
     }
 
     #[test]
+    fn proof_of_life_clears_read_backoff_before_next_read() {
+        let (controller, spy, _) = make_controller();
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+        spy.fail_read_node(42);
+
+        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+
+        spy.allow_read_node(42);
+        spy.set_on_off_state(42, true);
+        controller.hub_data.record_node_proof_of_life(42);
+
+        assert!(block_on(controller.any_lights_on_target(&target)).unwrap());
+
+        let read_count = spy
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::ReadOnOff {
+                        node_id: 42,
+                        endpoint: 1
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            read_count, 2,
+            "proof of life should break the read backoff before the next read"
+        );
+    }
+
+    #[test]
+    fn proof_of_life_clears_command_backoff_before_next_write() {
+        let (controller, spy, _) = make_controller();
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+        spy.timeout_node_commands(42);
+
+        let first = block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000)));
+        assert!(matches!(first, Err(LightControlError::CommandFailed(_))));
+        assert_eq!(
+            write_count_for_node(&spy.operations(), 42),
+            1,
+            "command timeout should suppress remaining writes for the endpoint"
+        );
+
+        spy.allow_node_commands(42);
+        controller.hub_data.record_node_proof_of_life(42);
+
+        block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000))).unwrap();
+
+        let operations = spy.operations();
+        assert_eq!(
+            write_count_for_node(&operations, 42),
+            3,
+            "proof of life should break the command backoff before the next write"
+        );
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetBrightness { node_id: 42, .. }
+        )));
+    }
+
+    #[test]
     fn successful_identify_clears_read_backoff_before_group_fanout() {
         let (controller, spy, registry) = make_controller();
         let group_id = 4097;
@@ -2373,6 +2504,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
 
@@ -2475,6 +2607,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2532,6 +2665,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2588,6 +2722,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2796,6 +2931,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
@@ -2988,6 +3124,7 @@ mod tests {
             ),
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
