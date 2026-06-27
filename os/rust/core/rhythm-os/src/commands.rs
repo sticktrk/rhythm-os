@@ -226,6 +226,7 @@ struct ModeDefaultApplyContext<'a> {
     dispatch_generation: u64,
     power_save: bool,
     reset_all_room_defaults: bool,
+    reassert_hard_off_defaults: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -5306,7 +5307,10 @@ fn apply_room_mode_defaults(
         let reset_offsets = ctx.reset_all_room_defaults
             && (snap.time_offset_minutes.abs() > f32::EPSILON
                 || snap.brightness_offset.abs() > f32::EPSILON);
-        if current_state == target_state && !reset_offsets {
+        let reassert_hard_off = ctx.reassert_hard_off_defaults
+            && target_state == RoomModeState::HardOff
+            && current_state == RoomModeState::HardOff;
+        if current_state == target_state && !reset_offsets && !reassert_hard_off {
             continue;
         }
 
@@ -6474,6 +6478,7 @@ struct ActiveModeOutputApply {
     dispatch_generation: u64,
     force_observed_off_outputs: bool,
     reset_all_room_defaults: bool,
+    reassert_hard_off_defaults: bool,
 }
 
 fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply) {
@@ -6485,6 +6490,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         dispatch_generation,
         force_observed_off_outputs,
         reset_all_room_defaults,
+        reassert_hard_off_defaults,
     } = request;
 
     let (
@@ -6562,6 +6568,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             dispatch_generation,
             power_save,
             reset_all_room_defaults,
+            reassert_hard_off_defaults,
         },
         &snapshots,
     );
@@ -6803,6 +6810,7 @@ fn apply_pending_mode_outputs_if_ready(state: &SharedState) {
             dispatch_generation,
             force_observed_off_outputs: false,
             reset_all_room_defaults: false,
+            reassert_hard_off_defaults: true,
         },
     );
     persist_state(state);
@@ -7063,6 +7071,7 @@ fn do_settings_set_internal(
                     dispatch_generation,
                     force_observed_off_outputs,
                     reset_all_room_defaults,
+                    reassert_hard_off_defaults: mode_changed || force_reapply_outputs,
                 },
             );
         } else {
@@ -9293,6 +9302,7 @@ pub fn do_config_set_with_options(
                 dispatch_generation,
                 force_observed_off_outputs: false,
                 reset_all_room_defaults: false,
+                reassert_hard_off_defaults: false,
             },
         );
     }

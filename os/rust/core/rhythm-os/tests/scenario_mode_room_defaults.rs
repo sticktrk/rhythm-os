@@ -132,6 +132,62 @@ fn put_mode_applies_room_defaults_on_mode_activation() {
 }
 
 #[test]
+fn mode_activation_reasserts_existing_hard_off_default() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(vec![room("drop_zone", "Drop Zone")], vec![]);
+    harness.sync();
+    harness.set_settings(Some(false));
+
+    harness.action("drop_zone", "on").unwrap();
+    harness.action("drop_zone", "lights_off").unwrap();
+    let drop_zone_id = harness.resolve("drop_zone");
+    assert!(
+        harness.snapshot("drop_zone").unwrap().hard_off,
+        "setup: room should already be logically hard-off"
+    );
+
+    harness.set_lights_on("drop_zone", true);
+    assert!(
+        harness.lights_on("drop_zone"),
+        "setup: observed power should simulate external Hue drift back on"
+    );
+    spy.reset();
+
+    let response = handlers::handle_put_mode(
+        &harness.state,
+        &json!({
+            "active": "sleep",
+            "configs": [
+                {
+                    "mode": "day",
+                    "active_profile_id": "rhythm",
+                    "room_defaults": [
+                        { "room_id": drop_zone_id.clone(), "state": "hard_off" }
+                    ]
+                },
+                {
+                    "mode": "sleep",
+                    "active_profile_id": "sleep",
+                    "room_defaults": [
+                        { "room_id": drop_zone_id.clone(), "state": "hard_off" }
+                    ]
+                }
+            ]
+        }),
+    );
+
+    assert_eq!(response.status, 200, "mode activation should succeed");
+    assert!(
+        spy.turn_off_calls().contains(&drop_zone_id),
+        "activating a mode must physically reassert an explicit hard-off default even when the room was already logically hard-off"
+    );
+    assert!(
+        !harness.lights_on("drop_zone"),
+        "hard-off reassertion should update observed power back to off"
+    );
+}
+
+#[test]
 fn same_mode_transition_resets_rooms_to_mode_defaults() {
     let (harness, spy) = TestHarness::with_spy_controller_at(10.0, 125);
     let harness = harness.with_discovery(
