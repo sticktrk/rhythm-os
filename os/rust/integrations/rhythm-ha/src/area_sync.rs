@@ -1700,6 +1700,7 @@ mod tests {
             &event_entity_areas,
             &HashSet::new(),
             &HashSet::new(),
+            &HashSet::new(),
         );
 
         assert_eq!(devices.len(), 1);
@@ -1725,6 +1726,7 @@ mod tests {
             &HashMap::new(),
             &HashSet::new(),
             &HashSet::new(),
+            &HashSet::new(),
         );
 
         assert!(devices.is_empty());
@@ -1743,6 +1745,7 @@ mod tests {
             &device_area_map,
             &device_info,
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             &HashSet::new(),
         );
