@@ -1158,6 +1158,7 @@ impl MatterLightController {
                 failed_devices += 1;
             } else {
                 successful_devices += 1;
+                self.clear_connectivity_backoff(node_id, endpoint);
             }
         }
 
@@ -2263,6 +2264,43 @@ mod tests {
             read_count, 1,
             "second read should be suppressed while the failed endpoint is in backoff"
         );
+    }
+
+    #[test]
+    fn successful_identify_clears_read_backoff_before_group_fanout() {
+        let (controller, spy, registry) = make_controller();
+        let group_id = 4097;
+        set_kitchen_group(&registry, group_id);
+        let direct_target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+        spy.fail_read_node(42);
+
+        assert!(!block_on(controller.any_lights_on_target(&direct_target)).unwrap());
+        block_on(controller.flash_target(&direct_target)).unwrap();
+        block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
+
+        let operations = spy.operations();
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::IdentifyLight { node_id: 42, .. }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetBrightness { node_id: 42, .. }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetColorTemperature { node_id: 43, .. }
+        )));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetBrightness { node_id: 43, .. }
+        )));
     }
 
     #[test]
