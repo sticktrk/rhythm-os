@@ -728,6 +728,7 @@ mod tests {
                 cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
                 decommissioning: Mutex::new(HashSet::new()),
                 recently_decommissioned: Mutex::new(HashMap::new()),
+                node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
                 event_tx,
             }),
             event_rx,
