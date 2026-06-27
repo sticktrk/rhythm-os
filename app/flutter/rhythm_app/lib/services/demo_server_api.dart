@@ -746,6 +746,22 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<bool> renameCanonicalDevice(String id, String name) async {
+    ensureSeeded();
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return false;
+    final device = _canonicalDevices[id];
+    final node = _topologyNodes[id];
+    final nodeState = _nodeStates[id];
+    if (device == null || node == null || nodeState == null) return false;
+    device['name'] = trimmed;
+    node['name'] = trimmed;
+    nodeState['name'] = trimmed;
+    _changes.add(null);
+    return true;
+  }
+
+  @override
   Future<bool> flashCanonicalDevice(String id) async {
     ensureSeeded();
     return _canonicalDevices.containsKey(id);

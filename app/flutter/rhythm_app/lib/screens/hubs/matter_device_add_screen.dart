@@ -520,7 +520,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 14),
         Text(
-          'Acquiring device signal',
+          _matterPairingTitle(progress),
           style: const TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 20,
@@ -569,7 +569,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                 icon: Icons.radar_outlined,
               ),
               StageTimelineItem(
-                label: 'Commissioning',
+                label: 'Pairing',
                 icon: Icons.verified_user_outlined,
               ),
               StageTimelineItem(
@@ -592,7 +592,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   /// Map the server's `PairingStage` onto our 4-step UI timeline.
   ///
-  /// 0 = Sending request, 1 = Searching, 2 = Commissioning, 3 = Finalizing.
+  /// 0 = Sending request, 1 = Searching, 2 = Pairing, 3 = Finalizing.
   /// Returns 4 (== stages.length) when complete.
   int _matterPairingActiveIndex(RhythmPairingProgress? progress) {
     if (progress == null) return 0;
@@ -619,6 +619,21 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     final trimmed = progress.message.trim();
     if (trimmed.isEmpty) return null;
     return trimmed;
+  }
+
+  String _matterPairingTitle(RhythmPairingProgress? progress) {
+    return switch (progress?.stage) {
+      RhythmPairingStage.commissioning => 'Pairing with device',
+      RhythmPairingStage.finalizing => 'Finalizing device',
+      RhythmPairingStage.complete => 'Device added',
+      RhythmPairingStage.failed => 'Pairing failed',
+      RhythmPairingStage.requested ||
+      RhythmPairingStage.hubConnecting ||
+      RhythmPairingStage.searching ||
+      RhythmPairingStage.connecting ||
+      null =>
+        'Searching for device',
+    };
   }
 
   // ──────────────────────────────────────────────────────────────────────────

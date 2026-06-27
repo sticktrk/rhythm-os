@@ -2441,6 +2441,24 @@ pub fn handle_get_canonical_device(state: &SharedState, id: &str) -> ApiResponse
     }
 }
 
+pub fn handle_put_canonical_device(
+    state: &SharedState,
+    device_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(name) => name,
+        None => return ApiResponse::bad_request("Missing name"),
+    };
+    match commands::do_canonical_rename_device(state, device_id, name) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(e) if e.to_string().contains("Device not found") => {
+            ApiResponse::bad_request("Device not found")
+        }
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
 pub fn handle_put_device_room(state: &SharedState, device_id: &str, body: &Value) -> ApiResponse {
     let room_id = body
         .get("room_id")

@@ -601,7 +601,7 @@ class _RoomCardState extends State<RoomCard> {
                               Expanded(
                                 child: Text(
                                   room.name,
-                                  maxLines: 1,
+                                  maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     color: textColor,

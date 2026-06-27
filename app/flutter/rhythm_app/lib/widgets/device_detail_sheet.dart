@@ -202,10 +202,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     }
   }
 
+  String get _deviceDisplayName {
+    final canonicalName = (_canonicalData?['name'] as String?)?.trim();
+    if (canonicalName != null && canonicalName.isNotEmpty) {
+      return canonicalName;
+    }
+    return widget.device.displayName;
+  }
+
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
     final device = widget.device;
+    final deviceDisplayName = _deviceDisplayName;
     final (icon, iconColor) = _iconForType(device.type);
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
@@ -259,14 +268,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     child: Icon(icon, color: iconColor, size: 24),
                   ),
                   const SizedBox(height: 12),
-                  Text(
-                    device.displayName,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  _DeviceNameButton(
+                    label: deviceDisplayName,
+                    onTap: device.type == RhythmDeviceType.light
+                        ? () => _showRenameDialog(context)
+                        : null,
                   ),
                   if (device.productInfo != null)
                     Padding(
@@ -310,8 +316,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     _buildConnectionsSection(),
                     const SizedBox(height: 16),
                     if (device.type == RhythmDeviceType.light) ...[
+                      _buildRenameButton(context),
+                      const SizedBox(height: 12),
                       _FlashButton(
-                        deviceLabel: device.displayName,
+                        deviceLabel: deviceDisplayName,
                         onFlash: () => context
                             .read<ServerSyncProvider>()
                             .api
@@ -394,6 +402,125 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               : rhythmId,
         ),
     ]);
+  }
+
+  Widget _buildRenameButton(BuildContext context) {
+    return GestureDetector(
+      onTap: () => _showRenameDialog(context),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.edit_outlined,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Rename Bulb...',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showRenameDialog(BuildContext context) async {
+    final controller = TextEditingController(text: _deviceDisplayName);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Rename Bulb',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: CelestialColors.textPrimary),
+          decoration: InputDecoration(
+            hintText: 'Bulb name',
+            hintStyle: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+            ),
+            enabledBorder: UnderlineInputBorder(
+              borderSide: BorderSide(
+                color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+              ),
+            ),
+            focusedBorder: const UnderlineInputBorder(
+              borderSide: BorderSide(color: CelestialColors.sunWarm),
+            ),
+          ),
+          onSubmitted: (value) => Navigator.of(ctx).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(
+              'Cancel',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text(
+              'Rename',
+              style: TextStyle(color: CelestialColors.sunWarm),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (newName == null ||
+        newName.isEmpty ||
+        newName == _deviceDisplayName ||
+        !context.mounted) {
+      return;
+    }
+
+    final syncProvider = context.read<ServerSyncProvider>();
+    final success =
+        await syncProvider.api.renameCanonicalDevice(widget.device.id, newName);
+    if (!context.mounted) return;
+
+    if (!success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to rename bulb')),
+      );
+      return;
+    }
+
+    setState(() {
+      _canonicalData = {
+        ...?_canonicalData,
+        'name': newName,
+      };
+    });
+    syncProvider.api.triggerSync();
   }
 
   Widget _buildConnectionsSection() {
@@ -733,6 +860,68 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             const Color(0xFF81C784)
           ),
       };
+}
+
+class _DeviceNameButton extends StatelessWidget {
+  final String label;
+  final VoidCallback? onTap;
+
+  const _DeviceNameButton({
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final content = ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.sizeOf(context).width - 64,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Flexible(
+            fit: FlexFit.loose,
+            child: Text(
+              label,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          if (onTap != null) ...[
+            const SizedBox(width: 6),
+            Icon(
+              Icons.edit_outlined,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.65),
+              size: 16,
+            ),
+          ],
+        ],
+      ),
+    );
+
+    if (onTap == null) return content;
+
+    return Semantics(
+      button: true,
+      label: 'Rename bulb',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: content,
+        ),
+      ),
+    );
+  }
 }
 
 class _InfoRow extends StatelessWidget {

@@ -1325,6 +1325,21 @@ class RhythmServerApi {
     return null;
   }
 
+  /// Rename a canonical device.
+  Future<bool> renameCanonicalDevice(String id, String name) async {
+    try {
+      final response = await _dio.put(
+        'api/devices/canonical/$id',
+        data: {'name': name},
+      );
+      final code = response.statusCode ?? 0;
+      return code >= 200 && code < 300;
+    } catch (e) {
+      _log.warning('renameCanonicalDevice failed', e);
+    }
+    return false;
+  }
+
   /// Run a raw Matter bulb tester command variant against a Matter light.
   ///
   /// [deviceId] may be either a canonical Rhythm device ID or a Matter native

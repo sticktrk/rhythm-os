@@ -10983,6 +10983,33 @@ pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
     }
 }
 
+/// Rename a canonical device and refresh runtime/topology views.
+pub fn do_canonical_rename_device(
+    state: &SharedState,
+    device_id: &str,
+    name: &str,
+) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("Device name cannot be empty"));
+    }
+
+    {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let device = s
+            .canonical_registry
+            .get_mut(device_id)
+            .filter(|device| !device.is_removed())
+            .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
+        device.name = trimmed.to_string();
+        persist_canonical(&s);
+    }
+
+    reconcile_runtime_from_state(state)?;
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    Ok(())
+}
+
 /// Flash a canonical light device for physical identification.
 ///
 /// The operation dispatches directly to the device's preferred integration

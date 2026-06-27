@@ -237,10 +237,14 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/devices/canonical/:id",
-        methods: &["GET"],
+        methods: &["GET", "PUT"],
     },
     SharedRoute {
         path: "/api/devices/canonical/:id/room",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/devices/canonical/:id/parent",
         methods: &["PUT"],
     },
     SharedRoute {

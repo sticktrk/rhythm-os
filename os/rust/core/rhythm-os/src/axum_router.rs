@@ -173,7 +173,10 @@ fn shared_routes() -> Router<SharedState> {
         )
         // Canonical device management
         .route("/api/devices/canonical", get(get_canonical_devices))
-        .route("/api/devices/canonical/:id", get(get_canonical_device))
+        .route(
+            "/api/devices/canonical/:id",
+            get(get_canonical_device).put(put_canonical_device),
+        )
         .route("/api/devices/canonical/:id/room", put(put_device_room))
         .route("/api/devices/canonical/:id/parent", put(put_device_parent))
         .route(
@@ -726,6 +729,14 @@ async fn get_canonical_device(
     Path(id): Path<String>,
 ) -> ApiResponse {
     handlers::handle_get_canonical_device(&state, &id)
+}
+
+async fn put_canonical_device(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    handlers::handle_put_canonical_device(&state, &id, &body)
 }
 
 async fn put_device_room(

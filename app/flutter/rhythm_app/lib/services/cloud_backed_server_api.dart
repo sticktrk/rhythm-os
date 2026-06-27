@@ -482,6 +482,10 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevices();
   }
 
+  Future<bool> renameCanonicalDevice(String id, String name) {
+    return _delegate.renameCanonicalDevice(id, name);
+  }
+
   Future<bool> flashCanonicalDevice(String id) {
     return _delegate.flashCanonicalDevice(id);
   }

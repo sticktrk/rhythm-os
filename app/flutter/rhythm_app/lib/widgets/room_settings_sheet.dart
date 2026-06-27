@@ -487,6 +487,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   Widget _buildSettingsContent(BuildContext context) {
     final syncProvider = context.watch<ServerSyncProvider>();
     final renameLabel = room.kind.isRoom ? 'Name' : 'Node Name';
+    final canRename = room.kind.isRoom || room.kind == RoomNodeKind.lightDevice;
     final hideLabel = room.kind == RoomNodeKind.lightDevice
         ? 'Hide this light'
         : 'Hide this room';
@@ -509,7 +510,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     fontSize: 14,
                   ),
                 ),
-                if (room.kind.isRoom) ...[
+                if (canRename) ...[
                   const SizedBox(width: 4),
                   Icon(
                     Icons.edit_outlined,
@@ -519,7 +520,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                 ],
               ],
             ),
-            onTap: room.kind.isRoom ? () => _showRenameDialog(context) : null,
+            onTap: canRename ? () => _showRenameDialog(context) : null,
           ),
           _SettingsRow(
             icon: Icons.hub_outlined,
@@ -605,20 +606,23 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 
   Future<void> _showRenameDialog(BuildContext context) async {
     final controller = TextEditingController(text: room.name);
+    final isRoom = room.kind.isRoom;
+    final title = isRoom ? 'Rename Room' : 'Rename Bulb';
+    final hintText = isRoom ? 'Room name' : 'Bulb name';
     final newName = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Rename Room',
-          style: TextStyle(color: CelestialColors.textPrimary),
+        title: Text(
+          title,
+          style: const TextStyle(color: CelestialColors.textPrimary),
         ),
         content: TextField(
           controller: controller,
           autofocus: true,
           style: const TextStyle(color: CelestialColors.textPrimary),
           decoration: InputDecoration(
-            hintText: 'Room name',
+            hintText: hintText,
             hintStyle: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.5),
             ),
@@ -659,8 +663,18 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         newName != room.name &&
         context.mounted) {
       final http = context.read<ServerSyncProvider>().api;
-      await http.topologyRenameRoom(room.id, newName);
-      // Trigger re-sync so the name updates
+      final success = isRoom
+          ? await http.topologyRenameRoom(room.id, newName)
+          : await http.renameCanonicalDevice(room.id, newName);
+      if (!context.mounted) return;
+      if (!success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to rename ${isRoom ? 'room' : 'bulb'}'),
+          ),
+        );
+        return;
+      }
       http.triggerSync();
     }
   }
