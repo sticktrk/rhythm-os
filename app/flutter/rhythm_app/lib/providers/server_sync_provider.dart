@@ -1002,7 +1002,8 @@ class ServerSyncProvider extends ChangeNotifier {
       const order = {
         RhythmDeviceType.light: 0,
         RhythmDeviceType.button: 1,
-        RhythmDeviceType.motion: 2
+        RhythmDeviceType.motion: 2,
+        RhythmDeviceType.contact: 3,
       };
       return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
     });
@@ -1016,10 +1017,12 @@ class ServerSyncProvider extends ChangeNotifier {
     final l = devices.where((d) => d.type == RhythmDeviceType.light).length;
     final b = devices.where((d) => d.type == RhythmDeviceType.button).length;
     final m = devices.where((d) => d.type == RhythmDeviceType.motion).length;
+    final c = devices.where((d) => d.type == RhythmDeviceType.contact).length;
     final parts = <String>[];
     if (l > 0) parts.add('$l light${l > 1 ? 's' : ''}');
     if (b > 0) parts.add('$b button${b > 1 ? 's' : ''}');
     if (m > 0) parts.add('$m sensor${m > 1 ? 's' : ''}');
+    if (c > 0) parts.add('$c contact sensor${c > 1 ? 's' : ''}');
     if (parts.isEmpty) return 'No devices';
     final roomCount = rooms.length;
     return '${parts.join(', ')} across $roomCount room${roomCount > 1 ? 's' : ''}';
@@ -2561,8 +2564,7 @@ class ServerSyncProvider extends ChangeNotifier {
     await Future<void>.delayed(Duration(milliseconds: waitMs));
   }
 
-  String _activeProfileIdForLightRuntime(RhythmLightRuntime runtime) =>
-      runtime == RhythmLightRuntime.removed-projectCircadian ? 'expert' : 'rhythm';
+  String _activeProfileIdForLightRuntime(RhythmLightRuntime _) => 'rhythm';
 
   RhythmLightRuntime? _authoritativeLightRuntimeFromHello(RhythmHello hello) {
     if (hello.hasLightRuntime) return hello.lightRuntime;
@@ -2583,9 +2585,8 @@ class ServerSyncProvider extends ChangeNotifier {
   ) {
     if (mode.hasLightRuntime) return mode.lightRuntime;
 
-    // Older servers expressed the runtime choice through the Day profile.
-    // Active mode can be Sleep while the selected light runtime is still
-    // removed-project, so prefer the Day config over the currently active config.
+    // Older servers expressed the runtime choice through the Day profile, so
+    // prefer the Day config over the currently active config.
     return _lightRuntimeFromLegacyDayProfileId(
           mode.configFor(RhythmMode.day)?.activeProfileId,
         ) ??
@@ -2596,7 +2597,6 @@ class ServerSyncProvider extends ChangeNotifier {
 
   RhythmLightRuntime? _lightRuntimeFromLegacyDayProfileId(String? profileId) {
     return switch (profileId) {
-      'expert' => RhythmLightRuntime.removed-projectCircadian,
       'rhythm' => RhythmLightRuntime.rhythmAdaptive,
       _ => null,
     };
@@ -3481,6 +3481,7 @@ class ServerSyncProvider extends ChangeNotifier {
             RhythmDeviceType.light: 0,
             RhythmDeviceType.button: 1,
             RhythmDeviceType.motion: 2,
+            RhythmDeviceType.contact: 3,
           };
           return (order[left.type] ?? 3).compareTo(order[right.type] ?? 3);
         });

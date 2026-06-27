@@ -71,19 +71,20 @@ enum RoomModeState {
 enum RhythmDeviceType {
   light,
   button,
-  motion;
+  motion,
+  contact;
 
   static RhythmDeviceType fromString(String value) => switch (value) {
         'light' => RhythmDeviceType.light,
         'motion' => RhythmDeviceType.motion,
+        'contact' => RhythmDeviceType.contact,
         _ => RhythmDeviceType.button,
       };
 
   static RhythmDeviceType? fromNodeKind(RhythmNodeKind kind) => switch (kind) {
         RhythmNodeKind.lightDevice => RhythmDeviceType.light,
-        RhythmNodeKind.motionSensor ||
-        RhythmNodeKind.sensor =>
-          RhythmDeviceType.motion,
+        RhythmNodeKind.motionSensor => RhythmDeviceType.motion,
+        RhythmNodeKind.sensor => RhythmDeviceType.contact,
         RhythmNodeKind.button ||
         RhythmNodeKind.switchDevice =>
           RhythmDeviceType.button,
@@ -489,7 +490,6 @@ class RhythmRoom {
 
   bool get hasMotionSensor =>
       kind == RhythmNodeKind.motionSensor ||
-      kind == RhythmNodeKind.sensor ||
       devices.any((d) => d.type == RhythmDeviceType.motion);
 
   String? get hubType => hubTypes.isEmpty ? null : hubTypes.first;
@@ -515,6 +515,9 @@ class RhythmRoom {
   List<RhythmDevice> get motionSensors =>
       devices.where((d) => d.type == RhythmDeviceType.motion).toList();
 
+  List<RhythmDevice> get contactSensors =>
+      devices.where((d) => d.type == RhythmDeviceType.contact).toList();
+
   int get lightCount {
     final typed = lights.length;
     if (typed > 0) return typed;
@@ -533,9 +536,11 @@ class RhythmRoom {
     final l = lights.length;
     final b = buttons.length;
     final m = motionSensors.length;
+    final c = contactSensors.length;
     if (l > 0) parts.add('$l light${l > 1 ? 's' : ''}');
     if (b > 0) parts.add('$b button${b > 1 ? 's' : ''}');
     if (m > 0) parts.add('$m sensor${m > 1 ? 's' : ''}');
+    if (c > 0) parts.add('$c contact sensor${c > 1 ? 's' : ''}');
     if (parts.isEmpty && kind == RhythmNodeKind.lightDevice) {
       parts.add('1 light');
     }

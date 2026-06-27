@@ -666,16 +666,13 @@ class DemoServerApi extends RhythmServerApi {
   @override
   Future<RhythmModeResource?> getMode() async {
     ensureSeeded();
-    final dayProfileId = _lightRuntime == RhythmLightRuntime.removed-projectCircadian
-        ? 'expert'
-        : 'rhythm';
     return RhythmModeResource.fromJson({
       'active': _activeMode.wireValue,
       'light_runtime': _lightRuntime.id,
       'configs': [
         {
           'mode': 'day',
-          'active_profile_id': dayProfileId,
+          'active_profile_id': 'rhythm',
         },
         {
           'mode': 'sleep',

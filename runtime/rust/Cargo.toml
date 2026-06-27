@@ -3,7 +3,6 @@ resolver = "2"
 exclude = ["rhythm-os-runtime-modules"]
 members = [
     "rhythm-runtime-api",
-    "removed-circadian",
     "rhythm-adaptive",
 ]
 

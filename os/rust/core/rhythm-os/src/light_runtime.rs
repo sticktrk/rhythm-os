@@ -24,7 +24,6 @@ use crate::state::SharedState;
 use crate::storage::StoredLightRuntimeState;
 
 pub const RHYTHM_ADAPTIVE_RUNTIME_ID: &str = "rhythm-adaptive";
-pub const removed_circadian_RUNTIME_ID: &str = "removed-circadian";
 
 pub type SharedLightRuntime = Arc<Mutex<Box<dyn LightRuntime>>>;
 
@@ -47,10 +46,6 @@ impl LightRuntimeKind {
     pub fn rhythm_adaptive() -> Self {
         Self::from_canonical_id(RHYTHM_ADAPTIVE_RUNTIME_ID)
     }
-
-    pub fn removed_circadian() -> Self {
-        Self::from_canonical_id(removed_circadian_RUNTIME_ID)
-    }
 }
 
 impl Default for LightRuntimeKind {
@@ -66,9 +61,6 @@ impl FromStr for LightRuntimeKind {
         match value {
             RHYTHM_ADAPTIVE_RUNTIME_ID | "rhythm" | "rhythm_adaptive" => {
                 Ok(Self::from_canonical_id(RHYTHM_ADAPTIVE_RUNTIME_ID))
-            }
-            removed_circadian_RUNTIME_ID | "removed-project" | "removed_circadian" => {
-                Ok(Self::from_canonical_id(removed_circadian_RUNTIME_ID))
             }
             other if is_valid_runtime_id(other) => Ok(Self::new(other)),
             _ => Err(anyhow::anyhow!("invalid light runtime id '{}'", value)),
@@ -749,16 +741,16 @@ mod tests {
         let mut store = StoredLightRuntimeState::new();
         apply_state_writes_locked(
             &mut store,
-            "removed-project",
+            "cached-lab",
             &[StateWrite {
                 node_id: "kitchen".to_string(),
-                key: "removed-project_area_runtime_state".to_string(),
+                key: "cached_runtime_state".to_string(),
                 value: json!({ "is_on": true }),
             }],
         );
 
         assert_eq!(
-            store["removed-project"]["kitchen"]["removed-project_area_runtime_state"],
+            store["cached-lab"]["kitchen"]["cached_runtime_state"],
             json!({ "is_on": true })
         );
     }
@@ -927,7 +919,7 @@ mod tests {
 
         let error = run_light_runtime_event(
             &state,
-            "removed-circadian",
+            "other-runtime",
             &mut light_runtime,
             RuntimeEvent::HostStateChanged {
                 reason: "test".to_string(),
@@ -965,13 +957,13 @@ mod tests {
     }
 
     #[test]
-    fn selected_removed-project_runtime_runs_and_persists_state() {
+    fn selected_cached_runtime_runs_and_persists_state() {
         let runtime = test_runtime();
         runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
         let state = make_state_with_runtime(runtime);
         {
             let mut s = state.lock().unwrap();
-            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::removed_circadian());
+            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::new(CACHED_RUNTIME_ID));
         }
 
         let report = run_selected_light_runtime_event(
@@ -979,7 +971,7 @@ mod tests {
             RuntimeEvent::Input(RuntimeInputEvent {
                 source_id: "switch-a".to_string(),
                 target_id: "kitchen".to_string(),
-                action: InputAction::Named("circadian_on".to_string()),
+                action: InputAction::Named("cached_on".to_string()),
                 epoch_ms: None,
                 metadata: Default::default(),
             }),
@@ -989,8 +981,8 @@ mod tests {
         assert_eq!(report.dispatch_count, 1);
         assert!(state.lock().unwrap().light_runtime.is_some());
         assert!(
-            state.lock().unwrap().light_runtime_state[removed_circadian_RUNTIME_ID]["kitchen"]
-                .contains_key("removed-project_area_runtime_state")
+            state.lock().unwrap().light_runtime_state[CACHED_RUNTIME_ID]["kitchen"]
+                .contains_key("cached_runtime_state")
         );
     }
 
@@ -1057,16 +1049,16 @@ mod tests {
     }
 
     #[test]
-    fn removed-project_runtime_rebuilds_when_host_topology_changes() {
+    fn cached_runtime_rebuilds_when_host_topology_changes() {
         let runtime = test_runtime();
         runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
         let state = make_state_with_runtime(runtime.clone());
         {
             let mut s = state.lock().unwrap();
-            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::removed_circadian());
+            reset_light_runtime_for_kind(&mut s, LightRuntimeKind::new(CACHED_RUNTIME_ID));
         }
 
-        ensure_registered_removed-project_runtime(&state).unwrap();
+        ensure_registered_cached_runtime(&state).unwrap();
         let (first_runtime, first_fingerprint) = {
             let s = state.lock().unwrap();
             (
@@ -1076,7 +1068,7 @@ mod tests {
         };
 
         runtime.add_node("bedroom", "Bedroom", rhythm_core::LightNodeKind::Room, None);
-        ensure_registered_removed-project_runtime(&state).unwrap();
+        ensure_registered_cached_runtime(&state).unwrap();
 
         let s = state.lock().unwrap();
         let second_runtime = s.light_runtime.clone().unwrap();
@@ -1154,6 +1146,7 @@ mod tests {
     const EXTERNAL_RUNTIME_ID: &str = "sunrise-lab";
     const EXTERNAL_RUNTIME_ALIAS: &str = "sunrise_lab";
     const OTHER_EXTERNAL_RUNTIME_ID: &str = "moonrise-lab";
+    const CACHED_RUNTIME_ID: &str = "cached-lab";
 
     fn external_runtime_module() -> LightRuntimeModule {
         LightRuntimeModule::ephemeral(
@@ -1209,6 +1202,15 @@ mod tests {
         )
     }
 
+    fn cached_runtime_module() -> LightRuntimeModule {
+        LightRuntimeModule::cached(
+            CACHED_RUNTIME_ID,
+            &[],
+            cached_runtime_manifest,
+            ensure_test_cached_runtime,
+        )
+    }
+
     fn external_runtime_manifest() -> RuntimeManifest {
         RuntimeManifest::new(EXTERNAL_RUNTIME_ID, "Sunrise Lab")
             .with_description("External test runtime")
@@ -1232,6 +1234,10 @@ mod tests {
 
     fn invalid_alias_runtime_manifest() -> RuntimeManifest {
         RuntimeManifest::new("invalid-alias", "Invalid Alias")
+    }
+
+    fn cached_runtime_manifest() -> RuntimeManifest {
+        RuntimeManifest::new(CACHED_RUNTIME_ID, "Cached Lab")
     }
 
     fn create_external_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
@@ -1320,6 +1326,36 @@ mod tests {
         }
     }
 
+    struct CachedTestRuntime;
+
+    impl LightRuntime for CachedTestRuntime {
+        fn name(&self) -> &str {
+            CACHED_RUNTIME_ID
+        }
+
+        fn handle_event(
+            &mut self,
+            snapshot: &RuntimeSnapshot,
+            _event: RuntimeEvent,
+        ) -> rhythm_runtime_api::RuntimeResult<RuntimePlan> {
+            let node_id = first_snapshot_node_id(snapshot);
+            Ok(RuntimePlan {
+                dispatch: vec![DispatchCommand::TurnOn {
+                    target: DispatchTarget::Node {
+                        node_id: node_id.clone(),
+                    },
+                    command: LightingCommand::new(64, 2700),
+                }],
+                state_writes: vec![StateWrite {
+                    node_id,
+                    key: "cached_runtime_state".to_string(),
+                    value: json!({"handled": true}),
+                }],
+                diagnostics: vec![],
+            })
+        }
+    }
+
     fn first_snapshot_node_id(snapshot: &RuntimeSnapshot) -> String {
         snapshot
             .nodes
@@ -1370,12 +1406,7 @@ mod tests {
                     rhythm_adaptive::runtime_manifest,
                     create_test_rhythm_adaptive_runtime,
                 ),
-                LightRuntimeModule::cached(
-                    removed_circadian_RUNTIME_ID,
-                    &["removed-project-circadian", "removed-project", "removed_circadian"],
-                    removed_circadian::runtime_manifest,
-                    ensure_test_removed-project_runtime,
-                ),
+                cached_runtime_module(),
             ],
         )
         .expect("test light runtime modules should register");
@@ -1387,20 +1418,20 @@ mod tests {
         Box::new(rhythm_adaptive::RuntimeHandleAdaptiveRuntime::new(runtime))
     }
 
-    fn ensure_registered_removed-project_runtime(state: &SharedState) -> Result<SharedLightRuntime> {
+    fn ensure_registered_cached_runtime(state: &SharedState) -> Result<SharedLightRuntime> {
         let module = {
             let s = state.lock().unwrap();
             s.light_runtime_registry
-                .module_for_kind(&LightRuntimeKind::removed_circadian())
+                .module_for_kind(&LightRuntimeKind::new(CACHED_RUNTIME_ID))
                 .unwrap()
         };
         let LightRuntimeInstance::Cached { ensure } = module.instance else {
-            panic!("removed-project test module should be cached");
+            panic!("cached test module should be cached");
         };
         ensure(state, &module)
     }
 
-    fn ensure_test_removed-project_runtime(
+    fn ensure_test_cached_runtime(
         state: &SharedState,
         module: &LightRuntimeModule,
     ) -> Result<SharedLightRuntime> {
@@ -1419,25 +1450,19 @@ mod tests {
             )
         };
         let snapshot = build_runtime_snapshot(runtime.as_ref(), runtime_state.as_ref());
-        let fingerprint = removed_circadian::runtime_config_fingerprint_from_snapshot(
-            &snapshot,
-            runtime_state.as_ref(),
-        );
+        let fingerprint = snapshot
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
         if current_fingerprint.as_deref() == Some(fingerprint.as_str()) {
             if let Some(existing_runtime) = existing_runtime {
                 return Ok(existing_runtime);
             }
         }
 
-        let mut light_runtime = removed_circadian::removed-projectRuntime::new();
-        light_runtime.load_from_runtime_snapshot(
-            &snapshot,
-            runtime_state.as_ref(),
-            runtime.current_hour() as f64,
-            removed_circadian::SunTimes::default(),
-            0.0,
-        );
-        let light_runtime: SharedLightRuntime = Arc::new(Mutex::new(Box::new(light_runtime)));
+        let light_runtime: SharedLightRuntime = Arc::new(Mutex::new(Box::new(CachedTestRuntime)));
 
         let mut s = state
             .lock()

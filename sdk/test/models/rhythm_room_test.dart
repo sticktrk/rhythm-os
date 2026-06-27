@@ -24,6 +24,11 @@ void main() {
         expect(RhythmDeviceType.fromString('motion'), RhythmDeviceType.motion);
       });
 
+      test('parses "contact" to contact', () {
+        expect(
+            RhythmDeviceType.fromString('contact'), RhythmDeviceType.contact);
+      });
+
       test('parses "button" to button', () {
         expect(RhythmDeviceType.fromString('button'), RhythmDeviceType.button);
       });
@@ -353,6 +358,7 @@ void main() {
             {'id': 'l2', 'type': 'light'},
             {'id': 'b1', 'type': 'button'},
             {'id': 'm1', 'type': 'motion'},
+            {'id': 'c1', 'type': 'contact'},
           ],
         });
       });
@@ -371,6 +377,11 @@ void main() {
       test('motionSensors returns only motion devices', () {
         expect(room.motionSensors.length, 1);
         expect(room.motionSensors.first.id, 'm1');
+      });
+
+      test('contactSensors returns only contact devices', () {
+        expect(room.contactSensors.length, 1);
+        expect(room.contactSensors.first.id, 'c1');
       });
 
       test('hasMotionSensor is true when a motion device exists', () {

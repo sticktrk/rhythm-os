@@ -51,6 +51,7 @@ fn translator_uses_raw_button_hook_for_unknown_hue_event() {
         None,
         Some(on_unknown_button),
         None,
+        None,
     );
 
     ws_tx
@@ -108,6 +109,7 @@ fn translator_uses_motion_hook_for_unknown_state_changed_motion() {
         None,
         None,
         Some(on_unknown_motion),
+        None,
     );
 
     ws_tx
@@ -137,5 +139,60 @@ fn translator_uses_motion_hook_for_unknown_state_changed_motion() {
             assert!(detected);
         }
         other => panic!("expected motion event, got {:?}", other),
+    }
+}
+
+#[test]
+fn translator_uses_contact_hook_for_unknown_state_changed_contact() {
+    let registry = make_registry();
+    let (ws_tx, ws_rx) = std::sync::mpsc::channel();
+    let hook_registry = registry.clone();
+
+    let on_unknown_contact: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
+        hook_registry.lock().unwrap().upsert_device(
+            sensor_id,
+            Some("living_room"),
+            &[],
+            DeviceType::Contact,
+        );
+    });
+
+    let out_rx = start_event_translator(
+        ws_rx,
+        registry,
+        Arc::new(AtomicBool::new(false)),
+        None,
+        None,
+        None,
+        Some(on_unknown_contact),
+    );
+
+    ws_tx
+        .send(HaWsEvent::ServiceEvent {
+            event_type: "state_changed".to_string(),
+            data: serde_json::json!({
+                "entity_id": "binary_sensor.front_door",
+                "new_state": {
+                    "state": "on",
+                    "attributes": { "device_class": "door" }
+                },
+                "old_state": { "state": "off" }
+            }),
+        })
+        .unwrap();
+
+    let event = out_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    match event {
+        HubEvent::Contact {
+            room_id,
+            sensor_id,
+            open,
+            ..
+        } => {
+            assert_eq!(room_id, "living_room");
+            assert_eq!(sensor_id, "binary_sensor.front_door");
+            assert!(open);
+        }
+        other => panic!("expected contact event, got {:?}", other),
     }
 }

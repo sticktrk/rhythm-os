@@ -378,12 +378,22 @@ fn start_event_stream(
         });
 
     let motion_registry = registry.clone();
-    let motion_cache = device_area_cache;
+    let motion_cache = device_area_cache.clone();
     let on_unknown_motion: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
         crate::events::register_unknown_motion_from_cache(
             sensor_id,
             &motion_registry,
             &motion_cache,
+        );
+    });
+
+    let contact_registry = registry.clone();
+    let contact_cache = device_area_cache;
+    let on_unknown_contact: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
+        crate::events::register_unknown_contact_from_cache(
+            sensor_id,
+            &contact_registry,
+            &contact_cache,
         );
     });
 
@@ -394,6 +404,7 @@ fn start_event_stream(
         None,
         Some(on_unknown_button),
         Some(on_unknown_motion),
+        Some(on_unknown_contact),
     )
 }
 

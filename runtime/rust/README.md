@@ -8,8 +8,6 @@ being merged into the production OS crates.
 - `rhythm-runtime-api`: neutral host/runtime contract. It defines snapshots,
   input events, periodic ticks, dispatch commands, state writes, diagnostics,
   and the `LightRuntime` trait.
-- `removed-circadian`: removed-project/Circadian implementation ported from the legacy
-  Python add-on.
 - `rhythm-adaptive`: Rhythm's existing adaptive light runtime, hosted
   behind the same neutral contract while it still reuses the production
   `rhythm-core` engine primitives.
@@ -35,8 +33,8 @@ Runtime crates own:
 - lighting calculations
 - dispatch gating decisions
 - conversion of events into neutral `RuntimePlan` values
-- runtime-local topology semantics such as removed-project zones and sections, while
-  still expressing all host effects as neutral dispatches/state writes
+- runtime-local topology semantics, while still expressing all host effects as
+  neutral dispatches/state writes
 - runtime-defined extension manifests for settings and advanced APIs
 
 Runtime crates must not import production OS internals. Shared functionality
@@ -57,7 +55,6 @@ The default server, add-on, and appliance binaries depend on
 during startup. That bundle currently registers:
 
 - `rhythm-adaptive`
-- `removed-circadian`
 
 To add another runtime to the default product build:
 
@@ -80,13 +77,13 @@ under the runtime namespace:
 /api/light-runtimes/{runtime_id}/...
 ```
 
-For example, removed-project/Circadian can declare `/scope`, `/settings`, and
+For example, a runtime can declare `/scope`, `/settings`, and
 `/areas/{area_id}/action`, which the host exposes as:
 
 ```text
-/api/light-runtimes/removed-circadian/scope
-/api/light-runtimes/removed-circadian/settings
-/api/light-runtimes/removed-circadian/areas/{area_id}/action
+/api/light-runtimes/{runtime_id}/scope
+/api/light-runtimes/{runtime_id}/settings
+/api/light-runtimes/{runtime_id}/areas/{area_id}/action
 ```
 
 The runtime defines the settings schema, default payload, endpoint list, and
@@ -106,11 +103,11 @@ Compile-check the runtime workspace:
 cargo check --manifest-path runtime/rust/Cargo.toml
 ```
 
-`removed-circadian` includes tests, including a local Python parity test that
-compares selected curve outputs against
-`legacy/removed-project/addon` when that ignored reference checkout
-is present. Test execution is intentionally deferred for the current rebuild
-pass.
+Run runtime tests with:
+
+```sh
+cargo test --manifest-path runtime/rust/Cargo.toml
+```
 
 Format with:
 

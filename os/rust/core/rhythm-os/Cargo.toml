@@ -35,4 +35,3 @@ rhythm-core = { path = "../rhythm-core", features = ["test-support"] }
 rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["test-support"] }
 rhythm-ha = { path = "../../integrations/rhythm-ha", features = ["test-support"] }
 rhythm-adaptive = { path = "../../../../runtime/rust/rhythm-adaptive" }
-removed-circadian = { path = "../../../../runtime/rust/removed-circadian" }

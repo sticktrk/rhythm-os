@@ -4218,20 +4218,12 @@ mod tests {
     fn install_test_light_runtime_modules(app: &mut AppState) {
         crate::light_runtime::register_light_runtime_modules(
             app,
-            [
-                crate::light_runtime::LightRuntimeModule::ephemeral(
-                    crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
-                    &["rhythm", "rhythm_adaptive"],
-                    test_rhythm_adaptive_manifest,
-                    create_test_rhythm_adaptive_runtime,
-                ),
-                crate::light_runtime::LightRuntimeModule::ephemeral(
-                    crate::light_runtime::removed_circadian_RUNTIME_ID,
-                    &["removed-project-circadian", "removed-project", "removed_circadian"],
-                    test_removed-project_manifest,
-                    create_test_removed-project_runtime,
-                ),
-            ],
+            [crate::light_runtime::LightRuntimeModule::ephemeral(
+                crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                &["rhythm", "rhythm_adaptive"],
+                test_rhythm_adaptive_manifest,
+                create_test_rhythm_adaptive_runtime,
+            )],
         )
         .expect("test light runtime modules should register");
     }
@@ -4244,27 +4236,11 @@ mod tests {
         .with_capabilities(RuntimeCapabilities::light_runtime())
     }
 
-    fn test_removed-project_manifest() -> RuntimeManifest {
-        RuntimeManifest::new(
-            crate::light_runtime::removed_circadian_RUNTIME_ID,
-            "removed-project Circadian",
-        )
-        .with_capabilities(RuntimeCapabilities::light_runtime())
-    }
-
     fn create_test_rhythm_adaptive_runtime(
         _: Arc<dyn rhythm_core::RuntimeHandle>,
     ) -> Box<dyn LightRuntime> {
         Box::new(NoopTestLightRuntime(
             crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
-        ))
-    }
-
-    fn create_test_removed-project_runtime(
-        _: Arc<dyn rhythm_core::RuntimeHandle>,
-    ) -> Box<dyn LightRuntime> {
-        Box::new(NoopTestLightRuntime(
-            crate::light_runtime::removed_circadian_RUNTIME_ID,
         ))
     }
 
@@ -5167,10 +5143,14 @@ mod tests {
     #[test]
     fn put_settings_updates_light_runtime() {
         let state = handler_state_with_runtime();
-        let r = handle_put_settings(&state, &json!({"light_runtime": "removed-circadian"}));
+        register_external_handler_light_runtime_module(&state);
+        let r = handle_put_settings(
+            &state,
+            &json!({"light_runtime": HANDLER_EXTERNAL_RUNTIME_ALIAS}),
+        );
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(parsed["light_runtime"], "removed-circadian");
+        assert_eq!(parsed["light_runtime"], HANDLER_EXTERNAL_RUNTIME_ID);
     }
 
     #[test]
@@ -5181,18 +5161,19 @@ mod tests {
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(parsed["runtime_id"], "rhythm-adaptive");
-        assert_eq!(
-            parsed["available_runtime_ids"],
-            json!(["rhythm-adaptive", "removed-circadian"])
-        );
+        assert_eq!(parsed["available_runtime_ids"], json!(["rhythm-adaptive"]));
 
-        let r = handle_put_light_runtime(&state, &json!({"runtime_id": "removed-circadian"}));
+        register_external_handler_light_runtime_module(&state);
+        let r = handle_put_light_runtime(
+            &state,
+            &json!({"runtime_id": HANDLER_EXTERNAL_RUNTIME_ALIAS}),
+        );
         assert_eq!(r.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
-        assert_eq!(parsed["runtime_id"], "removed-circadian");
+        assert_eq!(parsed["runtime_id"], HANDLER_EXTERNAL_RUNTIME_ID);
         assert_eq!(
             state.lock().unwrap().light_runtime_kind,
-            crate::light_runtime::LightRuntimeKind::removed_circadian()
+            crate::light_runtime::LightRuntimeKind::new(HANDLER_EXTERNAL_RUNTIME_ID)
         );
     }
 

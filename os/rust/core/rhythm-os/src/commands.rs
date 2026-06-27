@@ -1845,7 +1845,8 @@ fn build_node_state_dto_from_snapshot_parts(
             brightness_offset: snap.brightness_offset,
         },
     );
-    let color = apply_mood_scene_display_values(ctx.state, snap, state, &mut brightness, &mut kelvin);
+    let color =
+        apply_mood_scene_display_values(ctx.state, snap, state, &mut brightness, &mut kelvin);
 
     let (motion_active, motion_owned, remaining_secs, timeout_secs, warning_active) =
         if let Some(ms) = ctx.motion_snapshots.get(&snap.id) {
@@ -1999,8 +2000,13 @@ pub fn build_node_state_event(
                     brightness_offset: snap.brightness_offset,
                 },
             );
-        let color =
-            apply_mood_scene_display_values(&s, snap, room_state, &mut curve_brightness, &mut kelvin);
+        let color = apply_mood_scene_display_values(
+            &s,
+            snap,
+            room_state,
+            &mut curve_brightness,
+            &mut kelvin,
+        );
         (
             mode,
             room_state,
@@ -2309,7 +2315,9 @@ pub(crate) fn ensure_canonical_button_source(
             room_name: Some(topo_room_name.clone()),
             name: format!("{topo_room_name} button"),
             device_type: DeviceType::Button,
-            hardware_ids: vec![crate::canonical::identity::HardwareId::mac(native_device_id)],
+            hardware_ids: vec![crate::canonical::identity::HardwareId::mac(
+                native_device_id,
+            )],
             manufacturer: None,
             model: None,
         };
@@ -2317,7 +2325,9 @@ pub(crate) fn ensure_canonical_button_source(
         let canonical_id = match s.canonical_registry.resolve(&identity, hub_key, now) {
             crate::canonical::registry::ResolveResult::Created { canonical_id }
             | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id }
-            | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => canonical_id,
+            | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => {
+                canonical_id
+            }
             // A cross-hub match was queued for user approval and no silo device
             // was created — don't force a binding; the user resolves the triage.
             crate::canonical::registry::ResolveResult::Queued { .. } => return None,
@@ -10701,6 +10711,7 @@ pub(crate) fn runtime_node_kind_for_device_type(device_type: DeviceType) -> Ligh
         DeviceType::Light => LightNodeKind::LightDevice,
         DeviceType::Motion => LightNodeKind::MotionSensor,
         DeviceType::Button => LightNodeKind::Button,
+        DeviceType::Contact => LightNodeKind::Sensor,
     }
 }
 
@@ -10994,11 +11005,7 @@ pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
 }
 
 /// Rename a canonical device and refresh runtime/topology views.
-pub fn do_canonical_rename_device(
-    state: &SharedState,
-    device_id: &str,
-    name: &str,
-) -> Result<()> {
+pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &str) -> Result<()> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(anyhow::anyhow!("Device name cannot be empty"));
@@ -12952,20 +12959,12 @@ mod tests {
     fn install_test_light_runtime_modules(app: &mut AppState) {
         crate::light_runtime::register_light_runtime_modules(
             app,
-            [
-                crate::light_runtime::LightRuntimeModule::ephemeral(
-                    crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
-                    &["rhythm", "rhythm_adaptive"],
-                    test_rhythm_adaptive_manifest,
-                    create_test_rhythm_adaptive_runtime,
-                ),
-                crate::light_runtime::LightRuntimeModule::ephemeral(
-                    crate::light_runtime::removed_circadian_RUNTIME_ID,
-                    &["removed-project-circadian", "removed-project", "removed_circadian"],
-                    test_removed-project_manifest,
-                    create_test_removed-project_runtime,
-                ),
-            ],
+            [crate::light_runtime::LightRuntimeModule::ephemeral(
+                crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+                &["rhythm", "rhythm_adaptive"],
+                test_rhythm_adaptive_manifest,
+                create_test_rhythm_adaptive_runtime,
+            )],
         )
         .expect("test light runtime modules should register");
     }
@@ -12978,23 +12977,9 @@ mod tests {
         .with_capabilities(RuntimeCapabilities::light_runtime())
     }
 
-    fn test_removed-project_manifest() -> RuntimeManifest {
-        RuntimeManifest::new(
-            crate::light_runtime::removed_circadian_RUNTIME_ID,
-            "removed-project Circadian",
-        )
-        .with_capabilities(RuntimeCapabilities::light_runtime())
-    }
-
     fn create_test_rhythm_adaptive_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
         Box::new(NoopTestLightRuntime(
             crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
-        ))
-    }
-
-    fn create_test_removed-project_runtime(_: Arc<dyn RuntimeHandle>) -> Box<dyn LightRuntime> {
-        Box::new(NoopTestLightRuntime(
-            crate::light_runtime::removed_circadian_RUNTIME_ID,
         ))
     }
 
@@ -20173,18 +20158,22 @@ mod tests {
     #[test]
     fn light_runtime_set_emits_settings_changed_payload() {
         let (state, _rt) = setup_state(vec![]);
+        register_external_test_light_runtime_module(&state);
         let (event_tx, mut event_rx) =
             tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
         state.lock().unwrap().event_tx = Some(event_tx);
 
-        let result =
-            do_light_runtime_settings_set(&state, LightRuntimeKind::removed_circadian()).unwrap();
+        let result = do_light_runtime_settings_set(
+            &state,
+            LightRuntimeKind::new(COMMAND_EXTERNAL_RUNTIME_ALIAS),
+        )
+        .unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["light_runtime"], "removed-circadian");
+        assert_eq!(parsed["light_runtime"], COMMAND_EXTERNAL_RUNTIME_ID);
         assert_eq!(
             state.lock().unwrap().light_runtime_kind,
-            LightRuntimeKind::removed_circadian()
+            LightRuntimeKind::new(COMMAND_EXTERNAL_RUNTIME_ID)
         );
 
         let mut light_runtime = None;
@@ -20194,7 +20183,10 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(light_runtime, Some(LightRuntimeKind::removed_circadian()));
+        assert_eq!(
+            light_runtime,
+            Some(LightRuntimeKind::new(COMMAND_EXTERNAL_RUNTIME_ID))
+        );
     }
 
     #[test]
@@ -20236,13 +20228,18 @@ mod tests {
             make_snapshot("r1", false, false),
             make_snapshot("r2", false, false),
         ]);
+        register_external_test_light_runtime_module(&state);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         state.lock().unwrap().periodic_work_tx = Some(tx);
 
-        let selected = do_light_runtime_set(&state, LightRuntimeKind::removed_circadian()).unwrap();
+        let selected = do_light_runtime_set(
+            &state,
+            LightRuntimeKind::new(COMMAND_EXTERNAL_RUNTIME_ALIAS),
+        )
+        .unwrap();
         let selected: serde_json::Value = serde_json::from_str(&selected).unwrap();
 
-        assert_eq!(selected["runtime_id"], "removed-circadian");
+        assert_eq!(selected["runtime_id"], COMMAND_EXTERNAL_RUNTIME_ID);
         assert_eq!(selected["initial_apply"]["queued"], true);
         assert_eq!(selected["initial_apply"]["dispatch_count"], 2);
         assert_eq!(selected["initial_apply"]["dispatch_spacing_ms"], 500);

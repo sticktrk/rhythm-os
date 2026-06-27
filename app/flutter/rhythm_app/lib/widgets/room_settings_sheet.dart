@@ -784,6 +784,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           RhythmDeviceType.light: 0,
           RhythmDeviceType.button: 1,
           RhythmDeviceType.motion: 2,
+          RhythmDeviceType.contact: 3,
         };
         return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
       });
@@ -1032,6 +1033,7 @@ class _DeviceRow extends StatelessWidget {
       RhythmDeviceType.light => 'Light',
       RhythmDeviceType.button => 'Button',
       RhythmDeviceType.motion => 'Motion',
+      RhythmDeviceType.contact => 'Contact',
     };
 
     return GestureDetector(
@@ -1098,6 +1100,10 @@ class _DeviceRow extends StatelessWidget {
         RhythmDeviceType.motion => (
             Icons.sensors_outlined,
             const Color(0xFF81C784)
+          ),
+        RhythmDeviceType.contact => (
+            Icons.sensor_door_outlined,
+            const Color(0xFFFFB74D)
           ),
       };
 }

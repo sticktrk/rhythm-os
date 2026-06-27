@@ -108,8 +108,6 @@ class RhythmHello {
     final activeProfileMap = jsonMap(json['active_profile']);
     final effectiveProfile =
         jsonMap(activeProfileMap?['effective']) ?? const <String, dynamic>{};
-    final activeProfileId = activeProfile['id'] as String? ??
-        modeResource?.activeConfig?.activeProfileId;
     final runtimeId = json['light_runtime'] as String? ??
         json['runtime_id'] as String? ??
         (settings?.hasLightRuntime == true
@@ -119,10 +117,7 @@ class RhythmHello {
             ? modeResource?.lightRuntime.id
             : null);
     final lightRuntime = runtimeId == null
-        ? (modeResource?.lightRuntime ??
-            (activeProfileId == 'expert'
-                ? RhythmLightRuntime.removed-projectCircadian
-                : RhythmLightRuntime.rhythmAdaptive))
+        ? (modeResource?.lightRuntime ?? RhythmLightRuntime.rhythmAdaptive)
         : RhythmLightRuntime.fromId(runtimeId);
     return RhythmHello(
       version: json['version'] as String? ?? '0.0.0',

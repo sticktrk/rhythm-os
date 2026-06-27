@@ -17,6 +17,8 @@ pub enum DeviceType {
     Button,
     /// A motion/occupancy sensor.
     Motion,
+    /// A binary contact sensor such as a door, window, or opening sensor.
+    Contact,
 }
 
 /// Hub-agnostic registry for rooms, devices, buttons, and motion sensors.

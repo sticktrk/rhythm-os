@@ -1729,17 +1729,17 @@ void main() {
       connection.emitHello(
         RhythmHello.fromJson({
           'nodes': const <Map<String, dynamic>>[],
-          'light_runtime': 'removed-circadian',
+          'light_runtime': 'rhythm-adaptive',
           'mode': {
             'active': 'day',
-            'light_runtime': 'removed-circadian',
+            'light_runtime': 'rhythm-adaptive',
           },
           'location': const <String, dynamic>{},
         }),
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(provider.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
 
       connection.emitHello(
         RhythmHello.fromJson({
@@ -1750,7 +1750,7 @@ void main() {
       );
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(provider.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
     });
 
     test('runtime switch waits for initial apply pacing metadata', () async {
@@ -1770,7 +1770,7 @@ void main() {
       var completed = false;
       final future = provider
           .dispatchSetLightRuntime(
-        RhythmLightRuntime.removed-projectCircadian,
+        RhythmLightRuntime.rhythmAdaptive,
         transitionMs: 4321,
       )
           .then((value) {
@@ -1781,9 +1781,9 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 100));
 
       expect(api.setLightRuntimeCalls, 1);
-      expect(api.lastSetLightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(api.lastSetLightRuntime, RhythmLightRuntime.rhythmAdaptive);
       expect(api.lastSetLightRuntimeTransitionMs, 4321);
-      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(provider.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
       expect(completed, isFalse);
 
       await Future<void>.delayed(const Duration(milliseconds: 2600));
@@ -1803,10 +1803,10 @@ void main() {
       connection.emitHello(
         RhythmHello.fromJson({
           'nodes': const <Map<String, dynamic>>[],
-          'light_runtime': 'removed-circadian',
+          'light_runtime': 'rhythm-adaptive',
           'mode': {
             'active': 'day',
-            'light_runtime': 'removed-circadian',
+            'light_runtime': 'rhythm-adaptive',
           },
           'location': const <String, dynamic>{},
         }),
@@ -1824,10 +1824,10 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(provider.activeMode, RhythmMode.sleep);
-      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(provider.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
     });
 
-    test('infers legacy runtime selection from day profile while asleep',
+    test('does not infer runtime selection from day profile while asleep',
         () async {
       final provider = ServerSyncProvider(
         connection: connection,
@@ -1844,7 +1844,7 @@ void main() {
             'configs': [
               {
                 'mode': 'day',
-                'active_profile_id': 'expert',
+                'active_profile_id': 'custom',
               },
               {
                 'mode': 'sleep',
@@ -1858,7 +1858,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(provider.activeMode, RhythmMode.sleep);
-      expect(provider.lightRuntime, RhythmLightRuntime.removed-projectCircadian);
+      expect(provider.lightRuntime, RhythmLightRuntime.rhythmAdaptive);
     });
 
     test('preserves active mode across transient reconnect after hello',

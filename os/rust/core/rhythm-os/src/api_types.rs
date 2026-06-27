@@ -439,6 +439,7 @@ impl TypedDeviceDto {
             DeviceType::Light => "light",
             DeviceType::Button => "button",
             DeviceType::Motion => "motion",
+            DeviceType::Contact => "contact",
         }
     }
 }

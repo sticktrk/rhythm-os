@@ -57,11 +57,13 @@ sealed class RhythmInputEvent {
 
   bool get isButton => this is RhythmButtonInputEvent;
   bool get isMotion => this is RhythmMotionInputEvent;
+  bool get isContact => this is RhythmContactInputEvent;
 
   factory RhythmInputEvent.fromJson(Map<String, dynamic> json) {
     return switch (json['kind'] as String? ?? '') {
       'button' => RhythmButtonInputEvent.fromJson(json),
       'motion' => RhythmMotionInputEvent.fromJson(json),
+      'contact' => RhythmContactInputEvent.fromJson(json),
       _ => RhythmRawInputEvent.fromJson(json),
     };
   }
@@ -131,6 +133,38 @@ class RhythmMotionInputEvent extends RhythmInputEvent {
       sourceRoomId: json['source_room_id'] as String?,
       nativeSensorId: json['native_sensor_id'] as String? ?? '',
       detected: json['detected'] as bool? ?? false,
+    );
+  }
+}
+
+class RhythmContactInputEvent extends RhythmInputEvent {
+  final String nativeSensorId;
+  final bool open;
+
+  const RhythmContactInputEvent({
+    required super.epochMs,
+    required super.route,
+    required this.nativeSensorId,
+    required this.open,
+    super.hubType,
+    super.address,
+    super.sourceNodeId,
+    super.targetNodeId,
+    super.sourceRoomId,
+  }) : super(kind: 'contact');
+
+  factory RhythmContactInputEvent.fromJson(Map<String, dynamic> json) {
+    return RhythmContactInputEvent(
+      epochMs:
+          jsonInt(json['epoch_ms'], preferredKeys: const ['epoch_ms']) ?? 0,
+      route: RhythmInputEventRoute.fromString(json['route'] as String?),
+      hubType: json['hub_type'] as String?,
+      address: json['address'] as String?,
+      sourceNodeId: json['source_node_id'] as String?,
+      targetNodeId: json['target_node_id'] as String?,
+      sourceRoomId: json['source_room_id'] as String?,
+      nativeSensorId: json['native_sensor_id'] as String? ?? '',
+      open: json['open'] as bool? ?? false,
     );
   }
 }
