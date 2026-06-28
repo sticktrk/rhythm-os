@@ -363,6 +363,7 @@ void _emitSyncedHello(
   _TestRhythmConnection connection, {
   bool withKitchen = false,
   RhythmMode activeMode = RhythmMode.day,
+  bool lightBreakerEnabled = true,
 }) {
   connection.emitHello(
     RhythmHello.fromJson({
@@ -385,6 +386,7 @@ void _emitSyncedHello(
       'mode': {
         'active': activeMode == RhythmMode.sleep ? 'sleep' : 'day',
       },
+      'light_breaker': {'enabled': lightBreakerEnabled},
       'location': const <String, dynamic>{},
     }),
   );
@@ -852,7 +854,7 @@ void main() {
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
-  testWidgets('app resume refresh keeps synced Home on the room grid',
+  testWidgets('app resume refresh gates cached rooms until fresh hello',
       (tester) async {
     final roomProvider = RoomProvider();
     await _seedRoom(roomProvider);
@@ -891,20 +893,38 @@ void main() {
       homeProvider: homeProvider,
       serverSync: serverSync,
     );
-    _emitSyncedHello(connection, withKitchen: true);
+    _emitSyncedHello(
+      connection,
+      withKitchen: true,
+      lightBreakerEnabled: false,
+    );
     await tester.pump(const Duration(milliseconds: 10));
 
     expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.text('AUTOMATIC LIGHTING OFF'), findsOneWidget);
 
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump(const Duration(milliseconds: 50));
 
     expect(serverSync.hasHomeEntryRefreshGate, isFalse);
     expect(connection.reconnectCallCount, 1);
     expect(connection.lastReconnectAuthoritative, isTrue);
     expect(find.text('Waiting to Retry...'), findsNothing);
     expect(find.byType(ServerDisconnectedScreen), findsNothing);
+    expect(find.text('Setting up...'), findsOneWidget);
+    expect(find.text('AUTOMATIC LIGHTING OFF'), findsNothing);
+    expect(find.text('Kitchen'), findsNothing);
+
+    _emitSyncedHello(
+      connection,
+      withKitchen: true,
+      lightBreakerEnabled: false,
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Setting up...'), findsNothing);
+    expect(find.text('AUTOMATIC LIGHTING OFF'), findsOneWidget);
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
