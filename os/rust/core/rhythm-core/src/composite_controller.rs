@@ -99,7 +99,7 @@ impl HubDispatchPolicy {
                 min_dispatch_spacing: Duration::ZERO,
                 dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
                 timeout_cooldown: DEFAULT_MATTER_TIMEOUT_COOLDOWN,
-                timeout_scope: HubDispatchTimeoutScope::Hub,
+                timeout_scope: HubDispatchTimeoutScope::Target,
             },
             "hue" => Self {
                 queue_capacity: DEFAULT_HUB_QUEUE_CAPACITY,
@@ -1275,6 +1275,17 @@ mod tests {
         }
     }
 
+    fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        predicate()
+    }
+
     fn turn_on_with_deadline(
         composite: Arc<CompositeController>,
         room_id: &str,
@@ -1337,7 +1348,7 @@ mod tests {
         assert_eq!(hue.policy.timeout_scope, HubDispatchTimeoutScope::Target);
         assert_eq!(matter.policy.completion, HubDispatchCompletion::Enqueue);
         assert!(!matter.policy.requires_staggering);
-        assert_eq!(matter.policy.timeout_scope, HubDispatchTimeoutScope::Hub);
+        assert_eq!(matter.policy.timeout_scope, HubDispatchTimeoutScope::Target);
         assert_eq!(
             matter.policy.timeout_cooldown,
             DEFAULT_MATTER_TIMEOUT_COOLDOWN
@@ -1490,6 +1501,56 @@ mod tests {
         blocking.wait_started();
         assert_eq!(blocking.turn_on_count(), 1);
         blocking.release();
+    }
+
+    #[test]
+    fn matter_default_timeout_cooldown_does_not_block_other_targets() {
+        let controller = Arc::new(SelectiveBlockingController::new("blocked"));
+        let composite = CompositeController::new();
+        let mut policy = HubDispatchPolicy::for_hub_key("matter@local");
+        policy.dispatch_timeout = Duration::from_millis(75);
+        policy.timeout_cooldown = Duration::from_millis(500);
+        composite.register_controller_with_policy("matter@local", controller.clone(), policy);
+        composite.update_routing(HashMap::from([
+            (
+                "blocked".to_string(),
+                vec![(
+                    "matter@local".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "blocked".to_string(),
+                        control_id: "blocked".to_string(),
+                    },
+                )],
+            ),
+            (
+                "other".to_string(),
+                vec![(
+                    "matter@local".to_string(),
+                    HubDispatchTarget::Group {
+                        room_id: "other".to_string(),
+                        control_id: "other".to_string(),
+                    },
+                )],
+            ),
+        ]));
+
+        block_on(composite.turn_on("blocked", LightingCommand::new(80, 4000))).unwrap();
+        assert!(
+            controller.wait_blocked_started_timeout(Duration::from_millis(250)),
+            "blocked target dispatch should have started"
+        );
+
+        block_on(composite.turn_on("other", LightingCommand::new(70, 3500))).unwrap();
+        let other_dispatched = wait_until(Duration::from_millis(500), || {
+            controller.turn_on_count_for("other") == 1
+        });
+        controller.release();
+
+        assert!(
+            other_dispatched,
+            "a Matter timeout on one target should not suppress an unrelated target"
+        );
+        assert_eq!(controller.turn_on_count_for("blocked"), 1);
     }
 
     #[test]
