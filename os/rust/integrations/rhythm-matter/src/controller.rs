@@ -1560,6 +1560,28 @@ mod tests {
         );
     }
 
+    fn profiled_color_bulb(
+        node_id: u64,
+        vendor_name: &str,
+        product_name: &str,
+    ) -> crate::transport::CommissionedDevice {
+        crate::transport::CommissionedDevice {
+            node_id,
+            vendor_name: vendor_name.to_string(),
+            product_name: product_name.to_string(),
+            vendor_id: 0,
+            product_id: 0,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![
+                crate::transport::MatterColorMode::Xy,
+                crate::transport::MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: Some(1800),
+            max_kelvin: Some(6500),
+        }
+    }
+
     fn write_count_for_node(operations: &[RecordedOperation], expected_node_id: u64) -> usize {
         operations
             .iter()
@@ -1810,6 +1832,52 @@ mod tests {
                     node_id: 43,
                     endpoint: 1,
                     level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_on_matter_room_applies_builtin_profiles_for_leedarson_and_sengled() {
+        let (controller, spy, registry) = make_controller();
+        set_kitchen_group(&registry, 65281);
+        spy.set_probe_device(profiled_color_bulb(42, "Leedarson", "Smart RGBTW Bulb"));
+        spy.set_probe_device(profiled_color_bulb(43, "Sengled", "W41-N15A"));
+
+        block_on(controller.turn_on("kitchen", LightingCommand::new(50, 1809))).unwrap();
+
+        assert_eq!(
+            spy.operations(),
+            vec![
+                RecordedOperation::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: true,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 1809,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(50),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetXy {
+                    node_id: 43,
+                    endpoint: 1,
+                    x: rhythm_core::kelvin_to_xy(1809).x,
+                    y: rhythm_core::kelvin_to_xy(1809).y,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 43,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(50),
                     transition_ms: None,
                 },
             ]

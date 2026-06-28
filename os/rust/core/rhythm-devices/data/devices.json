@@ -505,6 +505,26 @@
     }
   },
   {
+    "manufacturer": "Leedarson",
+    "model": "Smart RGBTW Bulb",
+    "name": "Leedarson Smart RGBTW Bulb",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "matter": {
+      "quirks": ["needs_explicit_on"]
+    }
+  },
+  {
+    "manufacturer": "Sengled",
+    "model": "W41-N15A",
+    "name": "Sengled W41-N15A",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "matter": {
+      "quirks": ["needs_xy_not_ct"]
+    }
+  },
+  {
     "manufacturer": "Savant Systems, Inc.",
     "model": "93128984",
     "name": "GE Cync Tunable White A19",
