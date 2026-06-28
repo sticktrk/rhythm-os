@@ -600,7 +600,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   // tab stack from rebuilding on every ServerSync notification.
                   Selector<ServerSyncProvider, bool>(
                     selector: (_, sync) =>
-                        !isVirtual && sync.synced && !sync.lightBreakerEnabled,
+                        !isVirtual &&
+                        sync.synced &&
+                        sync.roomsReadyForDisplay &&
+                        !sync.lightBreakerEnabled,
                     builder: (context, showDisabledBanner, _) {
                       return Column(
                         children: [
@@ -757,6 +760,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       builder: (context, roomProvider, homeProvider, serverSync, child) {
         final serverHub = homeProvider.getFirstHubOfType(HubType.server);
         final state = serverSync.connectionState;
+        final roomsReady = serverSync.roomsReadyForDisplay;
 
         // Govern the disconnect screen without flashing it during the normal
         // connect handshake:
@@ -775,7 +779,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         if (serverHub == null || state == RhythmConnectionState.connected) {
           _serverLostConnection = false;
           _cancelServerConnectGrace();
-        } else if (!serverSync.hasBeenSynced && !_serverLostConnection) {
+        } else if ((!serverSync.hasBeenSynced ||
+                serverSync.isRoomReadinessRefreshPending) &&
+            !_serverLostConnection) {
           _startServerConnectGrace();
         }
 
@@ -790,7 +796,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             );
           }
 
-          if (!serverSync.hasBeenSynced) {
+          if (!serverSync.hasBeenSynced || !roomsReady) {
             return _buildServerConnectingState();
           }
 

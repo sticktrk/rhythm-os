@@ -163,6 +163,15 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Tracks the last poll time for debouncing [fullRefresh] and [pollNow].
   DateTime _lastPollTime = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Blocks the Rooms screen while a reconnect/full refresh is waiting for the
+  /// next authoritative hello. This is intentionally separate from
+  /// [_hasBeenSynced], which stays sticky so non-room tabs do not flicker out
+  /// during ordinary reconnects.
+  bool _roomReadinessRefreshPending = false;
+  bool _unclassifiedHubStartupGraceActive = false;
+  Timer? _roomReadinessGraceTimer;
+  static const Duration _unclassifiedHubStartupGrace = Duration(seconds: 8);
+
   /// Explicit gate used when the user enters a Home/server hub from the
   /// chooser. Unlike background reconnects, this must block cached rooms until
   /// a fresh authoritative hello has been accepted.
@@ -270,6 +279,20 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether an explicit Home entry/login flow is waiting on fresh server data.
   bool get isHomeEntryRefreshPending => _homeEntryRefreshPending;
+
+  /// Whether the Home/Rooms surface is waiting for a fresh room snapshot.
+  bool get isRoomReadinessRefreshPending =>
+      !HueServiceLocator.isDemoMode && _roomReadinessRefreshPending;
+
+  /// Whether the Rooms screen can show room controls without exposing stale
+  /// post-boot/post-update state.
+  bool get roomsReadyForDisplay =>
+      HueServiceLocator.isDemoMode ||
+      (_hasBeenSynced &&
+          !_roomReadinessRefreshPending &&
+          !_homeEntryRefreshPending &&
+          !_homeEntryRefreshAwaitingHello &&
+          !hasPendingAutomaticHubStartup);
 
   /// Whether the Home tab should be gated by Home entry loading/error UI.
   bool get hasHomeEntryRefreshGate =>
@@ -523,6 +546,21 @@ class ServerSyncProvider extends ChangeNotifier {
       .map(RhythmHubInfo.fromJson)
       .where((hub) => hub.configured)
       .toList(growable: false);
+
+  /// True while the server is still automatically trying to reconnect a
+  /// configured hub after boot/update. Manual failures are allowed through so
+  /// the recovery banner can offer a retry action.
+  bool get hasPendingAutomaticHubStartup {
+    for (final hub in serverHubs) {
+      if (hub.connected) continue;
+      if (hub.startupRetry?.isManualRetryRequired == true) continue;
+      if (hub.startupRetry?.isScheduled == true) return true;
+      if (hub.startupRetry == null && _unclassifiedHubStartupGraceActive) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
@@ -1084,6 +1122,40 @@ class ServerSyncProvider extends ChangeNotifier {
     });
   }
 
+  void _beginRoomReadinessRefresh() {
+    if (HueServiceLocator.isDemoMode || _serverHub == null) return;
+    if (_roomReadinessRefreshPending) return;
+    _roomReadinessRefreshPending = true;
+    notifyListeners();
+  }
+
+  void _completeRoomReadinessRefresh({bool notify = true}) {
+    if (!_roomReadinessRefreshPending) return;
+    _roomReadinessRefreshPending = false;
+    if (notify) notifyListeners();
+  }
+
+  bool get _hasUnclassifiedDisconnectedHub {
+    for (final hub in serverHubs) {
+      if (!hub.connected && hub.startupRetry == null) return true;
+    }
+    return false;
+  }
+
+  void _scheduleRoomReadinessGraceExpiryIfNeeded() {
+    _roomReadinessGraceTimer?.cancel();
+    _roomReadinessGraceTimer = null;
+    if (!_hasUnclassifiedDisconnectedHub || HueServiceLocator.isDemoMode) {
+      _unclassifiedHubStartupGraceActive = false;
+      return;
+    }
+    _unclassifiedHubStartupGraceActive = true;
+    _roomReadinessGraceTimer = Timer(_unclassifiedHubStartupGrace, () {
+      _unclassifiedHubStartupGraceActive = false;
+      notifyListeners();
+    });
+  }
+
   /// Connect to server if a hub is available.
   ///
   /// Called from the ProxyProvider update. Since ProxyProvider fires on
@@ -1145,6 +1217,10 @@ class ServerSyncProvider extends ChangeNotifier {
       _serverHub = null;
       _activeConnectionEndpoint = null;
       _hasBeenSynced = false;
+      _roomReadinessRefreshPending = false;
+      _unclassifiedHubStartupGraceActive = false;
+      _roomReadinessGraceTimer?.cancel();
+      _roomReadinessGraceTimer = null;
       _resetConnectionMetadata();
       Future.microtask(() async {
         final localServer = LocalRhythmServerService.instance;
@@ -1223,6 +1299,9 @@ class ServerSyncProvider extends ChangeNotifier {
       _hasBeenSynced = false;
       _resetConnectionMetadata();
       _roomProvider.clearTransientState();
+    }
+    if (authoritative) {
+      _beginRoomReadinessRefresh();
     }
     await _connectToServerHub(
       hub,
@@ -1612,6 +1691,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final now = DateTime.now();
     if (now.difference(_lastPollTime).inSeconds < 2) return;
     _lastPollTime = now;
+    _beginRoomReadinessRefresh();
     await _connection.reconnect(authoritative: true);
   }
 
@@ -1713,6 +1793,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _lastHubInfos = hello.hubs;
     _capabilities = hello.capabilities;
     _hasBeenSynced = true;
+    _completeRoomReadinessRefresh(notify: false);
+    _scheduleRoomReadinessGraceExpiryIfNeeded();
 
     // Bootstrap countdown timer from server's last tick timestamp
     if (hello.lastTickEpochMs != null) {
@@ -1987,6 +2069,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Handle new nodes detected in poll — trigger a full re-hello.
   void _onNewNodesDetected(void _) {
     debugPrint('ServerSync: New nodes detected in poll — triggering re-hello');
+    _beginRoomReadinessRefresh();
     _connection.reconnect();
   }
 
@@ -2028,6 +2111,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _lastHubReconnectTime = now;
       debugPrint(
           'ServerSync: Hub connected — triggering re-hello for room sync');
+      _beginRoomReadinessRefresh();
       unawaited(_connection.reconnect());
       return;
     }
@@ -2045,6 +2129,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _lastHubDisconnectRefreshTime = now;
       debugPrint(
           'ServerSync: Hub disconnected — refreshing state for retry metadata');
+      _beginRoomReadinessRefresh();
       unawaited(_connection.reconnect());
     }
   }
@@ -2608,6 +2693,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
     if (_connection.connected) {
+      _beginRoomReadinessRefresh();
       await _connection.reconnect(authoritative: true);
     }
   }
@@ -2859,6 +2945,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected) return;
     debugPrint('ServerSync: Triggering server-side sync');
     await api.triggerSync();
+    _beginRoomReadinessRefresh();
     await _connection.reconnect();
   }
 
@@ -2912,6 +2999,7 @@ class ServerSyncProvider extends ChangeNotifier {
       credentials: {},
     );
     _lastHubReconnectTime = DateTime.now();
+    _beginRoomReadinessRefresh();
     await _connection.reconnect(); // Re-fetch state with new rooms
     return hubConnected;
   }
@@ -2942,6 +3030,7 @@ class ServerSyncProvider extends ChangeNotifier {
     debugPrint('ServerSync: Retrying hub $hubType @ $address');
     final accepted = await api.hubRetry(hubType: hubType, address: address);
     if (accepted && refreshState) {
+      _beginRoomReadinessRefresh();
       await _connection.reconnect();
     }
     return accepted;
@@ -2963,6 +3052,7 @@ class ServerSyncProvider extends ChangeNotifier {
       if (ok) accepted++;
     }
     if (accepted > 0) {
+      _beginRoomReadinessRefresh();
       await _connection.reconnect();
     }
     return accepted;
@@ -2988,6 +3078,7 @@ class ServerSyncProvider extends ChangeNotifier {
       credentials: credentials,
     );
     _lastHubReconnectTime = DateTime.now();
+    _beginRoomReadinessRefresh();
     await _connection.reconnect();
     return hubConnected;
   }
@@ -3643,6 +3734,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _roomReadinessGraceTimer?.cancel();
     _helloSub?.cancel();
     _rhythmStateSub?.cancel();
     _hubEventSub?.cancel();

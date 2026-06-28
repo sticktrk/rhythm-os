@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -2497,6 +2498,163 @@ void main() {
 
       expect(connection.reconnectCalls, 1);
       expect(connection.lastReconnectAuthoritative, isTrue);
+    });
+
+    test('fullRefresh gates room display until the next hello arrives',
+        () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '127.0.0.1',
+            port: 54448,
+            token: 'owner-token',
+          ),
+        ]),
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection(
+        assumeLanReachable: true,
+        assumeSavedAuth: true,
+      );
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.roomsReadyForDisplay, isTrue);
+
+      await provider.fullRefresh();
+
+      expect(provider.isRoomReadinessRefreshPending, isTrue);
+      expect(provider.roomsReadyForDisplay, isFalse);
+      expect(helloConnection.reconnectCalls, 1);
+      expect(helloConnection.lastReconnectAuthoritative, isTrue);
+
+      helloConnection.emitHello(RhythmHello.fromJson({}));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.isRoomReadinessRefreshPending, isFalse);
+      expect(provider.roomsReadyForDisplay, isTrue);
+    });
+
+    test('scheduled hub startup keeps rooms gated until a connected hello',
+        () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '127.0.0.1',
+            port: 54448,
+            token: 'owner-token',
+          ),
+        ]),
+      );
+      addTearDown(provider.dispose);
+
+      helloConnection.emitHello(RhythmHello.fromJson({
+        'hubs': [
+          {
+            'type': 'matter',
+            'address': 'matter',
+            'connected': false,
+            'startup_retry': {'status': 'scheduled'},
+          },
+        ],
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasBeenSynced, isTrue);
+      expect(provider.hasPendingAutomaticHubStartup, isTrue);
+      expect(provider.roomsReadyForDisplay, isFalse);
+
+      helloConnection.emitHello(RhythmHello.fromJson({
+        'hubs': [
+          {
+            'type': 'matter',
+            'address': 'matter',
+            'connected': true,
+          },
+        ],
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasPendingAutomaticHubStartup, isFalse);
+      expect(provider.roomsReadyForDisplay, isTrue);
+    });
+
+    test('manual hub retry state allows rooms so recovery banner can render',
+        () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      helloConnection.emitHello(RhythmHello.fromJson({
+        'hubs': [
+          {
+            'type': 'matter',
+            'address': 'matter',
+            'connected': false,
+            'startup_retry': {'status': 'manual_retry_required'},
+          },
+        ],
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasPendingAutomaticHubStartup, isFalse);
+      expect(provider.roomsReadyForDisplay, isTrue);
+    });
+
+    test('unclassified disconnected hub gates briefly then allows recovery',
+        () {
+      fakeAsync((async) {
+        final localRoomProvider = RoomProvider();
+        final localConnection = _HelloRhythmConnection(_FakeRhythmServerApi());
+        final provider = ServerSyncProvider(
+          connection: localConnection,
+          roomProvider: localRoomProvider,
+          homeProvider: _TestHomeProvider(const []),
+        );
+
+        localConnection.emitHello(RhythmHello.fromJson({
+          'hubs': [
+            {
+              'type': 'matter',
+              'address': 'matter',
+              'connected': false,
+            },
+          ],
+        }));
+        async.flushMicrotasks();
+
+        expect(provider.hasPendingAutomaticHubStartup, isTrue);
+        expect(provider.roomsReadyForDisplay, isFalse);
+
+        async.elapse(const Duration(seconds: 8));
+
+        expect(provider.hasPendingAutomaticHubStartup, isFalse);
+        expect(provider.roomsReadyForDisplay, isTrue);
+
+        provider.dispose();
+        localConnection.dispose();
+        localRoomProvider.dispose();
+      });
     });
 
     test('home entry refresh gates until authoritative hello arrives',
