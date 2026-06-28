@@ -53,7 +53,7 @@ enum RestartStrategy {
 ///
 /// `Beta` is the rolling feed populated by beta tags on CI. `Stable` is a
 /// dedicated stable-tag build published by `scripts/release.sh --promote-stable`
-/// and is what auto-updating appliances follow overnight.
+/// and is what auto-updating appliances follow during the daily update window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UpdateChannel {
     Beta,
@@ -72,7 +72,7 @@ impl UpdateChannel {
 /// Read the user's preferred OTA channel from shared state.
 ///
 /// `auto_update == true` (the factory default) → stable; the user has opted
-/// into curated overnight updates. `false` → beta; the user wants the rolling
+/// into curated automatic updates. `false` → beta; the user wants the rolling
 /// CI feed and manual control over when updates apply. Non-appliance runtimes
 /// stay on beta because stable promotion is only defined for the rpiz feed.
 pub fn channel_from_state(state: &rhythm_os::state::SharedState) -> UpdateChannel {

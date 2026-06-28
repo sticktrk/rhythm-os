@@ -433,8 +433,8 @@ pub struct AppState {
     /// control events from hub streams and does not run periodic light ticks.
     pub light_breaker_enabled: bool,
     /// When true, the appliance polls the curated "stable" OTA feed and
-    /// auto-applies updates overnight. When false, it polls "beta" and only
-    /// updates on an explicit `POST /api/ota/update`.
+    /// auto-applies updates during the daily update window. When false, it
+    /// polls "beta" and only updates on an explicit `POST /api/ota/update`.
     pub auto_update: bool,
 
     // ---- Local API auth ----

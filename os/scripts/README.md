@@ -217,7 +217,7 @@ There are two release modes:
 - **Binary release (default)** — the rpiz OTA tarball via the tag-driven
   `rpiz Binary` job in `ci.yml`. Beta tags publish the rolling `rpiz` feed for
   manual updates. Stable tags publish the `rpiz-stable` feed that appliance
-  auto-update consumes overnight.
+  auto-update consumes during its daily update window.
 - **Full image release (`--with-image`)** — everything above *plus* dispatches
   `rpiz-sd-image.yml`, which re-runs Buildroot end-to-end and attaches
   `sdcard.img` + `rootfs.ext2.gz` to the release. Use this when you bumped

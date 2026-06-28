@@ -349,8 +349,9 @@ pub struct StoredSettings {
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
     /// When true, the appliance silently polls the curated "stable" OTA feed
-    /// and applies updates during the overnight window. When false, it polls
-    /// the "beta" feed and only updates on an explicit `POST /api/ota/update`.
+    /// and applies updates during the daily update window. When false, it
+    /// polls the "beta" feed and only updates on an explicit
+    /// `POST /api/ota/update`.
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
 }

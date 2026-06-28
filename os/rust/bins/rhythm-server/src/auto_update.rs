@@ -1,12 +1,12 @@
-//! Background loop that auto-applies stable OTA updates overnight.
+//! Background loop that auto-applies stable OTA updates.
 //!
 //! Runs on the rpiz appliance only. Wakes every 30 minutes, checks whether the
-//! local clock is inside the configured overnight window (default 00:00–02:00
+//! local clock is inside the configured update window (default 14:00-16:00
 //! local), and — at most once per 20 hours — pulls the stable manifest,
 //! downloads any newer release, persists runtime state, and triggers the rpiz
 //! A/B reboot path. The
 //! 30-min wake / 20h dedupe combination means at most one update attempt per
-//! night even if the device clock skews mid-window.
+//! day even if the device clock skews mid-window.
 //!
 //! The loop is a no-op when `auto_update == false` in `StoredSettings` (the
 //! user opted into beta + manual updates) and on non-appliance builds.
@@ -22,8 +22,8 @@ use crate::self_update::{self, UpdateChannel};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_BETWEEN_CHECKS: Duration = Duration::from_secs(20 * 60 * 60);
-const WINDOW_START_HOUR: u32 = 0;
-const WINDOW_END_HOUR: u32 = 2;
+const WINDOW_START_HOUR: u32 = 14;
+const WINDOW_END_HOUR: u32 = 16;
 const MIN_SANE_YEAR: i32 = 2024;
 
 pub fn spawn(state: SharedState) {
@@ -72,7 +72,7 @@ fn run(state: SharedState) {
             continue;
         }
 
-        if !in_overnight_window(now, snapshot.utc_offset_hours) {
+        if !in_auto_update_window(now, snapshot.utc_offset_hours) {
             continue;
         }
 
@@ -118,7 +118,7 @@ fn clock_is_sane(now_utc: chrono::DateTime<Utc>) -> bool {
     now_utc.year() >= MIN_SANE_YEAR
 }
 
-fn in_overnight_window(now_utc: chrono::DateTime<Utc>, utc_offset_hours: f32) -> bool {
+fn in_auto_update_window(now_utc: chrono::DateTime<Utc>, utc_offset_hours: f32) -> bool {
     let local_hour = local_hour_from_utc(now_utc, utc_offset_hours);
     (WINDOW_START_HOUR..WINDOW_END_HOUR).contains(&local_hour)
 }
@@ -204,30 +204,30 @@ mod tests {
     }
 
     #[test]
-    fn window_open_at_local_midnight() {
-        // UTC 07:00 with -7h offset -> local 00:00, window opens.
-        assert_eq!(local_hour_from_utc(utc_at(7), -7.0), 0);
-        assert!(in_overnight_window(utc_at(7), -7.0));
+    fn window_open_at_local_1400() {
+        // UTC 21:00 with -7h offset -> local 14:00, window opens.
+        assert_eq!(local_hour_from_utc(utc_at(21), -7.0), 14);
+        assert!(in_auto_update_window(utc_at(21), -7.0));
     }
 
     #[test]
-    fn window_closed_at_local_0200() {
-        // UTC 09:00 with -7h offset -> local 02:00, boundary closed.
-        assert_eq!(local_hour_from_utc(utc_at(9), -7.0), 2);
-        assert!(!in_overnight_window(utc_at(9), -7.0));
+    fn window_closed_at_local_1600() {
+        // UTC 23:00 with -7h offset -> local 16:00, boundary closed.
+        assert_eq!(local_hour_from_utc(utc_at(23), -7.0), 16);
+        assert!(!in_auto_update_window(utc_at(23), -7.0));
     }
 
     #[test]
     fn window_closed_at_local_noon() {
         // UTC 19:00 with -7h offset -> local 12:00.
-        assert!(!in_overnight_window(utc_at(19), -7.0));
+        assert!(!in_auto_update_window(utc_at(19), -7.0));
     }
 
     #[test]
     fn window_open_with_positive_offset() {
-        // UTC 22:00 with +3h offset -> local 01:00 next day.
-        assert_eq!(local_hour_from_utc(utc_at(22), 3.0), 1);
-        assert!(in_overnight_window(utc_at(22), 3.0));
+        // UTC 11:00 with +3h offset -> local 14:00.
+        assert_eq!(local_hour_from_utc(utc_at(11), 3.0), 14);
+        assert!(in_auto_update_window(utc_at(11), 3.0));
     }
 
     #[test]
@@ -265,6 +265,6 @@ mod tests {
         let now = utc_at(5);
 
         assert_eq!(local_hour_from_utc(now, 100.0), 5);
-        assert!(!in_overnight_window(now, 100.0));
+        assert!(!in_auto_update_window(now, 100.0));
     }
 }
