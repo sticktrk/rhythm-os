@@ -22,3 +22,6 @@ target/
 
 # Downloaded/extracted app bug-report debug bundles (see /triage).
 .triage/
+
+# Local Supabase CLI project metadata.
+tools/app/supabase/.temp/
