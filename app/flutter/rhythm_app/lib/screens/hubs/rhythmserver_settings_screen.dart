@@ -32,6 +32,7 @@ import '../../services/analytics_service.dart';
 import '../../services/ota_service.dart';
 import '../../services/remote_access_service.dart';
 import '../../services/server_endpoint_resolver.dart';
+import '../../services/support_access_service.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
@@ -2460,13 +2461,29 @@ class _RhythmServerAdvancedSettingsScreenState
           home: homeProvider.currentHome,
         );
         await homeProvider.updateHub(result.updatedHub);
-        _showSnackBar('Remote access enabled.');
+        var supportAccessConfigured = false;
+        try {
+          await SupportAccessService.instance.grantForHub(result.updatedHub);
+          supportAccessConfigured = true;
+        } catch (error) {
+          debugPrint('Support access grant failed: $error');
+        }
+        _showSnackBar(
+          supportAccessConfigured
+              ? 'Remote access enabled. Admin access configured.'
+              : 'Remote access enabled. Admin access not configured.',
+        );
       } else {
         final updatedHub = await remoteAccess.disableForHub(
           hub,
           home: homeProvider.currentHome,
         );
         await homeProvider.updateHub(updatedHub);
+        try {
+          await SupportAccessService.instance.revokeForHub(hub);
+        } catch (error) {
+          debugPrint('Support access revoke failed: $error');
+        }
         _showSnackBar('Remote access disabled.');
       }
       syncProvider.connectIfAvailable();

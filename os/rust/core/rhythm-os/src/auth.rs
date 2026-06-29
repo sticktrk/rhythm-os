@@ -726,6 +726,8 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
         return Some("Support token cannot export backup secrets");
     }
 
+    // Beta admin support tokens are intentionally broad. Keep ownership,
+    // credential, tunnel, network, and destructive recovery operations owner-only.
     let forbidden = matches!(
         (method, path),
         (&Method::POST, "/api/auth/claim")
@@ -739,8 +741,6 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
             | (&Method::PUT, "/api/wifi")
             | (&Method::DELETE, "/api/wifi")
             | (&Method::POST, "/api/diag/reset-matter-fabric")
-            | (&Method::POST, "/api/ota/upload")
-            | (&Method::POST, "/api/ota/update")
             | (&Method::PUT, "/api/backup")
     );
     if forbidden {
@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn support_policy_blocks_safety_critical_routes() {
+    fn support_policy_blocks_owner_only_routes() {
         let denied = [
             (Method::POST, "/api/auth/claim", "auth claim"),
             (
@@ -1443,8 +1443,6 @@ mod tests {
                 "/api/diag/reset-matter-fabric",
                 "matter fabric reset",
             ),
-            (Method::POST, "/api/ota/upload", "ota upload"),
-            (Method::POST, "/api/ota/update", "ota apply"),
             (Method::PUT, "/api/backup", "backup restore"),
             (
                 Method::GET,
@@ -1456,16 +1454,18 @@ mod tests {
         for (method, uri, label) in denied {
             assert!(
                 support_token_forbidden_reason(&method, &test_uri(uri)).is_some(),
-                "{label} should be owner-only"
+                "{label} should stay owner-only"
             );
         }
     }
 
     #[test]
-    fn support_policy_allows_lighting_admin_routes() {
+    fn support_policy_allows_beta_admin_routes() {
         let allowed = [
             (Method::GET, "/api/backup", "redacted backup export"),
             (Method::GET, "/api/ota/status", "ota status"),
+            (Method::POST, "/api/ota/upload", "ota upload"),
+            (Method::POST, "/api/ota/update", "ota apply"),
             (Method::POST, "/api/diag/debug-bundle", "debug bundle"),
             (Method::POST, "/api/restart", "restart"),
             (Method::PUT, "/api/config", "runtime config"),
@@ -1481,7 +1481,7 @@ mod tests {
         for (method, uri, label) in allowed {
             assert!(
                 support_token_forbidden_reason(&method, &test_uri(uri)).is_none(),
-                "{label} should be allowed for support"
+                "{label} should be allowed for beta admin support"
             );
         }
     }

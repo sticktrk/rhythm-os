@@ -7,15 +7,19 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 
 import 'models.dart';
 import 'supabase_rest_client.dart';
+import 'support_access_service.dart';
 
 class DeviceProbeService {
   DeviceProbeService({
     required SupabaseRestClient supabase,
+    SupportAccessService? supportAccess,
     http.Client? httpClient,
   })  : _supabase = supabase,
+        _supportAccess = supportAccess,
         _http = httpClient ?? http.Client();
 
   final SupabaseRestClient _supabase;
+  final SupportAccessService? _supportAccess;
   final http.Client _http;
 
   Future<DeviceProbeResultDto> probeHub({
@@ -36,7 +40,7 @@ class DeviceProbeService {
 
     var sawAuthRequired = false;
     for (final candidate in distinctCandidates) {
-      final result = await _probeEndpoint(hub, candidate);
+      final result = await _probeEndpoint(session, hub, candidate);
       if (result.status == 'online') return result;
       if (result.status == 'auth_required') {
         sawAuthRequired = true;
@@ -57,6 +61,7 @@ class DeviceProbeService {
   }
 
   Future<DeviceProbeResultDto> _probeEndpoint(
+    AdminSession session,
     _ProbeHub hub,
     ({String route, HubEndpointDto endpoint}) candidate,
   ) async {
@@ -84,7 +89,15 @@ class DeviceProbeService {
       );
     }
 
-    final state = await _fetchState(baseUrl, hub.authToken);
+    final supportSessionToken = hub.authToken == null
+        ? await _supportAccess?.createSessionToken(
+            session: session,
+            hubId: hub.id,
+            baseUrl: baseUrl,
+          )
+        : null;
+    final stateAuthToken = hub.authToken ?? supportSessionToken;
+    final state = await _fetchState(baseUrl, stateAuthToken);
     if (state.authRequired) {
       return DeviceProbeResultDto(
         hubId: hub.id,
@@ -92,11 +105,9 @@ class DeviceProbeService {
         route: candidate.route,
         baseUrl: baseUrl,
         checkedAt: checkedAt,
-        tokenAvailable: hub.authToken != null,
+        tokenAvailable: stateAuthToken != null,
         hasEncryptedToken: hub.hasEncryptedToken,
-        message: hub.authToken == null && hub.hasEncryptedToken
-            ? 'Device is reachable, but its token is client-side encrypted and unavailable to admin-api.'
-            : 'Device is reachable, but /api/state rejected the token.',
+        message: _authRequiredMessage(hub, supportSessionToken),
       );
     }
 
@@ -107,7 +118,7 @@ class DeviceProbeService {
       route: candidate.route,
       baseUrl: baseUrl,
       checkedAt: checkedAt,
-      tokenAvailable: hub.authToken != null,
+      tokenAvailable: stateAuthToken != null,
       hasEncryptedToken: hub.hasEncryptedToken,
       inventory: hello == null ? null : _inventoryFromState(hello),
       serverVersion: hello?.version,
@@ -205,6 +216,8 @@ class DeviceProbeService {
           buttons++;
         case RhythmDeviceType.motion:
           motionSensors++;
+        case RhythmDeviceType.contact:
+          otherDevices++;
         case null:
           otherDevices++;
       }
@@ -225,6 +238,19 @@ class DeviceProbeService {
       motionSensors: motionSensors,
       otherDevices: otherDevices,
     );
+  }
+
+  String _authRequiredMessage(_ProbeHub hub, String? supportSessionToken) {
+    if (supportSessionToken != null) {
+      return 'Device is reachable, but /api/state rejected the admin support session token.';
+    }
+    if (hub.authToken == null && hub.hasEncryptedToken) {
+      return 'Device is reachable, but its token is client-side encrypted and no admin support grant is available to admin-api.';
+    }
+    if (hub.authToken == null) {
+      return 'Device is reachable, but admin-api has no usable token for /api/state.';
+    }
+    return 'Device is reachable, but /api/state rejected the token.';
   }
 }
 

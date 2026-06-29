@@ -44,6 +44,7 @@ class AdminApiServer {
       'ok': true,
       'service': 'rhythm-admin-api',
       'serviceRoleConfigured': _config.hasServiceRoleKey,
+      'supportAccessConfigured': _config.hasSupportAccessEncryptionKey,
     });
   }
 

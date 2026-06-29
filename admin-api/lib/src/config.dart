@@ -6,17 +6,24 @@ class AdminApiConfig {
     required this.port,
     required this.allowedOrigins,
     this.supabaseServiceRoleKey,
+    this.supportAccessEncryptionKey,
+    this.supportAccessKeyId,
   });
 
   final Uri supabaseUrl;
   final String supabaseAnonKey;
   final String? supabaseServiceRoleKey;
+  final String? supportAccessEncryptionKey;
+  final String? supportAccessKeyId;
   final String host;
   final int port;
   final Set<String> allowedOrigins;
 
   bool get hasServiceRoleKey =>
       supabaseServiceRoleKey != null && supabaseServiceRoleKey!.isNotEmpty;
+  bool get hasSupportAccessEncryptionKey =>
+      supportAccessEncryptionKey != null &&
+      supportAccessEncryptionKey!.isNotEmpty;
 
   static AdminApiConfig fromEnvironment(Map<String, String> environment) {
     final url = _required(environment, 'SUPABASE_URL');
@@ -26,6 +33,12 @@ class AdminApiConfig {
           'SUPABASE_SERVICE_ROLE_KEY',
         ) ??
         _optional(environment, 'SUPABASE_SERVICE_KEY');
+    final supportAccessEncryptionKey = _optional(
+      environment,
+      'SUPPORT_ACCESS_ENCRYPTION_KEY',
+    );
+    final supportAccessKeyId =
+        _optional(environment, 'SUPPORT_ACCESS_KEY_ID') ?? 'default';
     final host = _optional(environment, 'ADMIN_API_HOST') ?? '127.0.0.1';
     final port = int.tryParse(
           _optional(environment, 'ADMIN_API_PORT') ??
@@ -55,6 +68,8 @@ class AdminApiConfig {
       host: host,
       port: port,
       allowedOrigins: origins,
+      supportAccessEncryptionKey: supportAccessEncryptionKey,
+      supportAccessKeyId: supportAccessKeyId,
     );
   }
 

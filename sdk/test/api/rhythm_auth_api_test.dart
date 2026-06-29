@@ -18,6 +18,64 @@ void main() {
     );
   });
 
+  group('issueSupportToken', () {
+    test('posts support token request and parses issued token', () async {
+      when(() => dio.post<Map<String, dynamic>>(
+            any(),
+            data: any(named: 'data'),
+          )).thenAnswer(
+        (_) async => Response<Map<String, dynamic>>(
+          requestOptions: RequestOptions(path: 'api/auth/support-token'),
+          statusCode: 200,
+          data: {
+            'status': 'ok',
+            'token_id': 'support-1',
+            'token': 'rhythm_support_raw',
+            'role': 'support',
+          },
+        ),
+      );
+
+      final result = await api.issueSupportToken(label: ' admin support ');
+
+      expect(result.tokenId, 'support-1');
+      expect(result.token, 'rhythm_support_raw');
+      expect(result.role, 'support');
+
+      final captured = verify(() => dio.post<Map<String, dynamic>>(
+            'api/auth/support-token',
+            data: captureAny(named: 'data'),
+          )).captured.single as Map<String, dynamic>;
+      expect(captured, {'label': 'admin support'});
+    });
+
+    test('omits blank support token labels', () async {
+      when(() => dio.post<Map<String, dynamic>>(
+            any(),
+            data: any(named: 'data'),
+          )).thenAnswer(
+        (_) async => Response<Map<String, dynamic>>(
+          requestOptions: RequestOptions(path: 'api/auth/support-token'),
+          statusCode: 200,
+          data: {
+            'status': 'ok',
+            'token_id': 'support-1',
+            'token': 'rhythm_support_raw',
+            'role': 'support',
+          },
+        ),
+      );
+
+      await api.issueSupportToken(label: '  ');
+
+      final captured = verify(() => dio.post<Map<String, dynamic>>(
+            'api/auth/support-token',
+            data: captureAny(named: 'data'),
+          )).captured.single as Map<String, dynamic>;
+      expect(captured, isEmpty);
+    });
+  });
+
   group('setSettings', () {
     test('puts auth settings and parses issued owner token', () async {
       when(() => dio.put<Map<String, dynamic>>(
