@@ -1,7 +1,7 @@
 # Rhythm Runtime Crates
 
-This workspace contains runtime crates that can be hosted by Rhythm OS without
-being merged into the production OS crates.
+These runtime crates are members of the top-level Rust workspace and are hosted
+by Rhythm OS without being merged into the production OS crates.
 
 ## Crates
 
@@ -97,27 +97,27 @@ core OS API instead of duplicating it under multiple runtime namespaces.
 
 ## Verification
 
-Compile-check the runtime workspace:
+Compile-check the runtime crates:
 
 ```sh
-cargo check --manifest-path runtime/rust/Cargo.toml
+cargo check -p rhythm-runtime-api -p rhythm-adaptive -p rhythm-os-runtime-modules
 ```
 
 Run runtime tests with:
 
 ```sh
-cargo test --manifest-path runtime/rust/Cargo.toml
+cargo test -p rhythm-runtime-api -p rhythm-adaptive -p rhythm-os-runtime-modules
 ```
 
 Format with:
 
 ```sh
-cargo fmt --all --manifest-path runtime/rust/Cargo.toml
+cargo fmt --all
 ```
 
-The module bundle depends back on `rhythm-os`, so it is intentionally excluded
-from the pure runtime workspace. It is compiled through the OS workspace:
+The module bundle is part of the same workspace as the OS binaries, so full
+product checks include it naturally:
 
 ```sh
-cargo check -p rhythm-server -p rhythm-addon -p rhythm-linux-appliance --manifest-path os/Cargo.toml
+cargo check -p rhythm-server -p rhythm-addon -p rhythm-linux-appliance
 ```

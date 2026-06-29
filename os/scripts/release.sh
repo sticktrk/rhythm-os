@@ -14,6 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 REMOTE="origin"
 VERSION=""
@@ -25,15 +26,9 @@ PROMOTE_STABLE=false
 PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
-WORKSPACE_VERSION_FILES=(
-    "Cargo.toml"
-    "Cargo.lock"
-    "../runtime/rust/Cargo.toml"
-    "../runtime/rust/Cargo.lock"
-    "../runtime/rust/rhythm-os-runtime-modules/Cargo.toml"
-    "install/rpiz/builder-image.lock"
-)
-BUILDER_LOCK_FILE="install/rpiz/builder-image.lock"
+WORKSPACE_LOCK_FILES=("Cargo.lock")
+WORKSPACE_VERSION_FILES=("Cargo.toml" "${WORKSPACE_LOCK_FILES[@]}" "os/install/rpiz/builder-image.lock")
+BUILDER_LOCK_FILE="os/install/rpiz/builder-image.lock"
 SERVER_RELEASES_TO_KEEP=5
 
 usage() {
@@ -215,7 +210,7 @@ read_workspace_version() {
         /^\[workspace\.package\]/ { in_workspace = 1; next }
         /^\[/ && in_workspace { exit }
         in_workspace && $0 ~ /^version[[:space:]]*=/ { print $2; exit }
-    ' "$PROJECT_ROOT/Cargo.toml"
+    ' "$REPO_ROOT/Cargo.toml"
 }
 
 normalize_release_version() {
@@ -286,12 +281,12 @@ semver_gt() {
 }
 
 tracked_worktree_dirty() {
-    [ -n "$(git -C "$PROJECT_ROOT" status --short --untracked-files=no)" ]
+    [ -n "$(git -C "$REPO_ROOT" status --short --untracked-files=no)" ]
 }
 
 github_repo_url() {
     local remote_url
-    remote_url="$(git -C "$PROJECT_ROOT" remote get-url "$REMOTE" 2>/dev/null || true)"
+    remote_url="$(git -C "$REPO_ROOT" remote get-url "$REMOTE" 2>/dev/null || true)"
 
     if [[ "$remote_url" =~ ^git@github\.com:(.+)\.git$ ]]; then
         echo "https://github.com/${BASH_REMATCH[1]}"
@@ -424,47 +419,29 @@ upload_rpiz_feed() {
 update_workspace_version_files() {
     local new_version="$1"
     local current_version="$2"
-    local runtime_root="$PROJECT_ROOT/../runtime/rust"
+    local lock_file
 
     if [ "$current_version" != "$new_version" ]; then
         NEW_VERSION="$new_version" perl -0pi -e '
             s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
-        ' "$PROJECT_ROOT/Cargo.toml"
+        ' "$REPO_ROOT/Cargo.toml"
     fi
 
-    if [ -f "$runtime_root/Cargo.toml" ]; then
-        NEW_VERSION="$new_version" perl -0pi -e '
-            s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
-        ' "$runtime_root/Cargo.toml"
-    fi
+    for lock_file in "${WORKSPACE_LOCK_FILES[@]}"; do
+        if [ ! -f "$REPO_ROOT/$lock_file" ]; then
+            continue
+        fi
 
-    if [ -f "$runtime_root/rhythm-os-runtime-modules/Cargo.toml" ]; then
-        NEW_VERSION="$new_version" perl -0pi -e '
-            s/(\[package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
-        ' "$runtime_root/rhythm-os-runtime-modules/Cargo.toml"
-    fi
-
-    NEW_VERSION="$new_version" perl -0pi -e '
-        s{(\[\[package\]\]\n.*?)(?=\n\[\[package\]\]\n|\z)}{
-            my $block = $1;
-            if ($block !~ /^source = /m) {
-                $block =~ s/^version = "[^"]+"/version = "$ENV{NEW_VERSION}"/m;
-            }
-            $block;
-        }gse;
-    ' "$PROJECT_ROOT/Cargo.lock"
-
-    if [ -f "$runtime_root/Cargo.lock" ]; then
         NEW_VERSION="$new_version" perl -0pi -e '
             s{(\[\[package\]\]\n.*?)(?=\n\[\[package\]\]\n|\z)}{
                 my $block = $1;
-                if ($block !~ /^source = /m) {
+                if ($block =~ /^name = "rhythm-[^"]+"$/m && $block !~ /^source = /m) {
                     $block =~ s/^version = "[^"]+"/version = "$ENV{NEW_VERSION}"/m;
                 }
                 $block;
             }gse;
-        ' "$runtime_root/Cargo.lock"
-    fi
+        ' "$REPO_ROOT/$lock_file"
+    done
 }
 
 commit_release_version_update() {
@@ -474,7 +451,7 @@ commit_release_version_update() {
     local changed=false
 
     for file in "${WORKSPACE_VERSION_FILES[@]}"; do
-        if ! git -C "$PROJECT_ROOT" diff --quiet -- "$file"; then
+        if ! git -C "$REPO_ROOT" diff --quiet -- "$file"; then
             changed=true
             break
         fi
@@ -484,8 +461,8 @@ commit_release_version_update() {
         return 0
     fi
 
-    git -C "$PROJECT_ROOT" add "${WORKSPACE_VERSION_FILES[@]}"
-    git -C "$PROJECT_ROOT" commit -m "$commit_message"
+    git -C "$REPO_ROOT" add "${WORKSPACE_VERSION_FILES[@]}"
+    git -C "$REPO_ROOT" commit -m "$commit_message"
 }
 
 require_command git
@@ -526,12 +503,12 @@ if [ "$UPLOAD" = true ]; then
     ensure_upload_env
 fi
 
-if ! git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "Error: $PROJECT_ROOT is not a git repository" >&2
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Error: $REPO_ROOT is not a git repository" >&2
     exit 1
 fi
 
-CURRENT_BRANCH="$(git -C "$PROJECT_ROOT" branch --show-current)"
+CURRENT_BRANCH="$(git -C "$REPO_ROOT" branch --show-current)"
 if [ -z "$CURRENT_BRANCH" ]; then
     echo "Error: Detached HEAD. Check out a branch before tagging a release." >&2
     exit 1
@@ -540,17 +517,19 @@ fi
 if tracked_worktree_dirty; then
     if [ "$DRY_RUN" = true ]; then
         echo "Warning: tracked worktree is dirty; a real release would fail until you commit or stash these changes." >&2
-        git -C "$PROJECT_ROOT" status --short --untracked-files=no >&2
+        git -C "$REPO_ROOT" status --short --untracked-files=no >&2
         echo "" >&2
     else
         echo "Error: Refusing to tag from a dirty tracked worktree." >&2
         echo "Commit or stash tracked changes first." >&2
-        git -C "$PROJECT_ROOT" status --short --untracked-files=no >&2
+        git -C "$REPO_ROOT" status --short --untracked-files=no >&2
         exit 1
     fi
 fi
 
-LATEST_TAG="$(git -C "$PROJECT_ROOT" tag --list 'v[0-9]*' --sort=-version:refname | head -n 1)"
+CURRENT_WORKSPACE_VERSION="$(read_workspace_version)"
+
+LATEST_TAG="$(git -C "$REPO_ROOT" tag --list 'v[0-9]*' --sort=-version:refname | head -n 1)"
 LATEST_VERSION=""
 if [ -n "$LATEST_TAG" ]; then
     LATEST_VERSION="${LATEST_TAG#v}"
@@ -558,6 +537,18 @@ fi
 
 if [ -n "$VERSION" ]; then
     VERSION="$(normalize_release_version "$VERSION")"
+elif [ -n "$CURRENT_WORKSPACE_VERSION" ]; then
+    WORKSPACE_RELEASE_VERSION="$(normalize_release_version "$CURRENT_WORKSPACE_VERSION")"
+    if [ -n "$LATEST_VERSION" ]; then
+        TAG_BUMP_VERSION="$(normalize_release_version "$(bump_version "$LATEST_VERSION" "$BUMP_KIND")")"
+        if semver_gt "$WORKSPACE_RELEASE_VERSION" "$TAG_BUMP_VERSION"; then
+            VERSION="$WORKSPACE_RELEASE_VERSION"
+        else
+            VERSION="$TAG_BUMP_VERSION"
+        fi
+    else
+        VERSION="$WORKSPACE_RELEASE_VERSION"
+    fi
 elif [ -n "$LATEST_VERSION" ]; then
     VERSION="$(normalize_release_version "$(bump_version "$LATEST_VERSION" "$BUMP_KIND")")"
 else
@@ -571,7 +562,7 @@ if [ -n "$LATEST_VERSION" ] && ! semver_gt "$VERSION" "$LATEST_VERSION"; then
     exit 1
 fi
 
-if git -C "$PROJECT_ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+if git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
     echo "Error: Tag already exists locally: $TAG" >&2
     exit 1
 fi
@@ -581,7 +572,6 @@ if [ -z "$MESSAGE" ]; then
 fi
 
 REPO_URL="$(github_repo_url)"
-CURRENT_WORKSPACE_VERSION="$(read_workspace_version)"
 
 echo "Release plan"
 echo "  Branch:  $CURRENT_BRANCH"
@@ -644,25 +634,25 @@ update_workspace_version_files "$VERSION" "$CURRENT_WORKSPACE_VERSION"
 
 commit_release_version_update "$TAG"
 
-EXACT_TAG="$(git -C "$PROJECT_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
+EXACT_TAG="$(git -C "$REPO_ROOT" describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null || true)"
 if [ -n "$EXACT_TAG" ]; then
     echo "Error: HEAD is already tagged with $EXACT_TAG" >&2
     exit 1
 fi
 
-git -C "$PROJECT_ROOT" tag -a "$TAG" -m "$MESSAGE"
+git -C "$REPO_ROOT" tag -a "$TAG" -m "$MESSAGE"
 
 if [ "$UPLOAD" = true ]; then
     TEMP_RELEASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-release.XXXXXX")"
     trap cleanup_temp_release_dir EXIT
     upload_rpiz_feed "$VERSION"
 elif [ "$PUSH" = true ]; then
-    git -C "$PROJECT_ROOT" push "$REMOTE" "HEAD:refs/heads/$CURRENT_BRANCH"
-    git -C "$PROJECT_ROOT" push "$REMOTE" "refs/tags/$TAG"
+    git -C "$REPO_ROOT" push "$REMOTE" "HEAD:refs/heads/$CURRENT_BRANCH"
+    git -C "$REPO_ROOT" push "$REMOTE" "refs/tags/$TAG"
 fi
 
 echo ""
-echo "Created $TAG at $(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
+echo "Created $TAG at $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 
 if [ "$PUSH" = true ]; then
     echo "Pushed branch and tag to $REMOTE."

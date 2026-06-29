@@ -114,9 +114,28 @@ class CrateHash {
 
     addFile('Cargo.toml');
     addFile('Cargo.lock');
+    addWorkspaceLockFile(files);
     addFile('build.rs');
     addFile('cargokit.yaml');
     return files;
+  }
+
+  void addWorkspaceLockFile(List<File> files) {
+    var directory = Directory(manifestDir).parent;
+    while (true) {
+      final lockFile = File(path.join(directory.path, 'Cargo.lock'));
+      final manifestFile = File(path.join(directory.path, 'Cargo.toml'));
+      if (lockFile.existsSync() && manifestFile.existsSync()) {
+        files.add(lockFile);
+        return;
+      }
+
+      final parent = directory.parent;
+      if (parent.path == directory.path) {
+        return;
+      }
+      directory = parent;
+    }
   }
 
   final String manifestDir;

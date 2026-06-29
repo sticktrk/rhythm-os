@@ -1,12 +1,10 @@
 [package]
 name = "rhythm-os-runtime-modules"
-version = "0.6.110-beta"
-edition = "2021"
-license = "Apache-2.0"
-authors = ["Tim Kijewski <3043754+sticktrk@users.noreply.github.com>"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 description = "Default light runtime module bundle for Rhythm OS hosts"
-
-[workspace]
 
 [dependencies]
 rhythm-os = { path = "../../../os/rust/core/rhythm-os" }

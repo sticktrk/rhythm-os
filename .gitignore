@@ -17,8 +17,8 @@ app/.dartServer/
 # should not be absorbed into the CROSS monorepo until legacy support settles.
 legacy/removed-project/
 
-# Runtime crate build output.
-runtime/rust/target/
+# Rust workspace build output.
+target/
 
 # Downloaded/extracted app bug-report debug bundles (see /triage).
 .triage/

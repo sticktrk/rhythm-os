@@ -26,8 +26,8 @@ PROMOTE_STABLE=false
 PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
-WORKSPACE_LOCK_FILES=("os/Cargo.lock" "app/flutter/rhythm_app/rust/Cargo.lock")
-WORKSPACE_VERSION_FILES=("os/Cargo.toml" "${WORKSPACE_LOCK_FILES[@]}" "os/install/rpiz/builder-image.lock")
+WORKSPACE_LOCK_FILES=("Cargo.lock")
+WORKSPACE_VERSION_FILES=("Cargo.toml" "${WORKSPACE_LOCK_FILES[@]}" "os/install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="os/install/rpiz/builder-image.lock"
 SERVER_RELEASES_TO_KEEP=5
 
@@ -210,7 +210,7 @@ read_workspace_version() {
         /^\[workspace\.package\]/ { in_workspace = 1; next }
         /^\[/ && in_workspace { exit }
         in_workspace && $0 ~ /^version[[:space:]]*=/ { print $2; exit }
-    ' "$PROJECT_ROOT/Cargo.toml"
+    ' "$REPO_ROOT/Cargo.toml"
 }
 
 normalize_release_version() {
@@ -424,7 +424,7 @@ update_workspace_version_files() {
     if [ "$current_version" != "$new_version" ]; then
         NEW_VERSION="$new_version" perl -0pi -e '
             s/(\[workspace\.package\]\n(?:[^\[]*\n)*?version = ")[^"]+(")/$1.$ENV{NEW_VERSION}.$2/se
-        ' "$PROJECT_ROOT/Cargo.toml"
+        ' "$REPO_ROOT/Cargo.toml"
     fi
 
     for lock_file in "${WORKSPACE_LOCK_FILES[@]}"; do

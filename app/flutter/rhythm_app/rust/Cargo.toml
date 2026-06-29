@@ -15,8 +15,3 @@ flutter_rust_bridge = "=2.11.1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
-
-# When built standalone by Cargokit, treat as own workspace root
-# This prevents "believes it's in a workspace" errors
-# Path dependencies still work without being workspace members
-[workspace]

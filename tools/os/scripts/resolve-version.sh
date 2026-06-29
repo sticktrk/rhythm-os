@@ -48,7 +48,7 @@ read_workspace_version() {
         /^\[workspace\.package\]/ { in_workspace = 1; next }
         /^\[/ && in_workspace { exit }
         in_workspace && $0 ~ /^version[[:space:]]*=/ { print $2; exit }
-    ' "$PROJECT_ROOT/Cargo.toml"
+    ' "$REPO_ROOT/Cargo.toml"
 }
 
 resolve_workspace_version() {
