@@ -119,6 +119,43 @@ void main() {
       expect(api.statusCalls, 1);
     });
 
+    test('owner token claim returns a hub that can be saved', () async {
+      late _FakeAuthApi authApi;
+      final service = RemoteAccessService.testing(
+        authApiFactory: ({required String baseUrl}) {
+          authApi = _FakeAuthApi(
+            baseUrl: baseUrl,
+            claim: const RhythmOwnerClaim(
+              tokenId: 'owner-token-id',
+              token: 'claimed-owner-token',
+            ),
+          );
+          return authApi;
+        },
+      );
+
+      final updated = await service.ensureOwnerTokenForHub(
+        _serverHub(token: null),
+      );
+
+      expect(authApi.baseUrl, 'http://192.168.5.123:54448');
+      expect(authApi.claimCalls, 1);
+      expect(updated.token, 'claimed-owner-token');
+      expect(updated.pendingSync, isTrue);
+    });
+
+    test('owner token claim reuses an existing saved token', () async {
+      final service = RemoteAccessService.testing(
+        authApiFactory: ({required String baseUrl}) {
+          throw StateError('claim should not be called');
+        },
+      );
+
+      final hub = _serverHub(token: 'saved-owner-token');
+
+      expect(await service.ensureOwnerTokenForHub(hub), same(hub));
+    });
+
     test('disable falls back to the remote endpoint when LAN is unreachable',
         () async {
       final calls = <String>[];
@@ -192,14 +229,17 @@ void main() {
   });
 }
 
-Hub _serverHub({HubEndpoint? remoteEndpoint}) {
+Hub _serverHub({
+  HubEndpoint? remoteEndpoint,
+  String? token = 'owner-token',
+}) {
   final now = DateTime.utc(2026, 6, 4);
   return Hub.server(
     id: 'hub-1',
     homeId: 'home-1',
     name: 'Kitchen Server',
     host: '192.168.5.123',
-    token: 'owner-token',
+    token: token,
     remoteEndpoint: remoteEndpoint,
   ).copyWith(
     createdAt: now,
@@ -264,6 +304,25 @@ class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
       metricsAvailable: false,
       connectorHealthy: false,
     );
+  }
+}
+
+class _FakeAuthApi extends RhythmAuthApi {
+  _FakeAuthApi({
+    required this.baseUrl,
+    required this.claim,
+  }) : super(baseUrl: 'http://127.0.0.1');
+
+  final String baseUrl;
+  final RhythmOwnerClaim claim;
+  int claimCalls = 0;
+
+  @override
+  Future<RhythmOwnerClaim> claimOwnerToken({
+    String label = 'Rhythm app',
+  }) async {
+    claimCalls += 1;
+    return claim;
   }
 }
 

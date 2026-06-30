@@ -22,6 +22,7 @@ import '../services/demo_server_api.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/local_rhythm_server_service.dart';
+import '../services/remote_access_service.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
 
@@ -1277,7 +1278,34 @@ class ServerSyncProvider extends ChangeNotifier {
       useSsl: endpoint.useSsl,
       authToken: auth.authToken,
     );
+    _scheduleRemoteAccessAutoEnable(auth.hub);
     notifyListeners();
+  }
+
+  void _scheduleRemoteAccessAutoEnable(Hub hub) {
+    if (HueServiceLocator.isDemoMode || !FeatureFlags.remoteAccessTunnel) {
+      return;
+    }
+    if (hub.type != HubType.server) return;
+
+    final home = _homeProvider.currentHome;
+    if (home == null) return;
+
+    RemoteAccessService.instance.scheduleAutoEnableForHub(
+      home: home,
+      serverHub: hub,
+      saveHub: _homeProvider.updateHub,
+      resolveLatestHub: _latestCurrentHomeHub,
+      onEnabled: (_) => connectIfAvailable(),
+    );
+  }
+
+  Hub? _latestCurrentHomeHub(String homeId, String hubId) {
+    if (_homeProvider.currentHome?.id != homeId) return null;
+    for (final hub in _homeProvider.currentHomeHubs) {
+      if (hub.id == hubId) return hub;
+    }
+    return null;
   }
 
   /// Retry the active server by reselecting LAN vs tunnel before reconnecting.

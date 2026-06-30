@@ -14,6 +14,7 @@ import 'cloud_backup_service.dart';
 import 'demo_server_api.dart';
 import 'hue/hue_service_locator.dart';
 import 'hue/demo_hue_bridge_service.dart';
+import 'remote_access_service.dart';
 import 'settings_service.dart';
 
 /// Options for controlling what gets synced.
@@ -104,6 +105,10 @@ class AppStateRefresh {
       return const SyncResult.failure('Context not mounted after cloud sync');
     }
 
+    _scheduleRemoteAccessAutoEnableIfAvailable(
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
     await _restoreCloudAppSettingsIfAvailable(context, homeProvider);
     _scheduleCloudBackupIfAvailable(homeProvider);
 
@@ -150,6 +155,38 @@ class AppStateRefresh {
     }
 
     return SyncResult.success(roomsSynced: roomsSynced);
+  }
+
+  static void _scheduleRemoteAccessAutoEnableIfAvailable({
+    required HomeProvider homeProvider,
+    required ServerSyncProvider serverSync,
+  }) {
+    if (HueServiceLocator.isDemoMode) return;
+
+    final home = homeProvider.currentHome;
+    final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+    if (home == null || serverHub == null) return;
+
+    RemoteAccessService.instance.scheduleAutoEnableForHub(
+      home: home,
+      serverHub: serverHub,
+      saveHub: homeProvider.updateHub,
+      resolveLatestHub: (homeId, hubId) =>
+          _latestCurrentHomeHub(homeProvider, homeId, hubId),
+      onEnabled: (_) => serverSync.connectIfAvailable(),
+    );
+  }
+
+  static Hub? _latestCurrentHomeHub(
+    HomeProvider homeProvider,
+    String homeId,
+    String hubId,
+  ) {
+    if (homeProvider.currentHome?.id != homeId) return null;
+    for (final hub in homeProvider.currentHomeHubs) {
+      if (hub.id == hubId) return hub;
+    }
+    return null;
   }
 
   static Future<void> _restoreCloudAppSettingsIfAvailable(

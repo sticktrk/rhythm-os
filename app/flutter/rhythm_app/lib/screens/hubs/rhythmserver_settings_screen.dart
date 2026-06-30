@@ -6,8 +6,6 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
-        RhythmAuthApi,
-        RhythmAuthStatus,
         RhythmConfigApi,
         RhythmConnection,
         RhythmConnectionState,
@@ -21,8 +19,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmOtaUpdateStage,
         RhythmRoom,
         RoomModeState;
-import '../../config/feature_flags.dart';
-import '../../models/plan_tier.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 import '../../providers/server_sync_provider.dart';
@@ -30,13 +26,10 @@ import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ota_service.dart';
-import '../../services/remote_access_service.dart';
 import '../../services/server_endpoint_resolver.dart';
-import '../../services/support_access_service.dart';
 import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
-import '../../widgets/plan_tier_modal.dart';
 import '../../widgets/report_bug_flow.dart';
 import 'ha_configurator_screen.dart';
 import 'hue_configurator_screen.dart';
@@ -807,7 +800,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   Future<void> _showServerSettings() {
     return Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => _RhythmServerAdvancedSettingsScreen(hub: _currentHub),
+        builder: (_) => const _RhythmServerAdvancedSettingsScreen(),
       ),
     );
   }
@@ -2367,11 +2360,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 }
 
 class _RhythmServerAdvancedSettingsScreen extends StatefulWidget {
-  final Hub hub;
-
-  const _RhythmServerAdvancedSettingsScreen({
-    required this.hub,
-  });
+  const _RhythmServerAdvancedSettingsScreen();
 
   @override
   State<_RhythmServerAdvancedSettingsScreen> createState() =>
@@ -2382,161 +2371,7 @@ class _RhythmServerAdvancedSettingsScreenState
     extends State<_RhythmServerAdvancedSettingsScreen> {
   static const _teal = Color(0xFF00BCD4);
   static const _enabledGreen = Color(0xFF22C55E);
-  static const _warningAmber = Color(0xFFE8A54B);
   static const _disabledRed = Color(0xFFEF4444);
-
-  RhythmAuthStatus? _authStatus;
-  String? _authToken;
-  bool _isAuthLoading = true;
-  bool _isRemoteAccessUpdating = false;
-
-  bool get _hasAuthToken {
-    final token = _authToken?.trim();
-    return token != null && token.isNotEmpty;
-  }
-
-  Hub get _currentHub {
-    final hubs = context.read<HomeProvider>().currentHomeHubs;
-    return hubs
-        .where((hub) => hub.id == widget.hub.id)
-        .cast<Hub?>()
-        .firstWhere((hub) => hub != null, orElse: () => widget.hub)!;
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _authToken = widget.hub.token;
-    unawaited(_loadAuthStatus());
-  }
-
-  Future<RhythmAuthApi> _authApi({bool localOnly = false}) async {
-    final resolved = localOnly
-        ? ServerEndpointResolver.local(_currentHub)
-        : await ServerEndpointResolver.resolve(
-            _currentHub,
-            syncProvider: context.read<ServerSyncProvider>(),
-          );
-    return resolved.authApi(authToken: _authToken);
-  }
-
-  Future<void> _loadAuthStatus() async {
-    setState(() => _isAuthLoading = true);
-    try {
-      final status = await (await _authApi()).getStatus();
-      if (!mounted) return;
-      setState(() {
-        _authStatus = status;
-        _isAuthLoading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _authStatus = null;
-        _isAuthLoading = false;
-      });
-    }
-  }
-
-  Future<void> _setRemoteAccessEnabled(bool enabled) async {
-    if (_isRemoteAccessUpdating) return;
-
-    final remoteAccess = RemoteAccessService.instance;
-    if (enabled && !remoteAccess.canUseRemoteAccess) {
-      await PlanTierModal.show(context,
-          highlightFeature: Entitlement.remoteAccess);
-      return;
-    }
-
-    final hub = _currentHub;
-    final homeProvider = context.read<HomeProvider>();
-    final syncProvider = context.read<ServerSyncProvider>();
-    setState(() => _isRemoteAccessUpdating = true);
-    try {
-      if (enabled) {
-        final tokenHub =
-            await _ensureOwnerTokenForRemoteAccess(hub, homeProvider);
-        final result = await remoteAccess.enableForHub(
-          tokenHub,
-          home: homeProvider.currentHome,
-        );
-        await homeProvider.updateHub(result.updatedHub);
-        var supportAccessConfigured = false;
-        try {
-          await SupportAccessService.instance.grantForHub(result.updatedHub);
-          supportAccessConfigured = true;
-        } catch (error) {
-          debugPrint('Support access grant failed: $error');
-        }
-        _showSnackBar(
-          supportAccessConfigured
-              ? 'Remote access enabled. Admin access configured.'
-              : 'Remote access enabled. Admin access not configured.',
-        );
-      } else {
-        final updatedHub = await remoteAccess.disableForHub(
-          hub,
-          home: homeProvider.currentHome,
-        );
-        await homeProvider.updateHub(updatedHub);
-        try {
-          await SupportAccessService.instance.revokeForHub(hub);
-        } catch (error) {
-          debugPrint('Support access revoke failed: $error');
-        }
-        _showSnackBar('Remote access disabled.');
-      }
-      syncProvider.connectIfAvailable();
-    } catch (error) {
-      _showSnackBar(
-        enabled && error is RemoteAccessActivationException
-            ? 'Remote access tunnel is still starting.'
-            : enabled
-                ? 'Could not enable remote access.'
-                : 'Could not disable remote access.',
-      );
-      debugPrint('Remote access update failed: $error');
-    } finally {
-      if (mounted) {
-        setState(() => _isRemoteAccessUpdating = false);
-      }
-    }
-  }
-
-  Future<Hub> _ensureOwnerTokenForRemoteAccess(
-    Hub hub,
-    HomeProvider homeProvider,
-  ) async {
-    final existingToken = hub.token?.trim();
-    if (existingToken != null && existingToken.isNotEmpty) {
-      _authToken = existingToken;
-      return hub;
-    }
-
-    final claim = await (await _authApi(localOnly: true)).claimOwnerToken();
-    final token = claim.token.trim();
-    if (token.isEmpty) {
-      throw StateError('Server returned an empty owner token.');
-    }
-
-    _authToken = token;
-    final updatedHub = hub.copyWith(token: token);
-    final saved = await homeProvider.updateHub(updatedHub);
-    if (!saved && mounted) {
-      _showSnackBar('Owner token created, but could not be saved.');
-    }
-    return updatedHub;
-  }
-
-  void _showSnackBar(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -2553,10 +2388,6 @@ class _RhythmServerAdvancedSettingsScreenState
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const SizedBox(height: 8),
-                    if (FeatureFlags.remoteAccessTunnel) ...[
-                      _buildRemoteAccessSection(),
-                      const SizedBox(height: 16),
-                    ],
                     _buildAutomaticLightingSection(),
                     const SizedBox(height: 40),
                   ],
@@ -2609,57 +2440,6 @@ class _RhythmServerAdvancedSettingsScreenState
           const SizedBox(width: 40),
         ],
       ),
-    );
-  }
-
-  Widget _buildRemoteAccessSection() {
-    context.watch<HomeProvider>();
-    final hub = _currentHub;
-    final configured = hub.remoteEndpoint != null;
-    final canCreateToken = _authStatus?.claimAvailable ?? false;
-    final prerequisitesMet = _hasAuthToken || canCreateToken;
-    final statusText = _isRemoteAccessUpdating
-        ? 'Saving'
-        : configured
-            ? 'Enabled'
-            : _isAuthLoading
-                ? 'Checking'
-                : _authStatus == null
-                    ? 'Unavailable'
-                    : !_hasAuthToken && canCreateToken
-                        ? 'Ready'
-                        : !_hasAuthToken
-                            ? 'Token unavailable'
-                            : 'Off';
-    final statusColor = configured
-        ? _enabledGreen
-        : prerequisitesMet
-            ? _warningAmber
-            : CelestialColors.textSecondary;
-    final canEnable =
-        !_isRemoteAccessUpdating && !_isAuthLoading && prerequisitesMet;
-    final canDisable = !_isRemoteAccessUpdating && configured;
-    final canToggle = configured ? canDisable : canEnable;
-
-    return _buildSection(
-      title: 'REMOTE ACCESS',
-      children: [
-        _buildSwitchRow(
-          icon: Icons.cloud_outlined,
-          iconColor: statusColor,
-          label: 'Remote Access',
-          tooltip:
-              'Uses a secure outbound tunnel so this server can be controlled away from home.',
-          statusText: statusText,
-          statusColor: statusColor,
-          value: configured,
-          activeTrackColor: _teal,
-          busy: _isRemoteAccessUpdating,
-          onChanged: canToggle
-              ? (next) => unawaited(_setRemoteAccessEnabled(next))
-              : null,
-        ),
-      ],
     );
   }
 

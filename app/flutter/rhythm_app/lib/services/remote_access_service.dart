@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -8,16 +10,26 @@ import '../config/feature_flags.dart';
 import '../models/plan_tier.dart';
 import 'account_cloud_sync_service.dart';
 import 'entitlements_service.dart';
+import 'support_access_service.dart';
 
 typedef RemoteAccessApiFactory = RhythmRemoteAccessApi Function({
   required String baseUrl,
   String? authToken,
 });
 
+typedef RemoteAccessAuthApiFactory = RhythmAuthApi Function({
+  required String baseUrl,
+});
+
 typedef RemoteAccessStateLoader = Future<RhythmHello> Function({
   required HubEndpoint endpoint,
   String? authToken,
 });
+
+typedef RemoteAccessHubSaver = Future<bool> Function(Hub hub);
+typedef RemoteAccessLatestHubResolver = Hub? Function(
+    String homeId, String hubId);
+typedef RemoteAccessEnabledCallback = void Function(Hub hub);
 
 class RemoteAccessEnableResult {
   const RemoteAccessEnableResult({
@@ -58,11 +70,13 @@ class RemoteAccessService {
     int activationPollAttempts = 6,
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
+    RemoteAccessAuthApiFactory? authApiFactory,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
         _supabaseClientFactory = supabaseClientFactory,
-        _stateLoader = stateLoader ?? _defaultStateLoader;
+        _stateLoader = stateLoader ?? _defaultStateLoader,
+        _authApiFactory = authApiFactory ?? _defaultAuthApiFactory;
 
   static final RemoteAccessService instance = RemoteAccessService._();
   static const _bootstrapFunctionName = 'remote-access-bootstrap';
@@ -74,6 +88,7 @@ class RemoteAccessService {
     int activationPollAttempts = 1,
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
+    RemoteAccessAuthApiFactory? authApiFactory,
   }) {
     return RemoteAccessService._(
       apiFactory: apiFactory,
@@ -81,6 +96,7 @@ class RemoteAccessService {
       activationPollAttempts: activationPollAttempts,
       supabaseClientFactory: supabaseClientFactory,
       stateLoader: stateLoader ?? _emptyStateLoader,
+      authApiFactory: authApiFactory,
     );
   }
 
@@ -89,6 +105,8 @@ class RemoteAccessService {
   final int _activationPollAttempts;
   final dynamic Function()? _supabaseClientFactory;
   final RemoteAccessStateLoader _stateLoader;
+  final RemoteAccessAuthApiFactory _authApiFactory;
+  final Set<String> _autoEnableInFlight = <String>{};
 
   bool get isEnabledByFlag => FeatureFlags.remoteAccessTunnel;
 
@@ -166,6 +184,112 @@ class RemoteAccessService {
       remoteUrl: remoteUrl,
       tunnelId: tunnelId,
       tunnelName: tunnelName,
+    );
+  }
+
+  void scheduleAutoEnableForHub({
+    required Home home,
+    required Hub serverHub,
+    required RemoteAccessHubSaver saveHub,
+    RemoteAccessLatestHubResolver? resolveLatestHub,
+    RemoteAccessEnabledCallback? onEnabled,
+  }) {
+    if (serverHub.remoteEndpoint != null) return;
+
+    try {
+      if (!canUseRemoteAccess) return;
+    } catch (error) {
+      debugPrint(
+        'RemoteAccessService: auto-enable unavailable for '
+        'hub=${serverHub.id}: $error',
+      );
+      return;
+    }
+
+    final key = '${home.id}:${serverHub.id}';
+    if (!_autoEnableInFlight.add(key)) return;
+
+    unawaited(
+      _autoEnableForHub(
+        home: home,
+        serverHub: serverHub,
+        saveHub: saveHub,
+        resolveLatestHub: resolveLatestHub,
+        onEnabled: onEnabled,
+      ).whenComplete(() => _autoEnableInFlight.remove(key)),
+    );
+  }
+
+  Future<void> _autoEnableForHub({
+    required Home home,
+    required Hub serverHub,
+    required RemoteAccessHubSaver saveHub,
+    RemoteAccessLatestHubResolver? resolveLatestHub,
+    RemoteAccessEnabledCallback? onEnabled,
+  }) async {
+    try {
+      var hub = resolveLatestHub?.call(home.id, serverHub.id) ?? serverHub;
+      if (hub.remoteEndpoint != null) return;
+
+      final tokenHub = await ensureOwnerTokenForHub(hub);
+      if (tokenHub.token != hub.token) {
+        final saved = await saveHub(tokenHub);
+        if (!saved) return;
+        hub = resolveLatestHub?.call(home.id, serverHub.id) ?? tokenHub;
+      }
+      if (hub.remoteEndpoint != null) return;
+
+      final result = await enableForHub(hub, home: home);
+      final saved = await saveHub(result.updatedHub);
+      if (!saved) return;
+
+      try {
+        await SupportAccessService.instance.grantForHub(result.updatedHub);
+      } catch (error) {
+        debugPrint(
+            'RemoteAccessService: support access auto-grant failed: $error');
+      }
+
+      onEnabled?.call(result.updatedHub);
+      debugPrint(
+        'RemoteAccessService: auto-enabled remote access for '
+        'hub=${result.updatedHub.id}',
+      );
+    } catch (error, stackTrace) {
+      debugPrint(
+        'RemoteAccessService: auto-enable skipped for hub=${serverHub.id}: '
+        '$error',
+      );
+      debugPrint('$stackTrace');
+    }
+  }
+
+  Future<Hub> ensureOwnerTokenForHub(Hub serverHub) async {
+    if (!FeatureFlags.remoteAccessTunnel) {
+      throw StateError('Remote access is not enabled in this build.');
+    }
+    if (serverHub.type != HubType.server) {
+      throw StateError(
+          'Remote access is only supported for Rhythm Server hubs.');
+    }
+
+    final existingToken = serverHub.token?.trim();
+    if (existingToken != null && existingToken.isNotEmpty) {
+      return serverHub;
+    }
+
+    final claim = await _authApiFactory(
+      baseUrl: serverHub.endpoint.baseUrl,
+    ).claimOwnerToken();
+    final token = claim.token.trim();
+    if (token.isEmpty) {
+      throw StateError('Server returned an empty owner token.');
+    }
+
+    return serverHub.copyWith(
+      token: token,
+      updatedAt: DateTime.now(),
+      pendingSync: true,
     );
   }
 
@@ -353,6 +477,12 @@ class RemoteAccessService {
       baseUrl: baseUrl,
       authToken: authToken,
     );
+  }
+
+  static RhythmAuthApi _defaultAuthApiFactory({
+    required String baseUrl,
+  }) {
+    return RhythmAuthApi(baseUrl: baseUrl);
   }
 
   static Future<RhythmHello> _defaultStateLoader({
