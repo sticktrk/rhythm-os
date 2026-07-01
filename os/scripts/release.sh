@@ -7,8 +7,9 @@
 #   ./scripts/release.sh
 #   ./scripts/release.sh --minor
 #   ./scripts/release.sh --version 0.5.0
+#   ./scripts/release.sh --with-image
 #   ./scripts/release.sh --upload
-#   ./scripts/release.sh --promote-stable [vX.Y.Z]
+#   ./scripts/release.sh --promote-stable [vX.Y.Z] --with-image
 
 set -euo pipefail
 
@@ -26,6 +27,9 @@ PROMOTE_STABLE=false
 PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
+WITH_IMAGE=false
+IMAGE_MODE="auto"
+IMAGE_MODE_EXPLICIT=false
 WORKSPACE_LOCK_FILES=("Cargo.lock")
 WORKSPACE_VERSION_FILES=("Cargo.toml" "${WORKSPACE_LOCK_FILES[@]}" "os/install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="os/install/rpiz/builder-image.lock"
@@ -49,6 +53,10 @@ Options:
   --promote-stable [VERSION]
                     Create and push vX.Y.Z-stable from the matching
                     vX.Y.Z-beta tag so CI builds/publishes the stable feed
+  --with-image      After pushing the release tag, dispatch rpiz-sd-image.yml
+                    with publish_full_image_ota=true
+  --image-mode MODE Image security posture for rpiz-sd-image.yml: auto, dev,
+                    or prod (default: auto)
   --message TEXT    Annotated tag message (default: "Release vX.Y.Z-beta")
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
@@ -59,19 +67,20 @@ Options:
                     when you know the lock file is already correct.
   -h, --help        Show this help
 
-Full SD-card image builds (sdcard.img + rootfs.ext2.gz) are trigger-only via
-the rpiz-sd-image.yml workflow — this script never dispatches them. For a CHIP/
-Buildroot/defconfig bump, run the workflow manually after the tag is up:
+Full SD-card image builds (sdcard.img + rootfs.ext2.gz) run through the
+rpiz-sd-image.yml workflow. Pass --with-image for CHIP, Buildroot, or defconfig
+changes that need a full rootfs image in the OTA feed.
 
-  gh workflow run rpiz-sd-image.yml -f tag=vX.Y.Z
-  # …or with --publish_full_image_ota=true to also push the rootfs to OTA.
+  $0 --version 0.5.0 --with-image
+  $0 --promote-stable 0.5.0 --with-image
 
 Examples:
   $0
   $0 --minor
   $0 --version 0.4.1
+  $0 --with-image
   $0 --upload
-  $0 --promote-stable v0.4.219
+  $0 --promote-stable v0.4.219 --with-image
   $0 --version v0.4.1 --dry-run
 EOF
 }
@@ -107,6 +116,19 @@ while [[ $# -gt 0 ]]; do
             else
                 shift
             fi
+            ;;
+        --with-image)
+            WITH_IMAGE=true
+            shift
+            ;;
+        --image-mode)
+            if [ $# -lt 2 ]; then
+                echo "Error: --image-mode requires a value" >&2
+                exit 1
+            fi
+            IMAGE_MODE="$2"
+            IMAGE_MODE_EXPLICIT=true
+            shift 2
             ;;
         --message)
             MESSAGE="$2"
@@ -306,6 +328,20 @@ github_repo_url() {
     echo ""
 }
 
+dispatch_image_workflow() {
+    local tag="$1"
+
+    echo "Dispatching rpiz-sd-image.yml for $tag ..."
+    (
+        cd "$REPO_ROOT"
+        gh workflow run rpiz-sd-image.yml \
+            -f "tag=$tag" \
+            -f "publish_full_image_ota=true" \
+            -f "image_mode=$IMAGE_MODE"
+    )
+    echo "Dispatched rpiz-sd-image.yml for $tag with full-image OTA publish enabled."
+}
+
 TEMP_RELEASE_DIR=""
 
 cleanup_temp_release_dir() {
@@ -468,6 +504,20 @@ commit_release_version_update() {
 require_command git
 require_command perl
 
+case "$IMAGE_MODE" in
+    auto|dev|prod)
+        ;;
+    *)
+        echo "Error: --image-mode must be auto, dev, or prod (got '$IMAGE_MODE')" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$IMAGE_MODE_EXPLICIT" = true ] && [ "$WITH_IMAGE" = false ]; then
+    echo "Error: --image-mode requires --with-image" >&2
+    exit 1
+fi
+
 if [ "$PROMOTE_STABLE" = true ]; then
     if [ "$UPLOAD" = true ]; then
         echo "Error: --promote-stable cannot be combined with --upload" >&2
@@ -488,11 +538,26 @@ if [ "$PROMOTE_STABLE" = true ]; then
     if [ -n "$MESSAGE" ]; then
         promote_args+=(--message "$MESSAGE")
     fi
+    if [ "$WITH_IMAGE" = true ]; then
+        promote_args+=(--with-image)
+    fi
+    if [ "$IMAGE_MODE" != "auto" ]; then
+        promote_args+=(--image-mode "$IMAGE_MODE")
+    fi
     if [ -n "$promote_version" ]; then
         promote_args+=(--version "$promote_version")
     fi
 
     exec "$SCRIPT_DIR/promote-stable.sh" "${promote_args[@]}"
+fi
+
+if [ "$WITH_IMAGE" = true ] && [ "$PUSH" = false ]; then
+    echo "Error: --with-image requires pushing the release tag; do not combine it with --no-push or --upload" >&2
+    exit 1
+fi
+
+if [ "$WITH_IMAGE" = true ] && [ "$DRY_RUN" = false ]; then
+    require_command gh
 fi
 
 if [ "$UPLOAD" = true ]; then
@@ -596,7 +661,11 @@ elif [ "$(uname -s)" != "Linux" ]; then
 else
     echo "  Builder image: will refresh dtconcepts/rhythm-rpiz-builder if inputs changed"
 fi
-echo "  rpiz sd image: binary-only (run rpiz-sd-image.yml manually for a full SD-card rebuild)"
+if [ "$WITH_IMAGE" = true ]; then
+    echo "  rpiz sd image: dispatch rpiz-sd-image.yml after tag push (mode: $IMAGE_MODE, full-image OTA: true)"
+else
+    echo "  rpiz sd image: binary-only (run with --with-image for a full SD-card rebuild)"
+fi
 if [ "$UPLOAD" = true ]; then
     echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
     echo "  Retention: keep the latest $SERVER_RELEASES_TO_KEEP server release(s)"
@@ -621,6 +690,9 @@ if [ "$DRY_RUN" = true ]; then
     elif [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
         echo "[dry-run] Would push tag:    git push $REMOTE refs/tags/$TAG"
+        if [ "$WITH_IMAGE" = true ]; then
+            echo "[dry-run] Would dispatch image workflow: gh workflow run rpiz-sd-image.yml -f tag=$TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE"
+        fi
     fi
     exit 0
 fi
@@ -649,6 +721,9 @@ if [ "$UPLOAD" = true ]; then
 elif [ "$PUSH" = true ]; then
     git -C "$REPO_ROOT" push "$REMOTE" "HEAD:refs/heads/$CURRENT_BRANCH"
     git -C "$REPO_ROOT" push "$REMOTE" "refs/tags/$TAG"
+    if [ "$WITH_IMAGE" = true ]; then
+        dispatch_image_workflow "$TAG"
+    fi
 fi
 
 echo ""

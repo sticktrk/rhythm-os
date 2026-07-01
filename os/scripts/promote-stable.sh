@@ -10,6 +10,7 @@
 #   ./scripts/promote-stable.sh --version 0.4.261     # v0.4.261-beta -> v0.4.261-stable
 #   ./scripts/promote-stable.sh --version v0.4.261-beta
 #   ./scripts/promote-stable.sh --version v0.4.261-stable
+#   ./scripts/promote-stable.sh --version 0.4.261 --with-image
 #   ./scripts/promote-stable.sh --dry-run
 #   ./scripts/promote-stable.sh --no-push             # create the stable tag locally only
 
@@ -23,6 +24,9 @@ VERSION=""
 PUSH=true
 DRY_RUN=false
 MESSAGE=""
+WITH_IMAGE=false
+IMAGE_MODE="auto"
+IMAGE_MODE_EXPLICIT=false
 
 usage() {
     cat <<EOF
@@ -37,6 +41,10 @@ Options:
                       vX.Y.Z-beta tag.
   --message TEXT      Annotated stable tag message (default: "Release vX.Y.Z-stable")
   --remote NAME       Remote to push the stable tag to (default: origin)
+  --with-image        After pushing the stable tag, dispatch rpiz-sd-image.yml
+                      with publish_full_image_ota=true
+  --image-mode MODE   Image security posture for rpiz-sd-image.yml: auto, dev,
+                      or prod (default: auto)
   --no-push           Create the stable tag locally but do not push it
   --dry-run           Print the planned tag action without changing git state
   -h, --help          Show this help
@@ -67,6 +75,19 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             REMOTE="$2"
+            shift 2
+            ;;
+        --with-image)
+            WITH_IMAGE=true
+            shift
+            ;;
+        --image-mode)
+            if [ $# -lt 2 ]; then
+                echo "Error: --image-mode requires a value" >&2
+                exit 1
+            fi
+            IMAGE_MODE="$2"
+            IMAGE_MODE_EXPLICIT=true
             shift 2
             ;;
         --no-push)
@@ -131,11 +152,48 @@ tag_commit() {
     git -C "$PROJECT_ROOT" rev-list -n 1 "$tag"
 }
 
+dispatch_image_workflow() {
+    local tag="$1"
+
+    echo "Dispatching rpiz-sd-image.yml for $tag ..."
+    (
+        cd "$PROJECT_ROOT"
+        gh workflow run rpiz-sd-image.yml \
+            -f "tag=$tag" \
+            -f "publish_full_image_ota=true" \
+            -f "image_mode=$IMAGE_MODE"
+    )
+    echo "Dispatched rpiz-sd-image.yml for $tag with full-image OTA publish enabled."
+}
+
 require_command git
 
 if ! git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Error: $PROJECT_ROOT is not a git repository" >&2
     exit 1
+fi
+
+case "$IMAGE_MODE" in
+    auto|dev|prod)
+        ;;
+    *)
+        echo "Error: --image-mode must be auto, dev, or prod (got '$IMAGE_MODE')" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$IMAGE_MODE_EXPLICIT" = true ] && [ "$WITH_IMAGE" = false ]; then
+    echo "Error: --image-mode requires --with-image" >&2
+    exit 1
+fi
+
+if [ "$WITH_IMAGE" = true ] && [ "$PUSH" = false ]; then
+    echo "Error: --with-image requires pushing the stable tag; remove --no-push" >&2
+    exit 1
+fi
+
+if [ "$WITH_IMAGE" = true ] && [ "$DRY_RUN" = false ]; then
+    require_command gh
 fi
 
 if [ -z "$VERSION" ]; then
@@ -190,6 +248,9 @@ if [ "$PUSH" = true ]; then
 else
     echo "  Remote:  (disabled by --no-push)"
 fi
+if [ "$WITH_IMAGE" = true ]; then
+    echo "  Image:   dispatch rpiz-sd-image.yml after tag push (mode: $IMAGE_MODE, full-image OTA: true)"
+fi
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
@@ -204,6 +265,9 @@ if [ "$DRY_RUN" = true ]; then
         else
             echo "[dry-run] Remote stable tag already exists at the source commit."
         fi
+    fi
+    if [ "$WITH_IMAGE" = true ]; then
+        echo "[dry-run] Would dispatch image workflow: gh workflow run rpiz-sd-image.yml -f tag=$STABLE_TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE"
     fi
     exit 0
 fi
@@ -226,4 +290,8 @@ if [ "$PUSH" = true ]; then
 else
     echo "Tag created locally only. Push it when ready:"
     echo "  git push $REMOTE refs/tags/$STABLE_TAG"
+fi
+
+if [ "$WITH_IMAGE" = true ]; then
+    dispatch_image_workflow "$STABLE_TAG"
 fi
