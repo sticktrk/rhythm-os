@@ -31,8 +31,7 @@ import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
-import 'ha_configurator_screen.dart';
-import 'hue_configurator_screen.dart';
+import '../settings/sections/lights_devices_section.dart';
 import 'matter_pairing_flow.dart';
 
 String _formatOtaVersionLabel(String version) {
@@ -2611,6 +2610,7 @@ class RhythmServerHubManagementSection extends StatefulWidget {
     super.key,
     this.showConfigured = true,
     this.showAddOptions = true,
+    this.onResynced,
   });
 
   /// Render the list of already-paired hubs (and their devices).
@@ -2621,6 +2621,10 @@ class RhythmServerHubManagementSection extends StatefulWidget {
   /// (configured only) and the "+" Add Device flow (add options only).
   final bool showAddOptions;
 
+  /// Called after a "Re-Sync" completes, so a host (e.g. the Add & Review
+  /// screen) can reload anything derived from the fresh device data.
+  final VoidCallback? onResynced;
+
   @override
   State<RhythmServerHubManagementSection> createState() =>
       _RhythmServerHubManagementSectionState();
@@ -2628,13 +2632,10 @@ class RhythmServerHubManagementSection extends StatefulWidget {
 
 class _RhythmServerHubManagementSectionState
     extends State<RhythmServerHubManagementSection> {
-  bool _isConfiguringHub = false;
   bool _isFetchingSummaries = false;
   bool _hubSummariesLoaded = false;
+  bool _isResyncing = false;
   Map<String, String> _hubSummaries = {};
-
-  bool get _isHaAddon =>
-      context.read<ServerSyncProvider>().serverPlatformContext == 'ha_addon';
 
   @override
   void initState() {
@@ -2791,130 +2792,14 @@ class _RhythmServerHubManagementSectionState
     ServerSyncProvider syncProvider,
     List<Map<String, dynamic>> configuredHubs,
   ) {
-    final configuredTypes = syncProvider.configuredHubTypes;
-    final hasAnyHub = configuredHubs.isNotEmpty;
-    final haConfigured = configuredTypes.contains('homeassistant') ||
-        configuredTypes.contains('home_assistant');
-    final showHa =
-        syncProvider.canConfigureHub('homeassistant') && !haConfigured;
-    final showHue =
-        syncProvider.canConfigureHub('hue') && !configuredTypes.contains('hue');
     final matterOptions = _buildMatterAddOptionRows(syncProvider);
-    final hasMatterOptions = matterOptions.isNotEmpty;
 
-    if (!showHa && !showHue && !hasMatterOptions && !hasAnyHub) {
-      return null;
-    }
-
-    if (!hasAnyHub) {
-      return _buildSection(
-        title: 'LIGHT HUB',
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: CelestialColors.backgroundCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-              ),
-            ),
-            child: Column(
-              children: [
-                _buildConnectionRow(
-                  label: 'Status',
-                  statusText: 'Not paired',
-                  statusColor: CelestialColors.textSecondary,
-                ),
-                if (showHa) ...[
-                  Divider(
-                    height: 1,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                  ),
-                  _buildHubOptionRow(
-                    icon: Icons.home_outlined,
-                    label: 'Home Assistant',
-                    color: const Color(0xFF42A5F5),
-                    isLoading: _isConfiguringHub,
-                    showBetaBadge: true,
-                    onTap:
-                        _isConfiguringHub ? null : () => _pairHa(syncProvider),
-                  ),
-                ],
-                if (showHue) ...[
-                  Divider(
-                    height: 1,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                  ),
-                  _buildHubOptionRow(
-                    icon: Icons.lightbulb_outline,
-                    label: 'Philips Hue',
-                    color: const Color(0xFFFFB900),
-                    onTap: () => HueConfiguratorScreen.show(context),
-                  ),
-                ],
-                if (hasMatterOptions) ...[
-                  Divider(
-                    height: 1,
-                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-                  ),
-                  ...matterOptions,
-                ],
-              ],
-            ),
-          ),
-        ],
-      );
-    }
-
-    final options = <Widget>[];
-    if (showHa) {
-      options.add(
-        _buildHubOptionRow(
-          icon: Icons.home_outlined,
-          label: 'Add Home Assistant',
-          color: const Color(0xFF42A5F5),
-          isLoading: _isConfiguringHub,
-          showBetaBadge: true,
-          onTap: _isConfiguringHub ? null : () => _pairHa(syncProvider),
-        ),
-      );
-    }
-    if (showHue) {
-      if (options.isNotEmpty) {
-        options.add(
-          Divider(
-            height: 1,
-            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-          ),
+    Widget divider() => Divider(
+          height: 1,
+          color: CelestialColors.orbitRing.withValues(alpha: 0.3),
         );
-      }
-      options.add(
-        _buildHubOptionRow(
-          icon: Icons.lightbulb_outline,
-          label: 'Add Philips Hue',
-          color: const Color(0xFFFFB900),
-          onTap: () => HueConfiguratorScreen.show(context),
-        ),
-      );
-    }
-    if (hasMatterOptions) {
-      if (options.isNotEmpty) {
-        options.add(
-          Divider(
-            height: 1,
-            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-          ),
-        );
-      }
-      options.addAll(matterOptions);
-    }
 
-    if (options.isEmpty) return null;
-
-    return _buildSection(
-      title: 'ADD HUB',
-      children: [
-        Container(
+    Container card(List<Widget> children) => Container(
           decoration: BoxDecoration(
             color: CelestialColors.backgroundCard,
             borderRadius: BorderRadius.circular(14),
@@ -2922,10 +2807,105 @@ class _RhythmServerHubManagementSectionState
               color: CelestialColors.orbitRing.withValues(alpha: 0.5),
             ),
           ),
-          child: Column(children: options),
-        ),
+          child: Column(children: children),
+        );
+
+    // Home Assistant and Hue can't be paired from the app — they're managed on
+    // the hub itself. Surface them as read-only links into the Devices list,
+    // and rely on Re-Sync to pull in whatever bulbs have been paired there.
+    // Matter *can* be added directly, so it sits in its own card below the
+    // read-only group (Re-Sync doesn't apply to it).
+    return _buildSection(
+      title: 'Add Device',
+      children: [
+        card([
+          _buildHubOptionRow(
+            icon: Icons.home_outlined,
+            label: 'Home Assistant',
+            color: const Color(0xFF42A5F5),
+            showBetaBadge: true,
+            trailingLabel: 'Devices',
+            onTap: () => DevicesListScreen.show(context),
+          ),
+          divider(),
+          _buildHubOptionRow(
+            icon: Icons.lightbulb_outline,
+            label: 'Philips Hue',
+            color: const Color(0xFFFFB900),
+            trailingLabel: 'Devices',
+            onTap: () => DevicesListScreen.show(context),
+          ),
+          divider(),
+          _buildResyncRow(),
+        ]),
+        if (matterOptions.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          card(matterOptions),
+        ],
       ],
     );
+  }
+
+  /// Prominent "Re-Sync" action grouped with the read-only Home Assistant / Hue
+  /// links — pulls in whatever bulbs have been paired to those hubs.
+  Widget _buildResyncRow() {
+    const accent = CelestialColors.accentBlue;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _isResyncing ? null : _resync,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            if (_isResyncing)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(accent),
+                ),
+              )
+            else
+              const Icon(Icons.sync_rounded, color: accent, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                _isResyncing ? 'Re-Syncing…' : 'Re-Sync',
+                style: const TextStyle(
+                  color: accent,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            Text(
+              'Add paired bulbs',
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _resync() async {
+    if (_isResyncing) return;
+    setState(() => _isResyncing = true);
+    final syncProvider = context.read<ServerSyncProvider>();
+    try {
+      await syncProvider.api.triggerSync();
+      await syncProvider.fullRefresh();
+      await _fetchHubSummaries();
+      widget.onResynced?.call();
+    } catch (e, st) {
+      debugPrint('RhythmServerHubManagementSection: resync failed: $e\n$st');
+    } finally {
+      if (mounted) setState(() => _isResyncing = false);
+    }
   }
 
   List<Widget> _buildMatterAddOptionRows(ServerSyncProvider syncProvider) {
@@ -2945,23 +2925,6 @@ class _RhythmServerHubManagementSectionState
     await startMatterPairingFlow(context);
     if (!mounted) return;
     await _fetchHubSummaries();
-  }
-
-  Future<void> _pairHa(ServerSyncProvider syncProvider) async {
-    if (_isHaAddon) {
-      setState(() => _isConfiguringHub = true);
-      try {
-        await syncProvider.configureAddonHaHub();
-      } finally {
-        if (mounted) setState(() => _isConfiguringHub = false);
-      }
-      return;
-    }
-
-    final result = await HAConfiguratorScreen.show(context);
-    if (result == true && mounted) {
-      await syncProvider.pushHubCredentials(RoomSourceDto.homeAssistant);
-    }
   }
 
   Widget _buildHubRow(Map<String, dynamic> hubInfo) {
@@ -3054,71 +3017,6 @@ class _RhythmServerHubManagementSectionState
     );
   }
 
-  Widget _buildConnectionRow({
-    required String label,
-    required String statusText,
-    required Color statusColor,
-    bool isPulsing = false,
-    bool isSpinning = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 80,
-            child: Text(
-              label,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                fontSize: 14,
-              ),
-            ),
-          ),
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: statusColor,
-              boxShadow: isPulsing
-                  ? [
-                      BoxShadow(
-                        color: statusColor.withValues(alpha: 0.6),
-                        blurRadius: 6,
-                        spreadRadius: 1,
-                      ),
-                    ]
-                  : null,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              statusText,
-              style: TextStyle(
-                color: statusColor,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          if (isSpinning)
-            SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(
-                strokeWidth: 1.5,
-                valueColor: AlwaysStoppedAnimation(
-                  CelestialColors.textSecondary.withValues(alpha: 0.5),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildHubOptionRow({
     required IconData icon,
     required String label,
@@ -3126,10 +3024,12 @@ class _RhythmServerHubManagementSectionState
     bool isActive = false,
     bool isLoading = false,
     bool showBetaBadge = false,
+    String? trailingLabel,
     VoidCallback? onTap,
   }) {
     return GestureDetector(
       onTap: onTap,
+      behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
@@ -3184,12 +3084,23 @@ class _RhythmServerHubManagementSectionState
                   ),
                 ),
               )
-            else if (onTap != null)
+            else if (onTap != null) ...[
+              if (trailingLabel != null) ...[
+                Text(
+                  trailingLabel,
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.4),
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
               Icon(
                 Icons.chevron_right,
                 color: CelestialColors.textSecondary.withValues(alpha: 0.4),
                 size: 20,
               ),
+            ],
           ],
         ),
       ),

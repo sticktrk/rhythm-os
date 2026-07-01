@@ -14,10 +14,10 @@ import 'providers/hub_connection_provider.dart';
 import 'providers/room_page_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'screens/all_rooms_screen.dart';
+import 'screens/triage_screen.dart';
 import 'screens/server_disconnected_screen.dart';
 import 'screens/settings/automations_screen.dart';
 import 'screens/settings/dialogs/sign_in_modal.dart';
-import 'screens/settings/sections/lights_devices_section.dart';
 import 'screens/settings/settings_screen.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
@@ -655,7 +655,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       left: 18,
                       bottom: MediaQuery.of(context).padding.bottom + 20,
                       child: _FloatingDevicesButton(
-                        onTap: () => AddDeviceScreen.show(context),
+                        onTap: () => TriageScreen.show(context),
+                        badgeCount: context.select<ServerSyncProvider, int>(
+                          (s) => s.triagePendingCount > 0
+                              ? s.triagePendingCount
+                              : s.hubConfiguredConflicts.length,
+                        ),
                       ),
                     ),
                   if (showPreHomeAccountControl)
@@ -1312,13 +1317,11 @@ class _NavFanButtonState extends State<_NavFanButton>
 
     final iconColor = disabled
         ? CelestialColors.textSecondary.withValues(alpha: 0.35)
-        : selected
-            ? Colors.white
-            : accent;
+        : accent;
     final textColor = disabled
         ? CelestialColors.textSecondary.withValues(alpha: 0.35)
         : selected
-            ? Colors.white
+            ? accent
             : CelestialColors.textPrimary;
 
     return AnimatedBuilder(
@@ -1360,7 +1363,12 @@ class _NavFanButtonState extends State<_NavFanButton>
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                       colors: selected
-                          ? [accent, Color.lerp(accent, Colors.black, 0.30)!]
+                          ? [
+                              Color.lerp(CelestialColors.backgroundCard, accent,
+                                  0.22)!,
+                              Color.lerp(CelestialColors.backgroundCard, accent,
+                                  0.10)!,
+                            ]
                           : [
                               CelestialColors.backgroundCard
                                   .withValues(alpha: 0.96),
@@ -1369,9 +1377,13 @@ class _NavFanButtonState extends State<_NavFanButton>
                             ],
                     ),
                     border: Border.all(
-                      color: selected
-                          ? Colors.white.withValues(alpha: 0.35)
-                          : accent.withValues(alpha: disabled ? 0.15 : 0.30),
+                      color: accent.withValues(
+                        alpha: disabled
+                            ? 0.15
+                            : selected
+                                ? 0.6
+                                : 0.3,
+                      ),
                       width: 1,
                     ),
                     boxShadow: [
@@ -1433,26 +1445,22 @@ class _NavFanButtonState extends State<_NavFanButton>
                 height: 52,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  gradient: const RadialGradient(
-                    center: Alignment(-0.4, -0.5),
-                    radius: 1.2,
-                    colors: [Color(0xFF4A6A99), Color(0xFF232B38)],
-                    stops: [0.0, 1.0],
-                  ),
+                  color: CelestialColors.backgroundCard.withValues(alpha: 0.9),
                   boxShadow: [
                     BoxShadow(
-                      color: accent.withValues(alpha: 0.25 + 0.30 * t),
-                      blurRadius: 18 + 8 * t,
-                      spreadRadius: -2,
+                      color: accent.withValues(alpha: 0.20 + 0.28 * t),
+                      blurRadius: 16 + 8 * t,
+                      spreadRadius: -3,
                     ),
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.40),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
+                      color: Colors.black.withValues(alpha: 0.30),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3),
                     ),
                   ],
                   border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.16),
+                    color: accent.withValues(alpha: 0.4 + 0.25 * t),
+                    width: 1,
                   ),
                 ),
                 child: child,
@@ -1468,7 +1476,7 @@ class _NavFanButtonState extends State<_NavFanButton>
                 child: Icon(
                   _open ? Icons.close_rounded : Icons.settings_rounded,
                   key: ValueKey(_open),
-                  color: Colors.white,
+                  color: accent,
                   size: 25,
                 ),
               ),
@@ -1484,59 +1492,93 @@ class _NavFanButtonState extends State<_NavFanButton>
 /// Device flow (pair a hub, Matter device, etc.); the cool cyan glow ties it to
 /// the "Hardware" language used across Settings.
 class _FloatingDevicesButton extends StatelessWidget {
-  const _FloatingDevicesButton({required this.onTap});
+  const _FloatingDevicesButton({required this.onTap, this.badgeCount = 0});
 
   final VoidCallback onTap;
 
+  /// Pending device-review count — shown as an amber badge (moved here from the
+  /// old notifications bell, since "+" now opens the Add & Review screen).
+  final int badgeCount;
+
   @override
   Widget build(BuildContext context) {
-    const bright = Color(0xFF35D0E8);
-    const deep = Color(0xFF0E8FA6);
+    const accent = Color(0xFF35D0E8);
     return Semantics(
       button: true,
-      label: 'Add a device',
-      child: Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () {
-            HapticFeedback.selectionClick();
-            onTap();
-          },
-          child: Container(
-            width: 52,
-            height: 52,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [bright, deep],
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: bright.withValues(alpha: 0.45),
-                  blurRadius: 16,
-                  spreadRadius: -2,
+      label: badgeCount > 0
+          ? 'Add & review, $badgeCount pending'
+          : 'Add a device',
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Material(
+            color: Colors.transparent,
+            shape: const CircleBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () {
+                HapticFeedback.selectionClick();
+                onTap();
+              },
+              child: Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CelestialColors.backgroundCard.withValues(alpha: 0.9),
+                  border: Border.all(
+                    color: accent.withValues(alpha: 0.4),
+                    width: 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.22),
+                      blurRadius: 16,
+                      spreadRadius: -3,
+                    ),
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.30),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
                 ),
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.30),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
+                child: const Icon(
+                  Icons.add_rounded,
+                  color: accent,
+                  size: 26,
                 ),
-              ],
-              border: Border.all(
-                color: Colors.white.withValues(alpha: 0.18),
               ),
-            ),
-            child: const Icon(
-              Icons.add_rounded,
-              color: Colors.white,
-              size: 26,
             ),
           ),
-        ),
+          if (badgeCount > 0)
+            Positioned(
+              right: -2,
+              top: -2,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                constraints: const BoxConstraints(minWidth: 18),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFF9800),
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(
+                    color: CelestialColors.backgroundDark,
+                    width: 2,
+                  ),
+                ),
+                child: Text(
+                  badgeCount > 9 ? '9+' : '$badgeCount',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF1A1A1A),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    height: 1.2,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

@@ -496,20 +496,6 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                   child: Row(
                     children: [
                       GestureDetector(
-                        onTap: () => Navigator.of(context).pop(),
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.black.withValues(alpha: 0.35),
-                          ),
-                          child: const Icon(Icons.close_rounded,
-                              color: Colors.white, size: 18),
-                        ),
-                      ),
-                      const Spacer(),
-                      GestureDetector(
                         onTap: _isLive ? null : _goLive,
                         child: Container(
                           padding: const EdgeInsets.symmetric(
@@ -527,6 +513,20 @@ class _SunPositionScreenState extends State<SunPositionScreen>
                                 fontWeight: FontWeight.w600,
                                 letterSpacing: 2.5,
                               )),
+                        ),
+                      ),
+                      const Spacer(),
+                      GestureDetector(
+                        onTap: () => Navigator.of(context).pop(),
+                        child: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.black.withValues(alpha: 0.35),
+                          ),
+                          child: const Icon(Icons.close_rounded,
+                              color: Colors.white, size: 18),
                         ),
                       ),
                     ],

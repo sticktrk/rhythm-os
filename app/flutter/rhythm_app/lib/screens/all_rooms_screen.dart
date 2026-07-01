@@ -14,7 +14,6 @@ import '../widgets/room_card.dart';
 import '../widgets/hub_connection_banner.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 import 'sun_position_screen.dart';
-import 'triage_screen.dart';
 
 /// All Rooms screen — horizontally paged room cards with edit-mode drag support.
 ///
@@ -843,22 +842,18 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           _HomeChooserButton(
             onTap: widget.onHomeChooserTap,
           ),
-          const SizedBox(width: 10),
+          const Spacer(),
           _SunButton(
             onTap: () => SunPositionScreen.show(context),
           ),
-          const Spacer(),
-          const _NotificationsBell(),
         ],
       ),
     );
   }
 }
 
-/// Circular Home action button paired opposite the notifications bell.
-///
-/// Matches the 34-px height of [_NotificationsBell] so the header reads as
-/// bookended: Home on the left, notifications on the right.
+/// Circular Home action button, sized to match the header's other 34-px
+/// controls (the sun orb beside it).
 class _HomeChooserButton extends StatelessWidget {
   const _HomeChooserButton({required this.onTap});
 
@@ -1461,105 +1456,6 @@ class _CelestialPainter extends CustomPainter {
   }
 }
 
-// ─── Curve Profile Toggle ──────────────────────────────────────────────
-
-/// Top-right notifications bell — the entry point for Device Review (triage).
-///
-/// Replaces the old day/sleep mode toggle. Shows an amber count badge whenever
-/// there are pending triage items or configured-hub conflicts, mirroring the
-/// signal that used to live on the "Device Review" settings row. Tapping opens
-/// the [TriageScreen].
-class _NotificationsBell extends StatelessWidget {
-  const _NotificationsBell();
-
-  static const _amber = Color(0xFFFF9800);
-
-  @override
-  Widget build(BuildContext context) {
-    final pending = context.select<ServerSyncProvider, int>(
-      (s) => s.triagePendingCount,
-    );
-    final conflicts = context.select<ServerSyncProvider, int>(
-      (s) => s.hubConfiguredConflicts.length,
-    );
-    final count = pending > 0 ? pending : conflicts;
-    final hasBadge = count > 0;
-
-    return Semantics(
-      button: true,
-      label: hasBadge ? 'Device review, $count pending' : 'Device review',
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () {
-          HapticFeedback.lightImpact();
-          Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const TriageScreen()),
-          );
-        },
-        child: SizedBox(
-          width: 34,
-          height: 34,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
-                  border: Border.all(
-                    color: hasBadge
-                        ? _amber.withValues(alpha: 0.45)
-                        : CelestialColors.orbitRing.withValues(alpha: 0.25),
-                    width: 1,
-                  ),
-                ),
-                child: Icon(
-                  hasBadge
-                      ? Icons.notifications_active_rounded
-                      : Icons.notifications_none_rounded,
-                  color: hasBadge
-                      ? _amber
-                      : CelestialColors.textSecondary.withValues(alpha: 0.7),
-                  size: 19,
-                ),
-              ),
-              if (hasBadge)
-                Positioned(
-                  right: -3,
-                  top: -3,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 5, vertical: 1),
-                    constraints: const BoxConstraints(minWidth: 16),
-                    decoration: BoxDecoration(
-                      color: _amber,
-                      borderRadius: BorderRadius.circular(9),
-                      border: Border.all(
-                        color: CelestialColors.backgroundDark,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Text(
-                      count > 9 ? '9+' : '$count',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Color(0xFF1A1A1A),
-                        fontSize: 10,
-                        fontWeight: FontWeight.w800,
-                        height: 1.2,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 /// Floating page indicator dots, rendered just above the global bottom nav
 /// over the celestial background — no opaque strip, no own background color.

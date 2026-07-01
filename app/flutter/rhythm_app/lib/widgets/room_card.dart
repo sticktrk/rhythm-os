@@ -306,6 +306,14 @@ class _RoomCardState extends State<RoomCard> {
     });
   }
 
+  /// "On" from any non-adaptive state (Off / Dim / Bright / Mood / standby):
+  /// turn the room on and reset it to the live adaptive curve — same outcome as
+  /// the "Reset to curve" affordance.
+  void _resetToOn() {
+    _applyModeChange(RoomMode.on);
+    context.read<ServerSyncProvider>().dispatchResetNode(widget.roomId);
+  }
+
   /// Reset this node to its adaptive curve position.
   void _resetRoom() {
     HapticFeedback.mediumImpact();
@@ -689,6 +697,7 @@ class _RoomCardState extends State<RoomCard> {
                             onModeChanged: _onModeChanged,
                             onBright: _setBrightMax,
                             onDim: _setDimMin,
+                            onReset: _resetToOn,
                             offCurve: offCurve,
                             cctColor: cctColor,
                             enabled: !isTransitioning,
@@ -1227,6 +1236,10 @@ class _SegmentedToggle extends StatelessWidget {
   final ValueChanged<RoomMode> onModeChanged;
   final VoidCallback onBright;
   final VoidCallback onDim;
+
+  /// Tapping "On" from any non-adaptive state resets the room to its live
+  /// curve (same as the "Reset to curve" action), rather than a plain On.
+  final VoidCallback onReset;
   final bool offCurve;
   final Color cctColor;
   final bool enabled;
@@ -1238,6 +1251,7 @@ class _SegmentedToggle extends StatelessWidget {
     required this.onModeChanged,
     required this.onBright,
     required this.onDim,
+    required this.onReset,
     required this.cctColor,
     this.offCurve = false,
     this.enabled = true,
@@ -1268,7 +1282,9 @@ class _SegmentedToggle extends StatelessWidget {
       case _Seg.off:
         onModeChanged(RoomMode.off);
       case _Seg.on:
-        onModeChanged(RoomMode.on);
+        // Reaching On means we weren't already adaptive-On, so this is a
+        // reset back to the live curve.
+        onReset();
       case _Seg.mood:
         onModeChanged(RoomMode.mood);
       case _Seg.bright:
@@ -1282,7 +1298,7 @@ class _SegmentedToggle extends StatelessWidget {
   Widget build(BuildContext context) {
     final active = _activeSlot;
     const groupA = <_Seg>[_Seg.off, _Seg.on];
-    const groupB = <_Seg>[_Seg.bright, _Seg.dim, _Seg.mood];
+    const groupB = <_Seg>[_Seg.dim, _Seg.bright, _Seg.mood];
 
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 160),
