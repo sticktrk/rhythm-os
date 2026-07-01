@@ -55,6 +55,7 @@ enum LivenessView {
     Acquired {
         last_check_instant: Option<Instant>,
         update_interval_secs: u64,
+        oldest_pending_periodic_tick_age_secs: Option<u64>,
     },
     LockUnavailable,
 }
@@ -71,6 +72,9 @@ fn try_acquire_liveness_view(
                 return LivenessView::Acquired {
                     last_check_instant: s.last_check_instant,
                     update_interval_secs: s.runtime_config.update_interval_secs,
+                    oldest_pending_periodic_tick_age_secs: oldest_pending_periodic_tick_age_secs(
+                        &s,
+                    ),
                 };
             }
             Err(TryLockError::Poisoned(poisoned)) => {
@@ -79,6 +83,9 @@ fn try_acquire_liveness_view(
                 return LivenessView::Acquired {
                     last_check_instant: s.last_check_instant,
                     update_interval_secs: s.runtime_config.update_interval_secs,
+                    oldest_pending_periodic_tick_age_secs: oldest_pending_periodic_tick_age_secs(
+                        &s,
+                    ),
                 };
             }
             Err(TryLockError::WouldBlock) => {
@@ -101,10 +108,15 @@ fn evaluate_liveness(
         LivenessView::Acquired {
             last_check_instant,
             update_interval_secs,
+            oldest_pending_periodic_tick_age_secs,
         } => {
             *consecutive_lock_failures = 0;
-            stale_periodic_liveness(last_check_instant, update_interval_secs)
-                .map(|(age, threshold)| (age, threshold, "periodic_stale"))
+            stale_pending_periodic_tick(oldest_pending_periodic_tick_age_secs, update_interval_secs)
+                .map(|(age, threshold)| (age, threshold, "periodic_tick_pending_stale"))
+                .or_else(|| {
+                    stale_periodic_liveness(last_check_instant, update_interval_secs)
+                        .map(|(age, threshold)| (age, threshold, "periodic_stale"))
+                })
         }
         LivenessView::LockUnavailable => {
             *consecutive_lock_failures = consecutive_lock_failures.saturating_add(1);
@@ -116,6 +128,22 @@ fn evaluate_liveness(
             ))
         }
     }
+}
+
+fn oldest_pending_periodic_tick_age_secs(s: &rhythm_os::state::AppState) -> Option<u64> {
+    s.pending_periodic_ticks
+        .values()
+        .map(|pending| pending.enqueued_at.elapsed().as_secs())
+        .max()
+}
+
+fn stale_pending_periodic_tick(
+    oldest_pending_periodic_tick_age_secs: Option<u64>,
+    update_interval_secs: u64,
+) -> Option<(u64, u64)> {
+    let age_secs = oldest_pending_periodic_tick_age_secs?;
+    let threshold_secs = periodic_liveness_threshold_secs(update_interval_secs);
+    (age_secs > threshold_secs).then_some((age_secs, threshold_secs))
 }
 
 fn stale_periodic_liveness(
@@ -240,6 +268,7 @@ mod tests {
             LivenessView::Acquired {
                 last_check_instant: Some(Instant::now()),
                 update_interval_secs: 60,
+                oldest_pending_periodic_tick_age_secs: None,
             },
             &mut consecutive,
             30,
@@ -259,6 +288,7 @@ mod tests {
             LivenessView::Acquired {
                 last_check_instant: Some(stale_instant),
                 update_interval_secs: 60,
+                oldest_pending_periodic_tick_age_secs: None,
             },
             &mut consecutive,
             30,
@@ -266,6 +296,37 @@ mod tests {
         );
 
         assert_eq!(outcome, Some((301, 300, "periodic_stale")));
+        assert_eq!(consecutive, 0);
+    }
+
+    #[test]
+    fn stale_pending_periodic_tick_trips_after_threshold() {
+        let threshold_secs = periodic_liveness_threshold_secs(60);
+
+        assert!(stale_pending_periodic_tick(Some(threshold_secs), 60).is_none());
+        assert_eq!(
+            stale_pending_periodic_tick(Some(threshold_secs + 1), 60),
+            Some((301, 300))
+        );
+        assert!(stale_pending_periodic_tick(None, 60).is_none());
+    }
+
+    #[test]
+    fn evaluate_liveness_reports_pending_tick_before_scheduler_staleness() {
+        let mut consecutive = 0u64;
+
+        let outcome = evaluate_liveness(
+            LivenessView::Acquired {
+                last_check_instant: Some(Instant::now()),
+                update_interval_secs: 60,
+                oldest_pending_periodic_tick_age_secs: Some(301),
+            },
+            &mut consecutive,
+            30,
+            300,
+        );
+
+        assert_eq!(outcome, Some((301, 300, "periodic_tick_pending_stale")));
         assert_eq!(consecutive, 0);
     }
 }

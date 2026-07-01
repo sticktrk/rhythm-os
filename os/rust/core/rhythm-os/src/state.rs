@@ -163,6 +163,7 @@ impl WorkItem {
 pub struct PendingPeriodicTick {
     pub current_hour: f32,
     pub dispatch_generation: u64,
+    pub enqueued_at: Instant,
 }
 
 impl PendingPeriodicTick {
@@ -170,6 +171,7 @@ impl PendingPeriodicTick {
         Self {
             current_hour,
             dispatch_generation,
+            enqueued_at: Instant::now(),
         }
     }
 }
