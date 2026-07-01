@@ -77,6 +77,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   RoomProvider? _pendingModeActionRoomProvider;
   VoidCallback? _pendingModeActionRoomListener;
   bool _accountActionInProgress = false;
+  bool _activeTabAtRoot = true;
+  bool _routeStateSyncQueued = false;
 
   /// Sticky flag governing the [ServerDisconnectedScreen]. Set true only when
   /// we've been unable to reach the server *and* have never completed a hello
@@ -215,6 +217,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     if (newIndex == _tabIndex) {
       // Re-tap of the active tab pops its nested stack to root.
       _navKeys[tab]?.currentState?.popUntil((route) => route.isFirst);
+      _scheduleActiveTabRouteSync();
       return;
     }
 
@@ -222,7 +225,21 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       _tabIndex = newIndex;
       _builtTabs.add(tab);
     });
+    _scheduleActiveTabRouteSync();
     AnalyticsService().logScreenView(_screenNameFor(tab));
+  }
+
+  void _scheduleActiveTabRouteSync() {
+    if (_routeStateSyncQueued) return;
+    _routeStateSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _routeStateSyncQueued = false;
+      if (!mounted) return;
+      final navigator = _navKeys[_currentTab]?.currentState;
+      final activeTabAtRoot = !(navigator?.canPop() ?? false);
+      if (_activeTabAtRoot == activeTabAtRoot) return;
+      setState(() => _activeTabAtRoot = activeTabAtRoot);
+    });
   }
 
   String _screenNameFor(MainNavTab tab) => switch (tab) {
@@ -534,6 +551,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           (s) => s.hasHomeEntryRefreshGate,
         );
     final hideChrome = showingHardwareGate || enteringHome;
+    final showBottomFloatingChrome =
+        _currentTab == MainNavTab.home && !hideChrome && _activeTabAtRoot;
     final hasCurrentHome = context.select<HomeProvider, bool>(
       (homeProvider) => homeProvider.currentHome != null,
     );
@@ -650,7 +669,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         },
                       ),
                     ),
-                  if (!hideChrome)
+                  if (showBottomFloatingChrome)
                     Positioned(
                       left: 18,
                       bottom: MediaQuery.of(context).padding.bottom + 20,
@@ -675,7 +694,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ),
                   // No bottom nav bar — navigation fans out of a floating gear
                   // button in the bottom-right corner.
-                  if (!hideChrome)
+                  if (showBottomFloatingChrome)
                     Positioned.fill(
                       child: _NavFanButton(
                         currentTab: _currentTab,
@@ -722,6 +741,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             ? _TabNavigator(
                 navigatorKey: _navKeys[tab]!,
                 builder: (_) => _buildTabRoot(tab),
+                onRouteStackChanged: _scheduleActiveTabRouteSync,
               )
             : const SizedBox.shrink(),
       ),
@@ -951,19 +971,52 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 class _TabNavigator extends StatelessWidget {
   final GlobalKey<NavigatorState> navigatorKey;
   final WidgetBuilder builder;
+  final VoidCallback onRouteStackChanged;
 
   const _TabNavigator({
     required this.navigatorKey,
     required this.builder,
+    required this.onRouteStackChanged,
   });
 
   @override
   Widget build(BuildContext context) {
     return Navigator(
       key: navigatorKey,
+      observers: [_TabRouteObserver(onRouteStackChanged)],
       onGenerateRoute: (settings) =>
           MaterialPageRoute(builder: builder, settings: settings),
     );
+  }
+}
+
+class _TabRouteObserver extends NavigatorObserver {
+  _TabRouteObserver(this.onChanged);
+
+  final VoidCallback onChanged;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPush(route, previousRoute);
+    onChanged();
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPop(route, previousRoute);
+    onChanged();
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didRemove(route, previousRoute);
+    onChanged();
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+    onChanged();
   }
 }
 
@@ -1294,7 +1347,7 @@ class _NavFanButtonState extends State<_NavFanButton>
             children: [
               for (var i = 0; i < tabs.length; i++)
                 _buildFanItem(tabs[i], tabs.length - 1 - i),
-              const SizedBox(height: 14),
+              const SizedBox(height: 20),
               _buildGear(),
             ],
           ),
@@ -1331,9 +1384,9 @@ class _NavFanButtonState extends State<_NavFanButton>
         return Opacity(
           opacity: v,
           child: Transform.translate(
-            offset: Offset((1 - v) * 12, (1 - v) * 22),
+            offset: Offset((1 - v) * 18, 0),
             child: Transform.scale(
-              scale: 0.82 + 0.18 * v,
+              scale: 0.92 + 0.08 * v,
               alignment: Alignment.centerRight,
               child: child,
             ),
@@ -1343,7 +1396,7 @@ class _NavFanButtonState extends State<_NavFanButton>
       child: IgnorePointer(
         ignoring: !_open,
         child: Padding(
-          padding: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.only(bottom: 14),
           child: Semantics(
             button: true,
             selected: selected,
@@ -1403,7 +1456,8 @@ class _NavFanButtonState extends State<_NavFanButton>
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(selected ? filled : outline, size: 20, color: iconColor),
+                      Icon(selected ? filled : outline,
+                          size: 20, color: iconColor),
                       const SizedBox(width: 11),
                       Text(
                         label,
@@ -1505,9 +1559,8 @@ class _FloatingDevicesButton extends StatelessWidget {
     const accent = Color(0xFF35D0E8);
     return Semantics(
       button: true,
-      label: badgeCount > 0
-          ? 'Add & review, $badgeCount pending'
-          : 'Add a device',
+      label:
+          badgeCount > 0 ? 'Add & review, $badgeCount pending' : 'Add a device',
       child: Stack(
         clipBehavior: Clip.none,
         children: [

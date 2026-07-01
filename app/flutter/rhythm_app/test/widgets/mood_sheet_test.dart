@@ -50,6 +50,30 @@ void main() {
     );
   });
 
+  testWidgets('color tab uses a wheel without quick-pick swatches',
+      (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialTab: MoodTab.color,
+            scenesLoader: () async => const [],
+            onColorChanged: (_) {},
+            onSceneSelected: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+
+    expect(find.byKey(const Key('mood_color_wheel')), findsOneWidget);
+    expect(find.byKey(const Key('mood_color_preset_red')), findsNothing);
+    expect(find.text('Red'), findsNothing);
+    expect(find.text('Ember'), findsNothing);
+    expect(find.text('Amber'), findsNothing);
+    expect(find.text('Blue'), findsNothing);
+  });
+
   testWidgets('choosing a color clears the active scene selection',
       (tester) async {
     final scene = _scene('evening-glow');
