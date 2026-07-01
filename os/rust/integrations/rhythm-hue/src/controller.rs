@@ -93,11 +93,21 @@ impl<H: HueTransport> HueLightController<H> {
         (room_label, caps, adapted)
     }
 
-    fn unsupported_device_dispatch(&self, target: &HubDispatchTarget) -> LightControlError {
-        LightControlError::CommandFailed(format!(
-            "Hue device-addressed dispatch is not implemented for target {}",
-            target.label()
-        ))
+    fn device_context(
+        &self,
+        native_ids: &[String],
+        command: &LightingCommand,
+    ) -> rhythm_devices::AdaptedCommand {
+        let caps = rhythm_os::controller_helpers::resolve_device_capabilities(
+            self.capability_state.as_ref(),
+            self.capability_hub_key.as_ref(),
+            native_ids,
+        );
+        rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            command,
+            ColorPreference::PreferColorTemperature,
+        )
     }
 
     fn send_group_turn_on(
@@ -282,12 +292,176 @@ impl<H: HueTransport> HueLightController<H> {
             return self.group_any_lights_on(&room_id, &grouped_light_id);
         }
 
-        debug!(
-            target: "cmd",
-            "Hue any_lights_on skipped for device target [{}]: no exact grouped_light match",
-            native_ids.join(",")
-        );
+        for native_id in native_ids {
+            let is_on = self
+                .client
+                .is_light_on(&self.username, native_id)
+                .map_err(|e| {
+                    LightControlError::CommandFailed(format!(
+                        "Failed to check Hue light {}: {}",
+                        native_id, e
+                    ))
+                })?;
+            if is_on {
+                return Ok(true);
+            }
+        }
         Ok(false)
+    }
+
+    fn send_direct_devices_turn_on(
+        &self,
+        native_ids: &[String],
+        command: LightingCommand,
+    ) -> LightControlResult<()> {
+        if native_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(
+                "Hue turn_on target has no light IDs".to_string(),
+            ));
+        }
+
+        let adapted = self.device_context(native_ids, &command);
+        let dynamics = adapted.transition_ms.map(|ms| ms as u16);
+        let label = native_ids.join(",");
+        let started = Instant::now();
+
+        for native_id in native_ids {
+            if let Err(e) = self.client.set_light(
+                &self.username,
+                native_id,
+                true,
+                adapted.brightness,
+                adapted.kelvin,
+                adapted.xy,
+                dynamics.filter(|ms| *ms > 0),
+            ) {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "hue_light_turn_on_failed",
+                    light_id = %native_id,
+                    target = %label,
+                    latency_ms = started.elapsed().as_millis(),
+                    error = %e,
+                    "Hue light turn_on failed"
+                );
+                return Err(LightControlError::CommandFailed(format!(
+                    "Failed to turn on Hue light {}: {}",
+                    native_id, e
+                )));
+            }
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "hue_light_turn_on",
+                target = %label,
+                latency_ms,
+                brightness = adapted.brightness.unwrap_or(0),
+                kelvin = ?adapted.kelvin,
+                xy = ?adapted.xy,
+                transition_ms = ?adapted.transition_ms,
+                direct_color = command.is_direct_color,
+                "Hue light turn_on slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "hue_light_turn_on",
+                target = %label,
+                latency_ms,
+                brightness = adapted.brightness.unwrap_or(0),
+                kelvin = ?adapted.kelvin,
+                xy = ?adapted.xy,
+                transition_ms = ?adapted.transition_ms,
+                direct_color = command.is_direct_color,
+                "Hue light turn_on"
+            );
+        } else {
+            debug!(
+                target: "cmd",
+                "Hue light turn_on: target={} bri={} kelvin={:?} xy={:?} transition_ms={:?} latency_ms={}",
+                label,
+                adapted.brightness.unwrap_or(0),
+                adapted.kelvin,
+                adapted.xy,
+                adapted.transition_ms,
+                latency_ms
+            );
+        }
+
+        Ok(())
+    }
+
+    fn send_direct_devices_turn_off(
+        &self,
+        native_ids: &[String],
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<()> {
+        if native_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(
+                "Hue turn_off target has no light IDs".to_string(),
+            ));
+        }
+
+        let fade_ms = transition_ms
+            .map(|ms| u16::try_from(ms).unwrap_or(u16::MAX))
+            .filter(|ms| *ms > 0);
+        let label = native_ids.join(",");
+        let started = Instant::now();
+
+        for native_id in native_ids {
+            if let Err(e) =
+                self.client
+                    .set_light(&self.username, native_id, false, None, None, None, fade_ms)
+            {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "hue_light_turn_off_failed",
+                    light_id = %native_id,
+                    target = %label,
+                    latency_ms = started.elapsed().as_millis(),
+                    error = %e,
+                    "Hue light turn_off failed"
+                );
+                return Err(LightControlError::CommandFailed(format!(
+                    "Failed to turn off Hue light {}: {}",
+                    native_id, e
+                )));
+            }
+        }
+
+        let latency_ms = started.elapsed().as_millis();
+        if latency_ms >= DISPATCH_WARN_MS {
+            tracing::warn!(
+                target: "cmd",
+                event = "hue_light_turn_off",
+                target = %label,
+                latency_ms,
+                transition_ms = ?transition_ms,
+                "Hue light turn_off slow"
+            );
+        } else if latency_ms >= DISPATCH_INFO_MS {
+            tracing::info!(
+                target: "cmd",
+                event = "hue_light_turn_off",
+                target = %label,
+                latency_ms,
+                transition_ms = ?transition_ms,
+                "Hue light turn_off"
+            );
+        } else {
+            debug!(
+                target: "cmd",
+                "Hue light turn_off: target={} transition_ms={:?} latency_ms={}",
+                label,
+                transition_ms,
+                latency_ms
+            );
+        }
+
+        Ok(())
     }
 
     fn send_devices_turn_on(
@@ -299,11 +473,7 @@ impl<H: HueTransport> HueLightController<H> {
             return self.send_group_turn_on(&room_id, &grouped_light_id, command);
         }
 
-        Err(
-            self.unsupported_device_dispatch(&HubDispatchTarget::Devices {
-                native_ids: native_ids.to_vec(),
-            }),
-        )
+        self.send_direct_devices_turn_on(native_ids, command)
     }
 
     fn send_devices_turn_off(
@@ -315,11 +485,7 @@ impl<H: HueTransport> HueLightController<H> {
             return self.send_group_turn_off(&room_id, &grouped_light_id, transition_ms);
         }
 
-        Err(
-            self.unsupported_device_dispatch(&HubDispatchTarget::Devices {
-                native_ids: native_ids.to_vec(),
-            }),
-        )
+        self.send_direct_devices_turn_off(native_ids, transition_ms)
     }
 }
 
@@ -636,8 +802,9 @@ mod tests {
     }
 
     #[test]
-    fn any_lights_on_device_target_without_match_returns_false_quietly() {
+    fn any_lights_on_device_target_without_match_checks_direct_lights() {
         let (controller, _) = make_spy_controller();
+        controller.client.set_is_on(true);
 
         let result = block_on(
             controller.any_lights_on_target(&HubDispatchTarget::Devices {
@@ -646,11 +813,15 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!result);
+        assert!(result);
         let calls = controller.client.calls();
         assert!(!calls
             .iter()
             .any(|call| matches!(call, HueTransportCall::IsGroupedLightOn { .. })));
+        assert!(calls.iter().any(|call| matches!(
+            call,
+            HueTransportCall::IsLightOn { light_id } if light_id == "orphan"
+        )));
     }
 
     #[test]
@@ -684,6 +855,41 @@ mod tests {
                 assert!(*on);
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn turn_on_device_target_without_match_uses_direct_light() {
+        let (controller, _) = make_spy_controller();
+
+        let cmd = LightingCommand::with_transition(80, 4000, 500);
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["orphan".to_string()],
+            },
+            cmd,
+        ))
+        .unwrap();
+
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+        let calls = controller.client.set_light_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            HueTransportCall::SetLight {
+                light_id,
+                on,
+                brightness,
+                kelvin,
+                fade_ms,
+                ..
+            } => {
+                assert_eq!(light_id, "orphan");
+                assert!(*on);
+                assert_eq!(*brightness, Some(80));
+                assert_eq!(*kelvin, Some(4000));
+                assert_eq!(*fade_ms, Some(500));
+            }
+            other => panic!("Expected SetLight, got {:?}", other),
         }
     }
 
@@ -779,6 +985,36 @@ mod tests {
                 assert_eq!(*fade_ms, Some(80));
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn turn_off_device_target_without_match_uses_direct_light() {
+        let (controller, _) = make_spy_controller();
+
+        block_on(controller.turn_off_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["orphan".to_string()],
+            },
+            Some(80),
+        ))
+        .unwrap();
+
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+        let calls = controller.client.set_light_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            HueTransportCall::SetLight {
+                light_id,
+                on,
+                fade_ms,
+                ..
+            } => {
+                assert_eq!(light_id, "orphan");
+                assert!(!*on);
+                assert_eq!(*fade_ms, Some(80));
+            }
+            other => panic!("Expected SetLight, got {:?}", other),
         }
     }
 

@@ -33,8 +33,27 @@ pub trait HueTransport: Send + Sync {
         fade_ms: Option<u16>,
     ) -> anyhow::Result<()>;
 
+    /// Control a single Hue light resource via V2 API.
+    ///
+    /// Uses the same command body shape as grouped_light control, but targets
+    /// `PUT /clip/v2/resource/light/{id}`.
+    #[allow(clippy::too_many_arguments)]
+    fn set_light(
+        &self,
+        username: &str,
+        light_id: &str,
+        on: bool,
+        brightness: Option<u8>,
+        kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
+        fade_ms: Option<u16>,
+    ) -> anyhow::Result<()>;
+
     /// Check if a grouped_light (room) has any lights on.
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> anyhow::Result<bool>;
+
+    /// Check whether a single Hue light resource is on.
+    fn is_light_on(&self, username: &str, light_id: &str) -> anyhow::Result<bool>;
 
     /// Trigger the Hue V2 native identify effect on a single light resource.
     ///

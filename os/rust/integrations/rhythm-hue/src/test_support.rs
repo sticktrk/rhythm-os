@@ -39,8 +39,23 @@ impl HueTransport for Arc<SpyHueTransport> {
             fade_ms,
         )
     }
+    fn set_light(
+        &self,
+        username: &str,
+        light_id: &str,
+        on: bool,
+        brightness: Option<u8>,
+        kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
+        fade_ms: Option<u16>,
+    ) -> anyhow::Result<()> {
+        (**self).set_light(username, light_id, on, brightness, kelvin, xy, fade_ms)
+    }
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> anyhow::Result<bool> {
         (**self).is_grouped_light_on(username, grouped_light_id)
+    }
+    fn is_light_on(&self, username: &str, light_id: &str) -> anyhow::Result<bool> {
+        (**self).is_light_on(username, light_id)
     }
     fn identify_light(&self, username: &str, light_id: &str) -> anyhow::Result<()> {
         (**self).identify_light(username, light_id)
@@ -65,8 +80,19 @@ pub enum HueTransportCall {
         xy: Option<(f32, f32)>,
         fade_ms: Option<u16>,
     },
+    SetLight {
+        light_id: String,
+        on: bool,
+        brightness: Option<u8>,
+        kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
+        fade_ms: Option<u16>,
+    },
     IsGroupedLightOn {
         grouped_light_id: String,
+    },
+    IsLightOn {
+        light_id: String,
     },
     IdentifyLight {
         light_id: String,
@@ -120,6 +146,17 @@ impl SpyHueTransport {
             .unwrap()
             .iter()
             .filter(|c| matches!(c, HueTransportCall::SetGroupedLight { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Get only `SetLight` calls.
+    pub fn set_light_calls(&self) -> Vec<HueTransportCall> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c, HueTransportCall::SetLight { .. }))
             .cloned()
             .collect()
     }
@@ -190,6 +227,30 @@ impl HueTransport for SpyHueTransport {
         Ok(())
     }
 
+    fn set_light(
+        &self,
+        _username: &str,
+        light_id: &str,
+        on: bool,
+        brightness: Option<u8>,
+        kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
+        fade_ms: Option<u16>,
+    ) -> anyhow::Result<()> {
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: set_light failed");
+        }
+        self.calls.lock().unwrap().push(HueTransportCall::SetLight {
+            light_id: light_id.to_string(),
+            on,
+            brightness,
+            kelvin,
+            xy,
+            fade_ms,
+        });
+        Ok(())
+    }
+
     fn is_grouped_light_on(&self, _username: &str, grouped_light_id: &str) -> anyhow::Result<bool> {
         self.calls
             .lock()
@@ -199,6 +260,19 @@ impl HueTransport for SpyHueTransport {
             });
         if self.should_fail.load(Ordering::Relaxed) {
             anyhow::bail!("spy: is_grouped_light_on failed");
+        }
+        Ok(*self.is_on.lock().unwrap())
+    }
+
+    fn is_light_on(&self, _username: &str, light_id: &str) -> anyhow::Result<bool> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::IsLightOn {
+                light_id: light_id.to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: is_light_on failed");
         }
         Ok(*self.is_on.lock().unwrap())
     }
@@ -272,14 +346,19 @@ mod tests {
         assert!(spy
             .set_grouped_light("user", "gl1", true, None, None, None, None)
             .is_err());
+        assert!(spy
+            .set_light("user", "light1", true, None, None, None, None)
+            .is_err());
     }
 
     #[test]
     fn is_on_configurable() {
         let spy = SpyHueTransport::new();
         assert!(!spy.is_grouped_light_on("user", "gl1").unwrap());
+        assert!(!spy.is_light_on("user", "light1").unwrap());
         spy.set_is_on(true);
         assert!(spy.is_grouped_light_on("user", "gl1").unwrap());
+        assert!(spy.is_light_on("user", "light1").unwrap());
     }
 
     #[test]

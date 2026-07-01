@@ -183,11 +183,28 @@ mod tests {
             Ok(())
         }
 
+        fn set_light(
+            &self,
+            _username: &str,
+            _light_id: &str,
+            _on: bool,
+            _brightness: Option<u8>,
+            _kelvin: Option<u16>,
+            _xy: Option<(f32, f32)>,
+            _fade_ms: Option<u16>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn is_grouped_light_on(
             &self,
             _username: &str,
             _grouped_light_id: &str,
         ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn is_light_on(&self, _username: &str, _light_id: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
 

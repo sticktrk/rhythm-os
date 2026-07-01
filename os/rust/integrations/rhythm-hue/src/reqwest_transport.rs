@@ -6,7 +6,7 @@
 use std::mem::ManuallyDrop;
 use std::time::Duration;
 
-use crate::api_types::{HueV2GroupedLight, HueV2Response};
+use crate::api_types::{HueV2GroupedLight, HueV2Light, HueV2Response};
 use crate::transport::HueTransport;
 use anyhow::Result;
 
@@ -18,6 +18,38 @@ fn identify_light_body() -> serde_json::Value {
     serde_json::json!({
         "identify": { "action": HUE_IDENTIFY_ACTION }
     })
+}
+
+fn light_control_body(
+    on: bool,
+    brightness: Option<u8>,
+    kelvin: Option<u16>,
+    xy: Option<(f32, f32)>,
+    fade_ms: Option<u16>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "on": { "on": on }
+    });
+
+    if on {
+        if let Some(bri) = brightness {
+            let bri_pct = (bri as f32).clamp(1.0, 100.0);
+            body["dimming"] = serde_json::json!({ "brightness": bri_pct });
+        }
+
+        if let Some((x, y)) = xy {
+            body["color"] = serde_json::json!({ "xy": { "x": x, "y": y } });
+        } else if let Some(k) = kelvin {
+            let mirek = ((1_000_000.0_f32 / k as f32).round() as u32).clamp(153, 500);
+            body["color_temperature"] = serde_json::json!({ "mirek": mirek });
+        }
+    }
+
+    if let Some(ms) = fade_ms {
+        body["dynamics"] = serde_json::json!({ "duration": ms });
+    }
+
+    body
 }
 
 /// Hue bridge transport using `reqwest` with rustls.
@@ -100,28 +132,7 @@ impl HueTransport for ReqwestHueTransport {
             grouped_light_id
         );
 
-        let mut body = serde_json::json!({
-            "on": { "on": on }
-        });
-
-        if on {
-            if let Some(bri) = brightness {
-                let bri_pct = (bri as f32).clamp(1.0, 100.0);
-                body["dimming"] = serde_json::json!({ "brightness": bri_pct });
-            }
-
-            if let Some((x, y)) = xy {
-                // Direct color via CIE xy coordinates (takes precedence over kelvin)
-                body["color"] = serde_json::json!({ "xy": { "x": x, "y": y } });
-            } else if let Some(k) = kelvin {
-                let mirek = ((1_000_000.0_f32 / k as f32).round() as u32).clamp(153, 500);
-                body["color_temperature"] = serde_json::json!({ "mirek": mirek });
-            }
-        }
-
-        if let Some(ms) = fade_ms {
-            body["dynamics"] = serde_json::json!({ "duration": ms });
-        }
+        let body = light_control_body(on, brightness, kelvin, xy, fade_ms);
 
         let resp = self
             .client
@@ -136,6 +147,40 @@ impl HueTransport for ReqwestHueTransport {
             return Err(anyhow::anyhow!(
                 "PUT grouped_light/{} failed with status {}: {}",
                 grouped_light_id,
+                status,
+                body
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn set_light(
+        &self,
+        username: &str,
+        light_id: &str,
+        on: bool,
+        brightness: Option<u8>,
+        kelvin: Option<u16>,
+        xy: Option<(f32, f32)>,
+        fade_ms: Option<u16>,
+    ) -> Result<()> {
+        let url = format!("{}/clip/v2/resource/light/{}", self.base_url(), light_id);
+        let body = light_control_body(on, brightness, kelvin, xy, fade_ms);
+
+        let resp = self
+            .client
+            .put(&url)
+            .header("hue-application-key", username)
+            .json(&body)
+            .send()?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "PUT light/{} failed with status {}: {}",
+                light_id,
                 status,
                 body
             ));
@@ -196,6 +241,33 @@ impl HueTransport for ReqwestHueTransport {
             .data
             .first()
             .and_then(|gl| gl.on.as_ref())
+            .map(|s| s.on)
+            .unwrap_or(false))
+    }
+
+    fn is_light_on(&self, username: &str, light_id: &str) -> Result<bool> {
+        let url = format!("{}/clip/v2/resource/light/{}", self.base_url(), light_id);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("hue-application-key", username)
+            .send()?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(anyhow::anyhow!(
+                "GET light/{} failed with status {}",
+                light_id,
+                status
+            ));
+        }
+
+        let envelope: HueV2Response<HueV2Light> = resp.json()?;
+        Ok(envelope
+            .data
+            .first()
+            .and_then(|light| light.on.as_ref())
             .map(|s| s.on)
             .unwrap_or(false))
     }

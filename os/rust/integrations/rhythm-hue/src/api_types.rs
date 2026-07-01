@@ -18,6 +18,14 @@ pub struct HueV2GroupedLight {
     pub on: Option<HueV2OnState>,
 }
 
+/// A Hue V2 light resource (single bulb/light state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HueV2Light {
+    pub id: String,
+    #[serde(default)]
+    pub on: Option<HueV2OnState>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HueV2OnState {
     pub on: bool,
