@@ -1117,8 +1117,8 @@ class _DefaultTransitionEditorScreenState
   }
 
   String get _detailTitle => switch (widget.detail) {
-        AutomationDetail.automatic => 'Day/Sleep Automatic',
-        AutomationDetail.button => 'Day/Sleep Button Toggle',
+        AutomationDetail.automatic => 'Alarm Schedule',
+        AutomationDetail.button => 'Wake/Sleep Button',
       };
 
   Widget _buildDetailHeader(BuildContext context) {

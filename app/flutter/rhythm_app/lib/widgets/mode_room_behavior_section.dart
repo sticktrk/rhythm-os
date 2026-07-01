@@ -179,7 +179,7 @@ _RoomDefaultMode _nextRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
 
 String _roomDefaultLabel(_RoomDefaultMode mode) => switch (mode) {
       _RoomDefaultMode.active => 'On',
-      _RoomDefaultMode.standby => 'Standby',
+      _RoomDefaultMode.standby => 'Dim',
       _RoomDefaultMode.off => 'Off',
       _RoomDefaultMode.none => 'No override',
     };

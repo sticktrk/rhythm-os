@@ -17,6 +17,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmTimerSetting;
 import 'device_detail_sheet.dart';
 import 'info_tooltip.dart';
+import 'off_behavior_switch.dart';
+import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -179,9 +181,14 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             // Tab selector
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: _TabSelector(
+              child: SegmentedTabBar<_SheetTab>(
                 selected: _selectedTab,
                 onChanged: (tab) => setState(() => _selectedTab = tab),
+                tabs: const [
+                  SegmentedTab('Settings', _SheetTab.rhythm),
+                  SegmentedTab('Devices', _SheetTab.devices),
+                  SegmentedTab('Info', _SheetTab.settings),
+                ],
               ),
             ),
             const SizedBox(height: 16),
@@ -302,10 +309,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               accentColor: Color(0xFF7C83FF),
               iconSize: 15,
               message: 'What this room does when it switches off. Off cuts the '
-                  'lights fully. Standby keeps them in a low, ready state '
+                  'lights fully. Dim keeps them in a low, ready state '
                   'instead of going dark.',
             ),
-            trailing: _OffBehaviorSwitch(
+            trailing: OffBehaviorSwitch(
               standby: standbyEnabled,
               onChanged: (val) => _setStandbyEnabled(context, val),
             ),
@@ -810,76 +817,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 }
 
-/// Segmented tab selector for Settings / Devices.
-class _TabSelector extends StatelessWidget {
-  final _SheetTab selected;
-  final ValueChanged<_SheetTab> onChanged;
-
-  const _TabSelector({required this.selected, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 36,
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-          width: 1,
-        ),
-      ),
-      child: Row(
-        children: [
-          _tabItem('Settings', _SheetTab.rhythm),
-          _tabItem('Devices', _SheetTab.devices),
-          _tabItem('Info', _SheetTab.settings),
-        ],
-      ),
-    );
-  }
-
-  Widget _tabItem(String label, _SheetTab tab) {
-    final isSelected = selected == tab;
-    return Expanded(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () {
-          HapticFeedback.selectionClick();
-          onChanged(tab);
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          margin: const EdgeInsets.all(3),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? CelestialColors.sunWarm.withValues(alpha: 0.2)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(15),
-            border: isSelected
-                ? Border.all(
-                    color: CelestialColors.sunWarm.withValues(alpha: 0.4),
-                    width: 1,
-                  )
-                : null,
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: isSelected
-                  ? CelestialColors.sunWarm
-                  : CelestialColors.textSecondary.withValues(alpha: 0.7),
-              fontSize: 13,
-              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-              letterSpacing: 0.5,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 /// A single row in the settings sheet.
 class _SettingsRow extends StatelessWidget {
@@ -938,81 +875,6 @@ class _SettingsRow extends StatelessWidget {
             ),
             trailing,
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// A two-segment switch for a room's off behavior — both options stay visible
-/// ("Off" | "Standby") with the active one tinted. Tapping a segment selects
-/// that state.
-class _OffBehaviorSwitch extends StatelessWidget {
-  final bool standby;
-  final ValueChanged<bool> onChanged;
-
-  const _OffBehaviorSwitch({required this.standby, required this.onChanged});
-
-  static const Color _standbyColor = Color(0xFF7C83FF);
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundDark.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.4),
-        ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _segment(
-            label: 'Off',
-            selected: !standby,
-            color: CelestialColors.textSecondary,
-            onTap: () => onChanged(false),
-          ),
-          _segment(
-            label: 'Standby',
-            selected: standby,
-            color: _standbyColor,
-            onTap: () => onChanged(true),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _segment({
-    required String label,
-    required bool selected,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOut,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-        decoration: BoxDecoration(
-          color: selected ? color.withValues(alpha: 0.18) : Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected
-                ? color
-                : CelestialColors.textSecondary.withValues(alpha: 0.5),
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.2,
-          ),
         ),
       ),
     );

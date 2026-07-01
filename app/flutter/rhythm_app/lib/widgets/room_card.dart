@@ -271,6 +271,41 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
+  /// "Bright" — jump the room to 100% brightness at its current color.
+  void _setBrightMax() => _setManualBrightness(100);
+
+  /// "Dim" — jump the room to 1% brightness at its current color.
+  void _setDimMin() => _setManualBrightness(1);
+
+  /// Set a manual brightness, exactly as if the slider were dragged there.
+  /// Ensures the room is on (active) first, so it also works from Off / Mood.
+  void _setManualBrightness(int percent) {
+    HapticFeedback.mediumImpact();
+    final roomProvider = context.read<RoomProvider>();
+    final serverSync = context.read<ServerSyncProvider>();
+    final state = roomProvider.getDisplayRoomState(widget.roomId);
+    if (state != RoomModeState.active) {
+      roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+      roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+      roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
+      serverSync.pushNodePreferences(
+        widget.roomId,
+        rhythmEnabled: true,
+        state: RoomModeState.active,
+      );
+    }
+    serverSync.dispatchNodeCurveBrightness(widget.roomId, percent);
+    AnalyticsService().logRoomBrightnessAdjusted(
+      roomId: widget.roomId,
+      brightness: percent,
+    );
+    setState(() {
+      _sliderBrightness = percent;
+      _cctMode = false;
+      _sliderKelvin = null;
+    });
+  }
+
   /// Reset this node to its adaptive curve position.
   void _resetRoom() {
     HapticFeedback.mediumImpact();
@@ -361,8 +396,6 @@ class _RoomCardState extends State<RoomCard> {
         // Check if this room's hub is reachable.
         final hubConnected = context.select<ServerSyncProvider, bool>(
             (p) => p.isRoomHubConnected(room.source));
-        final standbyEnabled = context.select<ServerSyncProvider, bool>(
-            (p) => p.standbyEnabledForNode(widget.roomId));
         // Scene currently bound as this room's mood (null = custom color mood).
         final moodSceneId = context.select<ServerSyncProvider, String?>(
             (p) => p.moodSceneIdForRoom(widget.roomId));
@@ -465,6 +498,17 @@ class _RoomCardState extends State<RoomCard> {
         // Room is "off curve" when brightness or time has been manually adjusted
         final offCurve = mode == RoomMode.on &&
             (room.brightnessOffset != 0 || room.timeOffsetMinutes != 0);
+
+        // On with a manual brightness (off the adaptive curve) — either
+        // persisted or being dragged right now. This is what separates On
+        // (adaptive) from the manual Bright/Dim states, and it's stable while
+        // the slider moves so the brightness/CCT row doesn't flip mid-drag.
+        final manualBrightness = mode == RoomMode.on &&
+            (room.brightnessOffset != 0 || _sliderBrightness != null);
+        // Split the manual range in half: the lower half reads as Dim, the
+        // upper half as Bright. Bright jumps to 100%, Dim to 1%.
+        final dim = manualBrightness && displayBrightness < 50;
+        final bright = manualBrightness && !dim;
 
         final sliderActive =
             !isTransitioning && (mode == RoomMode.on || mode == RoomMode.mood);
@@ -633,24 +677,29 @@ class _RoomCardState extends State<RoomCard> {
                             ],
                           ),
                         ),
-                        // Big three-segment power control.
+                        // Two-group power/look control:
+                        //   [ Off · On · Standby ]   [ Bright · Mood ]
+                        // Standby only appears when enabled for this room.
                         Padding(
                           padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
                           child: _SegmentedToggle(
                             mode: mode,
+                            bright: bright,
+                            dim: dim,
                             onModeChanged: _onModeChanged,
+                            onBright: _setBrightMax,
+                            onDim: _setDimMin,
                             offCurve: offCurve,
                             cctColor: cctColor,
-                            standbyEnabled: standbyEnabled,
                             enabled: !isTransitioning,
                           ),
                         ),
-                        if (mode == RoomMode.on ||
-                            mode == RoomMode.mood ||
-                            mode == RoomMode.standby)
+                        // Brightness / CCT row for any manual on-state (Bright
+                        // or Dim) and Mood — hidden for On (adaptive) and Off.
+                        if (bright || dim || mode == RoomMode.mood)
                           GestureDetector(
                             behavior: HitTestBehavior.opaque,
-                            onTap: mode == RoomMode.standby ? () {} : null,
+                            onTap: null,
                             onLongPress: () {},
                             child: Padding(
                               padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
@@ -1157,89 +1206,175 @@ class _CCTGradientTrackShape extends SliderTrackShape
 /// every state is visible and discoverable — no hidden long-press. A
 /// highlight pill slides behind the active segment. Horizontal drag also
 /// works for users who prefer to flick.
-class _SegmentedToggle extends StatefulWidget {
+/// The room card's power/look control, rendered as two separate pill groups:
+///
+///   [ Off · On · Standby ]        [ Bright · Mood ]
+///
+/// The first group is the power state (Off · On). The second is the "look":
+/// Bright — a shortcut to 100% brightness — Dim — a shortcut to 1% brightness —
+/// and Mood. Exactly one segment across both groups is highlighted at a time,
+/// reflecting the room's current state.
+enum _Seg { off, on, bright, dim, mood }
+
+class _SegmentedToggle extends StatelessWidget {
   final RoomMode mode;
+
+  /// On with a manual brightness in the upper half — highlights Bright.
+  final bool bright;
+
+  /// On with a manual brightness in the lower half — highlights Dim.
+  final bool dim;
   final ValueChanged<RoomMode> onModeChanged;
+  final VoidCallback onBright;
+  final VoidCallback onDim;
   final bool offCurve;
   final Color cctColor;
-  final bool standbyEnabled;
   final bool enabled;
 
   const _SegmentedToggle({
     required this.mode,
+    required this.bright,
+    required this.dim,
     required this.onModeChanged,
+    required this.onBright,
+    required this.onDim,
     required this.cctColor,
-    this.standbyEnabled = false,
     this.offCurve = false,
     this.enabled = true,
   });
 
-  @override
-  State<_SegmentedToggle> createState() => _SegmentedToggleState();
-}
+  _Seg get _activeSlot => switch (mode) {
+        // A room in standby (off-behavior "Dim") still reads as Off on the card.
+        RoomMode.off || RoomMode.standby => _Seg.off,
+        RoomMode.mood => _Seg.mood,
+        RoomMode.on => dim
+            ? _Seg.dim
+            : bright
+                ? _Seg.bright
+                : _Seg.on,
+      };
 
-class _SegmentedToggleState extends State<_SegmentedToggle> {
-  static const double _height = 56;
-  static const double _padding = 4;
-
-  /// Index of the segment currently under the dragging finger; null when
-  /// not dragging. Lets the highlight preview the drag in real time and
-  /// commit to the segment under the finger on release.
-  int? _dragIndex;
-
-  static const List<_SegmentSpec> _segments = [
-    _SegmentSpec(RoomMode.mood, Icons.spa_rounded, 'Mood'),
-    _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
-    _SegmentSpec(RoomMode.on, Icons.lightbulb_rounded, 'On'),
-  ];
-
-  int _indexFor(RoomMode m) {
-    if (m == RoomMode.standby) return _indexFor(RoomMode.on);
-    final segs = _segments;
-    for (var i = 0; i < segs.length; i++) {
-      if (segs[i].mode == m) return i;
-    }
-    return 1;
-  }
-
-  int _indexAtX(double x, double trackWidth) {
-    final segs = _segments;
-    final usable = trackWidth - _padding * 2;
-    if (usable <= 0) return 0;
-    final segWidth = usable / segs.length;
-    final localX = (x - _padding).clamp(0.0, usable);
-    return (localX / segWidth).floor().clamp(0, segs.length - 1);
-  }
-
-  void _select(int i, {bool repeatTap = false}) {
-    if (!widget.enabled) return;
-    final target = _segments[i].mode;
-    if (repeatTap &&
-        target == RoomMode.on &&
-        widget.mode == RoomMode.on &&
-        widget.standbyEnabled) {
-      widget.onModeChanged(RoomMode.standby);
+  void _select(_Seg seg) {
+    if (!enabled) return;
+    // Re-tapping the active segment is a no-op, except Mood (re-opens the
+    // scene picker) and Bright/Dim (re-apply their brightness).
+    if (seg == _activeSlot &&
+        seg != _Seg.mood &&
+        seg != _Seg.bright &&
+        seg != _Seg.dim) {
       return;
     }
-    if (target != widget.mode || (repeatTap && target == RoomMode.mood)) {
-      widget.onModeChanged(target);
+    switch (seg) {
+      case _Seg.off:
+        onModeChanged(RoomMode.off);
+      case _Seg.on:
+        onModeChanged(RoomMode.on);
+      case _Seg.mood:
+        onModeChanged(RoomMode.mood);
+      case _Seg.bright:
+        onBright();
+      case _Seg.dim:
+        onDim();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final segments = _displaySegments();
-    final restingIndex = _indexFor(widget.mode);
-    final activeIndex = _dragIndex ?? restingIndex;
-    final activeMode = segments[activeIndex].mode;
-    final activeText = _activeTextColor(activeMode);
-    final inactiveText = const Color(0xFF8B949E);
+    final active = _activeSlot;
+    const groupA = <_Seg>[_Seg.off, _Seg.on];
+    const groupB = <_Seg>[_Seg.bright, _Seg.dim, _Seg.mood];
+
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 160),
+      opacity: enabled ? 1.0 : 0.58,
+      child: Row(
+        children: [
+          Expanded(
+            flex: groupA.length,
+            child: _SegmentGroupTrack(
+              segments: groupA,
+              active: groupA.contains(active) ? active : null,
+              onSelect: _select,
+              enabled: enabled,
+              offCurve: offCurve,
+              cctColor: cctColor,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            flex: groupB.length,
+            child: _SegmentGroupTrack(
+              segments: groupB,
+              active: groupB.contains(active) ? active : null,
+              onSelect: _select,
+              enabled: enabled,
+              offCurve: offCurve,
+              cctColor: cctColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A single pill-shaped segmented group. Renders its segments with a sliding
+/// highlight behind the active one (only when [active] is non-null — i.e. the
+/// active segment lives in this group). Supports tap and horizontal-drag
+/// selection within the group.
+class _SegmentGroupTrack extends StatefulWidget {
+  final List<_Seg> segments;
+  final _Seg? active;
+  final ValueChanged<_Seg> onSelect;
+  final bool enabled;
+  final bool offCurve;
+  final Color cctColor;
+
+  const _SegmentGroupTrack({
+    required this.segments,
+    required this.active,
+    required this.onSelect,
+    required this.enabled,
+    required this.offCurve,
+    required this.cctColor,
+  });
+
+  @override
+  State<_SegmentGroupTrack> createState() => _SegmentGroupTrackState();
+}
+
+class _SegmentGroupTrackState extends State<_SegmentGroupTrack> {
+  static const double _height = 56;
+  static const double _padding = 4;
+
+  /// Index under the dragging finger; null when not dragging.
+  int? _dragIndex;
+
+  int _indexAtX(double x, double trackWidth) {
+    final n = widget.segments.length;
+    final usable = trackWidth - _padding * 2;
+    if (usable <= 0) return 0;
+    final segWidth = usable / n;
+    final localX = (x - _padding).clamp(0.0, usable);
+    return (localX / segWidth).floor().clamp(0, n - 1);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final segs = widget.segments;
+    final restingIndex =
+        widget.active == null ? -1 : segs.indexOf(widget.active!);
+    final highlightIndex = _dragIndex ?? restingIndex;
+    final showHighlight = highlightIndex >= 0;
+    final activeSeg = showHighlight ? segs[highlightIndex] : null;
+    final activeText = activeSeg == null ? null : _activeTextColor(activeSeg);
+    const inactiveText = Color(0xFF8B949E);
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final trackWidth = constraints.maxWidth;
         final usable = trackWidth - _padding * 2;
-        final segWidth = usable / segments.length;
+        final segWidth = usable / segs.length;
 
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -1252,115 +1387,98 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
           onHorizontalDragUpdate: (details) {
             if (!widget.enabled) return;
             final idx = _indexAtX(details.localPosition.dx, trackWidth);
-            if (idx != _dragIndex) {
-              setState(() => _dragIndex = idx);
-            }
+            if (idx != _dragIndex) setState(() => _dragIndex = idx);
           },
           onHorizontalDragEnd: (_) {
             if (!widget.enabled) return;
             final idx = _dragIndex;
             if (idx == null) return;
             setState(() => _dragIndex = null);
-            _select(idx);
+            widget.onSelect(segs[idx]);
           },
           onHorizontalDragCancel: () {
             if (_dragIndex == null) return;
             setState(() => _dragIndex = null);
           },
-          child: AnimatedOpacity(
-            duration: const Duration(milliseconds: 160),
-            opacity: widget.enabled ? 1.0 : 0.58,
-            child: Container(
-              height: _height,
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(_height / 2),
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF161B22), Color(0xFF1C222B)],
-                ),
+          child: Container(
+            height: _height,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(_height / 2),
+              gradient: const LinearGradient(
+                colors: [Color(0xFF161B22), Color(0xFF1C222B)],
               ),
-              padding: const EdgeInsets.all(_padding),
-              child: Stack(
-                children: [
-                  // Sliding highlight pill behind the active segment.
+            ),
+            padding: const EdgeInsets.all(_padding),
+            child: Stack(
+              children: [
+                if (showHighlight)
                   AnimatedPositioned(
                     duration: _dragIndex != null
                         ? const Duration(milliseconds: 120)
                         : const Duration(milliseconds: 280),
                     curve: Curves.easeOutCubic,
-                    left: activeIndex * segWidth,
+                    left: highlightIndex * segWidth,
                     top: 0,
                     bottom: 0,
                     width: segWidth,
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 280),
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(
-                          (_height - _padding * 2) / 2,
-                        ),
-                        gradient: _highlightGradient(activeMode),
+                        borderRadius:
+                            BorderRadius.circular((_height - _padding * 2) / 2),
+                        gradient: _highlightGradient(activeSeg!),
                         boxShadow: widget.enabled
-                            ? _highlightShadow(activeMode)
+                            ? _highlightShadow(activeSeg)
                             : const [],
                       ),
                     ),
                   ),
-                  // Tap targets + icon/label stacks.
-                  Row(
-                    children: [
-                      for (var i = 0; i < segments.length; i++)
-                        Expanded(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: () => _select(i, repeatTap: true),
-                            child: Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  AnimatedSwitcher(
-                                    duration: const Duration(milliseconds: 200),
-                                    child: Icon(
-                                      segments[i].icon,
-                                      key: ValueKey(
-                                          '${segments[i].label}-${i == activeIndex}'),
-                                      size: 21,
-                                      color: i == activeIndex
-                                          ? activeText
-                                          : inactiveText,
-                                    ),
+                Row(
+                  children: [
+                    for (var i = 0; i < segs.length; i++)
+                      Expanded(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            if (!widget.enabled) return;
+                            widget.onSelect(segs[i]);
+                          },
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _iconFor(segs[i]),
+                                  size: 21,
+                                  color: i == highlightIndex
+                                      ? (activeText ?? inactiveText)
+                                      : inactiveText,
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  _labelFor(segs[i]),
+                                  maxLines: 1,
+                                  softWrap: false,
+                                  overflow: TextOverflow.visible,
+                                  style: TextStyle(
+                                    color: i == highlightIndex
+                                        ? (activeText ?? inactiveText)
+                                        : inactiveText,
+                                    fontSize:
+                                        _labelFor(segs[i]).length > 5 ? 9.5 : 12,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.3,
                                   ),
-                                  const SizedBox(height: 3),
-                                  AnimatedDefaultTextStyle(
-                                    duration: const Duration(milliseconds: 220),
-                                    style: TextStyle(
-                                      color: i == activeIndex
-                                          ? activeText
-                                          : inactiveText,
-                                      // "Standby" is wider than the other
-                                      // labels — shrink long labels so they
-                                      // don't crowd the segment.
-                                      fontSize: segments[i].label.length > 5
-                                          ? 9.5
-                                          : 12,
-                                      fontWeight: FontWeight.w600,
-                                      letterSpacing: 0.3,
-                                    ),
-                                    child: Text(
-                                      segments[i].label,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.visible,
-                                      softWrap: false,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                    ],
-                  ),
-                ],
-              ),
+                      ),
+                  ],
+                ),
+              ],
             ),
           ),
         );
@@ -1368,20 +1486,32 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
     );
   }
 
-  List<_SegmentSpec> _displaySegments() {
-    if (widget.mode != RoomMode.standby) return _segments;
-    return const [
-      _SegmentSpec(RoomMode.mood, Icons.spa_rounded, 'Mood'),
-      _SegmentSpec(RoomMode.off, Icons.power_settings_new_rounded, 'Off'),
-      _SegmentSpec(
-          RoomMode.standby, Icons.lightbulb_outline_rounded, 'Standby'),
-    ];
-  }
+  IconData _iconFor(_Seg s) => switch (s) {
+        _Seg.off => Icons.power_settings_new_rounded,
+        _Seg.on => Icons.lightbulb_rounded,
+        _Seg.dim => Icons.brightness_low_rounded,
+        _Seg.bright => Icons.brightness_7_rounded,
+        _Seg.mood => Icons.spa_rounded,
+      };
 
-  Gradient _highlightGradient(RoomMode m) {
+  String _labelFor(_Seg s) => switch (s) {
+        _Seg.off => 'Off',
+        _Seg.on => 'On',
+        // Labeled "Dim" on the room card only; the settings sheets still call
+        // this behavior "Standby".
+        _Seg.dim => 'Dim',
+        _Seg.bright => 'Bright',
+        _Seg.mood => 'Scenes',
+      };
+
+  Gradient _highlightGradient(_Seg s) {
     const base = Color(0xFF1C1C1C);
-    switch (m) {
-      case RoomMode.standby:
+    switch (s) {
+      case _Seg.off:
+        return const LinearGradient(
+          colors: [Color(0xFF353B45), Color(0xFF3F454F)],
+        );
+      case _Seg.dim:
         return LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -1390,7 +1520,8 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
             Color.lerp(base, widget.cctColor, 0.18)!,
           ],
         );
-      case RoomMode.on:
+      case _Seg.on:
+      case _Seg.bright:
         final start = Color.lerp(base, widget.cctColor, 0.50)!;
         final end = Color.lerp(base, widget.cctColor, 0.65)!;
         if (widget.offCurve) {
@@ -1409,7 +1540,7 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
           end: Alignment.bottomRight,
           colors: [start, end],
         );
-      case RoomMode.mood:
+      case _Seg.mood:
         return LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -1418,16 +1549,14 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
             Color.lerp(base, widget.cctColor, 0.25)!,
           ],
         );
-      case RoomMode.off:
-        return const LinearGradient(
-          colors: [Color(0xFF353B45), Color(0xFF3F454F)],
-        );
     }
   }
 
-  List<BoxShadow> _highlightShadow(RoomMode m) {
-    switch (m) {
-      case RoomMode.standby:
+  List<BoxShadow> _highlightShadow(_Seg s) {
+    switch (s) {
+      case _Seg.off:
+        return const <BoxShadow>[];
+      case _Seg.dim:
         return [
           BoxShadow(
             color: widget.cctColor.withValues(alpha: 0.18),
@@ -1435,7 +1564,8 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
             spreadRadius: -3,
           ),
         ];
-      case RoomMode.on:
+      case _Seg.on:
+      case _Seg.bright:
         return [
           BoxShadow(
             color: widget.cctColor
@@ -1444,7 +1574,7 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
             spreadRadius: -2,
           ),
         ];
-      case RoomMode.mood:
+      case _Seg.mood:
         return [
           BoxShadow(
             color: widget.cctColor.withValues(alpha: 0.25),
@@ -1452,34 +1582,26 @@ class _SegmentedToggleState extends State<_SegmentedToggle> {
             spreadRadius: -2,
           ),
         ];
-      case RoomMode.off:
-        return const <BoxShadow>[];
     }
   }
 
-  Color _activeTextColor(RoomMode m) {
-    switch (m) {
-      case RoomMode.standby:
+  Color _activeTextColor(_Seg s) {
+    switch (s) {
+      case _Seg.off:
+        return const Color(0xFFE6E8EB);
+      case _Seg.dim:
         return const Color(0xFFEADCC0);
-      case RoomMode.on:
+      case _Seg.on:
+      case _Seg.bright:
         final probe =
             Color.lerp(const Color(0xFF1C1C1C), widget.cctColor, 0.60)!;
         return probe.computeLuminance() > 0.30
             ? const Color(0xFF1A1A1E)
             : const Color(0xFFFFF3DC);
-      case RoomMode.mood:
+      case _Seg.mood:
         return const Color(0xFFFFF3DC);
-      case RoomMode.off:
-        return const Color(0xFFE6E8EB);
     }
   }
-}
-
-class _SegmentSpec {
-  final RoomMode mode;
-  final IconData icon;
-  final String label;
-  const _SegmentSpec(this.mode, this.icon, this.label);
 }
 
 /// Compact motion indicator: walk icon when active, countdown text when timing out.

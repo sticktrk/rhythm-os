@@ -25,7 +25,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
     if (bridgeHub != null) {
       return RhythmServerSettingsScreen(
         hub: bridgeHub,
-        headerTitleOverride: 'RhythmOS Server',
+        headerTitleOverride: 'LightBox',
         useBackButton: true,
       );
     }
@@ -48,7 +48,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
                         SettingsRow(
                           icon: Icons.developer_board,
                           iconColor: const Color(0xFF00BCD4),
-                          label: 'Connect RhythmOS Server',
+                          label: 'Connect LightBox',
                           onTap: () => ConnectHubScreen.show(
                             context,
                             mode: ConnectHubMode.rhythmServer,
@@ -90,7 +90,7 @@ class RhythmServerDetailScreen extends StatelessWidget {
           ),
           const Expanded(
             child: Text(
-              'RhythmOS Server',
+              'LightBox',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: CelestialColors.textPrimary,

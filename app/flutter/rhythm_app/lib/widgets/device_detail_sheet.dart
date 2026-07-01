@@ -4,7 +4,9 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
+import 'off_behavior_switch.dart';
 import 'room_picker_sheet.dart';
+import 'segmented_tab_bar.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 Future<bool> showDeviceNodeAssignmentFlow(
@@ -149,6 +151,9 @@ Future<bool> showDeviceRoomAssignmentFlow(
 /// Bottom sheet showing canonical device details + connections.
 ///
 /// Opened by tapping a device row in [RoomSettingsSheet].
+/// Tabs on the device (bulb) detail sheet — mirrors the room settings sheet.
+enum _DeviceTab { settings, network, info }
+
 class DeviceDetailSheet extends StatefulWidget {
   final RhythmDevice device;
   final String roomId;
@@ -184,6 +189,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
   bool _removing = false;
+  _DeviceTab _selectedTab = _DeviceTab.settings;
 
   @override
   void initState() {
@@ -219,6 +225,13 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
     );
+    // Standby (Off Behavior) is a node-level setting. It only applies to a
+    // light that is its own addressable node (an "individual bulb" that shows
+    // as its own card) — the same nodes a room's standby toggle governs.
+    final isStandbyCapable = device.type == RhythmDeviceType.light &&
+        context.select<ServerSyncProvider, bool>(
+          (sync) => sync.nodeById(device.id) != null,
+        );
 
     return Padding(
       padding: EdgeInsets.only(top: topPad + 100),
@@ -235,7 +248,6 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           ],
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
             // Drag handle
             Padding(
@@ -268,11 +280,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     child: Icon(icon, color: iconColor, size: 24),
                   ),
                   const SizedBox(height: 12),
+                  // The name is a plain title here; renaming lives on the
+                  // Device Info row (Info tab) with a pencil.
                   _DeviceNameButton(
                     label: deviceDisplayName,
-                    onTap: device.type == RhythmDeviceType.light
-                        ? () => _showRenameDialog(context)
-                        : null,
+                    onTap: null,
                   ),
                   if (device.productInfo != null)
                     Padding(
@@ -290,56 +302,35 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 ],
               ),
             ),
-            // Content
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                children: [
-                  _buildInfoSection(device),
-                  const SizedBox(height: 16),
-                  if (_loading)
-                    const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(20),
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: CelestialColors.sunWarm,
-                          ),
-                        ),
-                      ),
-                    )
-                  else if (_canonicalData != null) ...[
-                    _buildConnectionsSection(),
-                    const SizedBox(height: 16),
-                    if (device.type == RhythmDeviceType.light) ...[
-                      _buildRenameButton(context),
-                      const SizedBox(height: 12),
-                      _FlashButton(
-                        deviceLabel: deviceDisplayName,
-                        onFlash: () => context
-                            .read<ServerSyncProvider>()
-                            .api
-                            .flashCanonicalDevice(device.id),
-                      ),
-                      const SizedBox(height: 12),
-                    ],
-                    if (device.type == RhythmDeviceType.light &&
-                        _matterNativeId != null) ...[
-                      _buildMatterTesterButton(context, _matterNativeId!),
-                      const SizedBox(height: 12),
-                    ],
-                    _buildMoveButton(context),
-                    if (_matterNativeId != null && canUnpairMatter) ...[
-                      const SizedBox(height: 12),
-                      _buildRemoveButton(context),
-                    ],
-                  ],
-                  const SizedBox(height: 16),
+            // Tab selector
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: SegmentedTabBar<_DeviceTab>(
+                selected: _selectedTab,
+                onChanged: (tab) => setState(() => _selectedTab = tab),
+                tabs: const [
+                  SegmentedTab('Settings', _DeviceTab.settings),
+                  SegmentedTab('Network', _DeviceTab.network),
+                  SegmentedTab('Info', _DeviceTab.info),
                 ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Tab content — Expanded so the sheet keeps a stable height across
+            // tabs (short tabs fill/scroll instead of shrinking the card).
+            Expanded(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: switch (_selectedTab) {
+                  _DeviceTab.settings => _buildSettingsTab(
+                      context,
+                      device,
+                      isStandbyCapable,
+                    ),
+                  _DeviceTab.network =>
+                    _buildNetworkTab(context, device, canUnpairMatter),
+                  _DeviceTab.info => _buildInfoTab(context, device),
+                },
               ),
             ),
             // Done button
@@ -380,7 +371,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
-  Widget _buildInfoSection(RhythmDevice device) {
+  Widget _buildInfoSection(BuildContext context, RhythmDevice device) {
     final typeLabel = switch (device.type) {
       RhythmDeviceType.light => 'Light',
       RhythmDeviceType.button => 'Button',
@@ -391,6 +382,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final rhythmId = _canonicalData?['id'] as String?;
 
     return _buildGroup('Device Info', [
+      // Editable name (lights only) — the pencil is the rename affordance.
+      if (device.type == RhythmDeviceType.light) _buildNameEditRow(context),
       _InfoRow(label: 'Type', value: typeLabel),
       if (device.manufacturer != null)
         _InfoRow(label: 'Manufacturer', value: device.manufacturer!),
@@ -405,45 +398,201 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     ]);
   }
 
-  Widget _buildRenameButton(BuildContext context) {
-    return GestureDetector(
-      onTap: () => _showRenameDialog(context),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-          ),
-        ),
+  /// Per-bulb "Off Behavior" — mirrors the room-level standby control. Off cuts
+  /// the light fully; Standby keeps it in a low, ready state.
+  Widget _buildOffBehaviorSection(RhythmDevice device) {
+    final standby = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.standbyEnabledForNode(device.id),
+    );
+    return _buildGroup('Off Behavior', [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
         child: Row(
           children: [
-            Icon(
-              Icons.edit_outlined,
-              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
-              size: 20,
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'When turned off',
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Dim keeps a low, ready glow instead of going dark.',
+                    style: TextStyle(
+                      color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                      fontSize: 11,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(width: 12),
-            const Expanded(
+            OffBehaviorSwitch(
+              standby: standby,
+              onChanged: (val) => _setStandbyEnabled(device, val),
+            ),
+          ],
+        ),
+      ),
+    ]);
+  }
+
+  void _setStandbyEnabled(RhythmDevice device, bool enabled) {
+    final sync = context.read<ServerSyncProvider>();
+    sync.setNodeStandbyEnabledLocal(device.id, enabled);
+    sync.pushNodePreferences(device.id, standbyEnabled: enabled);
+  }
+
+  // ── Tab content ──────────────────────────────────────────────────────────
+
+  /// Settings tab: Off Behavior (standby) + Move.
+  Widget _buildSettingsTab(
+    BuildContext context,
+    RhythmDevice device,
+    bool isStandbyCapable,
+  ) {
+    return ListView(
+      key: const ValueKey('settings'),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      children: [
+        if (isStandbyCapable) ...[
+          _buildOffBehaviorSection(device),
+          const SizedBox(height: 16),
+        ],
+        if (_loading)
+          _tabLoadingIndicator()
+        else if (_canonicalData != null)
+          _buildMoveButton(context),
+      ],
+    );
+  }
+
+  /// Network tab: how this device connects (its hub / bridge), the bulb tester
+  /// for Matter lights, Identify, and Remove.
+  Widget _buildNetworkTab(
+    BuildContext context,
+    RhythmDevice device,
+    bool canUnpairMatter,
+  ) {
+    final isLight = device.type == RhythmDeviceType.light;
+    return ListView(
+      key: const ValueKey('network'),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      children: [
+        if (_loading)
+          _tabLoadingIndicator()
+        else if (_canonicalData != null) ...[
+          _buildConnectionsSection(),
+          if (isLight && _matterNativeId != null) ...[
+            const SizedBox(height: 12),
+            _buildMatterTesterButton(context, _matterNativeId!),
+          ],
+          if (isLight) ...[
+            const SizedBox(height: 12),
+            _FlashButton(
+              deviceLabel: _deviceDisplayName,
+              onFlash: () => context
+                  .read<ServerSyncProvider>()
+                  .api
+                  .flashCanonicalDevice(device.id),
+            ),
+          ],
+          if (_matterNativeId != null && canUnpairMatter) ...[
+            const SizedBox(height: 12),
+            _buildRemoveButton(context),
+          ],
+        ] else
+          _tabHint('No connection info available.'),
+      ],
+    );
+  }
+
+  /// Info tab: read-only device details.
+  Widget _buildInfoTab(BuildContext context, RhythmDevice device) {
+    return ListView(
+      key: const ValueKey('info'),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      children: [
+        _buildInfoSection(context, device),
+      ],
+    );
+  }
+
+  /// Editable "Name" row for the Device Info group — value plus a pencil that
+  /// opens the rename dialog. Lights only.
+  Widget _buildNameEditRow(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _showRenameDialog(context),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+        child: Row(
+          children: [
+            const Text(
+              'Name',
+              style: TextStyle(
+                color: CelestialColors.textSecondary,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
               child: Text(
-                'Rename Bulb...',
-                style: TextStyle(
+                _deviceDisplayName,
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
                   color: CelestialColors.textPrimary,
-                  fontSize: 15,
+                  fontSize: 14,
                 ),
               ),
             ),
-            const Icon(
-              Icons.chevron_right,
-              color: CelestialColors.textSecondary,
-              size: 20,
+            const SizedBox(width: 8),
+            Icon(
+              Icons.edit_outlined,
+              size: 16,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.85),
             ),
           ],
         ),
       ),
     );
   }
+
+  Widget _tabLoadingIndicator() => const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: CelestialColors.sunWarm,
+            ),
+          ),
+        ),
+      );
+
+  Widget _tabHint(String text) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Center(
+          child: Text(
+            text,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+              fontSize: 13,
+            ),
+          ),
+        ),
+      );
 
   Future<void> _showRenameDialog(BuildContext context) async {
     final controller = TextEditingController(text: _deviceDisplayName);

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/header_close_button.dart';
 import '../../widgets/mode_room_behavior_section.dart';
 import '../../widgets/settings_row.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
@@ -13,7 +15,10 @@ import 'default_transition_editor_screen.dart';
 /// into its own detail screen. New automation types slot in as additional rows
 /// without disturbing the details.
 class AutomationsScreen extends StatelessWidget {
-  const AutomationsScreen({super.key});
+  const AutomationsScreen({super.key, this.onClose});
+
+  /// Dismisses this menu back to Home (shown as a ✕ in the header).
+  final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -35,8 +40,8 @@ class AutomationsScreen extends StatelessWidget {
                       children: [
                         const _AutomationSectionHeader(
                           step: 1,
-                          title: 'How it switches',
-                          subtitle: 'Move between Day and Sleep automatically, '
+                          title: 'Schedule',
+                          subtitle: 'Trigger Wake / Sleep presets automatically '
                               'or with a button.',
                           accent: CelestialColors.accentBlue,
                         ),
@@ -48,9 +53,9 @@ class AutomationsScreen extends StatelessWidget {
                         ),
                         const _AutomationSectionHeader(
                           step: 2,
-                          title: 'What each mode does',
-                          subtitle: 'Set what your rooms do once Day or Sleep '
-                              'begins.',
+                          title: 'Wake / Sleep Presets',
+                          subtitle: 'Set what your rooms do once Wake or Sleep '
+                              'is triggered.',
                           accent: CelestialColors.sunWarm,
                         ),
                         SettingsGroup(
@@ -59,6 +64,13 @@ class AutomationsScreen extends StatelessWidget {
                             _modeRow(context, sync, RhythmMode.sleep),
                           ],
                         ),
+                        const _AutomationSectionHeader(
+                          step: 3,
+                          title: 'Test your presets',
+                          subtitle: 'Manually trigger a Wake or Sleep preset.',
+                          accent: Color(0xFF9C8CFF),
+                        ),
+                        const _ManualModeToggle(),
                         const SizedBox(height: 40),
                       ],
                     );
@@ -74,16 +86,27 @@ class AutomationsScreen extends StatelessWidget {
 
   Widget _buildHeader() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-      alignment: Alignment.center,
-      child: const Text(
-        'Automations',
-        style: TextStyle(
-          color: CelestialColors.textPrimary,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.3,
-        ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      child: Row(
+        children: [
+          if (onClose != null)
+            HeaderCloseButton(onTap: onClose!)
+          else
+            const SizedBox(width: 40),
+          const Expanded(
+            child: Text(
+              'Presets',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+          const SizedBox(width: 40),
+        ],
       ),
     );
   }
@@ -106,9 +129,9 @@ class AutomationsScreen extends StatelessWidget {
           t.triggerEnabled,
     );
     return SettingsRow(
-      icon: Icons.access_time_rounded,
+      icon: Icons.alarm_rounded,
       iconColor: const Color(0xFF58A6FF),
-      label: 'Time Schedule',
+      label: 'Alarm',
       showChevron: false,
       trailing: _StatusPill(enabled: enabled),
       onTap: () => _pushDetail(
@@ -130,7 +153,7 @@ class AutomationsScreen extends StatelessWidget {
     return SettingsRow(
       icon: Icons.radio_button_checked_rounded,
       iconColor: const Color(0xFF9C8CFF),
-      label: 'Button Toggle',
+      label: 'Wake/Sleep Button',
       showChevron: false,
       trailing: _StatusPill(enabled: enabled),
       onTap: () => _pushDetail(
@@ -157,7 +180,7 @@ class AutomationsScreen extends StatelessWidget {
     return SettingsRow(
       icon: isDay ? Icons.wb_sunny_rounded : Icons.bedtime_rounded,
       iconColor: isDay ? const Color(0xFFF9A825) : const Color(0xFF7C83FF),
-      label: isDay ? 'Day' : 'Sleep',
+      label: isDay ? 'Wake Presets' : 'Sleep Presets',
       value: overrides > 0
           ? '$overrides room${overrides == 1 ? '' : 's'} set'
           : 'All Auto',
@@ -281,6 +304,117 @@ class _StatusPill extends StatelessWidget {
           size: 22,
         ),
       ],
+    );
+  }
+}
+
+/// Standalone manual Day/Sleep switch — a segmented control that dispatches the
+/// mode transition immediately. This is the temporary home for the manual
+/// override that used to live on the home screen's top bar.
+class _ManualModeToggle extends StatefulWidget {
+  const _ManualModeToggle();
+
+  @override
+  State<_ManualModeToggle> createState() => _ManualModeToggleState();
+}
+
+class _ManualModeToggleState extends State<_ManualModeToggle> {
+  bool _busy = false;
+
+  Future<void> _select(RhythmMode target) async {
+    final sync = context.read<ServerSyncProvider>();
+    if (_busy || sync.activeMode == target || !sync.canDispatchActions) return;
+
+    HapticFeedback.mediumImpact();
+    setState(() => _busy = true);
+    try {
+      final current = sync.activeMode;
+      // Prefer a proper mode transition when we know the current mode; fall
+      // back to a direct set on a cold start (no known current mode).
+      final transitionId = current == null
+          ? null
+          : (target == RhythmMode.day ? 'sleep_to_day' : 'day_to_sleep');
+      if (transitionId == null) {
+        await sync.dispatchSetActiveMode(target);
+      } else {
+        await sync.dispatchRunTransition(transitionId);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = context.select<ServerSyncProvider, RhythmMode?>(
+      (s) => s.activeMode,
+    );
+    return Opacity(
+      opacity: _busy ? 0.6 : 1.0,
+      child: Container(
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundCard,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            _segment(RhythmMode.day, active),
+            _segment(RhythmMode.sleep, active),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _segment(RhythmMode mode, RhythmMode? active) {
+    final isActive = mode == active;
+    final isDay = mode == RhythmMode.day;
+    final color = isDay ? const Color(0xFFF9A825) : const Color(0xFF7C83FF);
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _busy ? null : () => _select(mode),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            color:
+                isActive ? color.withValues(alpha: 0.16) : Colors.transparent,
+            border: Border.all(
+              color:
+                  isActive ? color.withValues(alpha: 0.5) : Colors.transparent,
+              width: 1,
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                isDay ? Icons.wb_sunny_rounded : Icons.bedtime_rounded,
+                size: 18,
+                color: isActive
+                    ? color
+                    : CelestialColors.textSecondary.withValues(alpha: 0.5),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                isDay ? 'Wake' : 'Sleep',
+                style: TextStyle(
+                  color: isActive
+                      ? color
+                      : CelestialColors.textSecondary.withValues(alpha: 0.65),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

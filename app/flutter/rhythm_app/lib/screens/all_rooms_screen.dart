@@ -13,6 +13,8 @@ import '../widgets/editable_room_card.dart';
 import '../widgets/room_card.dart';
 import '../widgets/hub_connection_banner.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
+import 'sun_position_screen.dart';
+import 'triage_screen.dart';
 
 /// All Rooms screen — horizontally paged room cards with edit-mode drag support.
 ///
@@ -516,7 +518,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
-  bool _isHalfWidthCard(RoomDto room) => room.kind.isLightAddressable;
+  // TEST: force every room card to full width (one card per row) instead of the
+  // usual half-width grid for light-addressable rooms.
+  bool _isHalfWidthCard(RoomDto room) => false;
 
   List<_RoomGridItem> _roomGridItems(List<RoomDto> rooms) {
     return [
@@ -839,34 +843,22 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           _HomeChooserButton(
             onTap: widget.onHomeChooserTap,
           ),
-          const SizedBox(width: 12),
-          Text(
-            'Rooms',
-            style: TextStyle(
-              color: CelestialColors.textPrimary,
-              fontSize: isLandscape ? 16 : 20,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.3,
-            ),
+          const SizedBox(width: 10),
+          _SunButton(
+            onTap: () => SunPositionScreen.show(context),
           ),
           const Spacer(),
-          if (widget.activeMode != null)
-            _CurveProfileToggle(
-              activeMode: widget.activeMode!,
-              pendingMode: widget.pendingMode,
-              onModeSelected: widget.onModeSelected,
-              onActiveModeDoubleTap: widget.onActiveModeDoubleTap,
-            ),
+          const _NotificationsBell(),
         ],
       ),
     );
   }
 }
 
-/// Circular Home action button paired opposite the day/sleep mode toggle.
+/// Circular Home action button paired opposite the notifications bell.
 ///
-/// Matches the 34-px pill height of [_CurveProfileToggle] so the header reads
-/// as bookended: action on the left, mode on the right.
+/// Matches the 34-px height of [_NotificationsBell] so the header reads as
+/// bookended: Home on the left, notifications on the right.
 class _HomeChooserButton extends StatelessWidget {
   const _HomeChooserButton({required this.onTap});
 
@@ -902,6 +894,59 @@ class _HomeChooserButton extends StatelessWidget {
             Icons.home_rounded,
             color: _teal,
             size: 20,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Warm sun orb in the header, sitting next to the Home button. Opens the
+/// [SunPositionScreen] celestial visualization. Sized to match the 34-px header
+/// controls but keeps the sun's amber gradient so it still reads as "the sun".
+class _SunButton extends StatelessWidget {
+  const _SunButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    const warm = Color(0xFFFFB74D);
+    const deep = Color(0xFFE6892E);
+    return Semantics(
+      button: true,
+      label: 'Open sun position',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onTap();
+        },
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [warm, deep],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: warm.withValues(alpha: 0.4),
+                blurRadius: 12,
+                spreadRadius: -2,
+              ),
+            ],
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.18),
+            ),
+          ),
+          child: const Icon(
+            Icons.wb_sunny_rounded,
+            color: Colors.white,
+            size: 18,
           ),
         ),
       ),
@@ -1418,152 +1463,98 @@ class _CelestialPainter extends CustomPainter {
 
 // ─── Curve Profile Toggle ──────────────────────────────────────────────
 
-/// Moon glow color — matches celestial palette.
-const _moonGlow = Color(0xFF7C8EBF);
+/// Top-right notifications bell — the entry point for Device Review (triage).
+///
+/// Replaces the old day/sleep mode toggle. Shows an amber count badge whenever
+/// there are pending triage items or configured-hub conflicts, mirroring the
+/// signal that used to live on the "Device Review" settings row. Tapping opens
+/// the [TriageScreen].
+class _NotificationsBell extends StatelessWidget {
+  const _NotificationsBell();
 
-/// Animated segmented toggle for switching between day and sleep modes.
-class _CurveProfileToggle extends StatelessWidget {
-  final RhythmMode activeMode;
-  final RhythmMode? pendingMode;
-  final ValueChanged<RhythmMode>? onModeSelected;
-  final ValueChanged<RhythmMode>? onActiveModeDoubleTap;
-
-  const _CurveProfileToggle({
-    required this.activeMode,
-    this.pendingMode,
-    this.onModeSelected,
-    this.onActiveModeDoubleTap,
-  });
-
-  static const _duration = Duration(milliseconds: 350);
-
-  static const _modeVisuals = <RhythmMode, (String, IconData, Color)>{
-    RhythmMode.day: ('Day', Icons.wb_sunny_rounded, CelestialColors.sunWarm),
-    RhythmMode.sleep: ('Sleep', Icons.nightlight_round, _moonGlow),
-  };
+  static const _amber = Color(0xFFFF9800);
 
   @override
   Widget build(BuildContext context) {
-    return IgnorePointer(
-      ignoring: pendingMode != null,
-      child: AnimatedOpacity(
-        duration: _duration,
-        opacity: pendingMode == null ? 1.0 : 0.82,
-        child: Container(
+    final pending = context.select<ServerSyncProvider, int>(
+      (s) => s.triagePendingCount,
+    );
+    final conflicts = context.select<ServerSyncProvider, int>(
+      (s) => s.hubConfiguredConflicts.length,
+    );
+    final count = pending > 0 ? pending : conflicts;
+    final hasBadge = count > 0;
+
+    return Semantics(
+      button: true,
+      label: hasBadge ? 'Device review, $count pending' : 'Device review',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          HapticFeedback.lightImpact();
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const TriageScreen()),
+          );
+        },
+        child: SizedBox(
+          width: 34,
           height: 34,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(17),
-            color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
-            border: Border.all(
-              color: CelestialColors.orbitRing.withValues(alpha: 0.25),
-              width: 1,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
+          child: Stack(
+            clipBehavior: Clip.none,
             children: [
-              for (final mode in RhythmMode.values)
-                _buildSegment(
-                  label: _modeVisuals[mode]!.$1,
-                  icon: _modeVisuals[mode]!.$2,
-                  isActive: mode == activeMode,
-                  isPending: mode == pendingMode,
-                  activeColor: _modeVisuals[mode]!.$3,
-                  onTap: () => onModeSelected?.call(mode),
-                  onDoubleTap: mode == activeMode
-                      ? () => onActiveModeDoubleTap?.call(mode)
-                      : null,
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CelestialColors.backgroundCard.withValues(alpha: 0.85),
+                  border: Border.all(
+                    color: hasBadge
+                        ? _amber.withValues(alpha: 0.45)
+                        : CelestialColors.orbitRing.withValues(alpha: 0.25),
+                    width: 1,
+                  ),
+                ),
+                child: Icon(
+                  hasBadge
+                      ? Icons.notifications_active_rounded
+                      : Icons.notifications_none_rounded,
+                  color: hasBadge
+                      ? _amber
+                      : CelestialColors.textSecondary.withValues(alpha: 0.7),
+                  size: 19,
+                ),
+              ),
+              if (hasBadge)
+                Positioned(
+                  right: -3,
+                  top: -3,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 5, vertical: 1),
+                    constraints: const BoxConstraints(minWidth: 16),
+                    decoration: BoxDecoration(
+                      color: _amber,
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(
+                        color: CelestialColors.backgroundDark,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Text(
+                      count > 9 ? '9+' : '$count',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xFF1A1A1A),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        height: 1.2,
+                      ),
+                    ),
+                  ),
                 ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSegment({
-    required String label,
-    required IconData icon,
-    required bool isActive,
-    required bool isPending,
-    required Color activeColor,
-    required VoidCallback onTap,
-    VoidCallback? onDoubleTap,
-  }) {
-    final isHighlighted = isActive || isPending;
-
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        if (!isActive && !isPending && pendingMode == null) {
-          HapticFeedback.lightImpact();
-          onTap();
-        }
-      },
-      onDoubleTap: onDoubleTap == null
-          ? null
-          : () {
-              if (isActive && !isPending && pendingMode == null) {
-                HapticFeedback.lightImpact();
-                onDoubleTap();
-              }
-            },
-      child: AnimatedContainer(
-        duration: _duration,
-        curve: Curves.easeInOut,
-        margin: const EdgeInsets.all(3),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: isHighlighted
-              ? activeColor.withValues(alpha: 0.15)
-              : Colors.transparent,
-          border: Border.all(
-            color: isHighlighted
-                ? activeColor.withValues(alpha: 0.25)
-                : Colors.transparent,
-            width: 0.5,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AnimatedSwitcher(
-              duration: _duration,
-              child: isPending
-                  ? SizedBox(
-                      key: const ValueKey('pending'),
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.8,
-                        valueColor: AlwaysStoppedAnimation<Color>(activeColor),
-                      ),
-                    )
-                  : Icon(
-                      icon,
-                      key: ValueKey(isActive),
-                      size: 14,
-                      color: isHighlighted
-                          ? activeColor
-                          : CelestialColors.textSecondary
-                              .withValues(alpha: 0.4),
-                    ),
-            ),
-            const SizedBox(width: 5),
-            AnimatedDefaultTextStyle(
-              duration: _duration,
-              style: TextStyle(
-                color: isHighlighted
-                    ? activeColor
-                    : CelestialColors.textSecondary.withValues(alpha: 0.4),
-                fontSize: 13,
-                fontWeight: isHighlighted ? FontWeight.w600 : FontWeight.w400,
-                letterSpacing: 0.2,
-              ),
-              child: Text(label),
-            ),
-          ],
         ),
       ),
     );

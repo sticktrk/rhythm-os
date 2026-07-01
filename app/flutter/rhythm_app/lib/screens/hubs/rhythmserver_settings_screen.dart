@@ -2607,7 +2607,19 @@ class _DeviceCounts {
 }
 
 class RhythmServerHubManagementSection extends StatefulWidget {
-  const RhythmServerHubManagementSection({super.key});
+  const RhythmServerHubManagementSection({
+    super.key,
+    this.showConfigured = true,
+    this.showAddOptions = true,
+  });
+
+  /// Render the list of already-paired hubs (and their devices).
+  final bool showConfigured;
+
+  /// Render the "add a hub / pair a device" options. Splitting these two lets
+  /// the same capability-aware section back both the Settings → Devices list
+  /// (configured only) and the "+" Add Device flow (add options only).
+  final bool showAddOptions;
 
   @override
   State<RhythmServerHubManagementSection> createState() =>
@@ -2652,18 +2664,22 @@ class _RhythmServerHubManagementSectionState
     }
 
     final sections = <Widget>[];
-    final configuredSection = _buildConfiguredHubsSection(configuredHubs);
-    if (configuredSection != null) {
-      sections.add(configuredSection);
+    if (widget.showConfigured) {
+      final configuredSection = _buildConfiguredHubsSection(configuredHubs);
+      if (configuredSection != null) {
+        sections.add(configuredSection);
+      }
     }
 
-    final addHubSection =
-        _buildHubPairingSuggestions(syncProvider, configuredHubs);
-    if (addHubSection != null) {
-      if (sections.isNotEmpty) {
-        sections.add(const SizedBox(height: 12));
+    if (widget.showAddOptions) {
+      final addHubSection =
+          _buildHubPairingSuggestions(syncProvider, configuredHubs);
+      if (addHubSection != null) {
+        if (sections.isNotEmpty) {
+          sections.add(const SizedBox(height: 12));
+        }
+        sections.add(addHubSection);
       }
-      sections.add(addHubSection);
     }
 
     if (sections.isEmpty) return const SizedBox.shrink();

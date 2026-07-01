@@ -108,26 +108,69 @@ class SettingsRow extends StatelessWidget {
 }
 
 /// A settings section header with a title.
+///
+/// Optionally carries a leading [icon] and a one-line [subtitle]. The icon +
+/// subtitle are used to draw a clear line between conceptually different groups
+/// — e.g. the *look* of your light vs. the *physical hardware* it runs on — so
+/// a glance is enough to know which kind of setting a group holds.
 class SettingsSectionHeader extends StatelessWidget {
   final String title;
+  final String? subtitle;
+  final IconData? icon;
+
+  /// Tints the icon + title. Defaults to the muted secondary label color.
+  final Color? accent;
 
   const SettingsSectionHeader({
     super.key,
     required this.title,
+    this.subtitle,
+    this.icon,
+    this.accent,
   });
 
   @override
   Widget build(BuildContext context) {
+    final labelColor =
+        accent ?? CelestialColors.textSecondary.withValues(alpha: 0.6);
+
     return Padding(
       padding: const EdgeInsets.only(left: 8, bottom: 12, top: 28),
-      child: Text(
-        title.toUpperCase(),
-        style: TextStyle(
-          color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-          fontSize: 13,
-          fontWeight: FontWeight.w500,
-          letterSpacing: 0.8,
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (icon != null) ...[
+                Icon(icon, size: 15, color: labelColor),
+                const SizedBox(width: 7),
+              ],
+              Text(
+                title.toUpperCase(),
+                style: TextStyle(
+                  color: labelColor,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
+                ),
+              ),
+            ],
+          ),
+          if (subtitle != null)
+            Padding(
+              padding: EdgeInsets.only(left: icon != null ? 22 : 0, top: 3),
+              child: Text(
+                subtitle!,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.45),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  height: 1.3,
+                  letterSpacing: 0.1,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

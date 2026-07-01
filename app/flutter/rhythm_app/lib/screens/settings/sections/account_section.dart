@@ -21,16 +21,10 @@ class AccountSection extends StatelessWidget {
     final isSignedIn = user != null && !user!.isAnonymous;
     final isAnonymous = user != null && user!.isAnonymous;
     final rows = <Widget>[
-      if (FeatureFlags.auxSignIn)
-        if (isSignedIn)
-          SettingsRow(
-            icon: Icons.person_outline,
-            iconColor: CelestialColors.accentBlue,
-            label: 'Profile',
-            value: user?.email ?? 'Signed in',
-            showChevron: false,
-          )
-        else if (isAnonymous)
+      // Profile (email) is shown inside App Settings, not here — top-of-Settings
+      // only surfaces a sign-in call to action while signed out.
+      if (FeatureFlags.auxSignIn && !isSignedIn)
+        if (isAnonymous)
           SettingsRow(
             icon: Icons.person_add_outlined,
             iconColor: const Color(0xFFFFC107),
@@ -66,6 +60,10 @@ class AccountSection extends StatelessWidget {
         SettingsSectionHeader(
           title:
               FeatureFlags.entitlementsEnabled ? 'Account & Plan' : 'Account',
+          icon: Icons.account_circle_outlined,
+          subtitle: isSignedIn
+              ? 'Your plan and cloud sync.'
+              : 'Sign in to sync your setup across devices.',
         ),
         SettingsGroup(children: rows),
       ],

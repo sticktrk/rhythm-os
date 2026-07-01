@@ -5,6 +5,7 @@ import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../services/analytics_service.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 import '../../widgets/time_simulator.dart';
 import 'light_profile_screen.dart';
@@ -17,7 +18,21 @@ import 'light_profile_screen.dart';
 /// inline while the others stay tucked away. New profiles slot in by adding a
 /// single entry to [_kProfileLayers] — the screen scales without redesign.
 class LightScreen extends StatefulWidget {
-  const LightScreen({super.key});
+  const LightScreen({super.key, this.showBackButton = false});
+
+  /// When pushed as its own route (e.g. from Settings) the header shows a back
+  /// affordance; as an embedded tab body it doesn't.
+  final bool showBackButton;
+
+  /// Pushes the Light editor as a full route with a back button.
+  static Future<void> show(BuildContext context) {
+    AnalyticsService().logScreenView('light');
+    return Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const LightScreen(showBackButton: true),
+      ),
+    );
+  }
 
   @override
   State<LightScreen> createState() => _LightScreenState();
@@ -110,17 +125,48 @@ class _LightScreenState extends State<LightScreen> {
   }
 
   Widget _buildHeader() {
+    const title = Text(
+      'Light',
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: CelestialColors.textPrimary,
+        fontSize: 18,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.3,
+      ),
+    );
+
+    if (!widget.showBackButton) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        alignment: Alignment.center,
+        child: title,
+      );
+    }
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-      alignment: Alignment.center,
-      child: const Text(
-        'Light',
-        style: TextStyle(
-          color: CelestialColors.textPrimary,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.3,
-        ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () => Navigator.of(context).pop(),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: CelestialColors.accentBlue.withValues(alpha: 0.2),
+              ),
+              child: const Icon(
+                Icons.chevron_left,
+                color: CelestialColors.accentBlue,
+                size: 24,
+              ),
+            ),
+          ),
+          const Expanded(child: title),
+          const SizedBox(width: 40),
+        ],
       ),
     );
   }

@@ -17,10 +17,8 @@ import 'screens/all_rooms_screen.dart';
 import 'screens/server_disconnected_screen.dart';
 import 'screens/settings/automations_screen.dart';
 import 'screens/settings/dialogs/sign_in_modal.dart';
-import 'screens/settings/light_screen.dart';
 import 'screens/settings/sections/lights_devices_section.dart';
 import 'screens/settings/settings_screen.dart';
-import 'screens/sun_position_screen.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
 import 'main.dart';
@@ -41,7 +39,7 @@ import 'widgets/virtual_experience_banner.dart';
 
 /// Main app shell.
 ///
-/// Persistent 5-tab bottom navigation bar with an [IndexedStack] body.  Each
+/// Persistent 3-tab bottom navigation bar with an [IndexedStack] body.  Each
 /// tab owns its own [Navigator] so deeper pushes (e.g. Devices → Device Review)
 /// stay inside the body slot and the navbar remains visible.
 class AppShell extends StatefulWidget {
@@ -56,9 +54,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   static const _rhythmAdaptiveTabs = [
     MainNavTab.home,
-    MainNavTab.light,
     MainNavTab.automations,
-    MainNavTab.devices,
     MainNavTab.settings,
   ];
 
@@ -231,9 +227,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   String _screenNameFor(MainNavTab tab) => switch (tab) {
         MainNavTab.home => 'home',
-        MainNavTab.light => 'light',
         MainNavTab.automations => 'automations',
-        MainNavTab.devices => 'devices',
         MainNavTab.settings => 'settings',
       };
 
@@ -658,10 +652,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ),
                   if (!hideChrome)
                     Positioned(
-                      right: 14,
-                      bottom: 14,
-                      child: _FloatingSunButton(
-                        onTap: () => SunPositionScreen.show(context),
+                      left: 18,
+                      bottom: MediaQuery.of(context).padding.bottom + 20,
+                      child: _FloatingDevicesButton(
+                        onTap: () => AddDeviceScreen.show(context),
                       ),
                     ),
                   if (showPreHomeAccountControl)
@@ -674,14 +668,19 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         onLogOut: _logOutFromPreHome,
                       ),
                     ),
+                  // No bottom nav bar — navigation fans out of a floating gear
+                  // button in the bottom-right corner.
+                  if (!hideChrome)
+                    Positioned.fill(
+                      child: _NavFanButton(
+                        currentTab: _currentTab,
+                        tabs: visibleTabs,
+                        disabledTabs: disabledTabs,
+                        onSelected: _handleTabSelected,
+                      ),
+                    ),
                 ],
               ),
-              bottomNavigationBar: hideChrome
-                  ? null
-                  : _buildBottomNav(
-                      visibleTabs: visibleTabs,
-                      disabledTabs: disabledTabs,
-                    ),
             ),
           );
         },
@@ -689,7 +688,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
-  /// Bottom-nav tab visibility — all five tabs are always rendered so the
+  /// Bottom-nav tab visibility — all three tabs are always rendered so the
   /// navbar shape stays stable. Tabs whose dependencies aren't met get
   /// disabled via [_computeDisabledTabs] instead of being hidden.
   List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
@@ -727,30 +726,18 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Widget _buildTabRoot(MainNavTab tab) {
     return switch (tab) {
       MainNavTab.home => _buildHomeTab(),
-      MainNavTab.light => const LightScreen(),
       MainNavTab.automations => _buildAutomationsTab(),
-      MainNavTab.devices =>
-        const LightsDevicesDetailScreen(showBackButton: false),
-      MainNavTab.settings => const SettingsScreen(),
+      MainNavTab.settings => SettingsScreen(onClose: _goHome),
     };
   }
 
-  Widget _buildBottomNav({
-    required List<MainNavTab> visibleTabs,
-    required Set<MainNavTab> disabledTabs,
-  }) {
-    return MainBottomNav(
-      currentBodyTab: _currentTab,
-      onTabSelected: _handleTabSelected,
-      tabs: visibleTabs,
-      disabledTabs: disabledTabs,
-    );
-  }
+  /// Return to the Home tab — the ✕ on the fanned-out menus.
+  void _goHome() => _handleTabSelected(MainNavTab.home);
 
   /// Automations tab — a list of automations, each tapping into its own detail
   /// screen (the orbital schedule, button binding, and per-mode room behavior).
   Widget _buildAutomationsTab() {
-    return const AutomationsScreen();
+    return AutomationsScreen(onClose: _goHome);
   }
 
   /// Resolves the body for the Home tab through the existing
@@ -1187,21 +1174,327 @@ class _PulsingIconState extends State<_PulsingIcon>
   }
 }
 
-/// Small floating amber sun chip pinned bottom-right above the nav bar.
-/// Entry point for [SunPositionScreen] — the celestial visualization no
-/// longer has its own tab, so it lives here as a discoverable hover.
-class _FloatingSunButton extends StatelessWidget {
-  const _FloatingSunButton({required this.onTap});
+/// Floating gear button pinned bottom-right that fans out the navigation
+/// destinations (Home · Presets · Settings). Replaces the bottom nav bar: the
+/// gear is always visible; tapping it reveals the destinations stacked above it
+/// with a staggered reveal, and a scrim dismisses on an outside tap.
+class _NavFanButton extends StatefulWidget {
+  const _NavFanButton({
+    required this.currentTab,
+    required this.tabs,
+    required this.disabledTabs,
+    required this.onSelected,
+  });
+
+  final MainNavTab currentTab;
+  final List<MainNavTab> tabs;
+  final Set<MainNavTab> disabledTabs;
+  final ValueChanged<MainNavTab> onSelected;
+
+  @override
+  State<_NavFanButton> createState() => _NavFanButtonState();
+}
+
+class _NavFanButtonState extends State<_NavFanButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 300),
+  );
+  bool _open = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _toggle() {
+    HapticFeedback.selectionClick();
+    setState(() => _open = !_open);
+    _open ? _controller.forward() : _controller.reverse();
+  }
+
+  void _close() {
+    if (!_open) return;
+    setState(() => _open = false);
+    _controller.reverse();
+  }
+
+  void _select(MainNavTab tab) {
+    if (widget.disabledTabs.contains(tab)) return;
+    _close();
+    widget.onSelected(tab);
+  }
+
+  /// (outline icon, filled icon, label, accent) per destination.
+  static (IconData, IconData, String, Color) _meta(MainNavTab tab) =>
+      switch (tab) {
+        MainNavTab.home => (
+            Icons.home_outlined,
+            Icons.home_rounded,
+            'Home',
+            Color(0xFF00BCD4),
+          ),
+        MainNavTab.automations => (
+            Icons.bolt_outlined,
+            Icons.bolt,
+            'Presets',
+            Color(0xFFF2A93B),
+          ),
+        MainNavTab.settings => (
+            Icons.settings_outlined,
+            Icons.settings_rounded,
+            'Settings',
+            CelestialColors.accentBlue,
+          ),
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    // Home is the base surface — you return to it via the ✕ on each menu, so it
+    // isn't one of the fanned destinations.
+    final tabs =
+        widget.tabs.where((t) => t != MainNavTab.home).toList(growable: false);
+    return Stack(
+      children: [
+        if (_open)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _close,
+              child: FadeTransition(
+                opacity: _controller,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: RadialGradient(
+                      center: const Alignment(0.92, 0.92),
+                      radius: 1.1,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.30),
+                        Colors.black.withValues(alpha: 0.62),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        Positioned(
+          right: 18,
+          bottom: MediaQuery.of(context).padding.bottom + 20,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              for (var i = 0; i < tabs.length; i++)
+                _buildFanItem(tabs[i], tabs.length - 1 - i),
+              const SizedBox(height: 14),
+              _buildGear(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFanItem(MainNavTab tab, int slotFromBottom) {
+    final (outline, filled, label, accent) = _meta(tab);
+    final selected = tab == widget.currentTab;
+    final disabled = widget.disabledTabs.contains(tab);
+    // Items nearest the gear spring in first.
+    final start = (slotFromBottom * 0.09).clamp(0.0, 0.55);
+    final anim = CurvedAnimation(
+      parent: _controller,
+      curve: Interval(start, 1.0, curve: Curves.easeOutBack),
+      reverseCurve: const Interval(0.0, 1.0, curve: Curves.easeInCubic),
+    );
+
+    final iconColor = disabled
+        ? CelestialColors.textSecondary.withValues(alpha: 0.35)
+        : selected
+            ? Colors.white
+            : accent;
+    final textColor = disabled
+        ? CelestialColors.textSecondary.withValues(alpha: 0.35)
+        : selected
+            ? Colors.white
+            : CelestialColors.textPrimary;
+
+    return AnimatedBuilder(
+      animation: anim,
+      builder: (context, child) {
+        final v = anim.value.clamp(0.0, 1.0);
+        return Opacity(
+          opacity: v,
+          child: Transform.translate(
+            offset: Offset((1 - v) * 12, (1 - v) * 22),
+            child: Transform.scale(
+              scale: 0.82 + 0.18 * v,
+              alignment: Alignment.centerRight,
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: IgnorePointer(
+        ignoring: !_open,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Semantics(
+            button: true,
+            selected: selected,
+            label: label,
+            child: Material(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(26),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: disabled ? null : () => _select(tab),
+                child: Container(
+                  height: 50,
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(26),
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: selected
+                          ? [accent, Color.lerp(accent, Colors.black, 0.30)!]
+                          : [
+                              CelestialColors.backgroundCard
+                                  .withValues(alpha: 0.96),
+                              CelestialColors.backgroundCard
+                                  .withValues(alpha: 0.86),
+                            ],
+                    ),
+                    border: Border.all(
+                      color: selected
+                          ? Colors.white.withValues(alpha: 0.35)
+                          : accent.withValues(alpha: disabled ? 0.15 : 0.30),
+                      width: 1,
+                    ),
+                    boxShadow: [
+                      if (selected)
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.40),
+                          blurRadius: 20,
+                          spreadRadius: -4,
+                        ),
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.35),
+                        blurRadius: 12,
+                        offset: const Offset(0, 5),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(selected ? filled : outline, size: 20, color: iconColor),
+                      const SizedBox(width: 11),
+                      Text(
+                        label,
+                        style: TextStyle(
+                          color: textColor,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGear() {
+    const accent = CelestialColors.accentBlue;
+    return Semantics(
+      button: true,
+      label: _open ? 'Close navigation' : 'Open navigation',
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: _toggle,
+          child: AnimatedBuilder(
+            animation: _controller,
+            builder: (context, child) {
+              final t = _controller.value;
+              return Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: const RadialGradient(
+                    center: Alignment(-0.4, -0.5),
+                    radius: 1.2,
+                    colors: [Color(0xFF4A6A99), Color(0xFF232B38)],
+                    stops: [0.0, 1.0],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.25 + 0.30 * t),
+                      blurRadius: 18 + 8 * t,
+                      spreadRadius: -2,
+                    ),
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.40),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.16),
+                  ),
+                ),
+                child: child,
+              );
+            },
+            child: Center(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                transitionBuilder: (child, anim) => RotationTransition(
+                  turns: Tween(begin: 0.55, end: 1.0).animate(anim),
+                  child: FadeTransition(opacity: anim, child: child),
+                ),
+                child: Icon(
+                  _open ? Icons.close_rounded : Icons.settings_rounded,
+                  key: ValueKey(_open),
+                  color: Colors.white,
+                  size: 25,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Small floating "+" orb pinned bottom-left above the nav bar. Opens the Add
+/// Device flow (pair a hub, Matter device, etc.); the cool cyan glow ties it to
+/// the "Hardware" language used across Settings.
+class _FloatingDevicesButton extends StatelessWidget {
+  const _FloatingDevicesButton({required this.onTap});
 
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    const warm = Color(0xFFFFB74D);
-    const deep = Color(0xFFE6892E);
+    const bright = Color(0xFF35D0E8);
+    const deep = Color(0xFF0E8FA6);
     return Semantics(
       button: true,
-      label: 'Open sun position',
+      label: 'Add a device',
       child: Material(
         color: Colors.transparent,
         shape: const CircleBorder(),
@@ -1212,18 +1505,18 @@ class _FloatingSunButton extends StatelessWidget {
             onTap();
           },
           child: Container(
-            width: 44,
-            height: 44,
+            width: 52,
+            height: 52,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: const LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [warm, deep],
+                colors: [bright, deep],
               ),
               boxShadow: [
                 BoxShadow(
-                  color: warm.withValues(alpha: 0.45),
+                  color: bright.withValues(alpha: 0.45),
                   blurRadius: 16,
                   spreadRadius: -2,
                 ),
@@ -1238,9 +1531,9 @@ class _FloatingSunButton extends StatelessWidget {
               ),
             ),
             child: const Icon(
-              Icons.wb_sunny_rounded,
+              Icons.add_rounded,
               color: Colors.white,
-              size: 22,
+              size: 26,
             ),
           ),
         ),
