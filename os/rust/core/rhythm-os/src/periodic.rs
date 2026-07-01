@@ -2306,6 +2306,13 @@ mod tests {
                 dispatch_spacing: Duration::from_millis(250),
             },
         ));
+        let first_enqueued_at = state
+            .lock()
+            .unwrap()
+            .pending_periodic_ticks
+            .get("node-1")
+            .expect("first tick should reserve pending state")
+            .enqueued_at;
         assert!(enqueue_periodic_tick(
             &state,
             &tx,
@@ -2350,6 +2357,7 @@ mod tests {
             .expect("latest hour should be retained");
         assert!((latest.current_hour - 10.5).abs() < f32::EPSILON);
         assert_eq!(latest.dispatch_generation, dispatch_generation);
+        assert_eq!(latest.enqueued_at, first_enqueued_at);
     }
 
     #[test]

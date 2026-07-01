@@ -281,6 +281,10 @@ struct RuntimeQueueHealth {
     work_queue_configured: bool,
     periodic_work_queue_configured: bool,
     pending_periodic_ticks: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oldest_pending_periodic_tick_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oldest_pending_periodic_tick_age_secs: Option<f64>,
     pending_hub_event_receivers: usize,
     pending_motion_clear: usize,
     pending_motion_seed: usize,
@@ -1806,6 +1810,17 @@ fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -
     let last_change_age_secs = s
         .last_active_mode_change_utc_ms
         .map(|epoch_ms| ((now_epoch_ms - epoch_ms) / 1000).max(0));
+    let oldest_pending_periodic_tick = s
+        .pending_periodic_ticks
+        .iter()
+        .max_by_key(|(_, pending)| now_instant.saturating_duration_since(pending.enqueued_at));
+    let oldest_pending_periodic_tick_node_id =
+        oldest_pending_periodic_tick.map(|(node_id, _)| node_id.clone());
+    let oldest_pending_periodic_tick_age_secs = oldest_pending_periodic_tick.map(|(_, pending)| {
+        now_instant
+            .saturating_duration_since(pending.enqueued_at)
+            .as_secs_f64()
+    });
 
     let snapshot = RuntimeHealthSnapshot {
         schema_version: DEBUG_BUNDLE_SCHEMA_VERSION,
@@ -1846,6 +1861,8 @@ fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -
             work_queue_configured: s.work_tx.is_some(),
             periodic_work_queue_configured: s.periodic_work_tx.is_some(),
             pending_periodic_ticks: s.pending_periodic_ticks.len(),
+            oldest_pending_periodic_tick_node_id,
+            oldest_pending_periodic_tick_age_secs,
             pending_hub_event_receivers: s.pending_hub_event_rxs.len(),
             pending_motion_clear: s.pending_motion_clear.len(),
             pending_motion_seed: s.pending_motion_seed.len(),
@@ -3338,6 +3355,15 @@ mod tests {
             guard.storage = Some(Box::new(
                 rhythm_os::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
             ));
+            let dispatch_generation = guard.light_dispatch_generation;
+            guard.pending_periodic_ticks.insert(
+                "stalled-node".to_string(),
+                rhythm_os::state::PendingPeriodicTick {
+                    current_hour: 17.0,
+                    dispatch_generation,
+                    enqueued_at: std::time::Instant::now() - std::time::Duration::from_secs(42),
+                },
+            );
         }
 
         let bundle = build_debug_bundle(&state).unwrap();
@@ -3540,6 +3566,20 @@ mod tests {
             DEBUG_BUNDLE_SCHEMA_VERSION
         );
         assert_eq!(runtime_health["platform"]["platform_context"], "rpiz");
+        assert_eq!(
+            runtime_health["queues"]["pending_periodic_ticks"],
+            Value::from(1_u64)
+        );
+        assert_eq!(
+            runtime_health["queues"]["oldest_pending_periodic_tick_node_id"],
+            "stalled-node"
+        );
+        assert!(
+            runtime_health["queues"]["oldest_pending_periodic_tick_age_secs"]
+                .as_f64()
+                .is_some_and(|age| age >= 40.0),
+            "runtime health should report the pending tick age: {runtime_health}"
+        );
 
         let log_summary: Value =
             serde_json::from_slice(files.get("log_summary.json").unwrap()).unwrap();
