@@ -497,14 +497,6 @@ fn cloudflared_version_for(bin: &Path) -> Option<String> {
     }
 }
 
-fn cloudflared_running() -> bool {
-    Command::new("pidof")
-        .arg("cloudflared")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 fn read_supervisor_status(runtime_dir: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     let path = runtime_dir.join(STATUS_FILE);
     let text = match std::fs::read_to_string(path) {
@@ -699,9 +691,8 @@ impl RemoteAccessController for InitScriptRemoteAccessController {
             .get("child_pid")
             .and_then(|value| parse_pid(value))
             .or_else(|| read_pid_file(&self.child_pidfile));
-        let service_running = supervisor_pid.is_some_and(pid_running)
-            || child_pid.is_some_and(pid_running)
-            || cloudflared_running();
+        let service_running =
+            supervisor_pid.is_some_and(pid_running) || child_pid.is_some_and(pid_running);
         let metrics = if service_running {
             metrics_addr
                 .as_deref()

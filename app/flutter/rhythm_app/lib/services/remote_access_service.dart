@@ -64,11 +64,31 @@ class RemoteAccessActivationException implements Exception {
   }
 }
 
+class RemoteAccessRouteException implements Exception {
+  const RemoteAccessRouteException({
+    required this.endpoint,
+    required this.attempts,
+    this.cause,
+  });
+
+  final HubEndpoint endpoint;
+  final int attempts;
+  final Object? cause;
+
+  @override
+  String toString() {
+    return 'Remote access hostname did not become reachable '
+        '(endpoint=${endpoint.baseUrl}, attempts=$attempts, cause=$cause)';
+  }
+}
+
 class RemoteAccessService {
   RemoteAccessService._({
     RemoteAccessApiFactory? apiFactory,
     Duration activationPollDelay = const Duration(seconds: 2),
     int activationPollAttempts = 6,
+    Duration remoteRoutePollDelay = const Duration(seconds: 5),
+    int remoteRoutePollAttempts = 36,
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
@@ -77,6 +97,8 @@ class RemoteAccessService {
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
+        _remoteRoutePollDelay = remoteRoutePollDelay,
+        _remoteRoutePollAttempts = remoteRoutePollAttempts,
         _supabaseClientFactory = supabaseClientFactory,
         _stateLoader = stateLoader ?? _defaultStateLoader,
         _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
@@ -92,6 +114,8 @@ class RemoteAccessService {
     RemoteAccessApiFactory? apiFactory,
     Duration activationPollDelay = Duration.zero,
     int activationPollAttempts = 1,
+    Duration remoteRoutePollDelay = Duration.zero,
+    int remoteRoutePollAttempts = 1,
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
@@ -102,6 +126,8 @@ class RemoteAccessService {
       apiFactory: apiFactory,
       activationPollDelay: activationPollDelay,
       activationPollAttempts: activationPollAttempts,
+      remoteRoutePollDelay: remoteRoutePollDelay,
+      remoteRoutePollAttempts: remoteRoutePollAttempts,
       supabaseClientFactory: supabaseClientFactory,
       stateLoader: stateLoader ?? _emptyStateLoader,
       authApiFactory: authApiFactory,
@@ -113,6 +139,8 @@ class RemoteAccessService {
   final RemoteAccessApiFactory _apiFactory;
   final Duration _activationPollDelay;
   final int _activationPollAttempts;
+  final Duration _remoteRoutePollDelay;
+  final int _remoteRoutePollAttempts;
   final dynamic Function()? _supabaseClientFactory;
   final RemoteAccessStateLoader _stateLoader;
   final RemoteAccessAuthApiFactory _authApiFactory;
@@ -184,8 +212,18 @@ class RemoteAccessService {
       initialStatus: initialStatus,
     );
 
-    final stableServerInstanceId =
+    var stableServerInstanceId =
         serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+    final remoteHello = await _waitForRemoteRoute(
+      endpoint: remoteEndpoint,
+      authToken: serverHub.token,
+      expectedServerInstanceId: stableServerInstanceId,
+    );
+    stableServerInstanceId ??= remoteHello.serverInstanceId?.trim();
+    if (stableServerInstanceId?.isEmpty ?? false) {
+      stableServerInstanceId = null;
+    }
+
     final updatedHub = serverHub.copyWith(
       remoteEndpoint: remoteEndpoint,
       serverInstanceId: stableServerInstanceId,
@@ -492,6 +530,53 @@ class RemoteAccessService {
     return status.configured &&
         status.serviceRunning &&
         status.connectorHealthy;
+  }
+
+  Future<RhythmHello> _waitForRemoteRoute({
+    required HubEndpoint endpoint,
+    required String? authToken,
+    String? expectedServerInstanceId,
+  }) async {
+    final attempts =
+        _remoteRoutePollAttempts < 1 ? 1 : _remoteRoutePollAttempts;
+    Object? lastError;
+    StackTrace? lastStackTrace;
+
+    for (var attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt > 0) {
+        await Future<void>.delayed(_remoteRoutePollDelay);
+      }
+
+      try {
+        final state = await _stateLoader(
+          endpoint: endpoint,
+          authToken: authToken,
+        );
+        final remoteServerInstanceId = state.serverInstanceId?.trim();
+        if (expectedServerInstanceId != null &&
+            expectedServerInstanceId.isNotEmpty &&
+            remoteServerInstanceId != expectedServerInstanceId) {
+          throw StateError(
+            'Remote access hostname returned server_instance_id='
+            '${remoteServerInstanceId ?? '(missing)'}, expected '
+            '$expectedServerInstanceId.',
+          );
+        }
+        return state;
+      } catch (error, stackTrace) {
+        lastError = error;
+        lastStackTrace = stackTrace;
+      }
+    }
+
+    Error.throwWithStackTrace(
+      RemoteAccessRouteException(
+        endpoint: endpoint,
+        attempts: attempts,
+        cause: lastError,
+      ),
+      lastStackTrace ?? StackTrace.current,
+    );
   }
 
   List<HubEndpoint> _disableEndpoints(Hub serverHub) {

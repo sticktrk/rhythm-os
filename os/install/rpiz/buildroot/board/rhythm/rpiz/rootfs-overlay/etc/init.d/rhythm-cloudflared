@@ -22,6 +22,7 @@ PROTOCOL="${RHYTHM_CLOUDFLARED_PROTOCOL:-http2}"
 LOGLEVEL="${RHYTHM_CLOUDFLARED_LOGLEVEL:-warn}"
 HA_CONNECTIONS="${RHYTHM_CLOUDFLARED_HA_CONNECTIONS:-1}"
 MAX_RESTARTS="${RHYTHM_CLOUDFLARED_MAX_RESTARTS:-5}"
+STOP_TIMEOUT_SECS="${RHYTHM_CLOUDFLARED_STOP_TIMEOUT_SECS:-5}"
 VMEM_LIMIT_KB="${RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB:-262144}"
 NICE_LEVEL="${RHYTHM_CLOUDFLARED_NICE:-10}"
 METRICS_ADDR="${RHYTHM_CLOUDFLARED_METRICS:-127.0.0.1:54449}"
@@ -50,6 +51,7 @@ LOGFILE="$(resolve_log_dir)/cloudflared.log"
 
 case "$HA_CONNECTIONS" in ''|*[!0-9]*) HA_CONNECTIONS=1 ;; esac
 case "$MAX_RESTARTS" in ''|*[!0-9]*) MAX_RESTARTS=5 ;; esac
+case "$STOP_TIMEOUT_SECS" in ''|*[!0-9]*) STOP_TIMEOUT_SECS=5 ;; esac
 case "$VMEM_LIMIT_KB" in ''|*[!0-9]*) VMEM_LIMIT_KB=262144 ;; esac
 case "$NICE_LEVEL" in ''|*[!0-9]*) NICE_LEVEL=10 ;; esac
 
@@ -64,6 +66,37 @@ pid_is_running() {
 
 child_pid_is_running() {
     [ -f "$CHILD_PIDFILE" ] && kill -0 "$(cat "$CHILD_PIDFILE")" 2>/dev/null
+}
+
+pid_value_is_running() {
+    [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+wait_pid_exit() {
+    pid="${1:-}"
+    remaining="$STOP_TIMEOUT_SECS"
+    while pid_value_is_running "$pid" && [ "$remaining" -gt 0 ]; do
+        sleep 1 || true
+        remaining=$((remaining - 1))
+    done
+    ! pid_value_is_running "$pid"
+}
+
+terminate_pid() {
+    pid="${1:-}"
+    label="${2:-process}"
+    if ! pid_value_is_running "$pid"; then
+        return 0
+    fi
+
+    kill "$pid" 2>/dev/null || true
+    if wait_pid_exit "$pid"; then
+        return 0
+    fi
+
+    log "$label pid=$pid did not exit after ${STOP_TIMEOUT_SECS}s; killing"
+    kill -9 "$pid" 2>/dev/null || true
+    wait_pid_exit "$pid" || true
 }
 
 epoch_secs() {
@@ -87,6 +120,7 @@ write_status() {
         printf 'loglevel=%s\n' "$LOGLEVEL"
         printf 'ha_connections=%s\n' "$HA_CONNECTIONS"
         printf 'max_restarts=%s\n' "$MAX_RESTARTS"
+        printf 'stop_timeout_secs=%s\n' "$STOP_TIMEOUT_SECS"
         printf 'vmem_limit_kb=%s\n' "$VMEM_LIMIT_KB"
     } > "$tmp"
     mv -f "$tmp" "$STATUS_FILE"
@@ -236,10 +270,18 @@ start() {
 }
 
 stop() {
-    stop_child
-    if pid_is_running; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    supervisor_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    child_pid="$(cat "$CHILD_PIDFILE" 2>/dev/null || true)"
+
+    if pid_value_is_running "$supervisor_pid"; then
+        terminate_pid "$supervisor_pid" "supervisor"
+    else
+        terminate_pid "$child_pid" "connector"
     fi
+
+    child_pid="${child_pid:-$(cat "$CHILD_PIDFILE" 2>/dev/null || true)}"
+    terminate_pid "$child_pid" "connector"
+
     rm -f "$PIDFILE" "$CHILD_PIDFILE"
     state="stopped"
     supervisor_pid=""

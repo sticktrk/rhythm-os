@@ -121,6 +121,99 @@ void main() {
       expect(grants.single.token, 'owner-token');
     });
 
+    test('enable waits for the public remote hostname to route', () async {
+      final stateLoads = <String>[];
+      var remoteRouteAttempts = 0;
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          stateLoads.add('${endpoint.baseUrl}|$authToken');
+          if (endpoint.useSsl) {
+            remoteRouteAttempts += 1;
+            if (remoteRouteAttempts == 1) {
+              throw const RhythmApiException('remote hostname not ready');
+            }
+          }
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        remoteRoutePollAttempts: 2,
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(_serverHub(), home: home);
+
+      expect(result.updatedHub.remoteEndpoint?.host,
+          'hub.devices.rhythm.lighting');
+      expect(result.updatedHub.serverInstanceId, 'srv-test-instance');
+      expect(stateLoads, [
+        'http://192.168.5.123:54448|owner-token',
+        'https://hub.devices.rhythm.lighting:443|owner-token',
+        'https://hub.devices.rhythm.lighting:443|owner-token',
+      ]);
+    });
+
+    test('enable fails when the public remote hostname never routes', () async {
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          if (endpoint.useSsl) {
+            throw const RhythmApiException('remote hostname not ready');
+          }
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        remoteRoutePollAttempts: 2,
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await expectLater(
+        service.enableForHub(_serverHub()),
+        throwsA(isA<RemoteAccessRouteException>()),
+      );
+    });
+
     test('required support grant failure surfaces during enable', () async {
       final supabase = _FakeSupabaseClient(
         responseData: {

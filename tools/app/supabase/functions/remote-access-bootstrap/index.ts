@@ -24,6 +24,10 @@ type TunnelResult = {
   token?: string
 }
 
+type ListedTunnelResult = TunnelResult & {
+  deleted_at?: string | null
+}
+
 type DnsRecord = {
   id: string
   name: string
@@ -218,6 +222,20 @@ async function disableRemoteAccess({
     await deleteDnsRecordIfPresent(zoneId, apiToken, existing.hostname)
     await deleteTunnelIfPresent(accountId, apiToken, existing.tunnel_id)
     await deleteRemoteAccessMapping(adminClient, existing.hub_id)
+  } else {
+    const accountId = readOptionalEnv('CLOUDFLARE_ACCOUNT_ID')
+    const zoneId = readOptionalEnv('CLOUDFLARE_ZONE_ID')
+    const apiToken = readCloudflareApiToken()
+
+    if (accountId && zoneId && apiToken) {
+      const domain = remoteAccessDomain()
+      await deleteDnsRecordIfPresent(
+        zoneId,
+        apiToken,
+        `${hubId}.${domain}`.toLowerCase(),
+      )
+      await deleteTunnelByNameIfPresent(accountId, apiToken, `rhythm-${hubId}`)
+    }
   }
 
   await clearHubRemoteEndpoint(adminClient, hubId)
@@ -675,16 +693,23 @@ async function createTunnel(
   apiToken: string,
   name: string,
 ): Promise<TunnelResult> {
-  const response = await cloudflare<TunnelResult>(
-    `/accounts/${accountId}/cfd_tunnel`,
-    apiToken,
-    {
-      method: 'POST',
-      body: JSON.stringify({ name, config_src: 'cloudflare' }),
-    },
-    'create Cloudflare tunnel',
-  )
-  return response
+  try {
+    return await cloudflare<TunnelResult>(
+      `/accounts/${accountId}/cfd_tunnel`,
+      apiToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({ name, config_src: 'cloudflare' }),
+      },
+      'create Cloudflare tunnel',
+    )
+  } catch (error) {
+    if (!isCloudflareConflict(error)) throw error
+
+    const existing = await readTunnelByName(accountId, apiToken, name)
+    if (existing) return existing
+    throw error
+  }
 }
 
 async function getTunnelToken(
@@ -800,6 +825,37 @@ async function deleteTunnelIfPresent(
   )
 }
 
+async function deleteTunnelByNameIfPresent(
+  accountId: string,
+  apiToken: string,
+  tunnelName: string,
+): Promise<void> {
+  const existing = await readTunnelByName(accountId, apiToken, tunnelName)
+  if (!existing) return
+  await deleteTunnelIfPresent(accountId, apiToken, existing.id)
+}
+
+async function readTunnelByName(
+  accountId: string,
+  apiToken: string,
+  tunnelName: string,
+): Promise<TunnelResult | null> {
+  const query = new URLSearchParams({ name: tunnelName, per_page: '50' })
+  const tunnels = await cloudflare<ListedTunnelResult[]>(
+    `/accounts/${accountId}/cfd_tunnel?${query.toString()}`,
+    apiToken,
+    undefined,
+    'list Cloudflare tunnels',
+  )
+  return tunnels.find((tunnel) =>
+    tunnel.name === tunnelName && !tunnel.deleted_at
+  ) ?? null
+}
+
+function isCloudflareConflict(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('failed (409):')
+}
+
 async function cloudflare<T = unknown>(
   path: string,
   apiToken: string,
@@ -891,6 +947,17 @@ function requireCloudflareApiToken(): string {
   return requireEnv('CLOUDFLARE_API_TOKEN').replace(/^Bearer\s+/i, '').trim()
 }
 
+function readCloudflareApiToken(): string | null {
+  const value = readOptionalEnv('CLOUDFLARE_API_TOKEN')
+    ?.replace(/^Bearer\s+/i, '')
+    .trim()
+  return value || null
+}
+
 function readEnv(name: string, fallback: string): string {
   return Deno.env.get(name)?.trim() || fallback
+}
+
+function readOptionalEnv(name: string): string | null {
+  return Deno.env.get(name)?.trim() || null
 }
