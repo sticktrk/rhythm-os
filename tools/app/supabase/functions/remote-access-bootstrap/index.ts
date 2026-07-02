@@ -439,6 +439,8 @@ function normalizeServerHubSnapshot(
 
   const lastConnected = readString(hub, 'last_connected')
   if (lastConnected) payload.last_connected = lastConnected
+  const serverInstanceId = readString(hub, 'server_instance_id')
+  if (serverInstanceId) payload.server_instance_id = serverInstanceId
   return payload
 }
 

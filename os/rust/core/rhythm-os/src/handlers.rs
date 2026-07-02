@@ -1567,11 +1567,7 @@ pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value
     }
 }
 
-pub fn handle_post_scene_preview(
-    state: &SharedState,
-    scene_id: &str,
-    body: &Value,
-) -> ApiResponse {
+pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
     let request: crate::scenes::ScenePreviewRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
         Err(e) => {
@@ -1581,13 +1577,9 @@ pub fn handle_post_scene_preview(
     let duration_ms = request.duration_ms;
     match commands::do_scene_preview(state, scene_id, request) {
         Ok(json) => {
-            if let Ok(response) =
-                serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json)
-            {
-                let mut record = crate::activity::LightActivityRecord::app(
-                    &response.target_id,
-                    "preview_scene",
-                );
+            if let Ok(response) = serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json) {
+                let mut record =
+                    crate::activity::LightActivityRecord::app(&response.target_id, "preview_scene");
                 record.payload = Some(json!({
                     "scene_id": response.scene_id,
                     "preview_id": response.preview_id,
@@ -1616,9 +1608,7 @@ pub fn handle_post_scene_draft_preview(state: &SharedState, body: &Value) -> Api
     let duration_ms = request.duration_ms;
     match commands::do_scene_draft_preview(state, request) {
         Ok(json) => {
-            if let Ok(response) =
-                serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json)
-            {
+            if let Ok(response) = serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json) {
                 let mut record = crate::activity::LightActivityRecord::app(
                     &response.target_id,
                     "preview_draft_scene",
@@ -1640,9 +1630,7 @@ pub fn handle_post_scene_draft_preview(state: &SharedState, body: &Value) -> Api
 pub fn handle_post_scene_preview_commit(state: &SharedState, preview_id: &str) -> ApiResponse {
     match commands::do_scene_preview_commit(state, preview_id) {
         Ok(json) => {
-            if let Ok(response) =
-                serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json)
-            {
+            if let Ok(response) = serde_json::from_str::<crate::scenes::SceneApplyResponse>(&json) {
                 let mut record = crate::activity::LightActivityRecord::app(
                     &response.target_id,
                     "commit_scene_preview",
@@ -1919,6 +1907,15 @@ pub fn handle_set_brightness(state: &SharedState, body: &Value, persist: bool) -
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
         }
+        let mut record = crate::activity::LightActivityRecord::app(&room_id, "set_brightness");
+        record.brightness = Some(brightness.clamp(1, 100));
+        record.change = Some(crate::activity::LightValueChange {
+            axis: Some("brightness".to_string()),
+            before: None,
+            after: Some(json!(brightness.clamp(1, 100))),
+        });
+        record.payload = Some(json!({"brightness": brightness.clamp(1, 100)}));
+        crate::activity::record_light_activity(state, record);
     }
 
     if batch && persist {
@@ -1973,8 +1970,7 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
             return ApiResponse::server_error(e);
         }
         for (node_id, brightness) in &updates {
-            let mut record =
-                crate::activity::LightActivityRecord::app(node_id, "set_brightness");
+            let mut record = crate::activity::LightActivityRecord::app(node_id, "set_brightness");
             record.brightness = Some((*brightness).clamp(1, 100));
             record.change = Some(crate::activity::LightValueChange {
                 axis: Some("brightness".to_string()),
@@ -2176,8 +2172,7 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
             Ok(json) => results.push(json),
             Err(e) => return ApiResponse::server_error(e),
         }
-        let mut record =
-            crate::activity::LightActivityRecord::app(&room_id, "set_curve_position");
+        let mut record = crate::activity::LightActivityRecord::app(&room_id, "set_curve_position");
         record.change = Some(crate::activity::LightValueChange {
             axis: Some("time_offset_minutes".to_string()),
             before: None,
@@ -2258,8 +2253,7 @@ pub fn handle_set_node_time_offset(
         }
     }
     for (node_id, time_offset) in &updates {
-        let mut record =
-            crate::activity::LightActivityRecord::app(node_id, "set_curve_position");
+        let mut record = crate::activity::LightActivityRecord::app(node_id, "set_curve_position");
         record.change = Some(crate::activity::LightValueChange {
             axis: Some("time_offset_minutes".to_string()),
             before: None,
@@ -2456,8 +2450,7 @@ pub fn handle_put_node_preferences(
                     })
                 })
                 .unwrap_or_else(|| "set_light_preferences".to_string());
-            let mut record =
-                crate::activity::LightActivityRecord::app(&update.node_id, action_id);
+            let mut record = crate::activity::LightActivityRecord::app(&update.node_id, action_id);
             record.payload = Some(json!({
                 "rhythm_enabled": update.rhythm_enabled,
                 "standby_enabled": update.standby_enabled,
@@ -2537,10 +2530,35 @@ pub fn handle_put_node_profile_overrides(
     } else {
         dispatch_spacing
     };
-    if let Err(e) =
-        commands::queue_node_preferences_batch(state, updates, persist, queue_dispatch_spacing)
-    {
+    if let Err(e) = commands::queue_node_preferences_batch(
+        state,
+        updates.clone(),
+        persist,
+        queue_dispatch_spacing,
+    ) {
         return ApiResponse::server_error(e);
+    }
+    for update in &updates {
+        let mut record =
+            crate::activity::LightActivityRecord::app(&update.node_id, "set_light_preferences");
+        let profile_override_keys = update
+            .room_profile
+            .as_ref()
+            .and_then(|profile| profile.profile_overrides.as_ref())
+            .and_then(|profile_overrides| profile_overrides.as_ref())
+            .map(|overrides| overrides.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let clear_profile_overrides = update
+            .room_profile
+            .as_ref()
+            .and_then(|profile| profile.profile_overrides.as_ref())
+            .is_some_and(|profile_overrides| profile_overrides.is_none());
+        record.payload = Some(json!({
+            "profile_overrides_touched": true,
+            "profile_override_keys": profile_override_keys,
+            "clear_profile_overrides": clear_profile_overrides,
+        }));
+        crate::activity::record_light_activity(state, record);
     }
     nodes_response(results, true, queue_dispatch_spacing)
 }
@@ -3776,6 +3794,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_room_brightness_records_light_activity() {
+        let state = handler_state_with_runtime();
+        let r = handle_set_brightness(
+            &state,
+            &json!({"room_id": "room1", "brightness": 50}),
+            false,
+        );
+        assert_eq!(r.status, 200);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_activity.len(), 1);
+        let event = &s.light_activity[0];
+        assert_eq!(event.node_id, "room1");
+        assert_eq!(event.action_id, "set_brightness");
+        assert_eq!(event.brightness, Some(50));
+        assert_eq!(
+            event.target.as_ref().map(|target| target.node_id.as_str()),
+            Some("room1")
+        );
+    }
+
+    #[test]
     fn node_action_batch_queued() {
         let state = handler_state_with_runtime();
         let rx = attach_work_queue(&state);
@@ -4025,6 +4065,18 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodePreferences { .. }
         ));
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_activity.len(), 2);
+        let mut activity_nodes = s
+            .light_activity
+            .iter()
+            .map(|event| {
+                assert_eq!(event.action_id, "set_room_state");
+                event.node_id.as_str()
+            })
+            .collect::<Vec<_>>();
+        activity_nodes.sort_unstable();
+        assert_eq!(activity_nodes, vec!["room1", "room2"]);
     }
 
     /// Regression test for issue #36: rapid single-item preference taps must
@@ -5024,6 +5076,15 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodePreferences { .. }
         ));
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_activity.len(), 1);
+        let event = &s.light_activity[0];
+        assert_eq!(event.node_id, "standalone-light");
+        assert_eq!(event.action_id, "set_light_preferences");
+        let payload = event.payload.as_ref().unwrap();
+        assert_eq!(payload["profile_overrides_touched"], true);
+        assert_eq!(payload["profile_override_keys"], json!(["rhythm"]));
+        assert_eq!(payload["clear_profile_overrides"], false);
     }
 
     #[test]

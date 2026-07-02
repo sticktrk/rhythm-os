@@ -70,6 +70,60 @@ pub struct LightValueChange {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LightActivityTarget {
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hub_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub rhythm_enabled: bool,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub lights_on: bool,
+    #[serde(default)]
+    pub brightness: u8,
+    #[serde(default)]
+    pub kelvin: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Value>,
+    #[serde(default)]
+    pub time_offset_minutes: f32,
+    #[serde(default)]
+    pub brightness_offset: f32,
+    #[serde(default)]
+    pub mood_enabled: bool,
+    #[serde(default)]
+    pub mood_active: bool,
+    #[serde(default)]
+    pub standby_enabled: bool,
+    #[serde(default)]
+    pub standby_active: bool,
+    #[serde(default)]
+    pub transitioning: bool,
+    #[serde(default)]
+    pub pending_dispatch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve_modifier: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_settings: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LightActivityEvent {
     pub id: String,
     pub node_id: String,
@@ -77,6 +131,16 @@ pub struct LightActivityEvent {
     pub action_id: String,
     pub source: LightActivitySource,
     pub epoch_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_mode: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<LightActivityTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<LightValueChange>,
     #[serde(default = "default_count")]
@@ -116,6 +180,11 @@ impl LightActivityEvent {
                 .unwrap_or(self.source.raw.as_str()),
             "epoch_ms": self.epoch_ms,
             "ts": ts,
+            "server_instance_id": &self.server_instance_id,
+            "server_version": &self.server_version,
+            "platform": &self.platform,
+            "active_mode": &self.active_mode,
+            "target": &self.target,
             "count": self.count,
             "correlation_id": &self.correlation_id,
             "fanout_of": &self.fanout_of,
@@ -229,38 +298,93 @@ pub fn http_action_id(action: &str) -> String {
 pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecord) {
     record.action_id = http_action_id(record.action_id.as_str());
     let epoch_ms = crate::state::current_epoch_ms();
-    let event = LightActivityEvent {
-        id: crate::logging::next_command_id("activity"),
-        node_id: record.node_id,
-        action_id: record.action_id,
-        source: LightActivitySource {
-            raw: record.source_raw,
-            kind: record.source_kind,
-            marks_touched: record.marks_touched,
-            control_id: record.source_control_id,
-        },
-        epoch_ms,
-        change: record.change,
-        count: 1,
-        correlation_id: record.correlation_id,
-        fanout_of: record.fanout_of,
-        payload: record.payload,
-        brightness: record.brightness,
-        kelvin: record.kelvin,
+    let target = build_light_activity_target(state, &record.node_id);
+
+    let event = {
+        let Ok(mut s) = state.lock() else { return };
+        let event = LightActivityEvent {
+            id: crate::logging::next_command_id("activity"),
+            node_id: record.node_id,
+            action_id: record.action_id,
+            source: LightActivitySource {
+                raw: record.source_raw,
+                kind: record.source_kind,
+                marks_touched: record.marks_touched,
+                control_id: record.source_control_id,
+            },
+            epoch_ms,
+            server_instance_id: Some(s.server_instance_id.clone()),
+            server_version: Some(s.firmware_version.to_string()),
+            platform: Some(s.platform_type.to_string()),
+            active_mode: Some(json!(s.active_mode)),
+            target,
+            change: record.change,
+            count: 1,
+            correlation_id: record.correlation_id,
+            fanout_of: record.fanout_of,
+            payload: record.payload,
+            brightness: record.brightness,
+            kelvin: record.kelvin,
+        };
+
+        s.light_activity.insert(0, event.clone());
+        s.light_activity.truncate(LIGHT_ACTIVITY_HISTORY_LIMIT);
+        if let Some(storage) = s.storage.as_ref() {
+            let history = LightActivityHistory {
+                schema_version: light_activity_schema_version(),
+                activities: s.light_activity.clone(),
+            };
+            if let Err(e) = storage.save_light_activity_history(&history) {
+                log::warn!(target: "cmd", "Failed to save light activity history: {}", e);
+            }
+        }
+        event
     };
 
-    let Ok(mut s) = state.lock() else { return };
-    s.light_activity.insert(0, event);
-    s.light_activity.truncate(LIGHT_ACTIVITY_HISTORY_LIMIT);
-    if let Some(storage) = s.storage.as_ref() {
-        let history = LightActivityHistory {
-            schema_version: light_activity_schema_version(),
-            activities: s.light_activity.clone(),
-        };
-        if let Err(e) = storage.save_light_activity_history(&history) {
-            log::warn!(target: "cmd", "Failed to save light activity history: {}", e);
-        }
-    }
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::ActivityAppended { activity: event },
+    );
+    crate::activity_cloud::enqueue_light_activity_upload(state);
+}
+
+fn build_light_activity_target(state: &SharedState, node_id: &str) -> Option<LightActivityTarget> {
+    let node = crate::commands::build_node_state(state, node_id).ok()?;
+    Some(LightActivityTarget {
+        node_id: node.id,
+        name: node.name,
+        kind: serialized_string(&node.kind).unwrap_or_else(|| "unknown".to_string()),
+        parent_id: node.parent_id,
+        placement: node.placement.as_ref().and_then(serialized_string),
+        hub_types: node.hub_types,
+        manufacturer: node.manufacturer,
+        model: node.model,
+        state: serialized_string(&node.state).unwrap_or_else(|| "unknown".to_string()),
+        rhythm_enabled: node.rhythm_enabled,
+        disabled: node.disabled,
+        lights_on: node.lights_on,
+        brightness: node.brightness,
+        kelvin: node.kelvin,
+        color: node
+            .color
+            .and_then(|color| serde_json::to_value(color).ok()),
+        time_offset_minutes: node.time_offset,
+        brightness_offset: node.brightness_offset,
+        mood_enabled: node.mood_enabled,
+        mood_active: node.mood_active,
+        standby_enabled: node.standby_enabled,
+        standby_active: node.standby_active,
+        transitioning: node.transitioning,
+        pending_dispatch: node.pending_dispatch,
+        curve_modifier: serde_json::to_value(node.curve_modifier).ok(),
+        profile_settings: serde_json::to_value(node.profile_settings).ok(),
+    })
+}
+
+fn serialized_string<T: Serialize>(value: &T) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
 }
 
 pub fn build_light_activity_history(
@@ -390,5 +514,25 @@ mod tests {
         );
         assert_eq!(aliased_action["activities"].as_array().unwrap().len(), 1);
         assert_eq!(aliased_action["activities"][0]["action"], "turn_on");
+    }
+
+    #[test]
+    fn emits_activity_appended_server_event() {
+        let state = test_state();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        state.lock().unwrap().event_tx = Some(tx);
+
+        record_light_activity(&state, LightActivityRecord::app("bedroom", "on"));
+
+        let event = rx.try_recv().expect("expected activity SSE event");
+        match event {
+            crate::server_event::ServerEvent::ActivityAppended { activity } => {
+                assert_eq!(activity.node_id, "bedroom");
+                assert_eq!(activity.action_id, "turn_on");
+                assert_eq!(activity.source.kind, "app");
+                assert!(activity.server_instance_id.is_some());
+            }
+            other => panic!("unexpected server event: {:?}", other),
+        }
     }
 }

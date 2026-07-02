@@ -425,9 +425,22 @@ class RhythmRuntimeApi {
     return null;
   }
 
-  Future<RhythmHistory> getHistory() async {
+  Future<RhythmHistory> getHistory({
+    int? limit,
+    String? area,
+    String? source,
+    String? action,
+  }) async {
     try {
-      final response = await _dio.get('api/history');
+      final query = <String, dynamic>{
+        if (limit != null) 'limit': limit,
+        if (area != null && area.isNotEmpty) 'area': area,
+        if (source != null && source.isNotEmpty) 'source': source,
+        if (action != null && action.isNotEmpty) 'action': action,
+      };
+      final response = query.isEmpty
+          ? await _dio.get('api/history')
+          : await _dio.get('api/history', queryParameters: query);
       final data = jsonMap(response.data);
       return data == null
           ? const RhythmHistory.empty()
@@ -436,6 +449,41 @@ class RhythmRuntimeApi {
       _log.warning('getHistory failed', e);
     }
     return const RhythmHistory.empty();
+  }
+
+  Future<Map<String, dynamic>?> getActivityCloudConfig() async {
+    try {
+      final response = await _dio.get('api/activity-cloud/config');
+      return jsonMap(response.data);
+    } catch (e) {
+      _log.warning('getActivityCloudConfig failed', e);
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> putActivityCloudConfig(
+    Map<String, dynamic> config,
+  ) async {
+    try {
+      final response = await _dio.put(
+        'api/activity-cloud/config',
+        data: config,
+      );
+      return jsonMap(response.data);
+    } catch (e) {
+      _log.warning('putActivityCloudConfig failed', e);
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> clearActivityCloudConfig() async {
+    try {
+      final response = await _dio.delete('api/activity-cloud/config');
+      return jsonMap(response.data);
+    } catch (e) {
+      _log.warning('clearActivityCloudConfig failed', e);
+    }
+    return null;
   }
 
   Future<RhythmFilterPresetDocument> getFilterPresets() async {

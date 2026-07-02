@@ -46,6 +46,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT", "DELETE"],
     },
     SharedRoute {
+        path: "/api/activity-cloud/config",
+        methods: &["GET", "PUT", "DELETE"],
+    },
+    SharedRoute {
         path: "/api/state",
         methods: &["GET"],
     },

@@ -57,15 +57,27 @@ pub trait Storage: Send + Sync {
     fn save_light_runtime_state(&self, _state: &StoredLightRuntimeState) -> Result<()> {
         Ok(())
     }
-    fn load_light_activity_history(
-        &self,
-    ) -> Result<Option<crate::activity::LightActivityHistory>> {
+    fn load_light_activity_history(&self) -> Result<Option<crate::activity::LightActivityHistory>> {
         Ok(None)
     }
     fn save_light_activity_history(
         &self,
         _history: &crate::activity::LightActivityHistory,
     ) -> Result<()> {
+        Ok(())
+    }
+    fn load_activity_cloud_config(
+        &self,
+    ) -> Result<Option<crate::activity_cloud::StoredActivityCloudConfig>> {
+        Ok(None)
+    }
+    fn save_activity_cloud_config(
+        &self,
+        _config: &crate::activity_cloud::StoredActivityCloudConfig,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn clear_activity_cloud_config(&self) -> Result<()> {
         Ok(())
     }
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>>;
@@ -196,6 +208,7 @@ pub trait Storage: Send + Sync {
     fn clear_factory_reset_state(&self) -> Result<()> {
         self.clear_commissioning_wifi_credentials()?;
         self.clear_api_auth()?;
+        self.clear_activity_cloud_config()?;
         self.clear_remote_access_config()
     }
 }
@@ -811,9 +824,7 @@ impl Storage for FileStorage {
         self.write_atomic("light_runtime_state.json", data.as_bytes())
     }
 
-    fn load_light_activity_history(
-        &self,
-    ) -> Result<Option<crate::activity::LightActivityHistory>> {
+    fn load_light_activity_history(&self) -> Result<Option<crate::activity::LightActivityHistory>> {
         let path = self.file_path("activity_history.json");
         match self.read_json::<crate::activity::LightActivityHistory>("activity_history.json") {
             Ok(v) => Ok(Some(v.normalized())),
@@ -843,6 +854,46 @@ impl Storage for FileStorage {
     ) -> Result<()> {
         let data = serde_json::to_string_pretty(history)?;
         self.write_atomic("activity_history.json", data.as_bytes())
+    }
+
+    fn load_activity_cloud_config(
+        &self,
+    ) -> Result<Option<crate::activity_cloud::StoredActivityCloudConfig>> {
+        let path = self.file_path("activity_cloud.json");
+        match self
+            .read_json::<crate::activity_cloud::StoredActivityCloudConfig>("activity_cloud.json")
+        {
+            Ok(config) => Ok(Some(config)),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load activity cloud config {}: {}",
+                        path.display(),
+                        e
+                    );
+                } else {
+                    debug!(
+                        target: "sys",
+                        "No persisted activity cloud config at {}",
+                        path.display()
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_activity_cloud_config(
+        &self,
+        config: &crate::activity_cloud::StoredActivityCloudConfig,
+    ) -> Result<()> {
+        let data = serde_json::to_string_pretty(config)?;
+        self.write_atomic("activity_cloud.json", data.as_bytes())
+    }
+
+    fn clear_activity_cloud_config(&self) -> Result<()> {
+        self.remove_if_exists("activity_cloud.json")
     }
 
     fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
@@ -1141,6 +1192,7 @@ impl Storage for FileStorage {
             "motion_timers.json",
             "light_runtime_state.json",
             "activity_history.json",
+            "activity_cloud.json",
             "hub_credentials.json",
             "canonical_registry.json",
             "topology.json",
@@ -2768,6 +2820,37 @@ mod tests {
         }
 
         #[test]
+        fn activity_cloud_save_load_and_clear_roundtrip() {
+            let (storage, path) = temp_storage();
+            let config = crate::activity_cloud::StoredActivityCloudConfig {
+                schema_version: 1,
+                enabled: true,
+                ingest_url: "https://example.test/functions/v1/server-activity-ingest".into(),
+                upload_token: "device-secret".into(),
+                home_id: "home-1".into(),
+                hub_id: "hub-1".into(),
+                token_id: Some("token-1".into()),
+                server_instance_id: Some("srv-1".into()),
+                upload_status: Some("ok".into()),
+                last_upload_attempt_epoch_ms: Some(100),
+                last_upload_success_epoch_ms: Some(101),
+                last_upload_failure_epoch_ms: None,
+                last_upload_http_status: Some(200),
+                last_upload_error: None,
+                auth_failed_at_epoch_ms: None,
+                updated_at_epoch_ms: 123,
+            };
+
+            storage.save_activity_cloud_config(&config).unwrap();
+            let loaded = storage.load_activity_cloud_config().unwrap();
+            assert_eq!(loaded, Some(config));
+
+            storage.clear_activity_cloud_config().unwrap();
+            assert!(storage.load_activity_cloud_config().unwrap().is_none());
+            cleanup(&path);
+        }
+
+        #[test]
         fn clear_factory_reset_state_removes_persisted_files() {
             let (storage, path) = temp_storage();
             storage
@@ -2854,6 +2937,26 @@ mod tests {
                     updated_at_epoch_ms: 123,
                 })
                 .unwrap();
+            storage
+                .save_activity_cloud_config(&crate::activity_cloud::StoredActivityCloudConfig {
+                    schema_version: 1,
+                    enabled: true,
+                    ingest_url: "https://example.test/functions/v1/server-activity-ingest".into(),
+                    upload_token: "device-secret".into(),
+                    home_id: "home-1".into(),
+                    hub_id: "hub-1".into(),
+                    token_id: Some("token-1".into()),
+                    server_instance_id: Some("srv-1".into()),
+                    upload_status: Some("ok".into()),
+                    last_upload_attempt_epoch_ms: Some(100),
+                    last_upload_success_epoch_ms: Some(101),
+                    last_upload_failure_epoch_ms: None,
+                    last_upload_http_status: Some(200),
+                    last_upload_error: None,
+                    auth_failed_at_epoch_ms: None,
+                    updated_at_epoch_ms: 123,
+                })
+                .unwrap();
             std::fs::create_dir_all(path.join("cloudflared")).unwrap();
             std::fs::write(path.join("cloudflared").join("connector_token"), "secret").unwrap();
             std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
@@ -2884,6 +2987,7 @@ mod tests {
                 "canonical_registry.json",
                 "topology.json",
                 "commissioning_wifi.json",
+                "activity_cloud.json",
                 "remote_access.json",
                 "cloudflared/connector_token",
                 "cloudflared/hostname",
