@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -82,6 +83,15 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   static const _edgeScrollZone = 28.0;
   static const _edgeScrollIntentThreshold = 16.0;
   static const _edgeScrollDelay = Duration(milliseconds: 375);
+  static const _headerControlHeight = 38.0;
+  static const _maxSearchResults = 32;
+
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  String _searchQuery = '';
+  bool _searchOverlayOpen = false;
+  List<_RoomSearchEntry> _searchIndex = const [];
+  int _searchIndexSignature = 0;
 
   // Overlay-based drag state
   OverlayEntry? _dragOverlay;
@@ -105,10 +115,26 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   int _currentPage = 0;
 
   @override
+  void initState() {
+    super.initState();
+    _searchFocusNode.addListener(_handleSearchFocusChanged);
+    _rebuildSearchIndexIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(AllRoomsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _rebuildSearchIndexIfNeeded();
+  }
+
+  @override
   void dispose() {
     _edgeScrollTimer?.cancel();
     _removeTrackedPointerRoute();
     _dragOverlay?.remove();
+    _searchFocusNode.removeListener(_handleSearchFocusChanged);
+    _searchFocusNode.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -116,6 +142,139 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final serverSync = context.read<ServerSyncProvider>();
     await serverSync.fullRefresh();
     AnalyticsService().logRoomsRefreshed(source: 'all_rooms_pull_to_refresh');
+  }
+
+  void _handleSearchFocusChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (_searchFocusNode.hasFocus) _searchOverlayOpen = true;
+    });
+  }
+
+  void _handleSearchChanged(String value) {
+    if (_searchQuery == value) return;
+    setState(() {
+      _searchQuery = value;
+      _searchOverlayOpen = true;
+    });
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    _handleSearchChanged('');
+    _searchFocusNode.requestFocus();
+  }
+
+  void _dismissSearch() {
+    _searchController.clear();
+    _searchFocusNode.unfocus();
+    setState(() {
+      _searchQuery = '';
+      _searchOverlayOpen = false;
+    });
+  }
+
+  bool _showSearchOverlay(bool editMode) {
+    if (editMode) return false;
+    return _searchOverlayOpen &&
+        (_searchFocusNode.hasFocus || _searchQuery.trim().isNotEmpty);
+  }
+
+  double _headerVerticalPadding(bool isLandscape) => isLandscape ? 4.0 : 10.0;
+
+  double _headerHeight(bool isLandscape) =>
+      _headerControlHeight + (_headerVerticalPadding(isLandscape) * 2);
+
+  void _rebuildSearchIndexIfNeeded() {
+    final signature = _roomSearchSignature(widget.rooms);
+    if (signature == _searchIndexSignature) return;
+    _searchIndexSignature = signature;
+    _searchIndex = [
+      for (final room in widget.rooms) _RoomSearchEntry(room),
+    ];
+  }
+
+  int _roomSearchSignature(List<RoomDto> rooms) {
+    var hash = Object.hash(rooms.length, 0);
+    for (final room in rooms) {
+      hash = Object.hash(
+        hash,
+        room.id,
+        room.name,
+        room.source,
+        room.kind,
+        room.parentId,
+        Object.hashAll(room.deviceIds),
+      );
+    }
+    return hash;
+  }
+
+  List<_RoomSearchHit> _searchHits() {
+    final query = _normalizeSearchText(_searchQuery);
+    final hits = <_RoomSearchHit>[];
+    if (query.isEmpty) {
+      return const [];
+    }
+
+    for (final entry in _searchIndex) {
+      final score = _scoreRoomSearch(entry, query);
+      if (score >= 0) hits.add(_RoomSearchHit(entry: entry, score: score));
+    }
+    hits.sort((a, b) {
+      final scoreCompare = b.score.compareTo(a.score);
+      if (scoreCompare != 0) return scoreCompare;
+      return a.entry.sortName.compareTo(b.entry.sortName);
+    });
+    return hits.take(_maxSearchResults).toList(growable: false);
+  }
+
+  int _scoreRoomSearch(_RoomSearchEntry entry, String query) {
+    final name = entry.normalizedName;
+    final searchable = entry.normalizedSearchText;
+
+    if (name == query) return 10000 - name.length;
+    if (name.startsWith(query)) return 9000 - name.length;
+    if (entry.normalizedWords.any((word) => word.startsWith(query))) {
+      return 8600 - name.length;
+    }
+
+    final nameContains = name.indexOf(query);
+    if (nameContains >= 0) return 8200 - nameContains;
+
+    final textContains = searchable.indexOf(query);
+    if (textContains >= 0) return 7600 - textContains;
+
+    return _subsequenceSearchScore(searchable, query);
+  }
+
+  int _subsequenceSearchScore(String searchable, String query) {
+    var queryIndex = 0;
+    var lastMatch = -1;
+    var firstMatch = -1;
+    var gapPenalty = 0;
+    var contiguousBonus = 0;
+
+    for (var i = 0; i < searchable.length && queryIndex < query.length; i++) {
+      if (searchable.codeUnitAt(i) != query.codeUnitAt(queryIndex)) {
+        continue;
+      }
+      if (firstMatch == -1) firstMatch = i;
+      if (lastMatch >= 0) {
+        final gap = i - lastMatch - 1;
+        gapPenalty += gap;
+        if (gap == 0) contiguousBonus += 12;
+      }
+      lastMatch = i;
+      queryIndex++;
+    }
+
+    if (queryIndex != query.length) return -1;
+    return 6200 -
+        (firstMatch * 18) -
+        (gapPenalty * 14) -
+        (searchable.length - query.length).clamp(0, 160).toInt() +
+        contiguousBonus;
   }
 
   // -- Drag handle callbacks --------------------------------------------------
@@ -463,6 +622,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final pageCount = pageProvider.pageCount;
     final clampedPage =
         pageCount == 0 ? 0 : _currentPage.clamp(0, pageCount - 1);
+    final showSearchOverlay = _showSearchOverlay(pageProvider.editMode);
 
     return Stack(
       children: [
@@ -512,6 +672,11 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               totalPages: pageCount,
               pageController: widget.pageController,
             ),
+          ),
+        if (showSearchOverlay)
+          _buildSearchOverlay(
+            isLandscape: isLandscape,
+            bottomPad: bottomPad,
           ),
       ],
     );
@@ -793,7 +958,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   }
 
   Widget _buildHeader(bool isLandscape, bool editMode) {
-    final vPad = isLandscape ? 4.0 : 10.0;
+    final vPad = _headerVerticalPadding(isLandscape);
 
     if (editMode) {
       return Padding(
@@ -842,11 +1007,260 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           _HomeChooserButton(
             onTap: widget.onHomeChooserTap,
           ),
-          const Spacer(),
+          const SizedBox(width: 12),
+          Expanded(child: _buildSearchField()),
+          const SizedBox(width: 12),
           _SunButton(
             onTap: () => SunPositionScreen.show(context),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    final active = _searchFocusNode.hasFocus || _searchQuery.isNotEmpty;
+    final borderColor = active
+        ? CelestialColors.accentBlue.withValues(alpha: 0.55)
+        : CelestialColors.orbitRing.withValues(alpha: 0.75);
+
+    return SizedBox(
+      height: _headerControlHeight,
+      child: TextField(
+        key: const ValueKey('room_quick_search_field'),
+        controller: _searchController,
+        focusNode: _searchFocusNode,
+        onChanged: _handleSearchChanged,
+        onTap: () => setState(() => _searchOverlayOpen = true),
+        textInputAction: TextInputAction.search,
+        style: const TextStyle(
+          color: CelestialColors.textPrimary,
+          fontSize: 14,
+          fontWeight: FontWeight.w500,
+        ),
+        cursorColor: CelestialColors.accentBlue,
+        decoration: InputDecoration(
+          hintText: 'Search rooms',
+          hintStyle: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.72),
+            fontSize: 14,
+            fontWeight: FontWeight.w500,
+          ),
+          prefixIcon: Icon(
+            Icons.search_rounded,
+            color: active
+                ? CelestialColors.accentBlue
+                : CelestialColors.textSecondary.withValues(alpha: 0.78),
+            size: 20,
+          ),
+          prefixIconConstraints:
+              const BoxConstraints(minWidth: 38, minHeight: 38),
+          suffixIcon: _searchQuery.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear search',
+                  onPressed: _clearSearch,
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  color: CelestialColors.textSecondary,
+                  visualDensity: VisualDensity.compact,
+                ),
+          suffixIconConstraints:
+              const BoxConstraints(minWidth: 36, minHeight: 38),
+          filled: true,
+          fillColor: CelestialColors.backgroundCard.withValues(alpha: 0.84),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 0,
+            vertical: 9,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(20),
+            borderSide: BorderSide(color: borderColor),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(20),
+            borderSide: BorderSide(
+              color: CelestialColors.accentBlue.withValues(alpha: 0.75),
+              width: 1.2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchOverlay({
+    required bool isLandscape,
+    required double bottomPad,
+  }) {
+    final hits = _searchHits();
+    final top = MediaQuery.of(context).padding.top + _headerHeight(isLandscape);
+    final queryActive = _normalizeSearchText(_searchQuery).isNotEmpty;
+
+    return Positioned(
+      left: 0,
+      top: top,
+      right: 0,
+      bottom: 0,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _dismissSearch,
+              child: ClipRect(
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.58),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: 640,
+                        maxHeight: math.max(92, constraints.maxHeight - 8),
+                      ),
+                      child: !queryActive
+                          ? const SizedBox.shrink()
+                          : hits.isEmpty
+                              ? _SearchEmptyState(queryActive: queryActive)
+                              : ListView.builder(
+                                  key: const ValueKey(
+                                      'room_quick_search_results'),
+                                  shrinkWrap: true,
+                                  padding: EdgeInsets.only(bottom: bottomPad),
+                                  keyboardDismissBehavior:
+                                      ScrollViewKeyboardDismissBehavior.onDrag,
+                                  itemCount: hits.length,
+                                  itemBuilder: (context, index) {
+                                    final room = hits[index].entry.room;
+                                    return Padding(
+                                      padding:
+                                          const EdgeInsets.only(bottom: 12),
+                                      child: RoomCard(
+                                        key:
+                                            ValueKey('quick-search-${room.id}'),
+                                        roomId: room.id,
+                                        globalConfig: widget.globalConfig,
+                                        curveData: widget.curveData,
+                                      ),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _normalizeSearchText(String value) {
+  final buffer = StringBuffer();
+  for (final codeUnit in value.toLowerCase().codeUnits) {
+    final isDigit = codeUnit >= 48 && codeUnit <= 57;
+    final isLetter = codeUnit >= 97 && codeUnit <= 122;
+    if (isDigit || isLetter) buffer.writeCharCode(codeUnit);
+  }
+  return buffer.toString();
+}
+
+String _roomSourceLabel(RoomSourceDto source) => switch (source) {
+      RoomSourceDto.hue => 'Hue',
+      RoomSourceDto.homeAssistant => 'Home Assistant',
+      RoomSourceDto.matter => 'Matter',
+      RoomSourceDto.bridge => 'Bridge',
+      RoomSourceDto.unknown => 'Unknown',
+    };
+
+String _roomKindLabel(RoomNodeKind kind) => switch (kind) {
+      RoomNodeKind.room => 'Room',
+      RoomNodeKind.lightDevice => 'Light',
+      RoomNodeKind.switchDevice => 'Switch',
+      RoomNodeKind.motionSensor => 'Motion Sensor',
+      RoomNodeKind.sensor => 'Sensor',
+      RoomNodeKind.button => 'Button',
+      RoomNodeKind.otherDevice => 'Device',
+    };
+
+class _RoomSearchEntry {
+  _RoomSearchEntry(this.room)
+      : sortName = room.name.toLowerCase(),
+        normalizedName = _normalizeSearchText(room.name),
+        normalizedWords = room.name
+            .split(RegExp(r'\s+'))
+            .map(_normalizeSearchText)
+            .where((word) => word.isNotEmpty)
+            .toList(growable: false),
+        normalizedSearchText = _normalizeSearchText(
+          [
+            room.name,
+            room.id,
+            room.parentId,
+            _roomSourceLabel(room.source),
+            _roomKindLabel(room.kind),
+            ...room.deviceIds,
+          ].whereType<String>().join(' '),
+        );
+
+  final RoomDto room;
+  final String sortName;
+  final String normalizedName;
+  final List<String> normalizedWords;
+  final String normalizedSearchText;
+}
+
+class _RoomSearchHit {
+  const _RoomSearchHit({
+    required this.entry,
+    required this.score,
+  });
+
+  final _RoomSearchEntry entry;
+  final int score;
+}
+
+class _SearchEmptyState extends StatelessWidget {
+  const _SearchEmptyState({required this.queryActive});
+
+  final bool queryActive;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('room_quick_search_empty'),
+      height: 92,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.9),
+        ),
+      ),
+      child: Text(
+        queryActive ? 'No matching rooms' : 'No rooms',
+        style: TextStyle(
+          color: CelestialColors.textSecondary.withValues(alpha: 0.9),
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -1455,7 +1869,6 @@ class _CelestialPainter extends CustomPainter {
         !identical(palette, oldDelegate.palette);
   }
 }
-
 
 /// Floating page indicator dots, rendered just above the global bottom nav
 /// over the celestial background — no opaque strip, no own background color.

@@ -468,16 +468,25 @@ class _RoomCardState extends State<RoomCard> {
         final moodSecondary =
             moodPalette.length > 1 ? moodPalette[1] : moodPrimary;
 
+        final showActivitySpinner = isTransitioning || isDispatchPending;
+
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
+        //
+        // While a command is in flight, deliberately avoid using the reported
+        // light color for the card surface. Some hubs briefly report warning
+        // or stale RGB values during turn-on, and showing those as the card
+        // background makes users think the light itself changed color.
         final dimT = displayBrightness / 100.0;
         const darkBase = Color(0xFF141210);
-        final bgColor = switch (mode) {
+        final lightColorBg = switch (mode) {
           RoomMode.mood => Color.lerp(darkBase, cctColor, 0.22)!,
           RoomMode.standby => Color.lerp(darkBase, cctColor, 0.14)!,
           RoomMode.on => Color.lerp(darkBase, cctColor, 0.10 + dimT * 0.50)!,
           RoomMode.off => CelestialColors.backgroundCard,
         };
+        final bgColor =
+            showActivitySpinner ? const Color(0xFF1B222C) : lightColorBg;
 
         // Text and icon colors per mode — use luminance-based contrast
         // (same approach as _RhythmPill) so names stay readable at any brightness.
@@ -520,7 +529,6 @@ class _RoomCardState extends State<RoomCard> {
 
         final sliderActive =
             !isTransitioning && (mode == RoomMode.on || mode == RoomMode.mood);
-        final showActivitySpinner = isTransitioning || isDispatchPending;
         final sliderInCctMode = _cctMode && mode == RoomMode.on;
         final cctRange = _CctSideRange.fromCurveData(
           widget.curveData,
@@ -529,7 +537,9 @@ class _RoomCardState extends State<RoomCard> {
           fallbackMax: _maxKelvin,
         );
         final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
-        final glowColor = cctColor;
+        final glowColor = showActivitySpinner
+            ? CelestialColors.accentBlue.withValues(alpha: 0.65)
+            : cctColor;
         final sliderActiveTrackColor =
             Color.lerp(cctColor, Colors.white, 0.15)!.withValues(alpha: 0.85);
         final sliderInactiveTrackColor = Colors.black.withValues(alpha: 0.20);
@@ -565,6 +575,7 @@ class _RoomCardState extends State<RoomCard> {
               // Only register double-tap when off-curve to avoid tap delay on normal cards
               onDoubleTap: offCurve ? _resetRoom : null,
               child: AnimatedContainer(
+                key: ValueKey('room-card-surface-${widget.roomId}'),
                 duration: const Duration(milliseconds: 400),
                 curve: Curves.easeInOut,
                 clipBehavior: Clip.antiAlias,
@@ -1481,8 +1492,9 @@ class _SegmentGroupTrackState extends State<_SegmentGroupTrack> {
                                     color: i == highlightIndex
                                         ? (activeText ?? inactiveText)
                                         : inactiveText,
-                                    fontSize:
-                                        _labelFor(segs[i]).length > 5 ? 9.5 : 12,
+                                    fontSize: _labelFor(segs[i]).length > 5
+                                        ? 9.5
+                                        : 12,
                                     fontWeight: FontWeight.w600,
                                     letterSpacing: 0.3,
                                   ),

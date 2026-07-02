@@ -138,6 +138,32 @@ const _room1 = RoomDto(
   brightnessOffset: 0,
 );
 
+const _bedroom = RoomDto(
+  id: 'bedroom',
+  name: 'Bedroom',
+  source: RoomSourceDto.hue,
+  kind: RoomNodeKind.room,
+  deviceIds: ['device-2'],
+  rhythmEnabled: true,
+  disabled: false,
+  lightsOn: true,
+  timeOffsetMinutes: 0,
+  brightnessOffset: 0,
+);
+
+const _garage = RoomDto(
+  id: 'garage',
+  name: 'Garage',
+  source: RoomSourceDto.hue,
+  kind: RoomNodeKind.room,
+  deviceIds: ['device-3'],
+  rhythmEnabled: true,
+  disabled: false,
+  lightsOn: true,
+  timeOffsetMinutes: 0,
+  brightnessOffset: 0,
+);
+
 const _switch1 = RoomDto(
   id: 'switch-1',
   name: 'Wall Switch',
@@ -230,6 +256,69 @@ void main() {
     await tester.tap(find.byIcon(Icons.home_rounded));
 
     expect(opened, isTrue);
+  });
+
+  testWidgets('quick search fuzzy filters rooms and reuses room cards',
+      (tester) async {
+    await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom, _garage],
+    );
+
+    await tester.tap(find.byKey(const ValueKey('room_quick_search_field')));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('room_quick_search_results')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('quick-search-room-1')), findsNothing);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('room_quick_search_field')),
+      'ktc',
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('room_quick_search_results')),
+      findsOneWidget,
+    );
+    final kitchenResult = find.byKey(const ValueKey('quick-search-room-1'));
+    expect(kitchenResult, findsOneWidget);
+    expect(find.byKey(const ValueKey('quick-search-bedroom')), findsNothing);
+    expect(
+      find.descendant(of: kitchenResult, matching: find.text('Off')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: kitchenResult, matching: find.text('On')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('quick search backdrop tap clears and closes the overlay',
+      (tester) async {
+    await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom, _garage],
+    );
+
+    final searchField = find.byKey(const ValueKey('room_quick_search_field'));
+    await tester.tap(searchField);
+    await tester.enterText(searchField, 'kit');
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('quick-search-room-1')), findsOneWidget);
+
+    await tester.tapAt(const Offset(195, 760));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('room_quick_search_results')),
+      findsNothing,
+    );
+    expect(tester.widget<TextField>(searchField).controller?.text, isEmpty);
   });
 
   testWidgets('room cards show the default room icon', (tester) async {

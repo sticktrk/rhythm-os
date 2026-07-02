@@ -195,6 +195,14 @@ double _timeOffsetMinutesForEffectiveHour(double targetHour) {
   return deltaHours * 60;
 }
 
+Color _roomCardSurfaceColor(WidgetTester tester, String roomId) {
+  final surface = tester.widget<AnimatedContainer>(
+    find.byKey(ValueKey('room-card-surface-$roomId')),
+  );
+  final decoration = surface.decoration as BoxDecoration;
+  return decoration.color!;
+}
+
 void main() {
   setUp(() {
     // Most tests exercise Mood mechanics directly; treat the one-time
@@ -361,6 +369,67 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('pending dispatch uses a neutral surface instead of light color',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      pendingDispatch: true,
+      lightsOn: true,
+      color: (255, 0, 0),
+    );
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(_roomCardSurfaceColor(tester, 'room-1'), const Color(0xFF1B222C));
   });
 
   testWidgets('mood segment sends mood room state', (tester) async {
