@@ -67,6 +67,99 @@ void main() {
       expect(body['server_hub'], isA<Map<String, dynamic>>());
     });
 
+    test('enable provisions the tunnel and grants support access', () async {
+      late _FakeRemoteAccessApi remoteApi;
+      final grants = <Hub>[];
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+          'remote_url': 'https://hub.devices.rhythm.lighting',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          remoteApi = _FakeRemoteAccessApi(baseUrl: baseUrl);
+          return remoteApi;
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (hub) async {
+          grants.add(hub);
+        },
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(_serverHub(), home: home);
+
+      expect(result.updatedHub.remoteEndpoint?.host,
+          'hub.devices.rhythm.lighting');
+      expect(result.updatedHub.serverInstanceId, 'srv-test-instance');
+      expect(remoteApi.putConfigCalls, 1);
+      expect(remoteApi.lastHostname, 'hub.devices.rhythm.lighting');
+      expect(remoteApi.lastConnectorToken, 'connector-token');
+      expect(supabase.functions.invocations.single.name,
+          'remote-access-bootstrap');
+      expect(grants, hasLength(1));
+      expect(grants.single.remoteEndpoint?.host, 'hub.devices.rhythm.lighting');
+      expect(grants.single.token, 'owner-token');
+    });
+
+    test('required support grant failure surfaces during enable', () async {
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {
+          throw StateError('grant failed');
+        },
+        canUseRemoteAccessOverride: true,
+      );
+
+      await expectLater(
+        service.enableForHub(
+          _serverHub(),
+          requireSupportGrant: true,
+        ),
+        throwsA(isA<StateError>()),
+      );
+    });
+
     test('activation succeeds when the local connector is healthy', () async {
       final service = RemoteAccessService.testing();
       final api = _FakeRemoteAccessApi(
@@ -391,6 +484,11 @@ class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
   final Future<void> Function()? onClear;
   final List<RhythmRemoteAccessStatus> statuses;
   int statusCalls = 0;
+  int putConfigCalls = 0;
+  String? lastHostname;
+  String? lastConnectorToken;
+  String? lastTunnelId;
+  String? lastTunnelName;
 
   @override
   Future<RhythmRemoteAccessStatus> getStatus() async {
@@ -400,6 +498,22 @@ class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
     final resolvedIndex =
         index >= statuses.length ? statuses.length - 1 : index;
     return statuses[resolvedIndex];
+  }
+
+  @override
+  Future<RhythmRemoteAccessStatus> putConfig({
+    required String hostname,
+    required String connectorToken,
+    bool enabled = true,
+    String? tunnelId,
+    String? tunnelName,
+  }) async {
+    putConfigCalls += 1;
+    lastHostname = hostname;
+    lastConnectorToken = connectorToken;
+    lastTunnelId = tunnelId;
+    lastTunnelName = tunnelName;
+    return _remoteStatus(registeredConnections: 1);
   }
 
   @override
@@ -453,10 +567,16 @@ class _FakeAuthApi extends RhythmAuthApi {
 }
 
 class _FakeSupabaseClient {
-  final functions = _FakeFunctions();
+  _FakeSupabaseClient({Object? responseData})
+      : functions = _FakeFunctions(responseData ?? const {'status': 'ok'});
+
+  final _FakeFunctions functions;
 }
 
 class _FakeFunctions {
+  _FakeFunctions(this.responseData);
+
+  final Object? responseData;
   final invocations = <({String name, Map<String, dynamic> body})>[];
 
   Future<_FakeFunctionResponse> invoke(
@@ -467,7 +587,7 @@ class _FakeFunctions {
       name: name,
       body: Map<String, dynamic>.from(body as Map),
     ));
-    return const _FakeFunctionResponse({'status': 'ok'});
+    return _FakeFunctionResponse(responseData);
   }
 }
 

@@ -73,6 +73,7 @@ class RemoteAccessService {
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
     RemoteAccessSupportGrant? supportGrant,
+    bool? canUseRemoteAccessOverride,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
@@ -80,7 +81,8 @@ class RemoteAccessService {
         _stateLoader = stateLoader ?? _defaultStateLoader,
         _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
         _supportGrant =
-            supportGrant ?? SupportAccessService.instance.grantForHub;
+            supportGrant ?? SupportAccessService.instance.grantForHub,
+        _canUseRemoteAccessOverride = canUseRemoteAccessOverride;
 
   static final RemoteAccessService instance = RemoteAccessService._();
   static const _bootstrapFunctionName = 'remote-access-bootstrap';
@@ -94,6 +96,7 @@ class RemoteAccessService {
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
     RemoteAccessSupportGrant? supportGrant,
+    bool? canUseRemoteAccessOverride,
   }) {
     return RemoteAccessService._(
       apiFactory: apiFactory,
@@ -103,6 +106,7 @@ class RemoteAccessService {
       stateLoader: stateLoader ?? _emptyStateLoader,
       authApiFactory: authApiFactory,
       supportGrant: supportGrant,
+      canUseRemoteAccessOverride: canUseRemoteAccessOverride,
     );
   }
 
@@ -113,11 +117,14 @@ class RemoteAccessService {
   final RemoteAccessStateLoader _stateLoader;
   final RemoteAccessAuthApiFactory _authApiFactory;
   final RemoteAccessSupportGrant _supportGrant;
+  final bool? _canUseRemoteAccessOverride;
   final Set<String> _autoEnableInFlight = <String>{};
 
   bool get isEnabledByFlag => FeatureFlags.remoteAccessTunnel;
 
   bool get canUseRemoteAccess {
+    final override = _canUseRemoteAccessOverride;
+    if (override != null) return override;
     return FeatureFlags.remoteAccessTunnel &&
         AccountCloudSyncService.instance.canUseSignedInCloudFeatures &&
         EntitlementsService.instance.has(Entitlement.remoteAccess);
@@ -126,6 +133,7 @@ class RemoteAccessService {
   Future<RemoteAccessEnableResult> enableForHub(
     Hub serverHub, {
     Home? home,
+    bool requireSupportGrant = false,
   }) async {
     _ensureCanUse(serverHub);
 
@@ -184,6 +192,11 @@ class RemoteAccessService {
       updatedAt: DateTime.now(),
       pendingSync: true,
     );
+    if (requireSupportGrant) {
+      await _supportGrant(updatedHub);
+    } else {
+      await _grantSupportAccessForHub(updatedHub);
+    }
 
     return RemoteAccessEnableResult(
       updatedHub: updatedHub,
@@ -273,8 +286,6 @@ class RemoteAccessService {
       final result = await enableForHub(hub, home: home);
       final saved = await saveHub(result.updatedHub);
       if (!saved) return;
-
-      await _grantSupportAccessForHub(result.updatedHub);
 
       onEnabled?.call(result.updatedHub);
       debugPrint(
