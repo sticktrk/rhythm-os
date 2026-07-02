@@ -16,9 +16,11 @@ use log::{debug, info, warn};
 use crate::sse::{drain_sse_lines, HueSseConfig, HueSseEvent, SseParseState};
 
 /// Maximum seconds without any SSE bytes before assuming the connection is
-/// stalled and reconnecting. Hue bridges send heartbeat comment frames every
-/// ~10s, so 45s ≈ 4 missed heartbeats.
-const SSE_IDLE_TIMEOUT_SECS: u64 = 45;
+/// stalled and reconnecting. Motion controls are latency-sensitive, and Hue
+/// bridges normally send heartbeat comment frames every ~10s, so 15s catches a
+/// dead stream after roughly one missed heartbeat instead of waiting through
+/// several missed room-entry events.
+const SSE_IDLE_TIMEOUT_SECS: u64 = 15;
 
 /// Log an "SSE alive" message at this interval during idle periods.
 const ALIVE_LOG_INTERVAL_SECS: u64 = 300;
