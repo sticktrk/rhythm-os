@@ -3,6 +3,8 @@ import type { Session } from '@supabase/supabase-js';
 import {
   Activity,
   AlertTriangle,
+  Download,
+  FileText,
   Home,
   KeyRound,
   Loader2,
@@ -16,10 +18,25 @@ import {
   Wifi
 } from 'lucide-react';
 
-import { fetchMe, fetchSupportSnapshot, probeHub } from './api';
+import {
+  downloadDebugBundle,
+  fetchHealth,
+  fetchHubStatus,
+  fetchHubLogSources,
+  fetchHubLogTail,
+  fetchMe,
+  fetchReadiness,
+  fetchSupportSnapshot,
+  probeHub
+} from './api';
 import { isSupabaseConfigured, supabase } from './supabaseClient';
 import type {
   HomeListItem,
+  AdminApiHealth,
+  AdminApiReadiness,
+  DeviceLogSource,
+  DeviceLogTail,
+  DeviceStatus,
   MeResponse,
   ProbeResult,
   SupportHub,
@@ -32,12 +49,38 @@ type ProbeState = {
   error?: string;
 };
 
+type BundleState = {
+  loading: boolean;
+  error?: string;
+  fileName?: string;
+  downloadedAt?: string;
+  route?: 'remote' | 'local';
+};
+
+type LogState = {
+  loading: boolean;
+  opened: boolean;
+  error?: string;
+  sources?: DeviceLogSource[];
+  selectedSourceId?: string;
+  tail?: DeviceLogTail;
+};
+
+type StatusState = {
+  loading: boolean;
+  opened: boolean;
+  error?: string;
+  result?: DeviceStatus;
+};
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authBusy, setAuthBusy] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [health, setHealth] = useState<AdminApiHealth | null>(null);
+  const [readiness, setReadiness] = useState<AdminApiReadiness | null>(null);
   const [me, setMe] = useState<MeResponse | null>(null);
   const [snapshot, setSnapshot] = useState<SupportSnapshot | null>(null);
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
@@ -45,6 +88,13 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [selectedHomeId, setSelectedHomeId] = useState<string | null>(null);
   const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>(
+    {}
+  );
+  const [bundleStates, setBundleStates] = useState<Record<string, BundleState>>(
+    {}
+  );
+  const [logStates, setLogStates] = useState<Record<string, LogState>>({});
+  const [statusStates, setStatusStates] = useState<Record<string, StatusState>>(
     {}
   );
 
@@ -65,10 +115,15 @@ export default function App() {
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setAuthError(null);
+      setHealth(null);
+      setReadiness(null);
       setMe(null);
       setSnapshot(null);
       setSelectedHomeId(null);
       setProbeStates({});
+      setBundleStates({});
+      setLogStates({});
+      setStatusStates({});
     });
 
     return () => {
@@ -82,10 +137,14 @@ export default function App() {
     setLoadingSnapshot(true);
     setLoadError(null);
     try {
-      const [nextMe, nextSnapshot] = await Promise.all([
+      const [nextHealth, nextReadiness, nextMe, nextSnapshot] = await Promise.all([
+        fetchHealth().catch(() => null),
+        fetchReadiness().catch(() => null),
         fetchMe(session.access_token),
         fetchSupportSnapshot(session.access_token)
       ]);
+      setHealth(nextHealth);
+      setReadiness(nextReadiness);
       setMe(nextMe);
       setSnapshot(nextSnapshot);
       setSelectedHomeId((current) => current ?? firstHomeId(nextSnapshot));
@@ -164,6 +223,117 @@ export default function App() {
     }
   }
 
+  async function handleDownloadBundle(hub: SupportHub) {
+    if (!session) return;
+    setBundleStates((current) => ({
+      ...current,
+      [hub.id]: { ...current[hub.id], loading: true, error: undefined }
+    }));
+    try {
+      const bundle = await downloadDebugBundle(session.access_token, hub.id);
+      triggerBrowserDownload(bundle.blob, bundle.fileName);
+      setBundleStates((current) => ({
+        ...current,
+        [hub.id]: {
+          loading: false,
+          fileName: bundle.fileName,
+          downloadedAt: new Date().toISOString(),
+          route: bundle.route
+        }
+      }));
+    } catch (error) {
+      setBundleStates((current) => ({
+        ...current,
+        [hub.id]: {
+          ...current[hub.id],
+          loading: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    }
+  }
+
+  async function handleLoadStatus(hub: SupportHub) {
+    if (!session) return;
+    setStatusStates((current) => ({
+      ...current,
+      [hub.id]: {
+        ...current[hub.id],
+        loading: true,
+        opened: true,
+        error: undefined
+      }
+    }));
+
+    try {
+      const result = await fetchHubStatus(session.access_token, hub.id);
+      setStatusStates((current) => ({
+        ...current,
+        [hub.id]: {
+          loading: false,
+          opened: true,
+          result
+        }
+      }));
+    } catch (error) {
+      setStatusStates((current) => ({
+        ...current,
+        [hub.id]: {
+          ...current[hub.id],
+          loading: false,
+          opened: true,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    }
+  }
+
+  async function handleLoadLogs(hub: SupportHub, sourceId?: string) {
+    if (!session) return;
+    const existing = logStates[hub.id];
+    setLogStates((current) => ({
+      ...current,
+      [hub.id]: {
+        ...current[hub.id],
+        loading: true,
+        opened: true,
+        error: undefined
+      }
+    }));
+
+    try {
+      const sources =
+        existing?.sources ??
+        (await fetchHubLogSources(session.access_token, hub.id)).sources;
+      const selectedSourceId =
+        sourceId ?? existing?.selectedSourceId ?? preferredLogSourceId(sources);
+      const tail = selectedSourceId
+        ? await fetchHubLogTail(session.access_token, hub.id, selectedSourceId)
+        : undefined;
+
+      setLogStates((current) => ({
+        ...current,
+        [hub.id]: {
+          loading: false,
+          opened: true,
+          sources,
+          selectedSourceId,
+          tail
+        }
+      }));
+    } catch (error) {
+      setLogStates((current) => ({
+        ...current,
+        [hub.id]: {
+          ...current[hub.id],
+          loading: false,
+          opened: true,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    }
+  }
+
   if (!isSupabaseConfigured) {
     return <SetupScreen />;
   }
@@ -216,6 +386,8 @@ export default function App() {
         </div>
       ) : null}
 
+      <ApiCapabilityNotice health={health} readiness={readiness} />
+
       <section className="metrics" aria-label="Support totals">
         <Metric icon={<Users size={20} />} label="Customers" value={snapshot?.totals.customers ?? 0} />
         <Metric icon={<Home size={20} />} label="Homes" value={snapshot?.totals.homes ?? 0} />
@@ -267,7 +439,13 @@ export default function App() {
             <HomeDetail
               item={selectedHome}
               probeStates={probeStates}
+              bundleStates={bundleStates}
+              statusStates={statusStates}
+              logStates={logStates}
               onProbe={handleProbe}
+              onDownloadBundle={handleDownloadBundle}
+              onLoadStatus={handleLoadStatus}
+              onLoadLogs={handleLoadLogs}
             />
           ) : (
             <div className="emptyPane">
@@ -277,6 +455,43 @@ export default function App() {
           )}
         </section>
       </main>
+    </div>
+  );
+}
+
+function ApiCapabilityNotice({
+  health,
+  readiness
+}: {
+  health: AdminApiHealth | null;
+  readiness: AdminApiReadiness | null;
+}) {
+  if (readiness?.remoteDebugReady) return null;
+  if (!readiness && !health) return null;
+  if (
+    !readiness &&
+    health?.serviceRoleConfigured &&
+    health.supportAccessConfigured
+  ) {
+    return null;
+  }
+
+  const missing =
+    readiness?.missing ??
+    [
+      health && !health.serviceRoleConfigured ? 'SUPABASE_SERVICE_ROLE_KEY' : null,
+      health && !health.supportAccessConfigured
+        ? 'SUPPORT_ACCESS_ENCRYPTION_KEY'
+        : null
+    ].filter((value): value is string => value !== null);
+
+  return (
+    <div className="notice warning">
+      <AlertTriangle size={18} />
+      <span>
+        admin-api remote debugging is not ready; missing {missing.join(' and ')}.{' '}
+        {readiness?.notes[0] ?? 'Encrypted remote support needs matching server config.'}
+      </span>
     </div>
   );
 }
@@ -386,11 +601,23 @@ function Metric({
 function HomeDetail({
   item,
   probeStates,
-  onProbe
+  bundleStates,
+  statusStates,
+  logStates,
+  onProbe,
+  onDownloadBundle,
+  onLoadStatus,
+  onLoadLogs
 }: {
   item: HomeListItem;
   probeStates: Record<string, ProbeState>;
+  bundleStates: Record<string, BundleState>;
+  statusStates: Record<string, StatusState>;
+  logStates: Record<string, LogState>;
   onProbe: (hub: SupportHub) => void;
+  onDownloadBundle: (hub: SupportHub) => void;
+  onLoadStatus: (hub: SupportHub) => void;
+  onLoadLogs: (hub: SupportHub, sourceId?: string) => void;
 }) {
   return (
     <div className="homeDetail">
@@ -433,7 +660,13 @@ function HomeDetail({
               key={hub.id}
               hub={hub}
               probeState={probeStates[hub.id]}
+              bundleState={bundleStates[hub.id]}
+              statusState={statusStates[hub.id]}
+              logState={logStates[hub.id]}
               onProbe={() => onProbe(hub)}
+              onDownloadBundle={() => onDownloadBundle(hub)}
+              onLoadStatus={() => onLoadStatus(hub)}
+              onLoadLogs={(sourceId) => onLoadLogs(hub, sourceId)}
             />
           ))}
         </div>
@@ -445,11 +678,23 @@ function HomeDetail({
 function HubRow({
   hub,
   probeState,
-  onProbe
+  bundleState,
+  statusState,
+  logState,
+  onProbe,
+  onDownloadBundle,
+  onLoadStatus,
+  onLoadLogs
 }: {
   hub: SupportHub;
   probeState?: ProbeState;
+  bundleState?: BundleState;
+  statusState?: StatusState;
+  logState?: LogState;
   onProbe: () => void;
+  onDownloadBundle: () => void;
+  onLoadStatus: () => void;
+  onLoadLogs: (sourceId?: string) => void;
 }) {
   const result = probeState?.result;
   return (
@@ -461,8 +706,12 @@ function HubRow({
         <div className="hubText">
           <div className="hubTitle">{hub.name}</div>
           <div className="hubMeta">
-            <span>{hub.remoteEndpoint ? hub.remoteEndpoint.baseUrl : hub.endpoint.baseUrl}</span>
+            {hub.remoteEndpoint ? (
+              <span>Remote {hub.remoteEndpoint.baseUrl}</span>
+            ) : null}
+            <span>Local {hub.endpoint.baseUrl}</span>
             {hub.serverInstanceId ? <span>{shortId(hub.serverInstanceId)}</span> : null}
+            {hub.lastConnected ? <span>Seen {formatDateTime(hub.lastConnected)}</span> : null}
           </div>
         </div>
       </div>
@@ -480,21 +729,293 @@ function HubRow({
 
       <ProbeBadge state={probeState} />
 
-      <button className="probeButton" type="button" onClick={onProbe} disabled={probeState?.loading}>
-        {probeState?.loading ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
-        <span>Probe</span>
-      </button>
+      <div className="hubActions">
+        <button className="probeButton" type="button" onClick={onProbe} disabled={probeState?.loading}>
+          {probeState?.loading ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
+          <span>Probe</span>
+        </button>
+        <button
+          className="probeButton"
+          type="button"
+          onClick={onLoadStatus}
+          disabled={statusState?.loading}
+        >
+          {statusState?.loading ? <Loader2 className="spin" size={16} /> : <Activity size={16} />}
+          <span>Status</span>
+        </button>
+        <button
+          className="probeButton"
+          type="button"
+          onClick={onDownloadBundle}
+          disabled={bundleState?.loading}
+        >
+          {bundleState?.loading ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+          <span>Bundle</span>
+        </button>
+        <button
+          className="probeButton"
+          type="button"
+          onClick={() => onLoadLogs()}
+          disabled={logState?.loading}
+        >
+          {logState?.loading ? <Loader2 className="spin" size={16} /> : <FileText size={16} />}
+          <span>Logs</span>
+        </button>
+      </div>
 
-      {result?.inventory ? (
+      {result ? (
         <div className="inventory">
-          <span>{result.inventory.lights} lights</span>
-          <span>{result.inventory.buttons} buttons</span>
-          <span>{result.inventory.motionSensors} motion</span>
+          {result.baseUrl ? <span>{result.route ?? 'route'} {result.baseUrl}</span> : null}
+          {result.serverVersion ? <span>v{result.serverVersion}</span> : null}
+          {result.checkedAt ? <span>Checked {formatDateTime(result.checkedAt)}</span> : null}
+          {result.inventory ? (
+            <>
+              <span>{result.inventory.lights} lights</span>
+              <span>{result.inventory.buttons} buttons</span>
+              <span>{result.inventory.motionSensors} motion</span>
+            </>
+          ) : null}
         </div>
       ) : null}
 
-      {probeState?.error || result?.message ? (
-        <div className="hubMessage">{probeState?.error ?? result?.message}</div>
+      {probeState?.error || result?.message || bundleState?.error ? (
+        <div className="hubMessage">
+          {bundleState?.error ?? probeState?.error ?? result?.message}
+        </div>
+      ) : null}
+
+      {bundleState?.fileName ? (
+        <div className="hubMessage success">
+          Downloaded {bundleState.fileName}
+          {bundleState.route ? ` from ${bundleState.route}` : ''}
+          {bundleState.downloadedAt ? ` at ${formatDateTime(bundleState.downloadedAt)}` : ''}
+        </div>
+      ) : null}
+
+      {statusState?.opened ? (
+        <StatusPanel state={statusState} onRefresh={onLoadStatus} />
+      ) : null}
+
+      {logState?.opened ? (
+        <LogPanel
+          state={logState}
+          onSourceChange={(sourceId) => onLoadLogs(sourceId)}
+          onRefresh={() => onLoadLogs(logState.selectedSourceId)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function StatusPanel({
+  state,
+  onRefresh
+}: {
+  state: StatusState;
+  onRefresh: () => void;
+}) {
+  const result = state.result;
+  const errors = Object.entries(result?.errors ?? {});
+  return (
+    <div className="statusPanel">
+      <div className="logToolbar">
+        <div className="logMeta">
+          {result ? (
+            <>
+              <span>{result.route} {result.baseUrl}</span>
+              <span>{formatDateTime(result.checkedAt)}</span>
+            </>
+          ) : (
+            <span>Status</span>
+          )}
+        </div>
+        <button className="probeButton" type="button" onClick={onRefresh} disabled={state.loading}>
+          {state.loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          <span>Refresh</span>
+        </button>
+      </div>
+
+      {state.error ? <div className="hubMessage">{state.error}</div> : null}
+
+      {result ? (
+        <div className="statusGrid">
+          <StatusTile
+            title="Health"
+            status={String(result.health?.status ?? 'unknown')}
+            rows={[
+              ['Token', result.tokenAvailable ? 'available' : 'missing'],
+              ['Encrypted', result.hasEncryptedToken ? 'yes' : 'no']
+            ]}
+          />
+          <StatusTile
+            title="Runtime"
+            status={result.state?.serverVersion ?? 'unavailable'}
+            rows={[
+              ['Platform', compactJoin([result.state?.platformType, result.state?.platformContext], ' / ')],
+              ['Instance', result.state?.serverInstanceId],
+              ['Nodes', result.state?.nodeCount],
+              ['Hubs', result.state?.hubCount],
+              ['Last tick', formatEpochMs(result.state?.lastTickEpochMs)],
+              ['Mode', result.state?.activeMode],
+              ['Runtime', result.state?.lightRuntime]
+            ]}
+          />
+          <StatusTile
+            title="Remote Access"
+            status={statusBool(result.remoteAccess?.connector_healthy)}
+            rows={[
+              ['Enabled', yesNo(result.remoteAccess?.enabled)],
+              ['Configured', yesNo(result.remoteAccess?.configured)],
+              ['Service', yesNo(result.remoteAccess?.service_running)],
+              ['Connections', result.remoteAccess?.registered_connections],
+              ['Hostname', result.remoteAccess?.hostname]
+            ]}
+          />
+          <StatusTile
+            title="Auth"
+            status={yesNo(result.auth?.requires_auth) ?? 'unknown'}
+            rows={[
+              ['Owner', yesNo(result.auth?.owner_configured)],
+              ['Tokens', result.auth?.token_count],
+              ['Remote request', yesNo(result.auth?.via_remote_access)]
+            ]}
+          />
+          <StatusTile
+            title="OTA"
+            status={stringValue(result.ota?.state)}
+            rows={[
+              ['Current', result.ota?.current_version],
+              ['Target', result.ota?.target_version],
+              ['Latest', result.ota?.latest_version],
+              ['Update', yesNo(result.ota?.update_available)],
+              ['Error', result.ota?.last_error]
+            ]}
+          />
+          {result.state?.inventory ? (
+            <StatusTile
+              title="Inventory"
+              status={`${result.state.inventory.total} devices`}
+              rows={[
+                ['Lights', result.state.inventory.lights],
+                ['Buttons', result.state.inventory.buttons],
+                ['Motion', result.state.inventory.motionSensors],
+                ['Other', result.state.inventory.otherDevices]
+              ]}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
+      {errors.length > 0 ? (
+        <div className="statusErrors">
+          {errors.map(([key, value]) => (
+            <div key={key}>
+              <strong>{key}</strong>: {value}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StatusTile({
+  title,
+  status,
+  rows
+}: {
+  title: string;
+  status: string;
+  rows: Array<[string, unknown]>;
+}) {
+  return (
+    <div className="statusTile">
+      <div className="statusTileHeader">
+        <span>{title}</span>
+        <strong>{status}</strong>
+      </div>
+      <dl>
+        {rows
+          .filter(([, value]) => value !== undefined && value !== null && value !== '')
+          .map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{stringValue(value)}</dd>
+            </div>
+          ))}
+      </dl>
+    </div>
+  );
+}
+
+function LogPanel({
+  state,
+  onSourceChange,
+  onRefresh
+}: {
+  state: LogState;
+  onSourceChange: (sourceId: string) => void;
+  onRefresh: () => void;
+}) {
+  const sources = state.sources ?? [];
+  return (
+    <div className="logPanel">
+      <div className="logToolbar">
+        <div className="logMeta">
+          {state.tail ? (
+            <>
+              <span>{state.tail.route} {state.tail.baseUrl}</span>
+              <span>{state.tail.returnedLines} lines</span>
+              <span>{formatDateTime(state.tail.fetchedAt)}</span>
+            </>
+          ) : (
+            <span>Logs</span>
+          )}
+        </div>
+        <div className="logControls">
+          <select
+            className="logSelect"
+            value={state.selectedSourceId ?? ''}
+            disabled={state.loading || sources.length === 0}
+            onChange={(event) => onSourceChange(event.target.value)}
+          >
+            {sources.length === 0 ? (
+              <option value="">No sources</option>
+            ) : (
+              sources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.fileName}
+                </option>
+              ))
+            )}
+          </select>
+          <button
+            className="probeButton"
+            type="button"
+            onClick={onRefresh}
+            disabled={state.loading || !state.selectedSourceId}
+          >
+            {state.loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+            <span>Refresh</span>
+          </button>
+        </div>
+      </div>
+
+      {state.error ? <div className="hubMessage">{state.error}</div> : null}
+
+      {state.tail ? (
+        <div className="logOutput" aria-label={`${state.tail.source.fileName} tail`}>
+          {state.tail.lines.length === 0 ? (
+            <div className="logEmpty">No lines returned.</div>
+          ) : (
+            state.tail.lines.map((line) => (
+              <div className="logLine" key={`${line.source}-${line.lineNumber}`}>
+                <span className="logLineNumber">{line.lineNumber}</span>
+                <span className="logLineText">{line.text}</span>
+              </div>
+            ))
+          )}
+        </div>
       ) : null}
     </div>
   );
@@ -578,6 +1099,63 @@ function firstHomeId(snapshot: SupportSnapshot | null): string | null {
   return snapshot?.customers[0]?.homes[0]?.home.id ?? null;
 }
 
+function preferredLogSourceId(sources: DeviceLogSource[]): string | undefined {
+  return (
+    sources.find((source) => source.id === 'rhythm-server.log') ??
+    sources.find((source) => source.fileName === 'rhythm-server.log') ??
+    sources[0]
+  )?.id;
+}
+
+function compactJoin(values: Array<string | undefined>, separator: string): string | undefined {
+  const present = values.filter((value): value is string => Boolean(value));
+  return present.length === 0 ? undefined : present.join(separator);
+}
+
+function yesNo(value: unknown): string | undefined {
+  if (typeof value !== 'boolean') return undefined;
+  return value ? 'yes' : 'no';
+}
+
+function statusBool(value: unknown): string {
+  if (typeof value !== 'boolean') return 'unknown';
+  return value ? 'healthy' : 'unhealthy';
+}
+
+function stringValue(value: unknown): string {
+  if (value === undefined || value === null || value === '') return 'unknown';
+  if (typeof value === 'number') return new Intl.NumberFormat().format(value);
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  return String(value);
+}
+
+function formatEpochMs(value: number | undefined): string | undefined {
+  if (typeof value !== 'number' || value <= 0) return undefined;
+  return formatDateTime(new Date(value).toISOString());
+}
+
 function shortId(value: string): string {
   return value.length <= 10 ? value : `${value.slice(0, 10)}...`;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  }).format(date);
+}
+
+function triggerBrowserDownload(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }

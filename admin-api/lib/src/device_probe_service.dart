@@ -27,16 +27,7 @@ class DeviceProbeService {
     required String hubId,
   }) async {
     final hub = await _loadHub(session: session, hubId: hubId);
-    final candidates = <({String route, HubEndpointDto endpoint})>[
-      if (hub.remoteEndpoint != null)
-        (route: 'remote', endpoint: hub.remoteEndpoint!),
-      (route: 'local', endpoint: hub.endpoint),
-    ];
-    final seen = <String>{};
-    final distinctCandidates = [
-      for (final candidate in candidates)
-        if (seen.add(candidate.endpoint.baseUrl.toLowerCase())) candidate,
-    ];
+    final distinctCandidates = _endpointCandidates(hub);
 
     var sawAuthRequired = false;
     for (final candidate in distinctCandidates) {
@@ -57,6 +48,220 @@ class DeviceProbeService {
       message: distinctCandidates.isEmpty
           ? 'No endpoint is configured for this Light Box.'
           : 'No configured endpoint responded.',
+    );
+  }
+
+  Future<DeviceDebugBundleDto> downloadDebugBundle({
+    required AdminSession session,
+    required String hubId,
+  }) async {
+    final hub = await _loadHub(session: session, hubId: hubId);
+    final candidates = _endpointCandidates(hub);
+    if (candidates.isEmpty) {
+      throw const AdminApiException(
+        400,
+        'No endpoint is configured for this Light Box.',
+      );
+    }
+
+    final failures = <String>[];
+    var sawAuthRequired = false;
+    for (final candidate in candidates) {
+      final baseUrl = candidate.endpoint.baseUrl;
+      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      final result = await _downloadDebugBundleFromEndpoint(
+        hub: hub,
+        candidate: candidate,
+        authToken: token,
+      );
+      if (result.bundle != null) return result.bundle!;
+      if (result.authRequired) sawAuthRequired = true;
+      if (result.message != null) {
+        failures.add('${candidate.route} $baseUrl: ${result.message}');
+      }
+    }
+
+    if (sawAuthRequired) {
+      throw AdminApiException(
+        403,
+        _debugBundleAuthRequiredMessage(hub),
+      );
+    }
+
+    throw AdminApiException(
+      502,
+      failures.isEmpty
+          ? 'No configured endpoint returned a debug bundle.'
+          : 'No configured endpoint returned a debug bundle. '
+              '${failures.join(' ')}',
+    );
+  }
+
+  Future<DeviceStatusDto> loadStatus({
+    required AdminSession session,
+    required String hubId,
+  }) async {
+    final hub = await _loadHub(session: session, hubId: hubId);
+    final candidates = _endpointCandidates(hub);
+    if (candidates.isEmpty) {
+      throw const AdminApiException(
+        400,
+        'No endpoint is configured for this Light Box.',
+      );
+    }
+
+    final failures = <String>[];
+    for (final candidate in candidates) {
+      final baseUrl = candidate.endpoint.baseUrl;
+      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      final health = await _fetchJsonFromEndpoint(
+        hub: hub,
+        candidate: candidate,
+        path: 'health',
+        authToken: null,
+        operation: 'health',
+      );
+      if (health.success == null) {
+        if (health.message != null) {
+          failures.add('${candidate.route} $baseUrl: ${health.message}');
+        }
+        continue;
+      }
+
+      final errors = <String, String>{};
+      Future<Map<String, dynamic>?> fetchSection(
+        String key,
+        String path,
+      ) async {
+        final result = await _fetchJsonFromEndpoint(
+          hub: hub,
+          candidate: candidate,
+          path: path,
+          authToken: token,
+          operation: key,
+        );
+        if (result.success != null) return result.success!.body;
+        errors[key] = result.authRequired
+            ? _operationAuthRequiredMessage(hub, path)
+            : result.message ?? '$key request failed.';
+        return null;
+      }
+
+      final stateJson = await fetchSection('state', 'api/state');
+      final remoteAccess =
+          await fetchSection('remoteAccess', 'api/remote-access/status');
+      final auth = await fetchSection('auth', 'api/auth/status');
+      final ota = await fetchSection('ota', 'api/ota/status');
+
+      return DeviceStatusDto(
+        hubId: hub.id,
+        route: candidate.route,
+        baseUrl: baseUrl,
+        checkedAt: DateTime.now().toUtc(),
+        tokenAvailable: token != null,
+        hasEncryptedToken: hub.hasEncryptedToken,
+        health: health.success!.body,
+        state: stateJson == null ? null : _stateSummaryFromJson(stateJson),
+        remoteAccess: remoteAccess,
+        auth: auth,
+        ota: ota,
+        errors: errors,
+      );
+    }
+
+    throw AdminApiException(
+      502,
+      failures.isEmpty
+          ? 'No configured endpoint returned health status.'
+          : 'No configured endpoint returned health status. '
+              '${failures.join(' ')}',
+    );
+  }
+
+  Future<DeviceLogSourcesDto> listLogs({
+    required AdminSession session,
+    required String hubId,
+  }) async {
+    final result = await _fetchFirstJson(
+      session: session,
+      hubId: hubId,
+      path: 'api/diag/logs',
+      operation: 'log sources',
+    );
+    final sourcesValue = result.body['sources'];
+    final sources = sourcesValue is List
+        ? sourcesValue
+            .whereType<Map>()
+            .map(
+              (source) => DeviceLogSourceDto.fromJson(
+                source.map((key, value) => MapEntry(key.toString(), value)),
+              ),
+            )
+            .where((source) => source.id.trim().isNotEmpty)
+            .toList(growable: false)
+        : const <DeviceLogSourceDto>[];
+    return DeviceLogSourcesDto(
+      hubId: result.hubId,
+      route: result.route,
+      baseUrl: result.baseUrl,
+      fetchedAt: DateTime.now().toUtc(),
+      sources: sources,
+    );
+  }
+
+  Future<DeviceLogTailDto> tailLog({
+    required AdminSession session,
+    required String hubId,
+    required String sourceId,
+    int lines = 200,
+  }) async {
+    final cleanSourceId = sourceId.trim();
+    if (cleanSourceId.isEmpty ||
+        cleanSourceId.contains('/') ||
+        cleanSourceId.contains('\\')) {
+      throw const AdminApiException(400, 'Invalid log source id.');
+    }
+    final clampedLines = lines.clamp(1, 2000).toInt();
+    final result = await _fetchFirstJson(
+      session: session,
+      hubId: hubId,
+      path: 'api/diag/logs/$cleanSourceId/tail',
+      queryParameters: {'lines': '$clampedLines'},
+      operation: 'log tail',
+    );
+    final tail = asStringMap(result.body['tail']);
+    if (tail == null) {
+      throw const AdminApiException(
+        502,
+        'Device returned an invalid log tail response.',
+      );
+    }
+
+    final source = asStringMap(tail['source']) ?? const <String, dynamic>{};
+    final linesValue = tail['lines'];
+    final parsedLines = linesValue is List
+        ? linesValue
+            .whereType<Map>()
+            .map(
+              (line) => DeviceLogTailLineDto.fromJson(
+                line.map((key, value) => MapEntry(key.toString(), value)),
+              ),
+            )
+            .toList(growable: false)
+        : const <DeviceLogTailLineDto>[];
+    return DeviceLogTailDto(
+      hubId: result.hubId,
+      route: result.route,
+      baseUrl: result.baseUrl,
+      fetchedAt: DateTime.now().toUtc(),
+      source: DeviceLogSourceDto.fromJson(source),
+      lines: parsedLines,
+      requestedLines: (tail['requestedLines'] as num?)?.toInt() ??
+          (tail['requested_lines'] as num?)?.toInt() ??
+          clampedLines,
+      returnedLines: (tail['returnedLines'] as num?)?.toInt() ??
+          (tail['returned_lines'] as num?)?.toInt() ??
+          parsedLines.length,
     );
   }
 
@@ -90,11 +295,7 @@ class DeviceProbeService {
     }
 
     final supportSessionToken = hub.authToken == null
-        ? await _supportAccess?.createSessionToken(
-            session: session,
-            hubId: hub.id,
-            baseUrl: baseUrl,
-          )
+        ? await _supportAccessSessionToken(session, hub, baseUrl)
         : null;
     final stateAuthToken = hub.authToken ?? supportSessionToken;
     final state = await _fetchState(baseUrl, stateAuthToken);
@@ -125,6 +326,59 @@ class DeviceProbeService {
       serverInstanceId: hello?.serverInstanceId ?? hub.serverInstanceId,
       message: state.error,
     );
+  }
+
+  Future<_DebugBundleEndpointResult> _downloadDebugBundleFromEndpoint({
+    required _ProbeHub hub,
+    required ({String route, HubEndpointDto endpoint}) candidate,
+    required String? authToken,
+  }) async {
+    final baseUrl = candidate.endpoint.baseUrl;
+    try {
+      final response = await _http.post(
+        _uriWithAppendedPath(baseUrl, 'api/diag/debug-bundle'),
+        headers: {
+          'Accept': 'application/gzip,application/octet-stream,*/*',
+          if (authToken != null) 'Authorization': 'Bearer $authToken',
+        },
+      ).timeout(const Duration(minutes: 2));
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        return const _DebugBundleEndpointResult.authRequired();
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return _DebugBundleEndpointResult.error(
+          'debug bundle returned HTTP ${response.statusCode}'
+          '${_responseErrorSuffix(response)}.',
+        );
+      }
+      if (response.bodyBytes.isEmpty) {
+        return const _DebugBundleEndpointResult.error(
+          'debug bundle response was empty.',
+        );
+      }
+
+      return _DebugBundleEndpointResult.bundle(
+        DeviceDebugBundleDto(
+          hubId: hub.id,
+          route: candidate.route,
+          baseUrl: baseUrl,
+          fileName: _attachmentFileName(
+                response.headers['content-disposition'],
+              ) ??
+              _fallbackDebugBundleFileName(hub.id),
+          contentType: response.headers['content-type'] ?? 'application/gzip',
+          bytes: response.bodyBytes,
+        ),
+      );
+    } on TimeoutException {
+      return const _DebugBundleEndpointResult.error(
+        'debug bundle request timed out.',
+      );
+    } catch (error) {
+      return _DebugBundleEndpointResult.error(
+        'debug bundle request failed: $error',
+      );
+    }
   }
 
   Future<_StateFetchResult> _fetchState(String baseUrl, String? token) async {
@@ -162,6 +416,110 @@ class DeviceProbeService {
     }
   }
 
+  Future<_JsonEndpointSuccess> _fetchFirstJson({
+    required AdminSession session,
+    required String hubId,
+    required String path,
+    required String operation,
+    Map<String, String>? queryParameters,
+  }) async {
+    final hub = await _loadHub(session: session, hubId: hubId);
+    final candidates = _endpointCandidates(hub);
+    if (candidates.isEmpty) {
+      throw const AdminApiException(
+        400,
+        'No endpoint is configured for this Light Box.',
+      );
+    }
+
+    final failures = <String>[];
+    var sawAuthRequired = false;
+    for (final candidate in candidates) {
+      final baseUrl = candidate.endpoint.baseUrl;
+      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      final result = await _fetchJsonFromEndpoint(
+        hub: hub,
+        candidate: candidate,
+        path: path,
+        authToken: token,
+        operation: operation,
+        queryParameters: queryParameters,
+      );
+      if (result.success != null) return result.success!;
+      if (result.authRequired) sawAuthRequired = true;
+      if (result.message != null) {
+        failures.add('${candidate.route} $baseUrl: ${result.message}');
+      }
+    }
+
+    if (sawAuthRequired) {
+      throw AdminApiException(
+        403,
+        _operationAuthRequiredMessage(hub, path),
+      );
+    }
+
+    throw AdminApiException(
+      502,
+      failures.isEmpty
+          ? 'No configured endpoint returned $operation.'
+          : 'No configured endpoint returned $operation. '
+              '${failures.join(' ')}',
+    );
+  }
+
+  Future<_JsonEndpointResult> _fetchJsonFromEndpoint({
+    required _ProbeHub hub,
+    required ({String route, HubEndpointDto endpoint}) candidate,
+    required String path,
+    required String? authToken,
+    required String operation,
+    Map<String, String>? queryParameters,
+  }) async {
+    final baseUrl = candidate.endpoint.baseUrl;
+    try {
+      final response = await _http.get(
+        _uriWithAppendedPath(
+          baseUrl,
+          path,
+          queryParameters: queryParameters,
+        ),
+        headers: {
+          'Accept': 'application/json',
+          if (authToken != null) 'Authorization': 'Bearer $authToken',
+        },
+      ).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        return const _JsonEndpointResult.authRequired();
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return _JsonEndpointResult.error(
+          '$operation returned HTTP ${response.statusCode}'
+          '${_responseErrorSuffix(response)}.',
+        );
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) {
+        return _JsonEndpointResult.error(
+          '$operation returned invalid JSON.',
+        );
+      }
+      return _JsonEndpointResult.success(
+        _JsonEndpointSuccess(
+          hubId: hub.id,
+          route: candidate.route,
+          baseUrl: baseUrl,
+          body: decoded.map((key, value) => MapEntry(key.toString(), value)),
+        ),
+      );
+    } on TimeoutException {
+      return _JsonEndpointResult.error('$operation request timed out.');
+    } catch (error) {
+      return _JsonEndpointResult.error('$operation request failed: $error');
+    }
+  }
+
   Future<_ProbeHub> _loadHub({
     required AdminSession session,
     required String hubId,
@@ -190,12 +548,53 @@ class DeviceProbeService {
     return hub;
   }
 
-  Uri _uriWithAppendedPath(String baseUrl, String pathToAppend) {
+  List<({String route, HubEndpointDto endpoint})> _endpointCandidates(
+    _ProbeHub hub,
+  ) {
+    final candidates = <({String route, HubEndpointDto endpoint})>[
+      if (hub.remoteEndpoint != null)
+        (route: 'remote', endpoint: hub.remoteEndpoint!),
+      (route: 'local', endpoint: hub.endpoint),
+    ];
+    final seen = <String>{};
+    return [
+      for (final candidate in candidates)
+        if (seen.add(candidate.endpoint.baseUrl.toLowerCase())) candidate,
+    ];
+  }
+
+  Future<String?> _authTokenForEndpoint(
+    AdminSession session,
+    _ProbeHub hub,
+    String baseUrl,
+  ) async {
+    if (hub.authToken != null) return hub.authToken;
+    return _supportAccessSessionToken(session, hub, baseUrl);
+  }
+
+  Future<String?> _supportAccessSessionToken(
+    AdminSession session,
+    _ProbeHub hub,
+    String baseUrl,
+  ) {
+    return _supportAccess?.createSessionToken(
+          session: session,
+          hubId: hub.id,
+          baseUrl: baseUrl,
+        ) ??
+        Future<String?>.value();
+  }
+
+  Uri _uriWithAppendedPath(
+    String baseUrl,
+    String pathToAppend, {
+    Map<String, String>? queryParameters,
+  }) {
     final uri = Uri.parse(baseUrl.trim());
     final basePath = uri.path.endsWith('/') ? uri.path : '${uri.path}/';
     return uri.replace(
       path: '$basePath$pathToAppend',
-      query: null,
+      queryParameters: queryParameters,
       fragment: null,
     );
   }
@@ -240,6 +639,29 @@ class DeviceProbeService {
     );
   }
 
+  DeviceStateSummaryDto _stateSummaryFromJson(Map<String, dynamic> json) {
+    final hello = RhythmHello.fromJson(json);
+    final mode = asStringMap(json['mode']);
+    final settings = asStringMap(json['settings']);
+    return DeviceStateSummaryDto(
+      serverVersion: hello.version,
+      serverInstanceId: hello.serverInstanceId,
+      platformType: hello.platformType,
+      platformContext: hello.platformContext,
+      listenPort: hello.listenPort,
+      nodeCount: hello.nodes.length,
+      hubCount: hello.hubs.length,
+      lastTickEpochMs: hello.lastTickEpochMs,
+      inventory: _inventoryFromState(hello),
+      activeMode: cleanString(mode?['id']) ??
+          cleanString(mode?['mode']) ??
+          cleanString(json['active_mode']),
+      lightRuntime: cleanString(json['light_runtime']) ??
+          cleanString(json['runtime_id']) ??
+          cleanString(settings?['light_runtime']),
+    );
+  }
+
   String _authRequiredMessage(_ProbeHub hub, String? supportSessionToken) {
     if (supportSessionToken != null) {
       return 'Device is reachable, but /api/state rejected the admin support session token.';
@@ -251,6 +673,85 @@ class DeviceProbeService {
       return 'Device is reachable, but admin-api has no usable token for /api/state.';
     }
     return 'Device is reachable, but /api/state rejected the token.';
+  }
+
+  String _debugBundleAuthRequiredMessage(_ProbeHub hub) {
+    return _operationAuthRequiredMessage(hub, 'api/diag/debug-bundle');
+  }
+
+  String _operationAuthRequiredMessage(_ProbeHub hub, String path) {
+    if (hub.authToken == null && hub.hasEncryptedToken) {
+      return 'Device is reachable, but its token is client-side encrypted and no admin support grant is available to admin-api.';
+    }
+    if (hub.authToken == null) {
+      return 'Device is reachable, but admin-api has no usable token for /$path.';
+    }
+    return 'Device is reachable, but /$path rejected the token.';
+  }
+
+  String _responseErrorSuffix(http.Response response) {
+    final message = _responseErrorMessage(response);
+    return message == null ? '' : ': $message';
+  }
+
+  String? _responseErrorMessage(http.Response response) {
+    final body = response.body.trim();
+    if (body.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map) {
+        final message = decoded['message'] ?? decoded['error'];
+        if (message != null) return _truncate(message.toString(), 180);
+      }
+    } catch (_) {
+      // Fall through to raw response text.
+    }
+    return _truncate(body, 180);
+  }
+
+  String _truncate(String value, int maxLength) {
+    if (value.length <= maxLength) return value;
+    return '${value.substring(0, maxLength)}...';
+  }
+
+  String? _attachmentFileName(String? contentDisposition) {
+    if (contentDisposition == null) return null;
+    final starMatch = RegExp(
+      r'''filename\*=UTF-8''([^;]+)''',
+      caseSensitive: false,
+    ).firstMatch(contentDisposition);
+    if (starMatch != null) {
+      return _safeFileName(Uri.decodeComponent(starMatch.group(1)!));
+    }
+
+    final quotedMatch = RegExp(
+      r'''filename="([^"]+)"''',
+      caseSensitive: false,
+    ).firstMatch(contentDisposition);
+    if (quotedMatch != null) return _safeFileName(quotedMatch.group(1)!);
+
+    final bareMatch = RegExp(
+      r'''filename=([^;]+)''',
+      caseSensitive: false,
+    ).firstMatch(contentDisposition);
+    if (bareMatch != null) return _safeFileName(bareMatch.group(1)!);
+    return null;
+  }
+
+  String? _safeFileName(String raw) {
+    final sanitized = raw
+        .trim()
+        .split(RegExp(r'''[/\\]'''))
+        .last
+        .replaceAll(RegExp(r'''[\x00-\x1f\x7f]'''), '')
+        .trim();
+    return sanitized.isEmpty ? null : sanitized;
+  }
+
+  String _fallbackDebugBundleFileName(String hubId) {
+    final safeId = hubId.replaceAll(RegExp(r'[^A-Za-z0-9_.-]+'), '-');
+    final suffix = safeId.isEmpty ? 'hub' : safeId;
+    return 'rhythm-debug-bundle-$suffix.tar.gz';
   }
 }
 
@@ -308,6 +809,61 @@ class _StateFetchResult {
 
   final RhythmHello? hello;
   final String? error;
+  final bool authRequired;
+}
+
+class _DebugBundleEndpointResult {
+  const _DebugBundleEndpointResult._({
+    this.bundle,
+    this.message,
+    this.authRequired = false,
+  });
+
+  const _DebugBundleEndpointResult.bundle(DeviceDebugBundleDto bundle)
+      : this._(bundle: bundle);
+
+  const _DebugBundleEndpointResult.error(String message)
+      : this._(message: message);
+
+  const _DebugBundleEndpointResult.authRequired()
+      : this._(authRequired: true, message: 'authentication required');
+
+  final DeviceDebugBundleDto? bundle;
+  final String? message;
+  final bool authRequired;
+}
+
+class _JsonEndpointSuccess {
+  const _JsonEndpointSuccess({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.body,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final Map<String, dynamic> body;
+}
+
+class _JsonEndpointResult {
+  const _JsonEndpointResult._({
+    this.success,
+    this.message,
+    this.authRequired = false,
+  });
+
+  const _JsonEndpointResult.success(_JsonEndpointSuccess success)
+      : this._(success: success);
+
+  const _JsonEndpointResult.error(String message) : this._(message: message);
+
+  const _JsonEndpointResult.authRequired()
+      : this._(authRequired: true, message: 'authentication required');
+
+  final _JsonEndpointSuccess? success;
+  final String? message;
   final bool authRequired;
 }
 

@@ -37,7 +37,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -329,6 +330,15 @@ code {
   gap: 5px;
 }
 
+.hubMeta {
+  min-width: 0;
+}
+
+.hubMeta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .homeIds {
   justify-content: flex-end;
   min-width: 190px;
@@ -358,7 +368,7 @@ code {
 
 .hubRow {
   display: grid;
-  grid-template-columns: minmax(240px, 1.5fr) minmax(170px, 0.75fr) minmax(160px, 0.7fr) auto;
+  grid-template-columns: minmax(260px, 1.5fr) minmax(170px, 0.7fr) minmax(160px, 0.65fr) minmax(190px, auto);
   gap: 14px;
   align-items: center;
   min-height: 92px;
@@ -443,6 +453,13 @@ code {
   color: var(--amber);
 }
 
+.hubActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .probeButton {
   min-width: 88px;
   padding: 0 12px;
@@ -455,13 +472,172 @@ code {
 }
 
 .inventory,
-.hubMessage {
+.hubMessage,
+.logPanel,
+.statusPanel {
   grid-column: 1 / -1;
   padding-left: 50px;
 }
 
 .hubMessage {
   color: var(--amber);
+}
+
+.hubMessage.success {
+  color: var(--green);
+}
+
+.logPanel {
+  display: grid;
+  gap: 10px;
+}
+
+.statusPanel {
+  display: grid;
+  gap: 10px;
+}
+
+.statusGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.statusTile {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafb;
+  padding: 12px;
+  min-width: 0;
+}
+
+.statusTileHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.statusTileHeader span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.statusTileHeader strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.statusTile dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.statusTile dl div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.statusTile dt,
+.statusTile dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.statusTile dt {
+  color: var(--dim);
+  font-weight: 750;
+}
+
+.statusTile dd {
+  color: var(--text);
+}
+
+.statusErrors {
+  display: grid;
+  gap: 5px;
+  color: var(--amber);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.logToolbar,
+.logControls,
+.logMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.logToolbar {
+  justify-content: space-between;
+}
+
+.logMeta {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.logSelect {
+  min-height: 36px;
+  min-width: 190px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 0 10px;
+  color: var(--text);
+}
+
+.logOutput {
+  display: grid;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafb;
+  padding: 8px 0;
+  color: var(--text);
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.logLine {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  padding: 1px 12px;
+}
+
+.logLineNumber {
+  color: var(--dim);
+  text-align: right;
+  user-select: none;
+}
+
+.logLineText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.logEmpty {
+  padding: 18px;
+  color: var(--muted);
+  font-weight: 700;
+  text-align: center;
 }
 
 .centeredScreen {
@@ -557,6 +733,12 @@ code {
   color: var(--red);
 }
 
+.notice.warning {
+  border-color: #f1ca85;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
 .loadingBlock,
 .listState,
 .emptyPane {
@@ -634,9 +816,19 @@ code {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .hubActions {
+    justify-content: flex-start;
+  }
+
   .inventory,
-  .hubMessage {
+  .hubMessage,
+  .logPanel,
+  .statusPanel {
     padding-left: 0;
+  }
+
+  .statusGrid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .homeHeader {

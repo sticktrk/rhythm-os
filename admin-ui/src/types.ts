@@ -16,6 +16,23 @@ export type MeResponse = {
   staffStatus: StaffStatus;
 };
 
+export type AdminApiHealth = {
+  ok: boolean;
+  service: string;
+  serviceRoleConfigured: boolean;
+  supportAccessConfigured: boolean;
+};
+
+export type AdminApiReadiness = {
+  ok: boolean;
+  service: string;
+  remoteDebugReady: boolean;
+  checks: Record<string, boolean>;
+  missing: string[];
+  supportAccessKeyId?: string;
+  notes: string[];
+};
+
 export type HubEndpoint = {
   host: string;
   port: number;
@@ -82,6 +99,20 @@ export type ProbeInventory = {
   total: number;
 };
 
+export type DeviceStateSummary = {
+  serverVersion: string;
+  serverInstanceId?: string;
+  platformType: string;
+  platformContext: string;
+  listenPort?: number;
+  nodeCount: number;
+  hubCount: number;
+  lastTickEpochMs?: number;
+  inventory?: ProbeInventory;
+  activeMode?: string;
+  lightRuntime?: string;
+};
+
 export type ProbeResult = {
   hubId: string;
   status: 'online' | 'offline' | 'auth_required';
@@ -94,6 +125,60 @@ export type ProbeResult = {
   serverVersion?: string;
   serverInstanceId?: string;
   message?: string;
+};
+
+export type DebugBundleDownload = {
+  blob: Blob;
+  fileName: string;
+  route?: 'remote' | 'local';
+  baseUrl?: string;
+};
+
+export type DeviceLogSource = {
+  id: string;
+  fileName: string;
+  bytes: number;
+  modifiedAt?: string;
+};
+
+export type DeviceLogSources = {
+  hubId: string;
+  route: 'remote' | 'local';
+  baseUrl: string;
+  fetchedAt: string;
+  sources: DeviceLogSource[];
+};
+
+export type DeviceLogTailLine = {
+  source: string;
+  lineNumber: number;
+  text: string;
+};
+
+export type DeviceLogTail = {
+  hubId: string;
+  route: 'remote' | 'local';
+  baseUrl: string;
+  fetchedAt: string;
+  source: DeviceLogSource;
+  lines: DeviceLogTailLine[];
+  requestedLines: number;
+  returnedLines: number;
+};
+
+export type DeviceStatus = {
+  hubId: string;
+  route: 'remote' | 'local';
+  baseUrl: string;
+  checkedAt: string;
+  tokenAvailable: boolean;
+  hasEncryptedToken: boolean;
+  health?: Record<string, unknown>;
+  state?: DeviceStateSummary;
+  remoteAccess?: Record<string, unknown>;
+  auth?: Record<string, unknown>;
+  ota?: Record<string, unknown>;
+  errors: Record<string, string>;
 };
 
 export type HomeListItem = {

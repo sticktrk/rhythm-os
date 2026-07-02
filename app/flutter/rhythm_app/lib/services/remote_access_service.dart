@@ -30,6 +30,7 @@ typedef RemoteAccessHubSaver = Future<bool> Function(Hub hub);
 typedef RemoteAccessLatestHubResolver = Hub? Function(
     String homeId, String hubId);
 typedef RemoteAccessEnabledCallback = void Function(Hub hub);
+typedef RemoteAccessSupportGrant = Future<void> Function(Hub hub);
 
 class RemoteAccessEnableResult {
   const RemoteAccessEnableResult({
@@ -71,12 +72,15 @@ class RemoteAccessService {
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
+    RemoteAccessSupportGrant? supportGrant,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _activationPollDelay = activationPollDelay,
         _activationPollAttempts = activationPollAttempts,
         _supabaseClientFactory = supabaseClientFactory,
         _stateLoader = stateLoader ?? _defaultStateLoader,
-        _authApiFactory = authApiFactory ?? _defaultAuthApiFactory;
+        _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
+        _supportGrant =
+            supportGrant ?? SupportAccessService.instance.grantForHub;
 
   static final RemoteAccessService instance = RemoteAccessService._();
   static const _bootstrapFunctionName = 'remote-access-bootstrap';
@@ -89,6 +93,7 @@ class RemoteAccessService {
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
+    RemoteAccessSupportGrant? supportGrant,
   }) {
     return RemoteAccessService._(
       apiFactory: apiFactory,
@@ -97,6 +102,7 @@ class RemoteAccessService {
       supabaseClientFactory: supabaseClientFactory,
       stateLoader: stateLoader ?? _emptyStateLoader,
       authApiFactory: authApiFactory,
+      supportGrant: supportGrant,
     );
   }
 
@@ -106,6 +112,7 @@ class RemoteAccessService {
   final dynamic Function()? _supabaseClientFactory;
   final RemoteAccessStateLoader _stateLoader;
   final RemoteAccessAuthApiFactory _authApiFactory;
+  final RemoteAccessSupportGrant _supportGrant;
   final Set<String> _autoEnableInFlight = <String>{};
 
   bool get isEnabledByFlag => FeatureFlags.remoteAccessTunnel;
@@ -194,8 +201,6 @@ class RemoteAccessService {
     RemoteAccessLatestHubResolver? resolveLatestHub,
     RemoteAccessEnabledCallback? onEnabled,
   }) {
-    if (serverHub.remoteEndpoint != null) return;
-
     try {
       if (!canUseRemoteAccess) return;
     } catch (error) {
@@ -220,6 +225,23 @@ class RemoteAccessService {
     );
   }
 
+  @visibleForTesting
+  Future<void> autoEnableForHubForTesting({
+    required Home home,
+    required Hub serverHub,
+    required RemoteAccessHubSaver saveHub,
+    RemoteAccessLatestHubResolver? resolveLatestHub,
+    RemoteAccessEnabledCallback? onEnabled,
+  }) {
+    return _autoEnableForHub(
+      home: home,
+      serverHub: serverHub,
+      saveHub: saveHub,
+      resolveLatestHub: resolveLatestHub,
+      onEnabled: onEnabled,
+    );
+  }
+
   Future<void> _autoEnableForHub({
     required Home home,
     required Hub serverHub,
@@ -229,7 +251,17 @@ class RemoteAccessService {
   }) async {
     try {
       var hub = resolveLatestHub?.call(home.id, serverHub.id) ?? serverHub;
-      if (hub.remoteEndpoint != null) return;
+      if (hub.remoteEndpoint != null) {
+        if (hub.token?.trim().isEmpty != false) {
+          debugPrint(
+            'RemoteAccessService: support access auto-grant skipped for '
+            'hub=${hub.id}: no saved owner token for existing remote access',
+          );
+          return;
+        }
+        await _grantSupportAccessForHub(hub);
+        return;
+      }
 
       final tokenHub = await ensureOwnerTokenForHub(hub);
       if (tokenHub.token != hub.token) {
@@ -237,18 +269,12 @@ class RemoteAccessService {
         if (!saved) return;
         hub = resolveLatestHub?.call(home.id, serverHub.id) ?? tokenHub;
       }
-      if (hub.remoteEndpoint != null) return;
 
       final result = await enableForHub(hub, home: home);
       final saved = await saveHub(result.updatedHub);
       if (!saved) return;
 
-      try {
-        await SupportAccessService.instance.grantForHub(result.updatedHub);
-      } catch (error) {
-        debugPrint(
-            'RemoteAccessService: support access auto-grant failed: $error');
-      }
+      await _grantSupportAccessForHub(result.updatedHub);
 
       onEnabled?.call(result.updatedHub);
       debugPrint(
@@ -261,6 +287,15 @@ class RemoteAccessService {
         '$error',
       );
       debugPrint('$stackTrace');
+    }
+  }
+
+  Future<void> _grantSupportAccessForHub(Hub hub) async {
+    try {
+      await _supportGrant(hub);
+    } catch (error) {
+      debugPrint(
+          'RemoteAccessService: support access auto-grant failed: $error');
     }
   }
 
@@ -278,9 +313,18 @@ class RemoteAccessService {
       return serverHub;
     }
 
-    final claim = await _authApiFactory(
+    final authApi = _authApiFactory(
       baseUrl: serverHub.endpoint.baseUrl,
-    ).claimOwnerToken();
+    );
+    final status = await authApi.getStatus();
+    if (!status.claimAvailable) {
+      throw StateError(
+        'Remote access has no saved owner token for ${serverHub.id}, and '
+        '${serverHub.endpoint.baseUrl} is already owner-configured.',
+      );
+    }
+
+    final claim = await authApi.claimOwnerToken();
     final token = claim.token.trim();
     if (token.isEmpty) {
       throw StateError('Server returned an empty owner token.');

@@ -2882,6 +2882,42 @@ void main() {
       expect(provider.activeConnectionEndpoint?.host, 'server.rhythm.lighting');
     });
 
+    test('retry does not use a remote endpoint without an owner token',
+        () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '127.0.0.1',
+            port: 54448,
+            token: null,
+            remoteEndpoint: const HubEndpoint(
+              host: 'server.rhythm.lighting',
+              port: 443,
+              useSsl: true,
+            ),
+          ),
+        ]),
+        endpointReachability: (endpoint, authToken) async {
+          expect(authToken, isNull);
+          return false;
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection(assumeSavedAuth: true);
+
+      expect(connection.connectCalls, isEmpty);
+      expect(provider.activeConnectionEndpoint, isNull);
+    });
+
     test('retry refreshes changed tunnel endpoint before reconnecting',
         () async {
       final api = _FakeRhythmServerApi();

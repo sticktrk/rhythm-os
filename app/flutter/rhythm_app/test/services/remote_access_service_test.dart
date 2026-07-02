@@ -139,9 +139,40 @@ void main() {
       );
 
       expect(authApi.baseUrl, 'http://192.168.5.123:54448');
+      expect(authApi.statusCalls, 1);
       expect(authApi.claimCalls, 1);
       expect(updated.token, 'claimed-owner-token');
       expect(updated.pendingSync, isTrue);
+    });
+
+    test('owner token claim stops when the server is already owner configured',
+        () async {
+      late _FakeAuthApi authApi;
+      final service = RemoteAccessService.testing(
+        authApiFactory: ({required String baseUrl}) {
+          authApi = _FakeAuthApi(
+            baseUrl: baseUrl,
+            claim: const RhythmOwnerClaim(
+              tokenId: 'owner-token-id',
+              token: 'claimed-owner-token',
+            ),
+            status: const RhythmAuthStatus(
+              requiresAuth: true,
+              ownerConfigured: true,
+              tokenCount: 13,
+              claimAvailable: false,
+            ),
+          );
+          return authApi;
+        },
+      );
+
+      await expectLater(
+        service.ensureOwnerTokenForHub(_serverHub(token: null)),
+        throwsA(isA<StateError>()),
+      );
+      expect(authApi.statusCalls, 1);
+      expect(authApi.claimCalls, 0);
     });
 
     test('owner token claim reuses an existing saved token', () async {
@@ -154,6 +185,87 @@ void main() {
       final hub = _serverHub(token: 'saved-owner-token');
 
       expect(await service.ensureOwnerTokenForHub(hub), same(hub));
+    });
+
+    test('auto-enable grants support access for an existing remote endpoint',
+        () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final grants = <Hub>[];
+      final saved = <Hub>[];
+      final service = RemoteAccessService.testing(
+        authApiFactory: ({required String baseUrl}) {
+          throw StateError('claim should not be called');
+        },
+        supportGrant: (hub) async {
+          grants.add(hub);
+        },
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.devices.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+        ),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(saved, isEmpty);
+      expect(grants, hasLength(1));
+      expect(grants.single.id, 'hub-1');
+      expect(grants.single.token, 'owner-token');
+      expect(
+        grants.single.remoteEndpoint?.host,
+        'hub.devices.rhythm.lighting',
+      );
+    });
+
+    test('auto-enable skips existing remote access without an owner token',
+        () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final grants = <Hub>[];
+      final saved = <Hub>[];
+      final service = RemoteAccessService.testing(
+        authApiFactory: ({required String baseUrl}) {
+          throw StateError('claim should not be called');
+        },
+        supportGrant: (hub) async {
+          grants.add(hub);
+        },
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(
+          token: null,
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.devices.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+        ),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(saved, isEmpty);
+      expect(grants, isEmpty);
     });
 
     test('disable falls back to the remote endpoint when LAN is unreachable',
@@ -311,11 +423,25 @@ class _FakeAuthApi extends RhythmAuthApi {
   _FakeAuthApi({
     required this.baseUrl,
     required this.claim,
+    this.status = const RhythmAuthStatus(
+      requiresAuth: true,
+      ownerConfigured: false,
+      tokenCount: 0,
+      claimAvailable: true,
+    ),
   }) : super(baseUrl: 'http://127.0.0.1');
 
   final String baseUrl;
   final RhythmOwnerClaim claim;
+  final RhythmAuthStatus status;
+  int statusCalls = 0;
   int claimCalls = 0;
+
+  @override
+  Future<RhythmAuthStatus> getStatus() async {
+    statusCalls += 1;
+    return status;
+  }
 
   @override
   Future<RhythmOwnerClaim> claimOwnerToken({

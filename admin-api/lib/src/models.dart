@@ -383,6 +383,229 @@ class DeviceProbeResultDto {
       };
 }
 
+class DeviceDebugBundleDto {
+  const DeviceDebugBundleDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.fileName,
+    required this.contentType,
+    required this.bytes,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final String fileName;
+  final String contentType;
+  final List<int> bytes;
+}
+
+class DeviceLogSourceDto {
+  const DeviceLogSourceDto({
+    required this.id,
+    required this.fileName,
+    required this.bytes,
+    this.modifiedAt,
+  });
+
+  final String id;
+  final String fileName;
+  final int bytes;
+  final DateTime? modifiedAt;
+
+  factory DeviceLogSourceDto.fromJson(Map<String, dynamic> json) {
+    return DeviceLogSourceDto(
+      id: json['id'] as String? ?? '',
+      fileName: json['fileName'] as String? ??
+          json['file_name'] as String? ??
+          json['id'] as String? ??
+          '',
+      bytes: (json['bytes'] as num?)?.toInt() ?? 0,
+      modifiedAt: parseDateTime(json['modifiedAt'] ?? json['modified_at']),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'fileName': fileName,
+        'bytes': bytes,
+        if (modifiedAt != null) 'modifiedAt': modifiedAt!.toIso8601String(),
+      };
+}
+
+class DeviceLogSourcesDto {
+  const DeviceLogSourcesDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.fetchedAt,
+    required this.sources,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final DateTime fetchedAt;
+  final List<DeviceLogSourceDto> sources;
+
+  Map<String, dynamic> toJson() => {
+        'hubId': hubId,
+        'route': route,
+        'baseUrl': baseUrl,
+        'fetchedAt': fetchedAt.toIso8601String(),
+        'sources': sources.map((source) => source.toJson()).toList(),
+      };
+}
+
+class DeviceLogTailLineDto {
+  const DeviceLogTailLineDto({
+    required this.source,
+    required this.lineNumber,
+    required this.text,
+  });
+
+  final String source;
+  final int lineNumber;
+  final String text;
+
+  factory DeviceLogTailLineDto.fromJson(Map<String, dynamic> json) {
+    return DeviceLogTailLineDto(
+      source: json['source'] as String? ?? '',
+      lineNumber: (json['lineNumber'] as num?)?.toInt() ??
+          (json['line_number'] as num?)?.toInt() ??
+          0,
+      text: json['text'] as String? ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'source': source,
+        'lineNumber': lineNumber,
+        'text': text,
+      };
+}
+
+class DeviceLogTailDto {
+  const DeviceLogTailDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.fetchedAt,
+    required this.source,
+    required this.lines,
+    required this.requestedLines,
+    required this.returnedLines,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final DateTime fetchedAt;
+  final DeviceLogSourceDto source;
+  final List<DeviceLogTailLineDto> lines;
+  final int requestedLines;
+  final int returnedLines;
+
+  Map<String, dynamic> toJson() => {
+        'hubId': hubId,
+        'route': route,
+        'baseUrl': baseUrl,
+        'fetchedAt': fetchedAt.toIso8601String(),
+        'source': source.toJson(),
+        'lines': lines.map((line) => line.toJson()).toList(),
+        'requestedLines': requestedLines,
+        'returnedLines': returnedLines,
+      };
+}
+
+class DeviceStateSummaryDto {
+  const DeviceStateSummaryDto({
+    required this.serverVersion,
+    required this.platformType,
+    required this.platformContext,
+    required this.nodeCount,
+    required this.hubCount,
+    this.serverInstanceId,
+    this.listenPort,
+    this.lastTickEpochMs,
+    this.inventory,
+    this.activeMode,
+    this.lightRuntime,
+  });
+
+  final String serverVersion;
+  final String? serverInstanceId;
+  final String platformType;
+  final String platformContext;
+  final int? listenPort;
+  final int nodeCount;
+  final int hubCount;
+  final int? lastTickEpochMs;
+  final LightBoxInventoryDto? inventory;
+  final String? activeMode;
+  final String? lightRuntime;
+
+  Map<String, dynamic> toJson() => {
+        'serverVersion': serverVersion,
+        if (serverInstanceId != null) 'serverInstanceId': serverInstanceId,
+        'platformType': platformType,
+        'platformContext': platformContext,
+        if (listenPort != null) 'listenPort': listenPort,
+        'nodeCount': nodeCount,
+        'hubCount': hubCount,
+        if (lastTickEpochMs != null) 'lastTickEpochMs': lastTickEpochMs,
+        if (inventory != null) 'inventory': inventory!.toJson(),
+        if (activeMode != null) 'activeMode': activeMode,
+        if (lightRuntime != null) 'lightRuntime': lightRuntime,
+      };
+}
+
+class DeviceStatusDto {
+  const DeviceStatusDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.checkedAt,
+    required this.tokenAvailable,
+    required this.hasEncryptedToken,
+    required this.errors,
+    this.health,
+    this.state,
+    this.remoteAccess,
+    this.auth,
+    this.ota,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final DateTime checkedAt;
+  final bool tokenAvailable;
+  final bool hasEncryptedToken;
+  final Map<String, dynamic>? health;
+  final DeviceStateSummaryDto? state;
+  final Map<String, dynamic>? remoteAccess;
+  final Map<String, dynamic>? auth;
+  final Map<String, dynamic>? ota;
+  final Map<String, String> errors;
+
+  Map<String, dynamic> toJson() => {
+        'hubId': hubId,
+        'route': route,
+        'baseUrl': baseUrl,
+        'checkedAt': checkedAt.toIso8601String(),
+        'tokenAvailable': tokenAvailable,
+        'hasEncryptedToken': hasEncryptedToken,
+        if (health != null) 'health': health,
+        if (state != null) 'state': state!.toJson(),
+        if (remoteAccess != null) 'remoteAccess': remoteAccess,
+        if (auth != null) 'auth': auth,
+        if (ota != null) 'ota': ota,
+        'errors': errors,
+      };
+}
+
 Map<String, dynamic>? asStringMap(Object? value) {
   if (value is! Map) return null;
   return value.map((key, value) => MapEntry(key.toString(), value));

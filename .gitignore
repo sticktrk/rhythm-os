@@ -23,5 +23,9 @@ target/
 # Downloaded/extracted app bug-report debug bundles (see /triage).
 .triage/
 
+# Local Codex skills/config and server-side secrets.
+.codex/
+admin-api/.env
+
 # Local Supabase CLI project metadata.
 tools/app/supabase/.temp/

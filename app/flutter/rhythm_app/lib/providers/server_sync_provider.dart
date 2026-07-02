@@ -1270,6 +1270,12 @@ class ServerSyncProvider extends ChangeNotifier {
       assumeLanReachable: assumeLanReachable,
     );
     if (!_sameServerHubIdentity(_serverHub, targetHub)) return;
+    if (endpoint == null) {
+      _activeConnectionEndpoint = null;
+      _connection.disconnect();
+      notifyListeners();
+      return;
+    }
 
     _activeConnectionEndpoint = endpoint;
     await _connection.connect(
@@ -1424,7 +1430,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
   }
 
-  Future<HubEndpoint> _selectConnectionEndpoint(
+  Future<HubEndpoint?> _selectConnectionEndpoint(
     Hub hub,
     String? authToken, {
     bool assumeLanReachable = false,
@@ -1440,6 +1446,14 @@ class ServerSyncProvider extends ChangeNotifier {
 
     if (await _canReachEndpoint(hub.endpoint, authToken)) {
       return hub.endpoint;
+    }
+
+    if (authToken?.trim().isEmpty != false) {
+      debugPrint(
+        'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
+        'unreachable and remote access has no saved owner token',
+      );
+      return null;
     }
 
     debugPrint(
