@@ -562,7 +562,7 @@ fn default_preserve_hard_off() -> bool {
 }
 
 fn default_trigger_enabled() -> bool {
-    true
+    false
 }
 
 fn default_mode_transition_duration_ms() -> TimerSetting {
@@ -1974,7 +1974,7 @@ mod tests {
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
             assert_eq!(config.duration_ms, TimerSetting::Auto);
             assert!(config.preserve_hard_off);
-            assert!(config.trigger_enabled);
+            assert!(!config.trigger_enabled);
         }
 
         #[test]

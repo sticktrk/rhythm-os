@@ -2652,6 +2652,42 @@ mod tests {
         }
 
         #[test]
+        fn settings_legacy_mode_transitions_default_disabled() {
+            let (storage, path) = temp_storage();
+            let json = r#"{
+              "power_save": false,
+              "active_mode": "day",
+              "modes": [],
+              "mode_transitions": [
+                {
+                  "id": "sleep_to_day",
+                  "label": "Sleep to Day",
+                  "from_mode": "sleep",
+                  "to_mode": "day",
+                  "trigger": "civil_twilight"
+                },
+                {
+                  "id": "day_to_sleep",
+                  "label": "Day to Sleep",
+                  "from_mode": "day",
+                  "to_mode": "sleep",
+                  "trigger": "nautical_twilight"
+                }
+              ]
+            }"#;
+            std::fs::write(path.join("settings.json"), json).unwrap();
+
+            let loaded = storage.load_settings().unwrap();
+
+            assert_eq!(loaded.mode_transitions.len(), 2);
+            assert!(loaded
+                .mode_transitions
+                .iter()
+                .all(|transition| !transition.trigger_enabled));
+            cleanup(&path);
+        }
+
+        #[test]
         fn hub_credentials_save_load_roundtrip() {
             let (storage, path) = temp_storage();
             let creds = HubCredentials::new(
