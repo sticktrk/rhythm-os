@@ -44,7 +44,7 @@ impl ChipFfiController {
     }
 
     pub fn commission_light(
-        &mut self,
+        &self,
         request: &MatterCommissionRequest,
     ) -> Result<CommissionedDevice> {
         #[cfg(rhythm_chipd_chip_ffi)]
@@ -59,7 +59,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn probe_light(&mut self, node_id: u64) -> Result<CommissionedDevice> {
+    pub fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::probe_light(node_id)
@@ -72,7 +72,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn decommission_device(&mut self, node_id: u64, force: bool) -> Result<()> {
+    pub fn decommission_device(&self, node_id: u64, force: bool) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::decommission_device(node_id, force)
@@ -85,7 +85,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
+    pub fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::set_on_off(node_id, endpoint, on)
@@ -98,7 +98,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn configure_group(&mut self, group: &MatterGroup) -> Result<()> {
+    pub fn configure_group(&self, group: &MatterGroup) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::configure_group(group)
@@ -111,7 +111,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn remove_group(&mut self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+    pub fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::remove_group(group_id, members)
@@ -124,7 +124,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn set_group_on_off(&mut self, group_id: u16, on: bool) -> Result<()> {
+    pub fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::set_group_on_off(group_id, on)
@@ -137,7 +137,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn identify_group(&mut self, group_id: u16, duration_secs: u16) -> Result<()> {
+    pub fn identify_group(&self, group_id: u16, duration_secs: u16) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::identify_group(group_id, duration_secs)
@@ -151,7 +151,7 @@ impl ChipFfiController {
     }
 
     pub fn set_group_brightness(
-        &mut self,
+        &self,
         group_id: u16,
         level: u8,
         transition_ms: Option<u32>,
@@ -169,7 +169,7 @@ impl ChipFfiController {
     }
 
     pub fn set_group_color_temperature(
-        &mut self,
+        &self,
         group_id: u16,
         kelvin: u16,
         transition_ms: Option<u32>,
@@ -187,7 +187,7 @@ impl ChipFfiController {
     }
 
     pub fn set_group_xy(
-        &mut self,
+        &self,
         group_id: u16,
         x: f32,
         y: f32,
@@ -206,7 +206,7 @@ impl ChipFfiController {
     }
 
     pub fn set_group_hue_saturation(
-        &mut self,
+        &self,
         group_id: u16,
         hue: u8,
         saturation: u8,
@@ -225,7 +225,7 @@ impl ChipFfiController {
     }
 
     pub fn identify_light(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         duration_secs: u16,
@@ -243,7 +243,7 @@ impl ChipFfiController {
     }
 
     pub fn set_brightness(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         level: u8,
@@ -262,7 +262,7 @@ impl ChipFfiController {
     }
 
     pub fn run_level_command(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         command: MatterLevelCommandVariant,
@@ -297,7 +297,7 @@ impl ChipFfiController {
     }
 
     pub fn set_color_temperature(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         kelvin: u16,
@@ -316,7 +316,7 @@ impl ChipFfiController {
     }
 
     pub fn set_xy(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         x: f32,
@@ -336,7 +336,7 @@ impl ChipFfiController {
     }
 
     pub fn set_hue_saturation(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         hue: u8,
@@ -355,7 +355,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
+    pub fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::read_on_off(node_id, endpoint)
@@ -369,7 +369,7 @@ impl ChipFfiController {
     }
 
     pub fn read_light_capability_snapshot(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
     ) -> Result<serde_json::Value> {
@@ -385,7 +385,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+    pub fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::read_light_state(node_id, endpoint)
@@ -399,7 +399,7 @@ impl ChipFfiController {
     }
 
     pub fn subscribe_on_off(
-        &mut self,
+        &self,
         targets: &[MatterSubscriptionTarget],
         min_interval_secs: u16,
         max_interval_secs: u16,
@@ -416,7 +416,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>> {
+    pub fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::drain_attribute_reports()
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn stub_controller_initializes_and_reports_unsupported_operations() {
         let state = commissioning_state();
-        let mut controller = ChipFfiController::initialize(&state, Some(0), &[]).unwrap();
+        let controller = ChipFfiController::initialize(&state, Some(0), &[]).unwrap();
         let request = commission_request();
         let group = group();
         let members = group.members.clone();

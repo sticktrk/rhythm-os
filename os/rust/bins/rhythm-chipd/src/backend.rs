@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
@@ -12,7 +13,14 @@ use crate::service::CommissioningState;
 
 mod chip_ffi;
 
-pub trait ChipControllerBackend {
+/// Backend contract for the chipd daemon.
+///
+/// All device/group operations take `&self` so the service can run them
+/// concurrently from multiple connection threads — the C++ CHIP bridge
+/// schedules work onto its own Matter thread and blocks each caller on
+/// per-operation state, so concurrent callers are safe. Only controller
+/// (re)initialization is exclusive.
+pub trait ChipControllerBackend: Send + Sync {
     fn init_controller(
         &mut self,
         state: &CommissioningState,
@@ -20,51 +28,45 @@ pub trait ChipControllerBackend {
         existing_devices: &[CommissionedDevice],
     ) -> Result<ChipInitControllerResponse>;
 
-    fn commission_light(&mut self, request: &MatterCommissionRequest)
-        -> Result<CommissionedDevice>;
-    fn probe_light(&mut self, node_id: u64) -> Result<CommissionedDevice>;
-    fn decommission_device(&mut self, node_id: u64, force: bool) -> Result<()>;
-    fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
-    fn configure_group(&mut self, group: &MatterGroup) -> Result<()>;
-    fn remove_group(&mut self, group_id: u16, members: &[MatterGroupMember]) -> Result<()>;
-    fn set_group_on_off(&mut self, group_id: u16, on: bool) -> Result<()>;
-    fn identify_group(&mut self, group_id: u16, duration_secs: u16) -> Result<()>;
+    fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice>;
+    fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice>;
+    fn decommission_device(&self, node_id: u64, force: bool) -> Result<()>;
+    fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
+    fn configure_group(&self, group: &MatterGroup) -> Result<()>;
+    fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()>;
+    fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()>;
+    fn identify_group(&self, group_id: u16, duration_secs: u16) -> Result<()>;
     fn set_group_brightness(
-        &mut self,
+        &self,
         group_id: u16,
         level: u8,
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn set_group_color_temperature(
-        &mut self,
+        &self,
         group_id: u16,
         kelvin: u16,
         transition_ms: Option<u32>,
     ) -> Result<()>;
-    fn set_group_xy(
-        &mut self,
-        group_id: u16,
-        x: f32,
-        y: f32,
-        transition_ms: Option<u32>,
-    ) -> Result<()>;
+    fn set_group_xy(&self, group_id: u16, x: f32, y: f32, transition_ms: Option<u32>)
+        -> Result<()>;
     fn set_group_hue_saturation(
-        &mut self,
+        &self,
         group_id: u16,
         hue: u8,
         saturation: u8,
         transition_ms: Option<u32>,
     ) -> Result<()>;
-    fn identify_light(&mut self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()>;
+    fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()>;
     fn set_brightness(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         level: u8,
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn run_level_command(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         command: MatterLevelCommandVariant,
@@ -73,14 +75,14 @@ pub trait ChipControllerBackend {
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn set_color_temperature(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         kelvin: u16,
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn set_xy(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         x: f32,
@@ -88,27 +90,27 @@ pub trait ChipControllerBackend {
         transition_ms: Option<u32>,
     ) -> Result<()>;
     fn set_hue_saturation(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         hue: u8,
         saturation: u8,
         transition_ms: Option<u32>,
     ) -> Result<()>;
-    fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool>;
+    fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool>;
     fn read_light_capability_snapshot(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
     ) -> Result<serde_json::Value>;
-    fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value>;
+    fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<serde_json::Value>;
     fn subscribe_on_off(
-        &mut self,
+        &self,
         targets: &[MatterSubscriptionTarget],
         min_interval_secs: u16,
         max_interval_secs: u16,
     ) -> Result<()>;
-    fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>>;
+    fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>>;
 }
 
 pub fn build_backend_from_env() -> Box<dyn ChipControllerBackend> {
@@ -124,9 +126,9 @@ pub struct NativeChipBackend {
 }
 
 impl NativeChipBackend {
-    fn controller_mut(&mut self) -> Result<&mut chip_ffi::ChipFfiController> {
+    fn controller_ref(&self) -> Result<&chip_ffi::ChipFfiController> {
         self.controller
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("CHIP controller backend not initialized"))
     }
 }
@@ -150,103 +152,99 @@ impl ChipControllerBackend for NativeChipBackend {
         })
     }
 
-    fn commission_light(
-        &mut self,
-        request: &MatterCommissionRequest,
-    ) -> Result<CommissionedDevice> {
-        self.controller_mut()?.commission_light(request)
+    fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
+        self.controller_ref()?.commission_light(request)
     }
 
-    fn probe_light(&mut self, node_id: u64) -> Result<CommissionedDevice> {
-        self.controller_mut()?.probe_light(node_id)
+    fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+        self.controller_ref()?.probe_light(node_id)
     }
 
-    fn decommission_device(&mut self, node_id: u64, force: bool) -> Result<()> {
-        self.controller_mut()?.decommission_device(node_id, force)
+    fn decommission_device(&self, node_id: u64, force: bool) -> Result<()> {
+        self.controller_ref()?.decommission_device(node_id, force)
     }
 
-    fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
-        self.controller_mut()?.set_on_off(node_id, endpoint, on)
+    fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
+        self.controller_ref()?.set_on_off(node_id, endpoint, on)
     }
 
-    fn configure_group(&mut self, group: &MatterGroup) -> Result<()> {
-        self.controller_mut()?.configure_group(group)
+    fn configure_group(&self, group: &MatterGroup) -> Result<()> {
+        self.controller_ref()?.configure_group(group)
     }
 
-    fn remove_group(&mut self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
-        self.controller_mut()?.remove_group(group_id, members)
+    fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
+        self.controller_ref()?.remove_group(group_id, members)
     }
 
-    fn set_group_on_off(&mut self, group_id: u16, on: bool) -> Result<()> {
-        self.controller_mut()?.set_group_on_off(group_id, on)
+    fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
+        self.controller_ref()?.set_group_on_off(group_id, on)
     }
 
-    fn identify_group(&mut self, group_id: u16, duration_secs: u16) -> Result<()> {
-        self.controller_mut()?
+    fn identify_group(&self, group_id: u16, duration_secs: u16) -> Result<()> {
+        self.controller_ref()?
             .identify_group(group_id, duration_secs)
     }
 
     fn set_group_brightness(
-        &mut self,
+        &self,
         group_id: u16,
         level: u8,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut()?
+        self.controller_ref()?
             .set_group_brightness(group_id, level, transition_ms)
     }
 
     fn set_group_color_temperature(
-        &mut self,
+        &self,
         group_id: u16,
         kelvin: u16,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut()?
+        self.controller_ref()?
             .set_group_color_temperature(group_id, kelvin, transition_ms)
     }
 
     fn set_group_xy(
-        &mut self,
+        &self,
         group_id: u16,
         x: f32,
         y: f32,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut()?
+        self.controller_ref()?
             .set_group_xy(group_id, x, y, transition_ms)
     }
 
     fn set_group_hue_saturation(
-        &mut self,
+        &self,
         group_id: u16,
         hue: u8,
         saturation: u8,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut()?
+        self.controller_ref()?
             .set_group_hue_saturation(group_id, hue, saturation, transition_ms)
     }
 
-    fn identify_light(&mut self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
-        self.controller_mut()?
+    fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
+        self.controller_ref()?
             .identify_light(node_id, endpoint, duration_secs)
     }
 
     fn set_brightness(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         level: u8,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut().and_then(|controller| {
-            controller.set_brightness(node_id, endpoint, level, transition_ms)
-        })
+        self.controller_ref()?
+            .set_brightness(node_id, endpoint, level, transition_ms)
     }
 
     fn run_level_command(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         command: MatterLevelCommandVariant,
@@ -254,96 +252,92 @@ impl ChipControllerBackend for NativeChipBackend {
         step_mode: Option<MatterLevelStepMode>,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut().and_then(|controller| {
-            controller.run_level_command(
-                node_id,
-                endpoint,
-                command,
-                level_or_step,
-                step_mode,
-                transition_ms,
-            )
-        })
+        self.controller_ref()?.run_level_command(
+            node_id,
+            endpoint,
+            command,
+            level_or_step,
+            step_mode,
+            transition_ms,
+        )
     }
 
     fn set_color_temperature(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         kelvin: u16,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut().and_then(|controller| {
-            controller.set_color_temperature(node_id, endpoint, kelvin, transition_ms)
-        })
+        self.controller_ref()?
+            .set_color_temperature(node_id, endpoint, kelvin, transition_ms)
     }
 
     fn set_xy(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         x: f32,
         y: f32,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut()
-            .and_then(|controller| controller.set_xy(node_id, endpoint, x, y, transition_ms))
+        self.controller_ref()?
+            .set_xy(node_id, endpoint, x, y, transition_ms)
     }
 
     fn set_hue_saturation(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         hue: u8,
         saturation: u8,
         transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.controller_mut().and_then(|controller| {
-            controller.set_hue_saturation(node_id, endpoint, hue, saturation, transition_ms)
-        })
+        self.controller_ref()?
+            .set_hue_saturation(node_id, endpoint, hue, saturation, transition_ms)
     }
 
-    fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
-        self.controller_mut()?.read_on_off(node_id, endpoint)
+    fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
+        self.controller_ref()?.read_on_off(node_id, endpoint)
     }
 
     fn read_light_capability_snapshot(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
     ) -> Result<serde_json::Value> {
-        self.controller_mut()?
+        self.controller_ref()?
             .read_light_capability_snapshot(node_id, endpoint)
     }
 
-    fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
-        self.controller_mut()?.read_light_state(node_id, endpoint)
+    fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+        self.controller_ref()?.read_light_state(node_id, endpoint)
     }
 
     fn subscribe_on_off(
-        &mut self,
+        &self,
         targets: &[MatterSubscriptionTarget],
         min_interval_secs: u16,
         max_interval_secs: u16,
     ) -> Result<()> {
-        self.controller_mut()?
+        self.controller_ref()?
             .subscribe_on_off(targets, min_interval_secs, max_interval_secs)
     }
 
-    fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>> {
-        self.controller_mut()?.drain_attribute_reports()
+    fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
+        self.controller_ref()?.drain_attribute_reports()
     }
 }
 
 #[derive(Default)]
-pub struct FakeChipBackend {
+struct FakeChipState {
     state: Option<CommissioningState>,
     devices: BTreeMap<u64, CommissionedDevice>,
     on_off: HashMap<(u64, u16), bool>,
     groups: BTreeMap<u16, MatterGroup>,
 }
 
-impl FakeChipBackend {
+impl FakeChipState {
     fn require_device(&self, node_id: u64) -> Result<&CommissionedDevice> {
         self.devices
             .get(&node_id)
@@ -360,6 +354,17 @@ impl FakeChipBackend {
         self.groups
             .get(&group_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown fake CHIP group {}", group_id))
+    }
+}
+
+#[derive(Default)]
+pub struct FakeChipBackend {
+    inner: Mutex<FakeChipState>,
+}
+
+impl FakeChipBackend {
+    fn lock(&self) -> std::sync::MutexGuard<'_, FakeChipState> {
+        self.inner.lock().expect("fake CHIP state poisoned")
     }
 
     fn fake_name(setup_payload: &str, suffix: &str) -> String {
@@ -382,17 +387,18 @@ impl ChipControllerBackend for FakeChipBackend {
         if state.ipk_hex.len() != 32 || !state.ipk_hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
             anyhow::bail!("Fake CHIP IPK must be a 16-byte hex string");
         }
-        self.state = Some(state.clone());
-        self.devices = existing_devices
+        let mut inner = self.lock();
+        inner.state = Some(state.clone());
+        inner.devices = existing_devices
             .iter()
             .cloned()
             .map(|device| (device.node_id, device))
             .collect();
-        self.on_off = existing_devices
+        inner.on_off = existing_devices
             .iter()
             .map(|device| ((device.node_id, device.light_endpoint), false))
             .collect();
-        self.groups.clear();
+        inner.groups.clear();
         Ok(ChipInitControllerResponse {
             fabric_id: state.fabric_id.clone(),
             operational_fabric_id: state.operational_fabric_id,
@@ -403,10 +409,7 @@ impl ChipControllerBackend for FakeChipBackend {
         })
     }
 
-    fn commission_light(
-        &mut self,
-        request: &MatterCommissionRequest,
-    ) -> Result<CommissionedDevice> {
+    fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
         let device = CommissionedDevice {
             node_id: request.node_id,
             vendor_name: Self::fake_name(&request.setup_payload, "FakeVendor"),
@@ -422,125 +425,135 @@ impl ChipControllerBackend for FakeChipBackend {
             min_kelvin: Some(2200),
             max_kelvin: Some(6500),
         };
-        self.on_off
+        let mut inner = self.lock();
+        inner
+            .on_off
             .insert((device.node_id, device.light_endpoint), false);
-        self.devices.insert(device.node_id, device.clone());
+        inner.devices.insert(device.node_id, device.clone());
         Ok(device)
     }
 
-    fn probe_light(&mut self, node_id: u64) -> Result<CommissionedDevice> {
-        Ok(self.require_device(node_id)?.clone())
+    fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+        Ok(self.lock().require_device(node_id)?.clone())
     }
 
-    fn decommission_device(&mut self, node_id: u64, _force: bool) -> Result<()> {
-        self.devices.remove(&node_id);
-        self.on_off
+    fn decommission_device(&self, node_id: u64, _force: bool) -> Result<()> {
+        let mut inner = self.lock();
+        inner.devices.remove(&node_id);
+        inner
+            .on_off
             .retain(|(device_node_id, _), _| *device_node_id != node_id);
         Ok(())
     }
 
-    fn set_on_off(&mut self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
-        self.require_device(node_id)?;
-        self.on_off.insert((node_id, endpoint), on);
+    fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
+        let mut inner = self.lock();
+        inner.require_device(node_id)?;
+        inner.on_off.insert((node_id, endpoint), on);
         Ok(())
     }
 
-    fn configure_group(&mut self, group: &MatterGroup) -> Result<()> {
+    fn configure_group(&self, group: &MatterGroup) -> Result<()> {
         if group.group_id == 0 {
             anyhow::bail!("Invalid fake CHIP group id 0");
         }
+        let mut inner = self.lock();
         for member in &group.members {
-            self.require_device(member.node_id)?;
+            inner.require_device(member.node_id)?;
         }
-        self.groups.insert(group.group_id, group.clone());
+        inner.groups.insert(group.group_id, group.clone());
         Ok(())
     }
 
-    fn remove_group(&mut self, group_id: u16, _members: &[MatterGroupMember]) -> Result<()> {
-        self.groups.remove(&group_id);
+    fn remove_group(&self, group_id: u16, _members: &[MatterGroupMember]) -> Result<()> {
+        self.lock().groups.remove(&group_id);
         Ok(())
     }
 
-    fn set_group_on_off(&mut self, group_id: u16, on: bool) -> Result<()> {
-        let members = self.require_group(group_id)?.members.clone();
+    fn set_group_on_off(&self, group_id: u16, on: bool) -> Result<()> {
+        let mut inner = self.lock();
+        let members = inner.require_group(group_id)?.members.clone();
         for member in members {
-            self.require_device(member.node_id)?;
-            self.on_off.insert((member.node_id, member.endpoint), on);
+            inner.require_device(member.node_id)?;
+            inner.on_off.insert((member.node_id, member.endpoint), on);
         }
         Ok(())
     }
 
-    fn identify_group(&mut self, group_id: u16, _duration_secs: u16) -> Result<()> {
-        self.require_group(group_id)?;
+    fn identify_group(&self, group_id: u16, _duration_secs: u16) -> Result<()> {
+        self.lock().require_group(group_id)?;
         Ok(())
     }
 
     fn set_group_brightness(
-        &mut self,
+        &self,
         group_id: u16,
         level: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        let members = self.require_group(group_id)?.members.clone();
+        let mut inner = self.lock();
+        let members = inner.require_group(group_id)?.members.clone();
         for member in members {
-            self.require_device(member.node_id)?;
-            self.on_off
+            inner.require_device(member.node_id)?;
+            inner
+                .on_off
                 .insert((member.node_id, member.endpoint), level > 0);
         }
         Ok(())
     }
 
     fn set_group_color_temperature(
-        &mut self,
+        &self,
         group_id: u16,
         _kelvin: u16,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.require_group(group_id)?;
+        self.lock().require_group(group_id)?;
         Ok(())
     }
 
     fn set_group_xy(
-        &mut self,
+        &self,
         group_id: u16,
         _x: f32,
         _y: f32,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.require_group(group_id)?;
+        self.lock().require_group(group_id)?;
         Ok(())
     }
 
     fn set_group_hue_saturation(
-        &mut self,
+        &self,
         group_id: u16,
         _hue: u8,
         _saturation: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.require_group(group_id)?;
+        self.lock().require_group(group_id)?;
         Ok(())
     }
 
-    fn identify_light(&mut self, node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
-        self.require_device(node_id)?;
+    fn identify_light(&self, node_id: u64, _endpoint: u16, _duration_secs: u16) -> Result<()> {
+        self.lock().require_device(node_id)?;
         Ok(())
     }
 
     fn set_brightness(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         level: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        let _ = self.require_device_mut(node_id)?;
-        self.on_off.insert((node_id, endpoint), level > 0);
+        let mut inner = self.lock();
+        let _ = inner.require_device_mut(node_id)?;
+        inner.on_off.insert((node_id, endpoint), level > 0);
         Ok(())
     }
 
     fn run_level_command(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
         command: MatterLevelCommandVariant,
@@ -548,11 +561,12 @@ impl ChipControllerBackend for FakeChipBackend {
         _step_mode: Option<MatterLevelStepMode>,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        self.require_device(node_id)?;
+        let mut inner = self.lock();
+        inner.require_device(node_id)?;
         match command {
             MatterLevelCommandVariant::MoveToLevelWithOnOff
             | MatterLevelCommandVariant::StepWithOnOff => {
-                self.on_off.insert((node_id, endpoint), level_or_step > 0);
+                inner.on_off.insert((node_id, endpoint), level_or_step > 0);
             }
             MatterLevelCommandVariant::MoveToLevel | MatterLevelCommandVariant::Step => {}
         }
@@ -560,53 +574,56 @@ impl ChipControllerBackend for FakeChipBackend {
     }
 
     fn set_color_temperature(
-        &mut self,
+        &self,
         node_id: u64,
         _endpoint: u16,
         kelvin: u16,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        let device = self.require_device_mut(node_id)?;
+        let mut inner = self.lock();
+        let device = inner.require_device_mut(node_id)?;
         device.min_kelvin = Some(device.min_kelvin.unwrap_or(kelvin).min(kelvin));
         device.max_kelvin = Some(device.max_kelvin.unwrap_or(kelvin).max(kelvin));
         Ok(())
     }
 
     fn set_xy(
-        &mut self,
+        &self,
         node_id: u64,
         _endpoint: u16,
         _x: f32,
         _y: f32,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        let _ = self.require_device(node_id)?;
+        let _ = self.lock().require_device(node_id)?;
         Ok(())
     }
 
     fn set_hue_saturation(
-        &mut self,
+        &self,
         node_id: u64,
         _endpoint: u16,
         _hue: u8,
         _saturation: u8,
         _transition_ms: Option<u32>,
     ) -> Result<()> {
-        let _ = self.require_device(node_id)?;
+        let _ = self.lock().require_device(node_id)?;
         Ok(())
     }
 
-    fn read_on_off(&mut self, node_id: u64, endpoint: u16) -> Result<bool> {
-        self.require_device(node_id)?;
-        Ok(*self.on_off.get(&(node_id, endpoint)).unwrap_or(&false))
+    fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
+        let inner = self.lock();
+        inner.require_device(node_id)?;
+        Ok(*inner.on_off.get(&(node_id, endpoint)).unwrap_or(&false))
     }
 
     fn read_light_capability_snapshot(
-        &mut self,
+        &self,
         node_id: u64,
         endpoint: u16,
     ) -> Result<serde_json::Value> {
-        let device = self.require_device(node_id)?;
+        let inner = self.lock();
+        let device = inner.require_device(node_id)?;
         Ok(serde_json::json!({
             "node_id": node_id,
             "selected_endpoint": endpoint,
@@ -648,7 +665,7 @@ impl ChipControllerBackend for FakeChipBackend {
         }))
     }
 
-    fn read_light_state(&mut self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
+    fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<serde_json::Value> {
         let on = self.read_on_off(node_id, endpoint)?;
         Ok(serde_json::json!({
             "onoff": {"ok": true, "value": on},
@@ -661,18 +678,19 @@ impl ChipControllerBackend for FakeChipBackend {
     }
 
     fn subscribe_on_off(
-        &mut self,
+        &self,
         targets: &[MatterSubscriptionTarget],
         _min_interval_secs: u16,
         _max_interval_secs: u16,
     ) -> Result<()> {
+        let inner = self.lock();
         for target in targets {
-            self.require_device(target.node_id)?;
+            inner.require_device(target.node_id)?;
         }
         Ok(())
     }
 
-    fn drain_attribute_reports(&mut self) -> Result<Vec<MatterAttributeReport>> {
+    fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
         Ok(Vec::new())
     }
 }
@@ -747,7 +765,7 @@ mod tests {
         assert_eq!(response.operational_fabric_id, 0x1234);
 
         std::env::remove_var("RHYTHM_CHIPD_BACKEND");
-        let mut native = build_backend_from_env();
+        let native = build_backend_from_env();
         assert!(string_error(native.read_on_off(1, 1))
             .contains("CHIP controller backend not initialized"));
     }
@@ -940,7 +958,7 @@ mod tests {
 
     #[test]
     fn native_backend_reports_uninitialized_for_operations() {
-        let mut backend = NativeChipBackend::default();
+        let backend = NativeChipBackend::default();
         let request = commission_request(1, "MT:code");
         let group = MatterGroup {
             group_id: 1,
