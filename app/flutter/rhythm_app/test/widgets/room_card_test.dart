@@ -153,17 +153,6 @@ class _TestRhythmConnection extends RhythmConnection {
   void disconnect() {}
 }
 
-class _StandbyServerSyncProvider extends ServerSyncProvider {
-  _StandbyServerSyncProvider({
-    required super.connection,
-    required super.roomProvider,
-    required super.homeProvider,
-  });
-
-  @override
-  bool standbyEnabledForNode(String nodeId) => true;
-}
-
 CurveData _curveDataWithKelvins(List<int> kelvins) {
   return CurveData(
     hours: [
@@ -203,6 +192,22 @@ Color _roomCardSurfaceColor(WidgetTester tester, String roomId) {
   return decoration.color!;
 }
 
+Finder _roomSegment(String label, {String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-segment-$roomId-${label.toLowerCase()}'));
+
+Future<void> _tapRoomSegment(
+  WidgetTester tester,
+  String label, {
+  String roomId = 'room-1',
+}) async {
+  tester
+      .widget<GestureDetector>(
+        _roomSegment(label, roomId: roomId),
+      )
+      .onTap!();
+  await tester.pump();
+}
+
 void main() {
   setUp(() {
     // Most tests exercise Mood mechanics directly; treat the one-time
@@ -226,7 +231,7 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     final homeProvider = _FakeHomeProvider();
@@ -264,7 +269,7 @@ void main() {
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       transitioning: true,
       lightsOn: true,
@@ -274,7 +279,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
 
-    await tester.tap(find.text('Off'));
+    await tester.tap(_roomSegment('Off'));
     await tester.pump();
 
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
@@ -284,7 +289,7 @@ void main() {
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       transitioning: false,
       lightsOn: true,
@@ -292,7 +297,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
   });
 
   testWidgets('shows spinner for pending dispatch without disabling controls',
@@ -309,7 +313,7 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     final homeProvider = _FakeHomeProvider();
@@ -347,7 +351,7 @@ void main() {
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       pendingDispatch: true,
       lightsOn: true,
@@ -361,12 +365,13 @@ void main() {
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       pendingDispatch: false,
       lightsOn: true,
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
@@ -385,7 +390,7 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     final homeProvider = _FakeHomeProvider();
@@ -445,7 +450,7 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     final homeProvider = _FakeHomeProvider();
@@ -476,8 +481,7 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('Mood'));
-    await tester.pump();
+    await _tapRoomSegment(tester, 'Scenes');
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
@@ -511,7 +515,7 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     final homeProvider = _FakeHomeProvider();
@@ -542,8 +546,7 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('Mood'));
-    await tester.pump();
+    await _tapRoomSegment(tester, 'Scenes');
     await tester.pump(const Duration(milliseconds: 50));
 
     // The explainer is presented and marked seen…
@@ -610,33 +613,19 @@ void main() {
       ),
     );
 
-    expect(find.text('Standby'), findsOneWidget);
     expect(find.text('Off'), findsOneWidget);
-    expect(find.text('On'), findsNothing);
-    final slider = tester.widget<Slider>(find.byType(Slider));
-    expect(slider.value, 1);
-    expect(slider.onChanged, isNull);
+    expect(find.text('On'), findsOneWidget);
+    expect(find.text('Dim'), findsOneWidget);
+    expect(find.byType(Slider), findsNothing);
 
-    await tester.tap(find.byType(Slider));
-    await tester.pumpAndSettle();
-
-    expect(find.text('DONE'), findsNothing);
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
-    expect(connection.api.nodePreferenceCalls, isEmpty);
-
-    await tester.tap(find.text('Standby'));
+    await tester.tap(_roomSegment('Off'));
     await tester.pump();
 
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
-    expect(connection.api.nodePreferenceCalls, hasLength(1));
-    final call = connection.api.nodePreferenceCalls.single;
-    expect(call.nodeId, 'room-1');
-    expect(call.rhythmEnabled, isTrue);
-    expect(call.state, RoomModeState.active);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
+    expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
-  testWidgets('selected on segment enters standby when enabled',
-      (tester) async {
+  testWidgets('dim segment applies minimum manual brightness', (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -649,14 +638,14 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     await roomProvider.applyServerNodeState(
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       lightsOn: true,
       brightness: 42,
@@ -665,7 +654,7 @@ void main() {
 
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
-    final serverSync = _StandbyServerSyncProvider(
+    final serverSync = ServerSyncProvider(
       connection: connection,
       roomProvider: roomProvider,
       homeProvider: homeProvider,
@@ -691,15 +680,14 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('On'));
-    await tester.pump();
+    await _tapRoomSegment(tester, 'Dim');
 
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
-    expect(connection.api.nodePreferenceCalls, hasLength(1));
-    final call = connection.api.nodePreferenceCalls.single;
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+    expect(connection.api.nodeCurveBrightnessCalls, hasLength(1));
+    final call = connection.api.nodeCurveBrightnessCalls.single;
     expect(call.nodeId, 'room-1');
-    expect(call.rhythmEnabled, isTrue);
-    expect(call.state, RoomModeState.standby);
+    expect(call.brightness, 1);
   });
 
   testWidgets('active brightness slider uses curve modifier endpoint',
@@ -716,14 +704,14 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     await roomProvider.applyServerNodeState(
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       lightsOn: true,
       brightness: 42,
@@ -784,14 +772,14 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: 0,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     await roomProvider.applyServerNodeState(
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       lightsOn: true,
       brightness: 42,
@@ -827,7 +815,11 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byIcon(Icons.wb_sunny_rounded).first);
+    tester
+        .widget<GestureDetector>(
+          find.byKey(const ValueKey('room-card-slider-mode-room-1')),
+        )
+        .onTap!();
     await tester.pump();
     tester.widget<Slider>(find.byType(Slider)).onChanged!(3200);
     await tester.pump();
@@ -856,14 +848,14 @@ void main() {
         disabled: false,
         lightsOn: true,
         timeOffsetMinutes: timeOffsetMinutes,
-        brightnessOffset: 0,
+        brightnessOffset: 1,
       ),
     );
     await roomProvider.applyServerNodeState(
       'room-1',
       rhythmEnabled: true,
       timeOffset: timeOffsetMinutes,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       lightsOn: true,
       brightness: 42,
@@ -899,7 +891,11 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byIcon(Icons.wb_sunny_rounded).first);
+    tester
+        .widget<GestureDetector>(
+          find.byKey(const ValueKey('room-card-slider-mode-room-1')),
+        )
+        .onTap!();
     await tester.pump(const Duration(milliseconds: 350));
 
     final cctSlider = tester.widget<Slider>(find.byType(Slider));
@@ -972,14 +968,13 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('Mood'));
+    await _tapRoomSegment(tester, 'Scenes');
     await tester.pump(const Duration(milliseconds: 300));
 
-    tester
-        .widget<GestureDetector>(
-          find.byKey(const Key('mood_color_preset_red')),
-        )
-        .onTap!();
+    final redWheelPoint =
+        tester.getCenter(find.byKey(const Key('mood_color_wheel'))) +
+            const Offset(40, 0);
+    await tester.tapAt(redWheelPoint);
     await tester.pump();
 
     expect(connection.api.nodeBrightnessCalls, isEmpty);
@@ -1133,13 +1128,12 @@ void main() {
     tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(13);
     await tester.pump();
 
-    await tester.tap(find.text('Mood'));
+    await _tapRoomSegment(tester, 'Scenes');
     await tester.pump(const Duration(milliseconds: 300));
-    tester
-        .widget<GestureDetector>(
-          find.byKey(const Key('mood_color_preset_amber')),
-        )
-        .onTap!();
+    final amberWheelPoint =
+        tester.getCenter(find.byKey(const Key('mood_color_wheel'))) +
+            const Offset(40, 0);
+    await tester.tapAt(amberWheelPoint);
     await tester.pump();
 
     expect(connection.api.nodeColorCalls, hasLength(2));

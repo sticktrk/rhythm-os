@@ -702,6 +702,7 @@ class _RoomCardState extends State<RoomCard> {
                         Padding(
                           padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
                           child: _SegmentedToggle(
+                            roomId: widget.roomId,
                             mode: mode,
                             bright: bright,
                             dim: dim,
@@ -727,6 +728,9 @@ class _RoomCardState extends State<RoomCard> {
                                 children: [
                                   // Mode toggle button
                                   GestureDetector(
+                                    key: ValueKey(
+                                      'room-card-slider-mode-${widget.roomId}',
+                                    ),
                                     onTap: sliderActive
                                         ? () {
                                             if (mode == RoomMode.mood) {
@@ -1237,6 +1241,7 @@ class _CCTGradientTrackShape extends SliderTrackShape
 enum _Seg { off, on, bright, dim, mood }
 
 class _SegmentedToggle extends StatelessWidget {
+  final String roomId;
   final RoomMode mode;
 
   /// On with a manual brightness in the upper half — highlights Bright.
@@ -1256,6 +1261,7 @@ class _SegmentedToggle extends StatelessWidget {
   final bool enabled;
 
   const _SegmentedToggle({
+    required this.roomId,
     required this.mode,
     required this.bright,
     required this.dim,
@@ -1320,6 +1326,7 @@ class _SegmentedToggle extends StatelessWidget {
             flex: groupA.length,
             child: _SegmentGroupTrack(
               segments: groupA,
+              roomId: roomId,
               active: groupA.contains(active) ? active : null,
               onSelect: _select,
               enabled: enabled,
@@ -1332,6 +1339,7 @@ class _SegmentedToggle extends StatelessWidget {
             flex: groupB.length,
             child: _SegmentGroupTrack(
               segments: groupB,
+              roomId: roomId,
               active: groupB.contains(active) ? active : null,
               onSelect: _select,
               enabled: enabled,
@@ -1350,6 +1358,7 @@ class _SegmentedToggle extends StatelessWidget {
 /// active segment lives in this group). Supports tap and horizontal-drag
 /// selection within the group.
 class _SegmentGroupTrack extends StatefulWidget {
+  final String roomId;
   final List<_Seg> segments;
   final _Seg? active;
   final ValueChanged<_Seg> onSelect;
@@ -1358,6 +1367,7 @@ class _SegmentGroupTrack extends StatefulWidget {
   final Color cctColor;
 
   const _SegmentGroupTrack({
+    required this.roomId,
     required this.segments,
     required this.active,
     required this.onSelect,
@@ -1466,6 +1476,9 @@ class _SegmentGroupTrackState extends State<_SegmentGroupTrack> {
                     for (var i = 0; i < segs.length; i++)
                       Expanded(
                         child: GestureDetector(
+                          key: ValueKey(
+                            'room-card-segment-${widget.roomId}-${_labelFor(segs[i]).toLowerCase()}',
+                          ),
                           behavior: HitTestBehavior.opaque,
                           onTap: () {
                             if (!widget.enabled) return;
