@@ -13,10 +13,6 @@ app/.dartServer/
 # Temporary history-filtered import clones.
 .repo-import-work/
 
-# Local legacy/reference checkout. This repo is still maintained upstream and
-# should not be absorbed into the CROSS monorepo until legacy support settles.
-legacy/removed-project/
-
 # Rust workspace build output.
 target/
 
