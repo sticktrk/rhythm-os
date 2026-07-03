@@ -658,8 +658,8 @@ void main() {
 
     await tester.pump(const Duration(seconds: 5));
 
-    expect(find.text('Server Unreachable'), findsOneWidget);
-    expect(find.text('Connecting...'), findsOneWidget);
+    expect(find.text('Waking Remote Tunnel'), findsOneWidget);
+    expect(find.text('Checking tunnel...'), findsOneWidget);
     expect(find.text('Trying local'), findsNothing);
     expect(find.text('Trying remote'), findsNothing);
     expect(find.text('Retry Now'), findsNothing);
@@ -668,17 +668,17 @@ void main() {
 
     connection.setConnectionState(RhythmConnectionState.connecting);
     await tester.pump(const Duration(milliseconds: 10));
-    expect(find.text('Server Unreachable'), findsOneWidget);
+    expect(find.text('Waking Remote Tunnel'), findsOneWidget);
 
     connection.setConnectionState(RhythmConnectionState.connected);
     await tester.pump(const Duration(milliseconds: 10));
-    expect(find.text('Server Unreachable'), findsNothing);
+    expect(find.text('Waking Remote Tunnel'), findsNothing);
     _emitSyncedHello(connection);
     await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Add Hubs'), findsOneWidget);
   });
 
-  testWidgets('server unreachable screen indicates connecting then waiting',
+  testWidgets('remote server unreachable screen indicates tunnel retry state',
       (tester) async {
     final retryCompleter = Completer<void>();
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -696,9 +696,36 @@ void main() {
     );
 
     await tester.pump();
-    expect(find.text('Connecting...'), findsOneWidget);
+    expect(find.text('Waking Remote Tunnel'), findsOneWidget);
+    expect(find.text('Checking tunnel...'), findsOneWidget);
     expect(find.text('Trying local'), findsNothing);
     expect(find.text('Trying remote'), findsNothing);
+
+    retryCompleter.complete();
+    await tester.pump();
+    expect(find.text('Retrying tunnel soon...'), findsOneWidget);
+  });
+
+  testWidgets('LAN server unreachable screen keeps generic retry state',
+      (tester) async {
+    final retryCompleter = Completer<void>();
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ServerDisconnectedScreen(
+          serverHub: _serverHub(),
+          retryInterval: const Duration(minutes: 1),
+          onRetry: () => retryCompleter.future,
+          onChooseHome: () {},
+        ),
+      ),
+    );
+
+    await tester.pump();
+    expect(find.text('Server Unreachable'), findsOneWidget);
+    expect(find.text('Connecting...'), findsOneWidget);
 
     retryCompleter.complete();
     await tester.pump();
@@ -739,8 +766,8 @@ void main() {
 
     await tester.pump();
 
-    expect(find.text('Connecting...'), findsOneWidget);
-    expect(find.text('Waiting to Retry...'), findsNothing);
+    expect(find.text('Checking tunnel...'), findsOneWidget);
+    expect(find.text('Retrying tunnel soon...'), findsNothing);
   });
 
   testWidgets('pops pushed routes when the paired server hub is removed',
