@@ -1918,7 +1918,11 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _startActivityCloudProvisioningTimer() {
-    if (!_connection.connected || HueServiceLocator.isDemoMode) return;
+    if (!_connection.connected ||
+        HueServiceLocator.isDemoMode ||
+        !ServerActivityCloudProvisioningService.instance.canProvision) {
+      return;
+    }
     _activityCloudProvisioningTimer ??= Timer.periodic(
       _activityCloudProvisioningInterval,
       (_) => _ensureServerActivityCloudConfigured(
@@ -1935,7 +1939,11 @@ class ServerSyncProvider extends ChangeNotifier {
   void _ensureServerActivityCloudConfigured({String? serverInstanceId}) {
     if (!_connection.connected) return;
     final serverHub = _serverHub ?? _homeProvider.activeServerHub;
-    if (serverHub == null || HueServiceLocator.isDemoMode) return;
+    if (serverHub == null ||
+        HueServiceLocator.isDemoMode ||
+        !ServerActivityCloudProvisioningService.instance.canProvision) {
+      return;
+    }
     unawaited(
       ServerActivityCloudProvisioningService.instance
           .ensureConfigured(

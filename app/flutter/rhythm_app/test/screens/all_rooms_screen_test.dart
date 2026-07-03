@@ -436,7 +436,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Bulb 1'), findsOneWidget);
-    expect(find.text('Mood'), findsOneWidget);
+    expect(find.text('Scenes'), findsOneWidget);
   });
 
   testWidgets(
@@ -561,74 +561,5 @@ void main() {
 
     expect(find.text('Edit Rooms'), findsNothing);
     expect(harness.roomPageProvider.editMode, isFalse);
-  });
-
-  testWidgets('double tapping the active mode toggle requests a reapply',
-      (tester) async {
-    final roomProvider = RoomProvider();
-    final homeProvider = _FakeHomeProvider();
-    final connection = _TestRhythmConnection();
-    final serverSync = ServerSyncProvider(
-      connection: connection,
-      roomProvider: roomProvider,
-      homeProvider: homeProvider,
-    );
-    final roomPageProvider = RoomPageProvider(
-      layoutStore: _MemoryRoomPageLayoutStore(),
-    );
-
-    addTearDown(roomProvider.dispose);
-    addTearDown(homeProvider.dispose);
-    addTearDown(serverSync.dispose);
-    addTearDown(connection.dispose);
-    addTearDown(roomPageProvider.dispose);
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-
-    await roomProvider.addRoom(_bulb1);
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-
-    RhythmMode? selectedMode;
-    RhythmMode? reappliedMode;
-
-    await tester.pumpWidget(
-      MultiProvider(
-        providers: [
-          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
-          ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
-          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
-          ChangeNotifierProvider<RoomPageProvider>.value(
-            value: roomPageProvider,
-          ),
-        ],
-        child: MaterialApp(
-          home: Scaffold(
-            body: AllRoomsScreen(
-              rooms: const [_bulb1],
-              globalConfig: defaultCurveConfig,
-              pageController: PageController(),
-              onPageChanged: (_) {},
-              activeMode: RhythmMode.day,
-              onModeSelected: (mode) => selectedMode = mode,
-              onActiveModeDoubleTap: (mode) => reappliedMode = mode,
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pump();
-
-    final dayToggle = find.text('Day');
-    await tester.tap(dayToggle);
-    await tester.pump(const Duration(milliseconds: 40));
-    await tester.tap(dayToggle);
-    await tester.pump(const Duration(milliseconds: 400));
-
-    expect(reappliedMode, RhythmMode.day);
-    expect(selectedMode, isNull);
-
-    await tester.tap(find.text('Sleep'));
-    await tester.pump();
-
-    expect(selectedMode, RhythmMode.sleep);
   });
 }

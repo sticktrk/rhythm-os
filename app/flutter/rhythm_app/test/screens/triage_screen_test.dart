@@ -97,11 +97,13 @@ class _FakeRhythmConnection extends RhythmConnection {
 
 Widget _buildTestApp({
   required RoomProvider roomProvider,
+  required RhythmConnection connection,
   required ServerSyncProvider serverSyncProvider,
 }) {
   return MultiProvider(
     providers: [
       ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+      Provider<RhythmConnection>.value(value: connection),
       ChangeNotifierProvider<ServerSyncProvider>.value(
           value: serverSyncProvider),
     ],
@@ -109,6 +111,13 @@ Widget _buildTestApp({
       home: TriageScreen(),
     ),
   );
+}
+
+Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
+  await tester.ensureVisible(finder);
+  await tester.pump();
+  await tester.tap(finder);
+  await tester.pumpAndSettle();
 }
 
 Map<String, dynamic> _roomBindingEntry() {
@@ -186,6 +195,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestApp(
           roomProvider: roomProvider,
+          connection: connection,
           serverSyncProvider: serverSyncProvider,
         ),
       );
@@ -193,12 +203,14 @@ void main() {
 
       expect(find.text('Merge Rooms'), findsOneWidget);
 
-      await tester.tap(find.text('Merge Rooms'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Merge Rooms'));
 
       expect(api.resolveTriageBindCalls, 1);
       expect(connection.reconnectCalls, 1);
-      expect(find.text('All clear'), findsOneWidget);
+      expect(
+        find.text('No devices need your attention right now.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('reconnects after keeping a room binding separate',
@@ -206,17 +218,20 @@ void main() {
       await tester.pumpWidget(
         _buildTestApp(
           roomProvider: roomProvider,
+          connection: connection,
           serverSyncProvider: serverSyncProvider,
         ),
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Keep Separate'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Keep Separate'));
 
       expect(api.resolveTriageNewCalls, 1);
       expect(connection.reconnectCalls, 1);
-      expect(find.text('All clear'), findsOneWidget);
+      expect(
+        find.text('No devices need your attention right now.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('assigns an unassigned device through triage room endpoint',
@@ -226,6 +241,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestApp(
           roomProvider: roomProvider,
+          connection: connection,
           serverSyncProvider: serverSyncProvider,
         ),
       );
@@ -233,15 +249,16 @@ void main() {
 
       expect(find.text('Assign Room'), findsOneWidget);
 
-      await tester.tap(find.text('Assign Room'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Assign Room'));
 
-      await tester.tap(find.text('Kitchen'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Kitchen'));
 
       expect(api.resolveTriageRoomCalls, 1);
       expect(connection.reconnectCalls, 1);
-      expect(find.text('All clear'), findsOneWidget);
+      expect(
+        find.text('No devices need your attention right now.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('assign room picker only lists room nodes', (tester) async {
@@ -263,19 +280,18 @@ void main() {
       await tester.pumpWidget(
         _buildTestApp(
           roomProvider: roomProvider,
+          connection: connection,
           serverSyncProvider: serverSyncProvider,
         ),
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Assign Room'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Assign Room'));
 
       expect(find.text('Kitchen'), findsOneWidget);
       expect(find.text('Desk Bulb Node'), findsNothing);
 
-      await tester.tap(find.text('Kitchen'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Kitchen'));
 
       expect(api.resolveTriageRoomCalls, 1);
       expect(connection.reconnectCalls, 1);
@@ -290,16 +306,15 @@ void main() {
       await tester.pumpWidget(
         _buildTestApp(
           roomProvider: roomProvider,
+          connection: connection,
           serverSyncProvider: serverSyncProvider,
         ),
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Assign Room'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Assign Room'));
 
-      await tester.tap(find.text('Create New Room'));
-      await tester.pumpAndSettle();
+      await _tapVisible(tester, find.text('Create New Room'));
 
       await tester.enterText(find.byType(TextField), 'Office');
       await tester.tap(find.text('Create'));
@@ -308,7 +323,10 @@ void main() {
       expect(api.createTopologyRoomCalls, 1);
       expect(api.resolveTriageRoomCalls, 1);
       expect(connection.reconnectCalls, 1);
-      expect(find.text('All clear'), findsOneWidget);
+      expect(
+        find.text('No devices need your attention right now.'),
+        findsOneWidget,
+      );
     });
   });
 }

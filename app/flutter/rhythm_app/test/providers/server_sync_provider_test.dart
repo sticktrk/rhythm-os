@@ -4131,7 +4131,7 @@ void main() {
     );
 
     await _selectRoomSettingsTab(tester, 'Settings');
-    await tester.tap(find.text('Standby'));
+    await tester.tap(find.text('Off Behavior'));
     await tester.pump();
 
     expect(api.nodePreferenceCalls, hasLength(1));

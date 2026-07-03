@@ -682,9 +682,8 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
-  // TEST: force every room card to full width (one card per row) instead of the
-  // usual half-width grid for light-addressable rooms.
-  bool _isHalfWidthCard(RoomDto room) => false;
+  bool _isHalfWidthCard(RoomDto room) =>
+      room.kind == RoomNodeKind.room || room.kind == RoomNodeKind.lightDevice;
 
   List<_RoomGridItem> _roomGridItems(List<RoomDto> rooms) {
     return [

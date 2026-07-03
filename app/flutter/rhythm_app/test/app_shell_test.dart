@@ -16,8 +16,9 @@ import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/screens/all_rooms_screen.dart';
 import 'package:rhythm_app/screens/server_disconnected_screen.dart';
+import 'package:rhythm_app/screens/settings/automations_screen.dart';
+import 'package:rhythm_app/screens/settings/settings_screen.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
-import 'package:rhythm_app/widgets/main_bottom_nav.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -451,6 +452,21 @@ Future<void> _pumpAppShell(
   await tester.pump(const Duration(milliseconds: 10));
 }
 
+Future<void> _openNavigationFan(WidgetTester tester) async {
+  await tester.tap(find.byIcon(Icons.settings_rounded).last);
+  await tester.pump();
+}
+
+Future<void> _selectNavigationFanItem(
+  WidgetTester tester,
+  String label,
+) async {
+  await _openNavigationFan(tester);
+  await tester.tap(find.text(label).last);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 10));
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -615,17 +631,16 @@ void main() {
     _emitSyncedHello(connection);
     await tester.pump(const Duration(milliseconds: 10));
 
-    await tester.tap(find.text('Settings'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 10));
+    await _selectNavigationFanItem(tester, 'Settings');
     expect(find.text('Settings'), findsWidgets);
-    expect(find.byType(MainBottomNav), findsOneWidget);
+    expect(find.byType(SettingsScreen), findsOneWidget);
 
     serverSync.beginHomeEntryRefresh(homeName: home.name);
     await tester.pump(const Duration(milliseconds: 10));
 
     expect(find.text('Kitchen'), findsOneWidget);
-    expect(find.byType(MainBottomNav), findsNothing);
+    expect(find.byType(ServerDisconnectedScreen), findsOneWidget);
+    expect(find.byType(SettingsScreen), findsOneWidget);
 
     serverSync.cancelHomeEntryRefresh();
     await tester.pump(const Duration(milliseconds: 10));
@@ -839,8 +854,7 @@ void main() {
       serverSync: serverSync,
     );
 
-    await tester.tap(find.text('Settings'));
-    await tester.pumpAndSettle();
+    await _selectNavigationFanItem(tester, 'Settings');
 
     expect(find.text('Do you have\na LightBox?'), findsNothing);
 
@@ -848,7 +862,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Do you have\na LightBox?'), findsOneWidget);
-    expect(find.byType(MainBottomNav), findsNothing);
+    expect(find.byIcon(Icons.settings_rounded), findsNothing);
   });
 
   testWidgets('shows the room grid when the connected server has rooms',
@@ -1011,7 +1025,8 @@ void main() {
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
-  testWidgets('lazily mounts bottom-nav editor tabs', (tester) async {
+  testWidgets('preset editor uses already-synced provider data',
+      (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider([_serverHub()]);
     final api = _FakeRhythmServerApi();
@@ -1044,24 +1059,20 @@ void main() {
 
     // The Automations list reads already-synced provider data, so opening it
     // must not trigger the profile-loading server API.
-    await tester.tap(find.text('Schedules'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 10));
+    await _selectNavigationFanItem(tester, 'Presets');
 
-    expect(find.text('Time Schedule'), findsOneWidget);
+    expect(find.text('Presets'), findsOneWidget);
     expect(api.getModeCallCount, 0);
     expect(api.getProfilesCallCount, 0);
 
-    // The Light tab stacks the Day + Sleep look profiles; each loads its own
-    // config, so opening it triggers two profile loads.
-    await tester.tap(find.text('Light'));
+    // The preset detail also reads already-synced provider state.
+    await tester.tap(find.text('Wake Presets'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(find.text('Day'), findsOneWidget);
-    expect(find.text('Sleep'), findsOneWidget);
-    expect(api.getModeCallCount, 2);
-    expect(api.getProfilesCallCount, 2);
+    expect(find.text('Wake Presets'), findsWidgets);
+    expect(api.getModeCallCount, 0);
+    expect(api.getProfilesCallCount, 0);
   });
 
   testWidgets('mode toggle disables immediately while transition is pending',
@@ -1118,31 +1129,26 @@ void main() {
     await serverSync.dispatchSetActiveMode(RhythmMode.day);
     await tester.pump(const Duration(milliseconds: 10));
 
-    final roomGrid = find.byType(AllRoomsScreen);
-    final sleepPill = find.descendant(
-      of: roomGrid,
+    await _selectNavigationFanItem(tester, 'Presets');
+
+    final presetsScreen = find.byType(AutomationsScreen);
+    final sleepSegment = find.descendant(
+      of: presetsScreen,
       matching: find.text('Sleep'),
     );
-    final dayPill = find.descendant(
-      of: roomGrid,
-      matching: find.text('Day'),
+    final wakeSegment = find.descendant(
+      of: presetsScreen,
+      matching: find.text('Wake'),
     );
 
-    await tester.tap(sleepPill);
+    await tester.tap(sleepSegment);
     await tester.pump();
 
     expect(api.triggerTransitionCallCount, 1);
     expect(api.lastTriggeredTransitionId, 'day_to_sleep');
-    expect(
-      find.descendant(
-        of: roomGrid,
-        matching: find.byType(CircularProgressIndicator),
-      ),
-      findsOneWidget,
-    );
 
-    await tester.tap(dayPill, warnIfMissed: false);
-    await tester.tap(sleepPill, warnIfMissed: false);
+    await tester.tap(wakeSegment, warnIfMissed: false);
+    await tester.tap(sleepSegment, warnIfMissed: false);
     await tester.pump();
 
     expect(api.triggerTransitionCallCount, 1);
@@ -1151,50 +1157,6 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(
-      find.descendant(
-        of: roomGrid,
-        matching: find.byType(CircularProgressIndicator),
-      ),
-      findsOneWidget,
-    );
-
-    await roomProvider.applyServerNodeState(
-      'room-1',
-      rhythmEnabled: true,
-      timeOffset: 0,
-      brightnessOffset: 0,
-      state: RoomModeState.active,
-      transitioning: true,
-      lightsOn: true,
-    );
-    await tester.pump();
-
-    expect(
-      find.descendant(
-        of: roomGrid,
-        matching: find.byType(CircularProgressIndicator),
-      ),
-      findsWidgets,
-    );
-
-    await roomProvider.applyServerNodeState(
-      'room-1',
-      rhythmEnabled: true,
-      timeOffset: 0,
-      brightnessOffset: 0,
-      state: RoomModeState.active,
-      transitioning: false,
-      lightsOn: true,
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.descendant(
-        of: roomGrid,
-        matching: find.byType(CircularProgressIndicator),
-      ),
-      findsNothing,
-    );
+    expect(serverSync.activeMode, RhythmMode.sleep);
   });
 }
