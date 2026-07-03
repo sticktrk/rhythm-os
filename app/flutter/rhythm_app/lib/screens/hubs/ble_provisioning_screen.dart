@@ -14,9 +14,11 @@ import '../../providers/home_provider.dart';
 import '../../services/account_cloud_sync_service.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
+import '../../services/ota_service.dart';
 import '../../services/recent_servers_service.dart';
 import '../../widgets/solar_orbit.dart';
 import 'add_home_flow.dart';
+import 'ota_update_overlay.dart';
 
 enum _ProvisioningPhase {
   scanning,
@@ -24,6 +26,7 @@ enum _ProvisioningPhase {
   connecting,
   credentials,
   provisioning,
+  updating,
   success,
   error,
 }
@@ -477,6 +480,14 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ip,
         result.ownerToken,
       );
+      if (!mounted) return;
+
+      // Bring a freshly provisioned (or factory-reset) box up to the latest
+      // stable build before it becomes usable. Failures here never block
+      // onboarding — the box already works on its current firmware.
+      await _runOnboardingOtaUpdate(ip, ownerToken);
+      if (!mounted) return;
+
       await _persistServerHub(ip, ownerToken);
       if (!mounted) return;
 
@@ -530,6 +541,75 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       await Future<void>.delayed(const Duration(seconds: 1));
     }
     return false;
+  }
+
+  /// Check the freshly provisioned box for a stable update and, when one is
+  /// available, drive it to completion behind the shared full-screen update
+  /// overlay before onboarding continues.
+  ///
+  /// This is best-effort by design: an unreachable update server, a check that
+  /// can't complete, a non-self-pull device, or a failed install all fall
+  /// through to a graceful continue so the user is never locked out of a box
+  /// that already works on its current firmware.
+  Future<void> _runOnboardingOtaUpdate(String ip, String? ownerToken) async {
+    final otaService = OtaService();
+    try {
+      await otaService.initialize(
+        host: ip,
+        port: 54448,
+        authToken: ownerToken,
+      );
+
+      // Only rhythm-server boxes expose the self-pull flow. Legacy/bridge
+      // devices resolve to a different strategy — skip the blocking step.
+      if (!otaService.isSelfPull) return;
+
+      await otaService.checkForUpdate(otaService.currentVersion);
+      if (!mounted) return;
+
+      // "Out of date" is decided server-side by /api/ota/check; anything other
+      // than an available update (up to date, error, unreachable) continues.
+      if (otaService.state != OtaState.available) return;
+
+      AnalyticsService().logEvent('ble_provisioning_ota_started');
+      setState(() {
+        _phase = _ProvisioningPhase.updating;
+      });
+
+      unawaited(otaService.startUpdate(
+        ip,
+        port: 54448,
+        authToken: ownerToken,
+      ));
+
+      // Reuse the settings-screen update overlay. With connection == null it
+      // renders staged progress from OtaService and finishes on the terminal
+      // state; the awaited future resolves once the user dismisses it.
+      await OtaUpdateOverlay.show(
+        context,
+        otaService: otaService,
+        connection: null,
+      );
+      if (!mounted) return;
+
+      if (otaService.state == OtaState.complete) {
+        AnalyticsService().logEvent('ble_provisioning_ota_completed');
+        // The box reboots while flashing; confirm it is reachable again before
+        // finishing onboarding.
+        await _waitForServerHealth(ip);
+      } else {
+        AnalyticsService().logEvent('ble_provisioning_ota_skipped', {
+          'stage': 'update_failed',
+        });
+      }
+    } catch (error) {
+      debugPrint('[BLE] onboarding OTA skipped: $error');
+      AnalyticsService().logEvent('ble_provisioning_ota_skipped', {
+        'stage': 'exception',
+      });
+    } finally {
+      otaService.dispose();
+    }
   }
 
   Future<String?> _resolveOwnerTokenAfterProvisioning(
@@ -796,6 +876,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _ProvisioningPhase.credentials => 'Connect to Wi-Fi',
       _ProvisioningPhase.provisioning =>
         _provisionedIp == null ? 'Joining Wi-Fi' : 'Almost there',
+      _ProvisioningPhase.updating => 'Updating your Rhythm Box',
       _ProvisioningPhase.success => 'You\'re all set',
       _ProvisioningPhase.error => 'Something went wrong',
     };
@@ -815,6 +896,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _ProvisioningPhase.provisioning => _provisionedIp == null
           ? 'Your device may show a pairing prompt — go ahead and accept it.'
           : 'Your Rhythm Box joined Wi-Fi at $_provisionedIp. Waiting for it to come online.',
+      _ProvisioningPhase.updating =>
+        'Installing the latest stable update so your box is ready to go.',
       _ProvisioningPhase.success =>
         'Your Rhythm Box is online and ready to go.',
       _ProvisioningPhase.error => 'You can try again or go back.',
@@ -857,6 +940,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
           _provisionedIp == null
               ? 'Connecting to your Wi-Fi network...'
               : 'Joined at $_provisionedIp — finishing setup...',
+        ),
+      _ProvisioningPhase.updating => _buildProgressCard(
+          'Updating to the latest version...',
         ),
       _ProvisioningPhase.success => _buildSuccessBody(),
       _ProvisioningPhase.error => _buildErrorBody(),
