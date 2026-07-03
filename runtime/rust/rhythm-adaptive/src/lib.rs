@@ -308,7 +308,12 @@ mod tests {
     fn test_runtime(
     ) -> RhythmAdaptiveRuntime<NoOpController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry>
     {
-        RhythmAdaptiveRuntime::new(
+        RhythmAdaptiveRuntime::from_runtime(test_core_runtime())
+    }
+
+    fn test_core_runtime(
+    ) -> RhythmRuntime<NoOpController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry> {
+        RhythmRuntime::new(
             Arc::new(NoOpController::new()),
             MockTimeProvider::default(),
             NoOpScheduler::new(),
@@ -339,6 +344,22 @@ mod tests {
             .into_iter()
             .collect(),
         }
+    }
+
+    #[test]
+    fn runtime_identity_accessors_match_manifest_contract() {
+        let mut runtime = test_runtime();
+
+        assert_eq!(runtime.name(), RUNTIME_ID);
+        assert_eq!(runtime.runtime_id(), RUNTIME_ID);
+        assert_eq!(runtime.capabilities(), RuntimeCapabilities::light_runtime());
+        assert_eq!(runtime.manifest().id, RUNTIME_ID);
+        RuntimeHandle::add_room(runtime.inner_mut(), "room-a", "Room A");
+        assert!(runtime.inner().engine_room_snapshot("room-a").is_some());
+        assert!(runtime
+            .into_inner()
+            .engine_room_snapshot("room-a")
+            .is_some());
     }
 
     #[test]
@@ -379,6 +400,27 @@ mod tests {
                 ..
             }) if node_id == "room-a"
         ));
+    }
+
+    #[test]
+    fn input_without_snapshot_power_reports_missing_state() {
+        let mut runtime = test_runtime();
+
+        let error = runtime
+            .handle_event(
+                &RuntimeSnapshot::default(),
+                RuntimeEvent::Input(RuntimeInputEvent {
+                    source_id: "switch-a".to_string(),
+                    target_id: "room-a".to_string(),
+                    action: InputAction::Toggle,
+                    epoch_ms: None,
+                    metadata: Default::default(),
+                }),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("snapshot is missing power state for 'room-a'"));
     }
 
     #[test]
@@ -451,6 +493,44 @@ mod tests {
     }
 
     #[test]
+    fn periodic_tick_without_snapshot_power_reports_missing_state_after_source_metadata() {
+        let mut runtime = test_runtime();
+        RuntimeHandle::add_room(runtime.inner(), "room-a", "Room A");
+        RuntimeHandle::restore_room_state(
+            runtime.inner(),
+            "room-a",
+            RestoredRoomState {
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                mood_active: false,
+                standby_enabled: true,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            },
+        );
+
+        let error = runtime
+            .handle_event(
+                &RuntimeSnapshot::default(),
+                RuntimeEvent::PeriodicTick(TickContext {
+                    node_id: "room-a".to_string(),
+                    hour: 14.5,
+                    epoch_ms: None,
+                    metadata: [("source_node_id".to_string(), serde_json::json!("room-a"))]
+                        .into_iter()
+                        .collect(),
+                }),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("snapshot is missing power state for 'room-a'"));
+    }
+
+    #[test]
     fn host_state_changed_is_noop() {
         let mut runtime = test_runtime();
 
@@ -486,5 +566,85 @@ mod tests {
             .to_string();
 
         assert!(error.contains("unsupported Rhythm input action"));
+    }
+
+    #[test]
+    fn runtime_handle_adapter_exposes_identity_and_host_noop() {
+        let core: Arc<dyn RuntimeHandle> = Arc::new(test_core_runtime());
+        let original = core.clone();
+        let mut runtime = RuntimeHandleAdaptiveRuntime::new(core);
+
+        assert!(Arc::ptr_eq(runtime.inner(), &original));
+        assert_eq!(runtime.name(), RUNTIME_ID);
+        assert_eq!(runtime.runtime_id(), RUNTIME_ID);
+        assert_eq!(runtime.capabilities(), RuntimeCapabilities::light_runtime());
+        assert_eq!(runtime.manifest().id, RUNTIME_ID);
+
+        let plan = runtime
+            .handle_event(
+                &RuntimeSnapshot::default(),
+                RuntimeEvent::HostStateChanged {
+                    reason: "startup".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn runtime_handle_adapter_falls_back_to_light_check_for_missing_input_power() {
+        let core = Arc::new(test_core_runtime());
+        let mut runtime = RuntimeHandleAdaptiveRuntime::new(core);
+
+        let plan = runtime
+            .handle_event(
+                &RuntimeSnapshot::default(),
+                RuntimeEvent::Input(RuntimeInputEvent {
+                    source_id: "switch-a".to_string(),
+                    target_id: "room-a".to_string(),
+                    action: InputAction::On,
+                    epoch_ms: None,
+                    metadata: Default::default(),
+                }),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            plan.dispatch.first(),
+            Some(DispatchCommand::TurnOn {
+                target: DispatchTarget::Node { node_id },
+                ..
+            }) if node_id == "room-a"
+        ));
+    }
+
+    #[test]
+    fn runtime_handle_adapter_falls_back_to_light_check_for_missing_tick_power() {
+        let core = Arc::new(test_core_runtime());
+        RuntimeHandle::add_node(
+            core.as_ref(),
+            "light-a",
+            "Light A",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("room-a".to_string()),
+        );
+        let mut runtime = RuntimeHandleAdaptiveRuntime::new(core);
+
+        let plan = runtime
+            .handle_event(
+                &RuntimeSnapshot::default(),
+                RuntimeEvent::PeriodicTick(TickContext {
+                    node_id: "light-a".to_string(),
+                    hour: 14.5,
+                    epoch_ms: None,
+                    metadata: [("source_node_id".to_string(), serde_json::json!("room-a"))]
+                        .into_iter()
+                        .collect(),
+                }),
+            )
+            .unwrap();
+
+        assert!(plan.is_empty());
     }
 }

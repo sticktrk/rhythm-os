@@ -1755,6 +1755,36 @@ mod tests {
         storage
             .save_motion_timers(&StoredMotionTimers::default())
             .unwrap();
+        assert!(storage.load_light_runtime_state().unwrap().is_none());
+        storage
+            .save_light_runtime_state(&StoredLightRuntimeState::default())
+            .unwrap();
+        assert!(storage.load_light_activity_history().unwrap().is_none());
+        storage
+            .save_light_activity_history(&crate::activity::LightActivityHistory::default())
+            .unwrap();
+        assert!(storage.load_activity_cloud_config().unwrap().is_none());
+        storage
+            .save_activity_cloud_config(&crate::activity_cloud::StoredActivityCloudConfig {
+                schema_version: 1,
+                enabled: false,
+                ingest_url: String::new(),
+                upload_token: String::new(),
+                home_id: String::new(),
+                hub_id: String::new(),
+                token_id: None,
+                server_instance_id: None,
+                upload_status: None,
+                last_upload_attempt_epoch_ms: None,
+                last_upload_success_epoch_ms: None,
+                last_upload_failure_epoch_ms: None,
+                last_upload_http_status: None,
+                last_upload_error: None,
+                auth_failed_at_epoch_ms: None,
+                updated_at_epoch_ms: 0,
+            })
+            .unwrap();
+        storage.clear_activity_cloud_config().unwrap();
         storage.clear_hub_registries().unwrap();
         assert!(storage
             .load_integration_backup_files(true)
@@ -2896,6 +2926,19 @@ mod tests {
                     }],
                 })
                 .unwrap();
+            storage.save_scenes(&StoredScenes::default()).unwrap();
+            let mut runtime_state = StoredLightRuntimeState::default();
+            runtime_state.insert(
+                "room-1".into(),
+                BTreeMap::from([(
+                    "adaptive".into(),
+                    BTreeMap::from([("last_plan".into(), serde_json::json!("off"))]),
+                )]),
+            );
+            storage.save_light_runtime_state(&runtime_state).unwrap();
+            storage
+                .save_light_activity_history(&crate::activity::LightActivityHistory::default())
+                .unwrap();
             storage
                 .save_all_hub_credentials(&[HubCredentials::new(
                     "hue",
@@ -2925,6 +2968,9 @@ mod tests {
                     ssid: "RhythmNet".into(),
                     password: "secret".into(),
                 })
+                .unwrap();
+            storage
+                .save_api_auth(&crate::auth::StoredApiAuth::default())
                 .unwrap();
             storage
                 .save_remote_access_config(&crate::remote_access::StoredRemoteAccessConfig {
@@ -2982,11 +3028,15 @@ mod tests {
                 "light_profiles.json",
                 "location.json",
                 "settings.json",
+                "scenes.json",
                 "motion_timers.json",
+                "light_runtime_state.json",
+                "activity_history.json",
                 "hub_credentials.json",
                 "canonical_registry.json",
                 "topology.json",
                 "commissioning_wifi.json",
+                "auth.json",
                 "activity_cloud.json",
                 "remote_access.json",
                 "cloudflared/connector_token",
@@ -3143,6 +3193,48 @@ mod tests {
             assert!(storage.load_motion_timers().unwrap().is_none());
             std::fs::write(path.join("motion_timers.json"), "{").unwrap();
             assert!(storage.load_motion_timers().unwrap().is_none());
+
+            assert!(storage.load_light_runtime_state().unwrap().is_none());
+            std::fs::write(path.join("app_runtime_state.json"), "{}").unwrap();
+            assert_eq!(
+                storage.load_light_runtime_state().unwrap(),
+                Some(StoredLightRuntimeState::default())
+            );
+            std::fs::write(path.join("light_runtime_state.json"), "{").unwrap();
+            assert!(storage.load_light_runtime_state().unwrap().is_none());
+            std::fs::remove_file(path.join("light_runtime_state.json")).unwrap();
+            std::fs::write(path.join("app_runtime_state.json"), "{").unwrap();
+            assert!(storage.load_light_runtime_state().unwrap().is_none());
+            std::fs::remove_file(path.join("app_runtime_state.json")).unwrap();
+
+            assert!(storage.load_light_activity_history().unwrap().is_none());
+            std::fs::write(
+                path.join("activity_history.json"),
+                serde_json::to_string(&crate::activity::LightActivityHistory {
+                    schema_version: 99,
+                    activities: Vec::new(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                storage
+                    .load_light_activity_history()
+                    .unwrap()
+                    .unwrap()
+                    .schema_version,
+                1
+            );
+            std::fs::write(path.join("activity_history.json"), "{").unwrap();
+            assert!(storage.load_light_activity_history().unwrap().is_none());
+
+            assert!(storage.load_activity_cloud_config().unwrap().is_none());
+            std::fs::write(path.join("activity_cloud.json"), "{").unwrap();
+            assert!(storage.load_activity_cloud_config().unwrap().is_none());
+
+            assert!(storage.load_remote_access_config().unwrap().is_none());
+            std::fs::write(path.join("remote_access.json"), "{").unwrap();
+            assert!(storage.load_remote_access_config().unwrap().is_none());
 
             assert!(storage.load_hub_registry_for(&hub_key).unwrap().is_none());
             std::fs::write(path.join("hub_registry_hue_192_168_1_60.json"), "{").unwrap();

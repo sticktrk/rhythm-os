@@ -2289,6 +2289,93 @@ mod tests {
     }
 
     #[test]
+    fn mode_transition_time_parsing_labels_and_trigger_helpers_cover_all_user_forms() {
+        let parsed = ModeTransitionTime::parse("07:30").unwrap();
+        assert_eq!(parsed.hour(), 7);
+        assert_eq!(parsed.minute(), 30);
+        assert_eq!(parsed.minutes_since_midnight(), 450);
+        assert_eq!(parsed.local_hour(), 7.5);
+        assert_eq!(parsed.display(), "07:30");
+        assert_eq!(parsed.id_suffix(), "scheduled_0730");
+        assert_eq!(parsed.to_string(), "07:30");
+        assert_eq!(ModeTransitionTime::parse("07:30:00").unwrap(), parsed);
+
+        for invalid in [
+            "",
+            "07",
+            "aa:30",
+            "07:xx",
+            "24:00",
+            "07:30:01",
+            "07:30:00:00",
+        ] {
+            assert!(
+                ModeTransitionTime::parse(invalid).is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+
+        let scheduled = ModeTransitionTrigger::Scheduled(parsed);
+        assert!(!scheduled.is_manual());
+        assert_eq!(scheduled.kind(), "scheduled");
+        assert_eq!(scheduled.event(), None);
+        assert_eq!(scheduled.scheduled_time(), Some(parsed));
+        assert_eq!(scheduled.id_suffix(), "scheduled_0730");
+        assert_eq!(scheduled.label_suffix(), Some("07:30".to_string()));
+
+        let manual = ModeTransitionTrigger::Manual;
+        assert!(manual.is_manual());
+        assert_eq!(manual.kind(), "manual");
+        assert_eq!(manual.event(), None);
+        assert_eq!(manual.label_suffix(), None);
+
+        for (trigger, event, label) in [
+            (ModeTransitionTrigger::Sunrise, "sunrise", "Sunrise"),
+            (ModeTransitionTrigger::Sunset, "sunset", "Sunset"),
+            (
+                ModeTransitionTrigger::CivilTwilight,
+                "civil_twilight",
+                "Civil Twilight",
+            ),
+            (
+                ModeTransitionTrigger::NauticalTwilight,
+                "nautical_twilight",
+                "Nautical Twilight",
+            ),
+            (
+                ModeTransitionTrigger::AstronomicalTwilight,
+                "astronomical_twilight",
+                "Astronomical Twilight",
+            ),
+        ] {
+            assert_eq!(trigger.kind(), "solar");
+            assert_eq!(trigger.event(), Some(event));
+            assert_eq!(trigger.id_suffix(), event);
+            assert_eq!(trigger.label_suffix(), Some(label.to_string()));
+            assert_eq!(trigger.scheduled_time(), None);
+        }
+    }
+
+    #[test]
+    fn room_mutators_expose_effective_offsets_and_disabled_state() {
+        let mut room = Room::default();
+        assert_eq!(room.id, "default");
+        assert_eq!(room.name, "Default Room");
+        assert!(!room.is_disabled());
+
+        room.set_disabled(true);
+        room.set_time_offset(42.0);
+        room.apply_time_offset(-2.0);
+        room.apply_brightness_offset(15.0);
+        room.clear_warning_state();
+
+        assert!(room.is_disabled());
+        assert_eq!(room.effective_time_offset(), 40.0);
+        assert_eq!(room.effective_brightness_offset(), 15.0);
+        assert!(!room.warning_active);
+    }
+
+    #[test]
     fn test_room_brightness_offset_clamping() {
         let mut room = Room::new("test", "Test");
 

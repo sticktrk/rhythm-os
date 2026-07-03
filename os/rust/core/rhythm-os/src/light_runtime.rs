@@ -1049,6 +1049,34 @@ mod tests {
     }
 
     #[test]
+    fn external_runtime_extension_rejects_unknown_endpoint_without_state_write() {
+        let runtime = test_runtime();
+        runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
+        let state = make_state_with_runtime(runtime);
+        install_external_runtime_module(&state);
+        select_external_runtime(&state, EXTERNAL_RUNTIME_ALIAS);
+
+        let error = run_light_runtime_extension(
+            &state,
+            EXTERNAL_RUNTIME_ALIAS,
+            RuntimeExtensionRequest {
+                method: RuntimeHttpMethod::Post,
+                path: "/unknown".to_string(),
+                query: Default::default(),
+                body: json!({"level": 7}),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("unsupported runtime extension endpoint"));
+        assert!(
+            state.lock().unwrap().light_runtime_state.is_empty(),
+            "rejected extension endpoints must not persist partial runtime state"
+        );
+    }
+
+    #[test]
     fn cached_runtime_rebuilds_when_host_topology_changes() {
         let runtime = test_runtime();
         runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
@@ -1108,6 +1136,41 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().light_runtime_state["test-runtime"]["kitchen"]["last"],
             json!("tick")
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_group_dispatch_target_before_state_writes() {
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState::default()));
+        let runtime = test_runtime();
+        runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
+        let plan = RuntimePlan {
+            dispatch: vec![DispatchCommand::TurnOn {
+                target: DispatchTarget::Group {
+                    hub_id: "matter@local".to_string(),
+                    control_id: "group-1".to_string(),
+                },
+                command: LightingCommand::new(42, 2700),
+            }],
+            state_writes: vec![StateWrite {
+                node_id: "kitchen".to_string(),
+                key: "should_not_write".to_string(),
+                value: json!(true),
+            }],
+            diagnostics: vec![RuntimeDiagnostic {
+                level: DiagnosticLevel::Warn,
+                message: "group target requested".to_string(),
+            }],
+        };
+
+        let error = apply_runtime_plan_to_handle(&state, "test-runtime", runtime.as_ref(), &plan)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("runtime dispatch target is not yet supported"));
+        assert!(
+            state.lock().unwrap().light_runtime_state.is_empty(),
+            "invalid dispatch targets must reject the plan before applying state writes"
         );
     }
 
