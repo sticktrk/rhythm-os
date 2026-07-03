@@ -231,7 +231,6 @@ pub fn factory_default_idle_profile_config_for_mode(mode: RhythmMode) -> LightPr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhythm_core::{ModeTransitionTrigger, TimerSetting};
 
     #[test]
     fn factory_default_profile_bundle_exposes_expected_defaults() {
@@ -324,29 +323,7 @@ mod tests {
             .all(|config| config.room_defaults.is_empty()));
 
         let transitions = factory_default_mode_transition_configs();
-        assert_eq!(transitions.len(), 2);
-        assert_eq!(transitions[0].id, "sleep_to_day");
-        assert_eq!(transitions[0].label, "Sleep to Day");
-        assert_eq!(transitions[0].from_mode, RhythmMode::Sleep);
-        assert_eq!(transitions[0].to_mode, RhythmMode::Day);
-        assert_eq!(
-            transitions[0].trigger,
-            ModeTransitionTrigger::AstronomicalTwilight
-        );
-        assert_eq!(transitions[0].duration_ms, TimerSetting::Auto);
-        assert!(transitions[0].trigger_enabled);
-        assert!(transitions[0].preserve_hard_off);
-        assert_eq!(transitions[1].id, "day_to_sleep");
-        assert_eq!(transitions[1].label, "Day to Sleep");
-        assert_eq!(transitions[1].from_mode, RhythmMode::Day);
-        assert_eq!(transitions[1].to_mode, RhythmMode::Sleep);
-        assert_eq!(
-            transitions[1].trigger,
-            ModeTransitionTrigger::NauticalTwilight
-        );
-        assert_eq!(transitions[1].duration_ms, TimerSetting::Auto);
-        assert!(transitions[1].trigger_enabled);
-        assert!(transitions[1].preserve_hard_off);
+        assert!(transitions.is_empty());
     }
 
     #[test]

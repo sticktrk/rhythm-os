@@ -124,35 +124,6 @@
         }
       }
     ],
-    "mode_transitions": [
-      {
-        "id": "sleep_to_day",
-        "label": "Sleep to Day",
-        "from_mode": "sleep",
-        "to_mode": "day",
-        "trigger": {
-          "kind": "solar",
-          "event": "astronomical_twilight"
-        },
-        "duration_ms": {
-          "mode": "auto"
-        },
-        "preserve_hard_off": true
-      },
-      {
-        "id": "day_to_sleep",
-        "label": "Day to Sleep",
-        "from_mode": "day",
-        "to_mode": "sleep",
-        "trigger": {
-          "kind": "solar",
-          "event": "nautical_twilight"
-        },
-        "duration_ms": {
-          "mode": "auto"
-        },
-        "preserve_hard_off": true
-      }
-    ]
+    "mode_transitions": []
   }
 }
