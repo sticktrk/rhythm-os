@@ -230,8 +230,12 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
   }
 
   Widget _buildTitle() {
+    final title = widget.title ??
+        (widget.serverHub.remoteEndpoint != null
+            ? 'Waking Remote Tunnel'
+            : 'Server Unreachable');
     return Text(
-      widget.title ?? 'Server Unreachable',
+      title,
       style: TextStyle(
         color: CelestialColors.textPrimary,
         fontSize: 22,
@@ -254,6 +258,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
         key: ValueKey(retrying),
         color: _accent,
         retrying: retrying,
+        remoteEndpoint: widget.serverHub.remoteEndpoint != null,
       ),
     );
   }
@@ -320,11 +325,13 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
 class _RetryStatusChip extends StatelessWidget {
   final Color color;
   final bool retrying;
+  final bool remoteEndpoint;
 
   const _RetryStatusChip({
     super.key,
     required this.color,
     required this.retrying,
+    required this.remoteEndpoint,
   });
 
   @override
@@ -353,7 +360,7 @@ class _RetryStatusChip extends StatelessWidget {
           ),
           const SizedBox(width: 10),
           Text(
-            retrying ? 'Connecting...' : 'Waiting to Retry...',
+            _statusText,
             style: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.76),
               fontSize: 15,
@@ -363,6 +370,13 @@ class _RetryStatusChip extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  String get _statusText {
+    if (remoteEndpoint) {
+      return retrying ? 'Checking tunnel...' : 'Retrying tunnel soon...';
+    }
+    return retrying ? 'Connecting...' : 'Waiting to Retry...';
   }
 }
 
