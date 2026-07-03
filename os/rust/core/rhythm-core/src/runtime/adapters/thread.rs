@@ -136,7 +136,7 @@ impl Scheduler for ThreadScheduler {
         &self,
         name: &str,
         interval_secs: u64,
-        mut callback: F,
+        callback: F,
     ) -> RuntimeResult<ScheduleHandle>
     where
         F: FnMut() + Send + 'static,
@@ -166,6 +166,13 @@ impl Scheduler for ThreadScheduler {
                     task_name, interval_secs
                 );
 
+                // The callback is not statically UnwindSafe, but we never
+                // reuse state owned by the closure after a panic — each tick
+                // is independent, and the alternative is worse: an unwinding
+                // panic silently kills this scheduler thread and adaptive
+                // lighting stops forever while the server looks healthy.
+                let mut callback = std::panic::AssertUnwindSafe(callback);
+
                 loop {
                     // Sleep for the interval
                     thread::sleep(interval);
@@ -176,8 +183,24 @@ impl Scheduler for ThreadScheduler {
                         break;
                     }
 
-                    // Execute the callback
-                    callback();
+                    // Execute the callback; survive panics so one bad tick
+                    // (bad config, poisoned downstream lock) doesn't
+                    // permanently stop the periodic light updates.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (callback.0)()
+                    }));
+                    if let Err(panic) = result {
+                        let msg = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "<non-string panic>".to_string());
+                        log::error!(
+                            "Periodic task '{}' panicked (continuing): {}",
+                            task_name,
+                            msg
+                        );
+                    }
                 }
             })
             .map_err(|e| RuntimeError::SchedulerError(format!("Failed to spawn thread: {}", e)))?;

@@ -33,6 +33,12 @@ const CHIP_EXAMPLE_STORAGE_EXT: &str = "ini";
 const CHIPD_LOGFILE_ENV: &str = "RHYTHM_MATTER_LOGFILE";
 const SIDECAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
+/// Commissioning gets its own, longer deadline: chipd's internal
+/// kCommissioningTimeout is 180s, and the client socket timeout must be
+/// ordered ABOVE it — otherwise a slow (BLE) commissioning that would have
+/// succeeded gets its sidecar killed mid-PASE at 120s and the whole
+/// CommissionLight is re-sent against a half-commissioned bulb.
+const RPC_COMMISSION_TIMEOUT: Duration = Duration::from_secs(200);
 #[cfg(not(test))]
 const RPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
@@ -56,6 +62,7 @@ fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
         | ChipRpcRequest::SetHueSaturation { .. }
         | ChipRpcRequest::ReadOnOff { .. }
         | ChipRpcRequest::ReadLightState { .. } => RPC_CONTROL_TIMEOUT,
+        ChipRpcRequest::CommissionLight(_) => RPC_COMMISSION_TIMEOUT,
         _ => RPC_TIMEOUT,
     }
 }
@@ -410,7 +417,11 @@ impl ChipTransport {
         };
 
         if let Some(delay) = delay {
-            std::thread::sleep(delay);
+            // Clamp: `delay` originates from a chipd-provided retry_after_ms
+            // and this sleep runs while holding the commissioning lock — an
+            // unclamped value from a buggy/older sidecar would wedge all
+            // future pairing attempts.
+            std::thread::sleep(delay.min(Duration::from_secs(60)));
             self.set_sidecar_health(SidecarHealth::Ready);
         } else if cooldown_finished {
             self.set_sidecar_health(SidecarHealth::Ready);
@@ -1190,10 +1201,13 @@ mod tests {
 
     #[test]
     fn commissioning_and_probe_requests_keep_long_rpc_timeout() {
+        // Commissioning must exceed chipd's internal 180s kCommissioningTimeout
+        // so the client never kills the sidecar mid-commission.
         assert_eq!(
             rpc_timeout_for_request(&ChipRpcRequest::CommissionLight(ble_commission_request())),
-            RPC_TIMEOUT
+            RPC_COMMISSION_TIMEOUT
         );
+        assert!(RPC_COMMISSION_TIMEOUT > Duration::from_secs(180));
         assert_eq!(
             rpc_timeout_for_request(&ChipRpcRequest::ProbeLight { node_id: 42 }),
             RPC_TIMEOUT

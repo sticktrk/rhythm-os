@@ -699,8 +699,13 @@ fn check_manifest_blocking(
     let manifest_url_overridden = std::env::var("RHYTHM_UPDATE_MANIFEST_URL").is_ok();
     let manifest_url = configured_manifest_url(channel)?;
 
+    // Explicit timeout: the blocking client's implicit 30s default is fine
+    // for a small manifest, but make the bound visible and add a connect
+    // deadline so a black-holed feed can't stall the auto-update thread.
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -1437,8 +1442,14 @@ fn apply_appliance_image_blocking(
     package_plan: Option<&PackageInstallPlan<'_>>,
     progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
+    // Long explicit timeout: reqwest's blocking client applies an implicit
+    // 30-second WHOLE-REQUEST deadline by default, which a multi-hundred-MB
+    // image over Pi Zero Wi-Fi always exceeds — nightly updates would fail
+    // forever. One hour bounds a wedged transfer without breaking slow ones.
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60 * 60))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -1769,7 +1780,35 @@ fn read_installed_binary_version(path: &Path) -> Option<String> {
         return None;
     }
 
-    let output = Command::new(path).arg("--version").output().ok()?;
+    // Bounded wait: this executes an arbitrary installed binary on every OTA
+    // check. `.output()` has no timeout — a broken sibling binary blocking on
+    // stdin would wedge the auto-update thread permanently.
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break child.wait_with_output().ok()?,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
     if !output.status.success() {
         return None;
     }
@@ -1964,8 +2003,14 @@ fn apply_payload_blocking_with_download_path(
     live_install: Option<LiveInstallVersions<'_>>,
     progress: &(impl Fn(UpdateProgress) + Send + Sync),
 ) -> Result<ApplyResult, String> {
+    // Long explicit timeout: reqwest's blocking client applies an implicit
+    // 30-second WHOLE-REQUEST deadline by default, which a multi-hundred-MB
+    // image over Pi Zero Wi-Fi always exceeds — nightly updates would fail
+    // forever. One hour bounds a wedged transfer without breaking slow ones.
     let client = reqwest::blocking::Client::builder()
         .user_agent("rhythm-server")
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60 * 60))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -2001,7 +2046,17 @@ fn apply_payload_blocking_with_download_path(
             }
             Some(true)
         }
-        None => None,
+        None => {
+            // An unverified archive that is corrupt at origin installs a
+            // broken binary that may never exec — a state the probation
+            // counter cannot detect. Surface it loudly.
+            log::warn!(
+                target: "sys",
+                "Update manifest for {} has no sha256; installing UNVERIFIED payload",
+                asset_name
+            );
+            None
+        }
     };
 
     progress(UpdateProgress::stage(
@@ -2017,9 +2072,37 @@ fn apply_payload_blocking_with_download_path(
         OtaUpdateStage::Installing,
         "Installing update bundle",
     ));
+    // Arm the rollback marker BEFORE the commit renames: a crash/power cut
+    // between the backup rename and the install rename would otherwise leave
+    // no binary AND no marker — nothing for the next boot to restore from.
+    if let Some(versions) = live_install {
+        let planned: Vec<AppliedInstallTarget> = staged_targets
+            .iter()
+            .filter(|staged| staged.stage_path.exists())
+            .map(|staged| AppliedInstallTarget {
+                destination: staged.spec.destination.clone(),
+                backup_path: staged.backup_path.clone(),
+                previously_existed: staged.spec.destination.exists(),
+            })
+            .collect();
+        if let Err(error) = write_pending_update_marker(&planned, versions) {
+            log::warn!(
+                target: "sys",
+                "Failed to arm pre-commit rollback marker: {}; continuing",
+                error
+            );
+        }
+    }
+
     let outcome = commit_staged_targets(&staged_targets).inspect_err(|_error| {
         cleanup_staged_files(&staged_targets);
         remove_if_exists(download_path);
+        // Commit rolled itself back — disarm the pre-commit marker so the
+        // next boots don't count probation attempts against the restored
+        // (healthy) build.
+        if live_install.is_some() {
+            remove_pending_update_marker();
+        }
     })?;
 
     if let Some(versions) = live_install {
@@ -2031,6 +2114,7 @@ fn apply_payload_blocking_with_download_path(
                 "Failed to arm pending-update rollback marker: {}; removing backups",
                 error
             );
+            remove_pending_update_marker();
             cleanup_backup_files(&outcome.applied);
         }
     } else {
@@ -2627,6 +2711,10 @@ fn stage_install_targets(
     for staged in &staged_targets {
         if staged.stage_path.exists() {
             set_executable_permissions(&staged.stage_path)?;
+            // Durability before the commit rename (see extract path).
+            if let Ok(staged_file) = File::open(&staged.stage_path) {
+                let _ = staged_file.sync_all();
+            }
         }
     }
 
@@ -2762,6 +2850,13 @@ fn extract_targets_from_archive(
             entry
                 .unpack(&target.stage_path)
                 .map_err(|e| format!("Failed to extract {}: {}", target.spec.archive_path, e))?;
+            // fsync before the commit rename: without it, power loss shortly
+            // after install can leave a zero-length destination binary on
+            // ext4 — a crash-loop the probation counter can never catch
+            // because the dead binary never runs to increment it.
+            if let Ok(staged_file) = File::open(&target.stage_path) {
+                let _ = staged_file.sync_all();
+            }
             found[index] = true;
             break;
         }
@@ -2963,6 +3058,12 @@ fn pending_update_marker_path(install_root: &Path) -> PathBuf {
         .join(PENDING_UPDATE_MARKER_FILE)
 }
 
+fn remove_pending_update_marker() {
+    if let Ok(install_root) = install_target_executable() {
+        remove_if_exists(&pending_update_marker_path(&install_root));
+    }
+}
+
 fn write_pending_update_marker(
     applied: &[AppliedInstallTarget],
     versions: LiveInstallVersions<'_>,
@@ -3002,18 +3103,10 @@ fn write_pending_marker_file(
 ) -> Result<(), String> {
     let body = serde_json::to_vec_pretty(marker)
         .map_err(|e| format!("Failed to encode pending-update marker: {}", e))?;
-    let tmp = bootstate::tmp_sibling_path(marker_path);
-    remove_if_exists(&tmp);
-    fs::write(&tmp, &body).map_err(|e| format!("Failed to write {}: {}", tmp.display(), e))?;
-    fs::rename(&tmp, marker_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!(
-            "Failed to promote {} -> {}: {}",
-            tmp.display(),
-            marker_path.display(),
-            e
-        )
-    })
+    // Durable write (fsync file + parent dir): the marker is the rollback
+    // safety net — losing it to power loss leaves a broken install with no
+    // record that backups exist.
+    bootstate::atomic_write_with_sync(marker_path, &body)
 }
 
 /// Startup gate for the bundle self-update flow.

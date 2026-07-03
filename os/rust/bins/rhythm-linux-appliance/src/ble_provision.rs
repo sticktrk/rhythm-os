@@ -886,7 +886,7 @@ mod tests {
         let root = unique_test_dir("persist");
         let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
         let state = state();
-        state.lock().unwrap().storage = Some(Box::new(storage));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage));
 
         let creds = wifi_credentials();
         persist_commissioning_wifi_credentials(&state, &creds);

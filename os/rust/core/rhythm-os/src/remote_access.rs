@@ -182,8 +182,23 @@ pub trait RemoteAccessController: Send + Sync {
     fn stop(&self, runtime_dir: &Path) -> anyhow::Result<()>;
 }
 
+/// Run remote-access work on the blocking pool. These paths spawn processes
+/// (`cloudflared --version`, `kill -0`), make raw TCP metrics reads, and do
+/// fsync'd file writes — on the appliance's single-worker tokio runtime,
+/// running them inline wedges the entire HTTP/SSE surface for the duration
+/// (or forever, if cloudflared is wedged).
+async fn run_remote_access_blocking<F>(f: F) -> ApiResponse
+where
+    F: FnOnce() -> ApiResponse + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(response) => response,
+        Err(e) => ApiResponse::server_error(anyhow::anyhow!("remote access task failed: {e}")),
+    }
+}
+
 pub async fn get_status(State(state): State<SharedState>) -> ApiResponse {
-    match load_config(&state) {
+    run_remote_access_blocking(move || match load_config(&state) {
         Ok(config) => {
             let runtime = runtime_status(&state);
             json_ok(RemoteAccessStatusBody::from_parts(
@@ -192,7 +207,8 @@ pub async fn get_status(State(state): State<SharedState>) -> ApiResponse {
             ))
         }
         Err(e) => ApiResponse::server_error(e),
-    }
+    })
+    .await
 }
 
 pub fn status_snapshot(state: &SharedState) -> serde_json::Value {
@@ -248,54 +264,60 @@ pub async fn put_config(
         updated_at_epoch_ms: current_epoch_ms(),
     };
 
-    if let Err(e) = save_config(&state, &config) {
-        return ApiResponse::server_error(e);
-    }
-    if let Err(e) = sync_runtime_files(&state, Some(&config)) {
-        return ApiResponse::server_error(e);
-    }
+    run_remote_access_blocking(move || {
+        if let Err(e) = save_config(&state, &config) {
+            return ApiResponse::server_error(e);
+        }
+        if let Err(e) = sync_runtime_files(&state, Some(&config)) {
+            return ApiResponse::server_error(e);
+        }
 
-    let service_result = if config.enabled {
-        controller_for_state(&state)
-            .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
-            .and_then(|controller| controller.start(&runtime_dir(&state)?, &config))
-    } else {
-        controller_for_state(&state)
-            .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
-            .and_then(|controller| controller.stop(&runtime_dir(&state)?))
-    };
+        let service_result = if config.enabled {
+            controller_for_state(&state)
+                .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
+                .and_then(|controller| controller.start(&runtime_dir(&state)?, &config))
+        } else {
+            controller_for_state(&state)
+                .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
+                .and_then(|controller| controller.stop(&runtime_dir(&state)?))
+        };
 
-    let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(
-        Some(config.redacted_status()),
-        runtime_status(&state),
-    ))
-    .unwrap_or_else(|_| json!({"status": "ok"}));
-    if let Err(e) = service_result {
-        value["service_error"] = json!(e.to_string());
-    }
-    ApiResponse::json_ok(value.to_string())
+        let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(
+            Some(config.redacted_status()),
+            runtime_status(&state),
+        ))
+        .unwrap_or_else(|_| json!({"status": "ok"}));
+        if let Err(e) = service_result {
+            value["service_error"] = json!(e.to_string());
+        }
+        ApiResponse::json_ok(value.to_string())
+    })
+    .await
 }
 
 pub async fn delete_config(State(state): State<SharedState>) -> ApiResponse {
-    if let Err(e) = clear_config(&state) {
-        return ApiResponse::server_error(e);
-    }
-    if let Err(e) = sync_runtime_files(&state, None) {
-        return ApiResponse::server_error(e);
-    }
-    let service_result = controller_for_state(&state)
-        .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
-        .and_then(|controller| controller.stop(&runtime_dir(&state)?));
+    run_remote_access_blocking(move || {
+        if let Err(e) = clear_config(&state) {
+            return ApiResponse::server_error(e);
+        }
+        if let Err(e) = sync_runtime_files(&state, None) {
+            return ApiResponse::server_error(e);
+        }
+        let service_result = controller_for_state(&state)
+            .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))
+            .and_then(|controller| controller.stop(&runtime_dir(&state)?));
 
-    let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(
-        None,
-        runtime_status(&state),
-    ))
-    .unwrap_or_else(|_| json!({"status": "ok"}));
-    if let Err(e) = service_result {
-        value["service_error"] = json!(e.to_string());
-    }
-    ApiResponse::json_ok(value.to_string())
+        let mut value = serde_json::to_value(RemoteAccessStatusBody::from_parts(
+            None,
+            runtime_status(&state),
+        ))
+        .unwrap_or_else(|_| json!({"status": "ok"}));
+        if let Err(e) = service_result {
+            value["service_error"] = json!(e.to_string());
+        }
+        ApiResponse::json_ok(value.to_string())
+    })
+    .await
 }
 
 pub fn reconcile_remote_access_runtime(state: &SharedState) -> anyhow::Result<()> {
@@ -485,15 +507,42 @@ fn current_epoch_secs() -> u64 {
 }
 
 fn cloudflared_version_for(bin: &Path) -> Option<String> {
-    let output = Command::new(bin).arg("--version").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        None
-    } else {
-        Some(stdout)
+    // Bounded wait: `.output()` has no timeout, and this runs on every
+    // remote-access status poll — a wedged/corrupt cloudflared binary would
+    // otherwise pin the calling thread forever.
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = String::new();
+                child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+                let stdout = stdout.trim().to_string();
+                return if stdout.is_empty() { None } else { Some(stdout) };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
 }
 
@@ -873,7 +922,14 @@ impl ChildProcessRemoteAccessController {
     }
 
     fn ensure_supervisor(&self) {
-        let mut shared = self.inner.shared.lock().expect("remote access lock");
+        // Recover from poisoning — these mutexes guard plain status data, and
+        // panicking here would make every future PUT /api/remote-access/config
+        // panic too, permanently disabling remote access until restart.
+        let mut shared = self
+            .inner
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if shared.supervisor_running {
             return;
         }
@@ -883,10 +939,21 @@ impl ChildProcessRemoteAccessController {
         drop(shared);
 
         let inner = self.inner.clone();
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("remote-access-cloudflared".to_string())
-            .spawn(move || child_supervisor_loop(inner))
-            .expect("failed to spawn cloudflared supervisor");
+            .spawn(move || child_supervisor_loop(inner));
+        if let Err(e) = spawned {
+            // Roll back so a later attempt can retry instead of believing a
+            // supervisor is running that never started.
+            log::warn!("failed to spawn cloudflared supervisor: {e}");
+            let mut shared = self
+                .inner
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            shared.supervisor_running = false;
+            shared.status.state = "error".to_string();
+        }
     }
 }
 
@@ -1048,11 +1115,11 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             Ok(child) => {
                 let child_pid = child.id();
                 {
-                    let mut child_slot = inner.child.lock().expect("cloudflared child lock");
+                    let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     *child_slot = Some(child);
                 }
                 {
-                    let mut shared = inner.shared.lock().expect("remote access lock");
+                    let mut shared = inner.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     shared.status.state = "running".to_string();
                     shared.status.child_pid = Some(child_pid);
                     shared.status.last_started_epoch_secs = Some(current_epoch_secs());
@@ -1062,7 +1129,7 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
                 backoff = inner.backoff_initial;
             }
             Err(e) => {
-                let mut shared = inner.shared.lock().expect("remote access lock");
+                let mut shared = inner.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 shared.status.state = "backoff".to_string();
                 shared.status.last_exit_epoch_secs = Some(current_epoch_secs());
                 shared.status.last_exit_code = None;
@@ -1086,7 +1153,7 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             }
 
             let exit_status = {
-                let mut child_slot = inner.child.lock().expect("cloudflared child lock");
+                let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 child_slot
                     .as_mut()
                     .and_then(|child| child.try_wait().ok().flatten())
@@ -1095,7 +1162,7 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             if let Some(exit_status) = exit_status {
                 clear_child_slot(&inner);
                 let should_restart = {
-                    let mut shared = inner.shared.lock().expect("remote access lock");
+                    let mut shared = inner.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     shared.status.state = "exited".to_string();
                     shared.status.child_pid = None;
                     shared.status.last_exit_epoch_secs = Some(current_epoch_secs());
@@ -1170,7 +1237,7 @@ fn sleep_backoff_or_change(inner: &ChildProcessInner, generation: u64, backoff: 
 }
 
 fn kill_child(inner: &ChildProcessInner) {
-    let mut child_slot = inner.child.lock().expect("cloudflared child lock");
+    let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(child) = child_slot.as_mut() {
         let _ = child.kill();
         let _ = child.wait();
@@ -1179,7 +1246,7 @@ fn kill_child(inner: &ChildProcessInner) {
 }
 
 fn clear_child_slot(inner: &ChildProcessInner) {
-    let mut child_slot = inner.child.lock().expect("cloudflared child lock");
+    let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     *child_slot = None;
 }
 
@@ -1333,7 +1400,7 @@ cloudflared_tunnel_server_locations{edge_location=\"ewr01\"} 1\n";
         {
             let mut state = state.lock().unwrap();
             state.data_dir = root.to_string_lossy().to_string();
-            state.storage = Some(Box::new(storage));
+            state.storage = Some(std::sync::Arc::new(storage));
         }
 
         let response = put_config(

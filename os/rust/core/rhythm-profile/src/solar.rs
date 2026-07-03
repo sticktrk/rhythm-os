@@ -12,6 +12,26 @@ use serde::{Deserialize, Serialize};
 /// Pi constant for calculations.
 const PI: f32 = core::f32::consts::PI;
 
+/// Wrap an hour value into `[0, 24)` safely.
+///
+/// Never wrap hours with a `while ± 24.0` loop: for `|hour|` ≳ 5e8 the f32
+/// ULP exceeds 24 so the subtraction rounds back to the same value, and ±inf
+/// stays ±inf — both spin forever. Hour inputs can come from unvalidated,
+/// persisted API floats (time offsets, solar noon), so a bad value would hang
+/// the tick loop on every boot. Non-finite input falls back to 0.0.
+pub fn wrap_hour_24(hour: f32) -> f32 {
+    if !hour.is_finite() {
+        return 0.0;
+    }
+    let wrapped = hour.rem_euclid(24.0);
+    // rem_euclid of a tiny negative rounds to exactly 24.0.
+    if wrapped >= 24.0 {
+        0.0
+    } else {
+        wrapped
+    }
+}
+
 /// Sunrise and sunset times for a location and date.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -90,18 +110,8 @@ impl SolarTime {
         // Calculate hours from solar midnight
         let solar_midnight = self.solar_midnight_hour();
 
-        // Calculate difference from solar midnight
-        let mut diff = current_hour - solar_midnight;
-
-        // Wrap to 0-24 range
-        while diff < 0.0 {
-            diff += 24.0;
-        }
-        while diff >= 24.0 {
-            diff -= 24.0;
-        }
-
-        diff
+        // Calculate difference from solar midnight, wrapped to 0-24 range
+        wrap_hour_24(current_hour - solar_midnight)
     }
 
     /// Calculate sun position using time-based cosine wave.

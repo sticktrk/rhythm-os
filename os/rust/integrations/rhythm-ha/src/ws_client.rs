@@ -26,6 +26,22 @@ pub(crate) const SUBSCRIBED_EVENT_TYPES: &[&str] = &[
     "state_changed",
 ];
 
+/// Bound on the TCP + TLS + WebSocket upgrade handshake. Without this a
+/// half-open peer (router reboot, wedged HA) stalls the reconnect loop
+/// forever — `connect_async` itself has no deadline.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// After this much silence we send an application-level `ping`. HA does not
+/// ping its clients, so on a quiet network an idle-but-healthy connection and
+/// a dead one are otherwise indistinguishable.
+const WS_IDLE_PING_INTERVAL: Duration = Duration::from_secs(30);
+/// How long after our ping we wait for any traffic before declaring the
+/// connection dead and reconnecting.
+const WS_PONG_TIMEOUT: Duration = Duration::from_secs(10);
+/// Fixed delay between reconnect attempts after HA rejects our token.
+/// Tokens can become valid again (HA core booting behind the Supervisor
+/// proxy, token rotation), so we retry slowly instead of giving up forever.
+const WS_AUTH_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 /// What the WS loop should do in response to a parsed HA WebSocket message.
 /// Extracted so the HA protocol state machine can be unit-tested without a
 /// live WebSocket.
@@ -116,16 +132,30 @@ pub fn start_ha_ws(
 ) -> std::sync::mpsc::Receiver<HaWsEvent> {
     let (tx, rx) = sync_channel::<HaWsEvent>(64);
 
-    std::thread::Builder::new()
+    // Spawn/build failures drop `tx`, which the translator observes as a
+    // disconnect — never panic here: this runs on hub-configure paths.
+    let spawn_result = std::thread::Builder::new()
         .name("ha-ws".to_string())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("Failed to build WS tokio runtime");
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!(target: "ws", "Failed to build WS tokio runtime: {}", e);
+                    let _ = tx.try_send(HaWsEvent::Disconnected(format!(
+                        "Failed to build WS runtime: {}",
+                        e
+                    )));
+                    return;
+                }
+            };
             rt.block_on(run_ws_loop(&config, &tx, &shutdown));
-        })
-        .expect("Failed to spawn WS thread");
+        });
+    if let Err(e) = spawn_result {
+        warn!(target: "ws", "Failed to spawn WS thread: {}", e);
+    }
 
     rx
 }
@@ -143,8 +173,11 @@ async fn run_ws_loop(
     while !shutdown.load(Ordering::Relaxed) {
         info!(target: "ws", "Connecting to HA WebSocket at {}...", ws_url);
 
-        // Build request with Authorization header (required by HA Supervisor proxy)
-        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        // Build request with Authorization header (required by HA Supervisor proxy).
+        // A token/host with invalid header bytes (trailing newline in a pasted
+        // token) makes this fail — retry with backoff so the user can fix the
+        // credentials, instead of panicking the event thread.
+        let request = match tokio_tungstenite::tungstenite::http::Request::builder()
             .uri(&ws_url)
             .header("Authorization", format!("Bearer {}", config.token))
             .header("Host", &config.host)
@@ -156,13 +189,34 @@ async fn run_ws_loop(
                 tokio_tungstenite::tungstenite::handshake::client::generate_key(),
             )
             .body(())
-            .expect("Failed to build WS request");
-
-        let ws_stream = match tokio_tungstenite::connect_async(request).await {
-            Ok((stream, _)) => stream,
+        {
+            Ok(request) => request,
             Err(e) => {
+                warn!(target: "ws", "Failed to build WS request (bad host/token characters?): {}", e);
+                let _ = tx.try_send(HaWsEvent::Disconnected(format!(
+                    "Invalid connection config: {}",
+                    e
+                )));
+                tokio::time::sleep(max_backoff).await;
+                continue;
+            }
+        };
+
+        let connect =
+            tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
+                .await;
+        let ws_stream = match connect {
+            Ok(Ok((stream, _))) => stream,
+            Ok(Err(e)) => {
                 warn!(target: "ws", "WS connection failed: {}", e);
                 let _ = tx.try_send(HaWsEvent::Disconnected(format!("Connection failed: {}", e)));
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+            Err(_) => {
+                warn!(target: "ws", "WS connection timed out after {:?}", WS_CONNECT_TIMEOUT);
+                let _ = tx.try_send(HaWsEvent::Disconnected("Connection timed out".to_string()));
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -184,8 +238,51 @@ async fn run_ws_loop(
         let mut msg_id: u64 = 1;
         let mut authenticated = false;
         let mut subscribed = false;
+        let mut auth_rejected = false;
+        // Liveness: any inbound frame proves the connection is alive. After
+        // WS_IDLE_PING_INTERVAL of silence we send an HA `ping`; if nothing at
+        // all arrives within WS_PONG_TIMEOUT after that, the TCP connection is
+        // half-open (router reboot, AP power cycle) and we reconnect. Without
+        // this, `read.next().await` blocks forever on a dead-but-unclosed
+        // socket and HA events silently stop.
+        let mut awaiting_pong = false;
 
-        while let Some(msg) = read.next().await {
+        loop {
+            let idle_limit = if awaiting_pong {
+                WS_PONG_TIMEOUT
+            } else {
+                WS_IDLE_PING_INTERVAL
+            };
+            let msg = match tokio::time::timeout(idle_limit, read.next()).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => {
+                    info!(target: "ws", "WS stream ended");
+                    break;
+                }
+                Err(_) => {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if awaiting_pong || !authenticated {
+                        warn!(
+                            target: "ws",
+                            "WS connection unresponsive (no traffic in {:?}), reconnecting",
+                            idle_limit
+                        );
+                        break;
+                    }
+                    let ping_msg = serde_json::json!({ "id": msg_id, "type": "ping" });
+                    msg_id += 1;
+                    if let Err(e) = write.send(Message::Text(ping_msg.to_string())).await {
+                        warn!(target: "ws", "Failed to send keepalive ping: {}", e);
+                        break;
+                    }
+                    awaiting_pong = true;
+                    continue;
+                }
+            };
+            awaiting_pong = false;
+
             if shutdown.load(Ordering::Relaxed) {
                 return;
             }
@@ -245,10 +342,21 @@ async fn run_ws_loop(
                     info!(target: "ws", "Subscribed to rhythm_service_event + zha_event + hue_event + state_changed");
                 }
                 WsMessageAction::AuthInvalid(message) => {
-                    warn!(target: "ws", "HA authentication failed: {}", message);
+                    // Do NOT give up permanently: HA rejects valid tokens
+                    // while core is still booting behind the Supervisor
+                    // proxy, and tokens can be rotated/fixed while we run.
+                    // Retry slowly instead of leaving events dead until the
+                    // daemon restarts.
+                    warn!(
+                        target: "ws",
+                        "HA authentication failed: {} (retrying in {:?})",
+                        message,
+                        WS_AUTH_RETRY_DELAY
+                    );
                     let _ =
                         tx.try_send(HaWsEvent::Disconnected(format!("Auth failed: {}", message)));
-                    return; // Don't retry with invalid token
+                    auth_rejected = true;
+                    break;
                 }
                 WsMessageAction::Event { event_type, data } => {
                     let _ = tx.try_send(HaWsEvent::ServiceEvent { event_type, data });
@@ -268,8 +376,13 @@ async fn run_ws_loop(
             if authenticated {
                 let _ = tx.try_send(HaWsEvent::Disconnected("Connection lost".to_string()));
             }
-            info!(target: "ws", "Reconnecting WS in {:?}...", backoff);
-            tokio::time::sleep(backoff).await;
+            let delay = if auth_rejected {
+                WS_AUTH_RETRY_DELAY
+            } else {
+                backoff
+            };
+            info!(target: "ws", "Reconnecting WS in {:?}...", delay);
+            tokio::time::sleep(delay).await;
             backoff = (backoff * 2).min(max_backoff);
         }
     }

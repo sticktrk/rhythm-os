@@ -535,7 +535,17 @@ CHIP_ERROR ExecuteOnMatterThread(const std::function<void()> & callback)
         chip::DeviceLayer::PlatformMgr().ScheduleWork(PerformScheduledWork, reinterpret_cast<intptr_t>(&work)));
 
     std::unique_lock<std::mutex> lock(work.mutex);
-    work.condition.wait(lock, [&work] { return work.done; });
+    // Bounded wait: if the CHIP event loop is wedged/dead, scheduled work
+    // never runs and this blocks the (serial) RPC daemon forever. We cannot
+    // simply return on timeout — `work` and the callback's captures live on
+    // this stack frame, so a late-running callback would be a use-after-free.
+    // Exiting is safe: rhythm-matter detects the dead daemon and respawns it,
+    // turning an indefinite Matter outage into a ~10s recovery.
+    if (!work.condition.wait_for(lock, std::chrono::seconds(60), [&work] { return work.done; }))
+    {
+        ChipLogError(Controller, "Matter event loop failed to run scheduled work within 60s; exiting for supervisor restart");
+        std::_Exit(70); // EX_SOFTWARE; skip destructors that could also hang
+    }
     return CHIP_NO_ERROR;
 }
 

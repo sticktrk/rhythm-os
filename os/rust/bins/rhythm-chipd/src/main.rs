@@ -74,6 +74,14 @@ fn serve(socket_path: PathBuf) -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
+                // The accept loop is serial: without socket timeouts, one
+                // client that connects and never sends a newline (or never
+                // drains our response) parks read_line/write forever and
+                // wedges ALL Matter light control until an external restart.
+                // Clients send their request immediately after connecting,
+                // so 30s is generous.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
                 if let Err(error) = handle_stream(&mut service, &mut stream) {
                     eprintln!("rhythm-chipd request error: {error:#}");
                 }

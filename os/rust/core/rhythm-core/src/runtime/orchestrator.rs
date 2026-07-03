@@ -113,10 +113,13 @@ where
 
     /// Get or create the per-target dispatch gate.
     pub(crate) fn dispatch_lock(&self, target_id: &str) -> Arc<Mutex<()>> {
+        // Recover from poisoning: the map holds no invariants beyond the
+        // entries themselves, and panicking here would turn one earlier
+        // panic into "every event dispatch panics forever".
         let mut locks = self
             .dispatch_locks
             .lock()
-            .expect("dispatch lock map poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         locks
             .entry(target_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))

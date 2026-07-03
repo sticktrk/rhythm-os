@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +12,40 @@ const WPA_CONF: &str = "/etc/wpa_supplicant.conf";
 const WIFI_INIT_SCRIPT: &str = "/etc/init.d/S42wifi";
 const WPA_CLI: &str = "/usr/sbin/wpa_cli";
 const DEFAULT_COUNTRY: &str = "US";
+
+/// Bound on the Wi-Fi init-script run. `Command::status()` has no timeout,
+/// and a wedged wpa_supplicant/dhcp stop can hang the init script — during
+/// startup that happens BEFORE the event loop and liveness watchdog exist,
+/// so an unbounded wait bricks the appliance until a manual power cycle.
+const WIFI_SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound on a `wpa_cli status` query (runs on every Wi-Fi status poll).
+const WPA_CLI_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for a spawned child with a deadline, killing it on timeout.
+pub(crate) fn wait_child_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().with_context(|| format!("waiting for {label}"))? {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .with_context(|| format!("collecting output of {label}"));
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("{label} timed out after {timeout:?}");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WifiStatus {
@@ -241,16 +275,24 @@ fn restart_wifi() -> Result<()> {
 }
 
 fn run_wifi_script(action: &str) -> Result<()> {
-    let status = Command::new(WIFI_INIT_SCRIPT)
+    let child = Command::new(WIFI_INIT_SCRIPT)
         .arg(action)
-        .status()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .with_context(|| format!("running {} {}", WIFI_INIT_SCRIPT, action))?;
-    if !status.success() {
+    let output = wait_child_with_timeout(
+        child,
+        WIFI_SCRIPT_TIMEOUT,
+        &format!("{} {}", WIFI_INIT_SCRIPT, action),
+    )?;
+    if !output.status.success() {
         bail!(
             "{} {} failed with status {}",
             WIFI_INIT_SCRIPT,
             action,
-            status
+            output.status
         );
     }
     Ok(())
@@ -303,10 +345,14 @@ fn find_wifi_iface() -> Option<String> {
 }
 
 fn wpa_status_field(iface: &str, field: &str) -> Option<String> {
-    let output = Command::new(WPA_CLI)
+    let child = Command::new(WPA_CLI)
         .args(["-i", iface, "status"])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
+    let output = wait_child_with_timeout(child, WPA_CLI_TIMEOUT, "wpa_cli status").ok()?;
     if !output.status.success() {
         return None;
     }

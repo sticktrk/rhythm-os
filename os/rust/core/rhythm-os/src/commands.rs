@@ -5228,22 +5228,51 @@ pub(crate) fn try_send_work_item_with_pending(
     }
 }
 
+/// Upper bound on how long a dispatcher thread waits for space on the
+/// bounded work channel. If the cmd-worker is dead or wedged, an unbounded
+/// `send()` would park this thread forever, leave the node flagged
+/// `pending_dispatch`, and leak one blocked thread per subsequent dispatch.
+const WORK_ITEM_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn send_work_item_with_pending(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
     item: WorkItem,
-) -> std::result::Result<(), std::sync::mpsc::SendError<WorkItem>> {
+) -> std::result::Result<(), std::sync::mpsc::TrySendError<WorkItem>> {
     let pending_node_id = item.pending_node_id().map(str::to_string);
     if let Some(node_id) = pending_node_id.as_deref() {
         mark_node_dispatch_pending(state, node_id);
     }
-    match tx.send(item) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            if let Some(node_id) = pending_node_id.as_deref() {
-                clear_node_dispatch_pending(state, node_id);
+    // Bounded retry instead of a blocking send(): std::sync::mpsc has no
+    // send_timeout, and an unbounded send here parks the dispatcher thread
+    // forever if the cmd-worker dies or wedges.
+    let deadline = std::time::Instant::now() + WORK_ITEM_SEND_TIMEOUT;
+    let mut item = item;
+    loop {
+        match tx.try_send(item) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                if std::time::Instant::now() >= deadline {
+                    warn!(
+                        target: "cmd",
+                        "Work queue full for {:?} — worker wedged? Dropping item",
+                        WORK_ITEM_SEND_TIMEOUT
+                    );
+                    if let Some(node_id) = pending_node_id.as_deref() {
+                        clear_node_dispatch_pending(state, node_id);
+                    }
+                    return Err(std::sync::mpsc::TrySendError::Full(returned));
+                }
+                item = returned;
+                std::thread::sleep(Duration::from_millis(50));
             }
-            Err(err)
+            Err(err @ std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                warn!(target: "cmd", "Work queue receiver gone: dropping item");
+                if let Some(node_id) = pending_node_id.as_deref() {
+                    clear_node_dispatch_pending(state, node_id);
+                }
+                return Err(err);
+            }
         }
     }
 }
@@ -9583,6 +9612,21 @@ pub fn do_hub_credentials(
 
     let get_provider = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        // Reject unregistered hub types up front — get_hub_provider_fn
+        // panics on unknown types, and hub_type is caller-supplied (e.g. a
+        // backup with Matter credentials restored onto a build without the
+        // Matter integration). Mirrors the check in do_retry_hub_connect.
+        if !s.hub_capabilities.is_empty()
+            && !s
+                .hub_capabilities
+                .iter()
+                .any(|capability| capability.hub_type == hub_type_str)
+        {
+            return Err(anyhow::anyhow!(
+                "Hub type '{}' is not supported on this runtime",
+                hub_type_str
+            ));
+        }
         s.get_hub_provider_fn
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No hub provider registered"))?
@@ -17087,7 +17131,7 @@ mod tests {
             secret: true,
         }];
         let state = Arc::new(Mutex::new(AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         }));
 
@@ -17196,7 +17240,7 @@ mod tests {
     fn backup_restore_applies_installation_state_after_hub_restore() {
         let storage = TestStorage::default();
         let app = AppState {
-            storage: Some(Box::new(storage.clone())),
+            storage: Some(std::sync::Arc::new(storage.clone())),
             ..Default::default()
         };
         let state = Arc::new(Mutex::new(app));
@@ -17369,7 +17413,7 @@ mod tests {
         // restored state. restore_backup_runtime_state must clear the flag.
         let storage = TestStorage::default();
         let app = AppState {
-            storage: Some(Box::new(storage.clone())),
+            storage: Some(std::sync::Arc::new(storage.clone())),
             ..Default::default()
         };
         let state = Arc::new(Mutex::new(app));
@@ -17899,7 +17943,7 @@ mod tests {
     fn backup_restore_redacted_backup_preserves_disconnected_hub_identity() {
         let storage = TestStorage::default();
         let app = AppState {
-            storage: Some(Box::new(storage.clone())),
+            storage: Some(std::sync::Arc::new(storage.clone())),
             ..Default::default()
         };
         let state = Arc::new(Mutex::new(app));
@@ -18062,7 +18106,7 @@ mod tests {
             .unwrap();
 
         let state = Arc::new(Mutex::new(AppState {
-            storage: Some(Box::new(storage.clone())),
+            storage: Some(std::sync::Arc::new(storage.clone())),
             ..Default::default()
         }));
 
@@ -18207,7 +18251,7 @@ mod tests {
         let storage = TestStorage::default();
         let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
 
-        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
 
         let canonical_id = insert_canonical_device(
             &state,
@@ -18553,7 +18597,7 @@ mod tests {
         storage.inner.lock().unwrap().rooms = rooms;
 
         let state: SharedState = Arc::new(Mutex::new(AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             power_save: true,
             ..Default::default()
         }));
@@ -18757,7 +18801,7 @@ mod tests {
         storage.save_rooms(&rooms).unwrap();
 
         let app = AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         let state: SharedState = Arc::new(Mutex::new(app));
@@ -18787,7 +18831,7 @@ mod tests {
         storage.save_rooms(&rooms).unwrap();
 
         let app = AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         let state: SharedState = Arc::new(Mutex::new(app));
@@ -21154,7 +21198,7 @@ mod tests {
 
             {
                 let mut s = state.lock().unwrap();
-                s.storage = Some(Box::new(storage.clone()));
+                s.storage = Some(std::sync::Arc::new(storage.clone()));
                 s.active_mode = RhythmMode::Day;
                 s.last_active_mode_cause = cause;
                 s.set_mode_transition_configs(vec![transition]);
@@ -21244,7 +21288,7 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
-            s.storage = Some(Box::new(storage.clone()));
+            s.storage = Some(std::sync::Arc::new(storage.clone()));
             s.active_mode = RhythmMode::Day;
             s.last_active_mode_cause = ModeChangeCause::Schedule;
             s.set_mode_transition_configs(vec![transition]);
@@ -21749,7 +21793,7 @@ mod tests {
         mood_room.hard_off = false;
         rooms.add_room(mood_room);
         storage.save_rooms(&rooms).unwrap();
-        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
 
         reconcile_runtime_from_state(&state).unwrap();
         persist_rooms(&state);
@@ -21802,7 +21846,7 @@ mod tests {
         room.standby_enabled = true;
         rooms.add_room(room);
         storage.save_rooms(&rooms).unwrap();
-        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
 
         reconcile_runtime_from_state(&state).unwrap();
         persist_rooms(&state);
@@ -21841,7 +21885,7 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
-            s.storage = Some(Box::new(storage.clone()));
+            s.storage = Some(std::sync::Arc::new(storage.clone()));
             assert!(s.canonical_registry.assign_room(&device_id, Some(&room_id)));
             s.topology.ensure_standalone_device(&device_id);
             assert!(s.topology.assign_device(
@@ -22213,7 +22257,7 @@ mod tests {
     fn canonical_assign_room_clears_standalone_light_off_flags() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
         let storage = TestStorage::default();
-        state.lock().unwrap().storage = Some(Box::new(storage.clone()));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
         let room_id = state.lock().unwrap().topology.create_room("Office");
         let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
 

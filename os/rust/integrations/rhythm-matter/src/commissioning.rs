@@ -678,7 +678,7 @@ mod tests {
         let path = unique_data_dir(name);
         let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
         let state = state();
-        state.lock().unwrap().storage = Some(Box::new(storage));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage));
         (state, path)
     }
 

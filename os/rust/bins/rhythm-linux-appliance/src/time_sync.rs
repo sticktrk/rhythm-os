@@ -8,6 +8,7 @@
 
 use std::fs::OpenOptions;
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -36,11 +37,25 @@ pub fn system_clock_is_sane() -> bool {
     clock_is_sane_at(Utc::now())
 }
 
+/// Bound on NTP sync subprocesses — these run on the startup path before the
+/// event loop and liveness watchdog exist, so an unbounded wait (unreachable
+/// NTP server, wedged init script) would brick boot until a power cycle.
+const SNTP_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn run_sntp_script() -> Result<ExitStatus> {
-    Command::new(SNTP_INIT_SCRIPT)
+    let child = Command::new(SNTP_INIT_SCRIPT)
         .arg("start")
-        .status()
-        .with_context(|| format!("running {} start", SNTP_INIT_SCRIPT))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("running {} start", SNTP_INIT_SCRIPT))?;
+    crate::wifi::wait_child_with_timeout(
+        child,
+        SNTP_TIMEOUT,
+        &format!("{} start", SNTP_INIT_SCRIPT),
+    )
+    .map(|output| output.status)
 }
 
 fn ensure_sntp_key_cache() -> Result<()> {
@@ -59,8 +74,14 @@ fn run_direct_sntp() -> Result<ExitStatus> {
     cmd.args(SNTP_ARGS);
     cmd.arg("-K").arg(SNTP_KEY_CACHE);
     cmd.args(SNTP_SERVERS);
-    cmd.status()
-        .with_context(|| format!("running direct {}", SNTP_BIN))
+    let child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("running direct {}", SNTP_BIN))?;
+    crate::wifi::wait_child_with_timeout(child, SNTP_TIMEOUT, SNTP_BIN)
+        .map(|output| output.status)
 }
 
 /// Attempt a one-shot wall-clock sync using the image's Buildroot NTP wiring.

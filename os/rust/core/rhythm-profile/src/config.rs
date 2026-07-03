@@ -56,7 +56,9 @@ impl Default for CommonCurveConfig {
 impl CommonCurveConfig {
     /// Calculate the brightness step size based on max_dim_steps.
     pub fn brightness_step_size(&self) -> f32 {
-        let range = (self.max_brightness - self.min_brightness) as f32;
+        // saturating_sub: config values arrive from unvalidated JSON, so a
+        // reversed min/max must not underflow (panic in debug builds).
+        let range = self.max_brightness.saturating_sub(self.min_brightness) as f32;
         range / self.max_dim_steps.max(1) as f32
     }
 }

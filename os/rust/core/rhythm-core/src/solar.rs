@@ -190,9 +190,18 @@ pub fn calculate_sun_times(
     let utc_offset_hours = tz.utc_offset(year, month, day, 12);
     let utc_offset_seconds = (utc_offset_hours * 3600.0) as i64;
 
-    // Create coordinates and date
-    let coords = Coordinates::new(latitude as f64, longitude as f64).expect("invalid coordinates");
-    let date = NaiveDate::from_ymd_opt(year, month, day).expect("invalid date");
+    // Create coordinates and date. Never panic here: lat/lon come from
+    // user-supplied, persisted location data, and this runs on every periodic
+    // tick — a panic would kill the scheduler thread and permanently stop
+    // adaptive lighting. Clamp junk into range instead.
+    let lat = if latitude.is_finite() { (latitude as f64).clamp(-90.0, 90.0) } else { 0.0 };
+    let lon = if longitude.is_finite() { (longitude as f64).clamp(-180.0, 180.0) } else { 0.0 };
+    let coords = Coordinates::new(lat, lon)
+        .or_else(|| Coordinates::new(0.0, 0.0))
+        .expect("Coordinates::new(0,0) is always valid");
+    let date = NaiveDate::from_ymd_opt(year, month, day)
+        .or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1))
+        .expect("2000-01-01 is a valid date");
 
     let solar_day = SolarDay::new(coords, date);
 
@@ -337,9 +346,18 @@ pub fn calculate_twilight_times(
     let utc_offset_hours = tz.utc_offset(year, month, day, 12);
     let utc_offset_seconds = (utc_offset_hours * 3600.0) as i64;
 
-    // Create coordinates and date
-    let coords = Coordinates::new(latitude as f64, longitude as f64).expect("invalid coordinates");
-    let date = NaiveDate::from_ymd_opt(year, month, day).expect("invalid date");
+    // Create coordinates and date. Never panic here: lat/lon come from
+    // user-supplied, persisted location data, and this runs on every periodic
+    // tick — a panic would kill the scheduler thread and permanently stop
+    // adaptive lighting. Clamp junk into range instead.
+    let lat = if latitude.is_finite() { (latitude as f64).clamp(-90.0, 90.0) } else { 0.0 };
+    let lon = if longitude.is_finite() { (longitude as f64).clamp(-180.0, 180.0) } else { 0.0 };
+    let coords = Coordinates::new(lat, lon)
+        .or_else(|| Coordinates::new(0.0, 0.0))
+        .expect("Coordinates::new(0,0) is always valid");
+    let date = NaiveDate::from_ymd_opt(year, month, day)
+        .or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1))
+        .expect("2000-01-01 is a valid date");
 
     let solar_day = SolarDay::new(coords, date);
 

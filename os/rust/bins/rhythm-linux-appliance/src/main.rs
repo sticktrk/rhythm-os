@@ -159,7 +159,7 @@ fn main() -> Result<()> {
         s.platform_context = Box::leak(platform_context.into_boxed_str());
         s.listen_port = Some(args.port);
         s.data_dir = args.data_dir.clone();
-        s.storage = Some(Box::new(file_storage));
+        s.storage = Some(std::sync::Arc::new(file_storage));
         // Linux appliances are active platforms and should match the other
         // desktop/server-class runtimes for bootstrap behavior.
         s.platform = PlatformConfig::desktop();
@@ -1095,7 +1095,7 @@ mod tests {
         let root = unique_test_dir("wifi-save");
         let state = test_state();
         state.lock().unwrap().storage =
-            Some(Box::new(FileStorage::new(root.to_str().unwrap()).unwrap()));
+            Some(std::sync::Arc::new(FileStorage::new(root.to_str().unwrap()).unwrap()));
         let creds = WifiCredentials {
             ssid: "Kitchen AP".to_string(),
             password: "correct horse battery staple".to_string(),

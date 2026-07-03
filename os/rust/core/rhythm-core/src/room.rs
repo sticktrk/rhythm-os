@@ -1181,14 +1181,26 @@ impl Room {
         self.warning_active = false;
     }
 
+    /// Clamp a time offset to a sane ±24h and reject NaN/inf. Offsets arrive
+    /// as unvalidated API floats and are persisted, so junk here would feed
+    /// every future curve calculation on every boot.
+    fn sanitize_time_offset(offset_minutes: f32) -> f32 {
+        if offset_minutes.is_finite() {
+            offset_minutes.clamp(-1440.0, 1440.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Apply a time offset (from step_up/step_down).
     pub fn apply_time_offset(&mut self, offset_minutes: f32) {
-        self.time_offset_minutes += offset_minutes;
+        self.time_offset_minutes =
+            Self::sanitize_time_offset(self.time_offset_minutes + offset_minutes);
     }
 
     /// Set the time offset directly.
     pub fn set_time_offset(&mut self, offset_minutes: f32) {
-        self.time_offset_minutes = offset_minutes;
+        self.time_offset_minutes = Self::sanitize_time_offset(offset_minutes);
     }
 
     /// Apply a brightness offset (from dim_up/dim_down).

@@ -673,7 +673,7 @@ impl<C: LightController> RhythmEngine<C> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.clear_off_states();
-            room.time_offset_minutes = position.time_offset_minutes - inherited_time_offset;
+            room.set_time_offset(position.time_offset_minutes - inherited_time_offset);
             if preserve_brightness {
                 room.brightness_offset = (current_brightness
                     - inherited_brightness_offset
@@ -697,7 +697,7 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> Option<ManualDispatchPlan> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
-            room.time_offset_minutes = offset_minutes;
+            room.set_time_offset(offset_minutes);
             room.clear_warning_state();
         }
 
@@ -953,16 +953,20 @@ impl<C: LightController> RhythmEngine<C> {
     }
 
     pub(crate) fn remove_room_state(&mut self, room_id: &str) {
-        let descendant_ids: Vec<String> = self
-            .rooms
-            .child_iter(room_id)
-            .map(|node| node.id.clone())
-            .collect();
-        for child_id in descendant_ids {
-            self.remove_room_state(&child_id);
+        // Iterative worklist with a visited set: parent links are stored
+        // unchecked, so a cycle (A.parent = B, B.parent = A) would make the
+        // recursive form overflow the stack and abort the process. See the
+        // matching cycle guard in RoomManager::effective_state.
+        let mut visited = std::collections::HashSet::new();
+        let mut worklist = vec![room_id.to_string()];
+        while let Some(id) = worklist.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            worklist.extend(self.rooms.child_iter(&id).map(|node| node.id.clone()));
+            self.rooms.remove(&id);
+            self.clear_periodic_dedupe_room(&id);
         }
-        self.rooms.remove(room_id);
-        self.clear_periodic_dedupe_room(room_id);
     }
 
     pub(crate) fn clear_motion_warning_state(&mut self, room_id: &str) {
@@ -1442,7 +1446,7 @@ impl<C: LightController> RhythmEngine<C> {
     ) -> LightControlResult<()> {
         {
             let room = self.rooms.get_or_create(room_id, room_id);
-            room.time_offset_minutes = offset_minutes;
+            room.set_time_offset(offset_minutes);
             room.clear_warning_state();
         }
 
