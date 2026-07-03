@@ -5,6 +5,9 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -17,6 +20,14 @@ const BUILD_VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// Upper bound on concurrent request threads. Callers above this get an
+/// immediate error response instead of queueing behind slow devices.
+const MAX_CONCURRENT_REQUESTS: usize = 32;
+
+/// Sockets from a healthy client carry one request line promptly; bound the
+/// read/write so a dead peer cannot pin a request thread.
+const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
     let socket_path = match parse_args()? {
@@ -69,13 +80,35 @@ fn serve(socket_path: PathBuf) -> Result<()> {
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("binding {}", socket_path.display()))?;
-    let mut service = ChipControllerService::new(build_backend_from_env());
+    let service = Arc::new(ChipControllerService::new(build_backend_from_env()));
+    let active_requests = Arc::new(AtomicUsize::new(0));
 
+    // One thread per connection: a lagging bulb pins only its own request
+    // thread while every other Matter command keeps flowing. The transport
+    // opens one connection per request, so thread lifetime is one RPC.
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                if let Err(error) = handle_stream(&mut service, &mut stream) {
-                    eprintln!("rhythm-chipd request error: {error:#}");
+                if active_requests.load(Ordering::SeqCst) >= MAX_CONCURRENT_REQUESTS {
+                    if let Err(error) = respond_busy(&mut stream) {
+                        eprintln!("rhythm-chipd busy response error: {error:#}");
+                    }
+                    continue;
+                }
+                let service = service.clone();
+                let thread_active_requests = active_requests.clone();
+                active_requests.fetch_add(1, Ordering::SeqCst);
+                let spawned = std::thread::Builder::new()
+                    .name("chipd-request".to_string())
+                    .spawn(move || {
+                        if let Err(error) = handle_stream(&service, &mut stream) {
+                            eprintln!("rhythm-chipd request error: {error:#}");
+                        }
+                        thread_active_requests.fetch_sub(1, Ordering::SeqCst);
+                    });
+                if let Err(error) = spawned {
+                    active_requests.fetch_sub(1, Ordering::SeqCst);
+                    eprintln!("rhythm-chipd failed to spawn request thread: {error:#}");
                 }
             }
             Err(error) => {
@@ -88,7 +121,40 @@ fn serve(socket_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn handle_stream(service: &mut ChipControllerService, stream: &mut UnixStream) -> Result<()> {
+/// Answer an over-capacity connection with an error envelope so the caller
+/// fails fast instead of hitting its socket timeout.
+fn respond_busy(stream: &mut UnixStream) -> Result<()> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    let mut reader = BufReader::new(stream.try_clone().context("cloning client stream")?);
+    let mut line = String::new();
+    let bytes = reader
+        .read_line(&mut line)
+        .context("reading chipd request line")?;
+    if bytes == 0 {
+        return Ok(());
+    }
+    let id = serde_json::from_str::<ChipRpcRequestEnvelope>(line.trim_end())
+        .map(|envelope| envelope.id)
+        .unwrap_or(0);
+    let response = ChipRpcResponseEnvelope::error(
+        id,
+        format!(
+            "rhythm-chipd is at capacity ({} concurrent requests)",
+            MAX_CONCURRENT_REQUESTS
+        ),
+    );
+    serde_json::to_writer(&mut *stream, &response).context("encoding chipd busy response")?;
+    stream
+        .write_all(b"\n")
+        .context("writing chipd response newline")?;
+    stream.flush().context("flushing chipd response")?;
+    Ok(())
+}
+
+fn handle_stream(service: &ChipControllerService, stream: &mut UnixStream) -> Result<()> {
+    let _ = stream.set_read_timeout(Some(STREAM_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(STREAM_IO_TIMEOUT));
     let mut reader = BufReader::new(stream.try_clone().context("cloning client stream")?);
     let mut line = String::new();
     let bytes = reader
@@ -180,14 +246,14 @@ mod tests {
     fn handle_stream_returns_ok_for_empty_client() {
         let (mut server, client) = UnixStream::pair().unwrap();
         drop(client);
-        let mut service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
+        let service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
 
-        handle_stream(&mut service, &mut server).unwrap();
+        handle_stream(&service, &mut server).unwrap();
     }
 
     #[test]
     fn handle_stream_writes_success_and_error_responses() {
-        let mut service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
+        let service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
 
         let (mut server, mut client) = UnixStream::pair().unwrap();
         let request = ChipRpcRequestEnvelope {
@@ -197,7 +263,7 @@ mod tests {
         serde_json::to_writer(&mut client, &request).unwrap();
         client.write_all(b"\n").unwrap();
 
-        handle_stream(&mut service, &mut server).unwrap();
+        handle_stream(&service, &mut server).unwrap();
 
         let mut response_line = String::new();
         BufReader::new(client)
@@ -223,7 +289,7 @@ mod tests {
         serde_json::to_writer(&mut client, &request).unwrap();
         client.write_all(b"\n").unwrap();
 
-        handle_stream(&mut service, &mut server).unwrap();
+        handle_stream(&service, &mut server).unwrap();
 
         let mut response_line = String::new();
         BufReader::new(client)
@@ -248,9 +314,9 @@ mod tests {
     fn handle_stream_surfaces_invalid_json_request() {
         let (mut server, mut client) = UnixStream::pair().unwrap();
         client.write_all(b"{ not valid json }\n").unwrap();
-        let mut service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
+        let service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
 
-        let error = handle_stream(&mut service, &mut server).unwrap_err();
+        let error = handle_stream(&service, &mut server).unwrap_err();
 
         assert!(format!("{error:#}").contains("decoding chipd request"));
     }

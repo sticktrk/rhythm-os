@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -40,22 +41,44 @@ impl CommissioningState {
     }
 }
 
+/// Thread-safe RPC service.
+///
+/// Connection threads call [`ChipControllerService::handle`] concurrently:
+/// device/group control and reads run in parallel (the CHIP bridge blocks
+/// each caller on per-operation state while the Matter thread multiplexes),
+/// so one lagging bulb no longer stalls every other Matter command. Only
+/// controller (re)initialization is exclusive, and lifecycle operations that
+/// mutate shared fabric/group/device tables serialize among themselves.
 pub struct ChipControllerService {
-    backend: Box<dyn ChipControllerBackend>,
-    device_store: DeviceStore,
-    state: Option<CommissioningState>,
+    backend: RwLock<Box<dyn ChipControllerBackend>>,
+    device_store: Mutex<DeviceStore>,
+    state: RwLock<Option<CommissioningState>>,
+    /// Serializes commissioning/decommissioning/probing/group config —
+    /// operations that touch shared fabric tables and the device store.
+    lifecycle_lock: Mutex<()>,
 }
 
 impl ChipControllerService {
     pub fn new(backend: Box<dyn ChipControllerBackend>) -> Self {
         Self {
-            backend,
-            device_store: DeviceStore::default(),
-            state: None,
+            backend: RwLock::new(backend),
+            device_store: Mutex::new(DeviceStore::default()),
+            state: RwLock::new(None),
+            lifecycle_lock: Mutex::new(()),
         }
     }
 
-    pub fn handle(&mut self, request: ChipRpcRequest) -> Result<serde_json::Value> {
+    fn backend(&self) -> RwLockReadGuard<'_, Box<dyn ChipControllerBackend>> {
+        self.backend.read().expect("chipd backend lock poisoned")
+    }
+
+    fn device_store(&self) -> std::sync::MutexGuard<'_, DeviceStore> {
+        self.device_store
+            .lock()
+            .expect("chipd device store lock poisoned")
+    }
+
+    pub fn handle(&self, request: ChipRpcRequest) -> Result<serde_json::Value> {
         match request {
             ChipRpcRequest::InitController(request) => {
                 let result = self.init_controller(request)?;
@@ -63,25 +86,28 @@ impl ChipControllerService {
             }
             ChipRpcRequest::CommissionLight(request) => {
                 self.require_initialized()?;
-                let device = self.backend.commission_light(&request)?;
-                self.device_store.upsert(device.clone())?;
+                let _lifecycle = self.lifecycle_lock.lock();
+                let device = self.backend().commission_light(&request)?;
+                self.device_store().upsert(device.clone())?;
                 Ok(serde_json::to_value(ChipRpcCommissionLightResponse {
                     device,
                 })?)
             }
             ChipRpcRequest::ListDevices => Ok(serde_json::to_value(ChipRpcListDevicesResponse {
-                devices: self.device_store.list_devices(),
+                devices: self.device_store().list_devices(),
             })?),
             ChipRpcRequest::ProbeLight { node_id } => {
                 self.require_initialized()?;
-                let device = self.backend.probe_light(node_id)?;
-                self.device_store.upsert(device.clone())?;
+                let _lifecycle = self.lifecycle_lock.lock();
+                let device = self.backend().probe_light(node_id)?;
+                self.device_store().upsert(device.clone())?;
                 Ok(serde_json::to_value(ChipRpcProbeLightResponse { device })?)
             }
             ChipRpcRequest::DecommissionDevice { node_id, force } => {
                 self.require_initialized()?;
-                self.backend.decommission_device(node_id, force)?;
-                self.device_store.remove(node_id)?;
+                let _lifecycle = self.lifecycle_lock.lock();
+                self.backend().decommission_device(node_id, force)?;
+                self.device_store().remove(node_id)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::SetOnOff {
@@ -90,22 +116,24 @@ impl ChipControllerService {
                 on,
             } => {
                 self.require_initialized()?;
-                self.backend.set_on_off(node_id, endpoint, on)?;
+                self.backend().set_on_off(node_id, endpoint, on)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::ConfigureGroup { group } => {
                 self.require_initialized()?;
-                self.backend.configure_group(&group)?;
+                let _lifecycle = self.lifecycle_lock.lock();
+                self.backend().configure_group(&group)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::RemoveGroup { group_id, members } => {
                 self.require_initialized()?;
-                self.backend.remove_group(group_id, &members)?;
+                let _lifecycle = self.lifecycle_lock.lock();
+                self.backend().remove_group(group_id, &members)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::SetGroupOnOff { group_id, on } => {
                 self.require_initialized()?;
-                self.backend.set_group_on_off(group_id, on)?;
+                self.backend().set_group_on_off(group_id, on)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::IdentifyGroup {
@@ -113,7 +141,7 @@ impl ChipControllerService {
                 duration_secs,
             } => {
                 self.require_initialized()?;
-                self.backend.identify_group(group_id, duration_secs)?;
+                self.backend().identify_group(group_id, duration_secs)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::SetGroupBrightness {
@@ -122,7 +150,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .set_group_brightness(group_id, level, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -132,7 +160,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .set_group_color_temperature(group_id, kelvin, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -143,7 +171,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend.set_group_xy(group_id, x, y, transition_ms)?;
+                self.backend().set_group_xy(group_id, x, y, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::SetGroupHueSaturation {
@@ -153,7 +181,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .set_group_hue_saturation(group_id, hue, saturation, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -163,7 +191,7 @@ impl ChipControllerService {
                 duration_secs,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .identify_light(node_id, endpoint, duration_secs)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -174,7 +202,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .set_brightness(node_id, endpoint, level, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -187,7 +215,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend.run_level_command(
+                self.backend().run_level_command(
                     node_id,
                     endpoint,
                     command,
@@ -204,7 +232,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .set_color_temperature(node_id, endpoint, kelvin, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -216,7 +244,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend
+                self.backend()
                     .set_xy(node_id, endpoint, x, y, transition_ms)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
@@ -228,7 +256,7 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend.set_hue_saturation(
+                self.backend().set_hue_saturation(
                     node_id,
                     endpoint,
                     hue,
@@ -239,19 +267,19 @@ impl ChipControllerService {
             }
             ChipRpcRequest::ReadOnOff { node_id, endpoint } => {
                 self.require_initialized()?;
-                let on = self.backend.read_on_off(node_id, endpoint)?;
+                let on = self.backend().read_on_off(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcReadOnOffResponse { on })?)
             }
             ChipRpcRequest::ReadLightCapabilitySnapshot { node_id, endpoint } => {
                 self.require_initialized()?;
                 let value = self
-                    .backend
+                    .backend()
                     .read_light_capability_snapshot(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcJsonValueResponse { value })?)
             }
             ChipRpcRequest::ReadLightState { node_id, endpoint } => {
                 self.require_initialized()?;
-                let value = self.backend.read_light_state(node_id, endpoint)?;
+                let value = self.backend().read_light_state(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcJsonValueResponse { value })?)
             }
             ChipRpcRequest::SubscribeOnOff {
@@ -260,13 +288,14 @@ impl ChipControllerService {
                 max_interval_secs,
             } => {
                 self.require_initialized()?;
-                self.backend
+                let _lifecycle = self.lifecycle_lock.lock();
+                self.backend()
                     .subscribe_on_off(&targets, min_interval_secs, max_interval_secs)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::DrainAttributeReports => {
                 self.require_initialized()?;
-                let reports = self.backend.drain_attribute_reports()?;
+                let reports = self.backend().drain_attribute_reports()?;
                 Ok(serde_json::to_value(ChipRpcAttributeReportsResponse {
                     reports,
                 })?)
@@ -275,7 +304,7 @@ impl ChipControllerService {
     }
 
     fn init_controller(
-        &mut self,
+        &self,
         request: ChipInitControllerRequest,
     ) -> Result<ChipInitControllerResponse> {
         let ChipInitControllerRequest {
@@ -292,21 +321,33 @@ impl ChipControllerService {
             storage_path: PathBuf::from(storage_path),
         };
 
-        self.device_store.configure(state.devices_path())?;
-        let existing_devices = self.device_store.devices();
-        let response = self
-            .backend
-            .init_controller(&state, ble_controller, &existing_devices)?;
-        self.device_store
+        let _lifecycle = self.lifecycle_lock.lock();
+        let response = {
+            let mut device_store = self.device_store();
+            device_store.configure(state.devices_path())?;
+            let existing_devices = device_store.devices();
+            // Initialization is the one exclusive backend operation.
+            drop(device_store);
+            let mut backend = self.backend.write().expect("chipd backend lock poisoned");
+            backend.init_controller(&state, ble_controller, &existing_devices)?
+        };
+        self.device_store()
             .ensure_controller_fabric(response.compressed_fabric_id.as_deref())?;
-        self.state = Some(state);
+        *self.state.write().expect("chipd state lock poisoned") = Some(state);
         Ok(response)
     }
 
-    fn require_initialized(&self) -> Result<&CommissioningState> {
-        self.state
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Controller not initialized"))
+    fn require_initialized(&self) -> Result<()> {
+        if self
+            .state
+            .read()
+            .expect("chipd state lock poisoned")
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Controller not initialized"))
+        }
     }
 }
 
@@ -633,7 +674,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
+        let service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
         let initial_list: ChipRpcListDevicesResponse =
             serde_json::from_value(service.handle(ChipRpcRequest::ListDevices).unwrap()).unwrap();
         assert!(initial_list.devices.is_empty());

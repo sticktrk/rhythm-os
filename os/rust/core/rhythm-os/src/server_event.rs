@@ -61,6 +61,31 @@ pub enum ServerEvent {
         address: Option<String>,
         connected: bool,
     },
+    /// A hub light command failed, timed out, or was dropped.
+    ///
+    /// Dispatch is fire-and-forget — commands are queued and paced per hub —
+    /// so physical delivery problems surface here instead of failing the
+    /// originating API call.
+    DispatchFailure {
+        hub_type: String,
+        hub_key: String,
+        /// Topology node the command addressed.
+        node_id: String,
+        /// Hub-native dispatch target label.
+        target: String,
+        /// Command kind: "turn_on" or "turn_off".
+        kind: String,
+        /// Failure class: "failed", "timed_out", "skipped_cooldown", "dropped".
+        status: String,
+        /// Human-readable failure detail.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        /// Time the command waited in the hub queue.
+        queued_ms: u64,
+        /// Time the physical dispatch ran before failing.
+        dispatch_ms: u64,
+        epoch_ms: i64,
+    },
     /// Settings changed.
     SettingsChanged { settings: SettingsDto },
     /// Global autonomous light breaker changed.
