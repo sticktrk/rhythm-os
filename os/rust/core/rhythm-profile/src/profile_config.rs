@@ -153,8 +153,31 @@ fn default_auto() -> TimerSetting {
 impl LightProfileConfig {
     /// Calculate the brightness step size based on max_dim_steps.
     pub fn brightness_step_size(&self) -> f32 {
-        let range = (self.max_brightness - self.min_brightness) as f32;
+        // saturating_sub: profiles are imported from user-editable bundles
+        // with no range validation, so a reversed min/max must not underflow
+        // (panic in debug, ~176%-per-step garbage in release).
+        let range = self.max_brightness.saturating_sub(self.min_brightness) as f32;
         range / self.max_dim_steps.max(1) as f32
+    }
+
+    /// Brightness range ordered `(min, max)` even if the profile was imported
+    /// with the fields reversed — callers feed these into `f32::clamp`, which
+    /// panics on `min > max`.
+    pub fn brightness_range(&self) -> (u8, u8) {
+        if self.min_brightness <= self.max_brightness {
+            (self.min_brightness, self.max_brightness)
+        } else {
+            (self.max_brightness, self.min_brightness)
+        }
+    }
+
+    /// Color-temperature range ordered `(min, max)`; see [`Self::brightness_range`].
+    pub fn color_temp_range(&self) -> (u16, u16) {
+        if self.min_color_temp <= self.max_color_temp {
+            (self.min_color_temp, self.max_color_temp)
+        } else {
+            (self.max_color_temp, self.min_color_temp)
+        }
     }
 }
 

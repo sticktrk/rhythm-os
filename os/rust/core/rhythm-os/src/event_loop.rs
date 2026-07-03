@@ -2181,7 +2181,19 @@ pub fn run_event_loop(
             match rx.try_recv() {
                 Ok(event) => {
                     processed_hub_event = true;
-                    handle_hub_event(&state, event, &mut motion_state);
+                    // A panic on one malformed hub event must not kill the
+                    // only event-loop thread (buttons/motion dead until
+                    // restart) — log and keep draining.
+                    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || handle_hub_event(&state, event, &mut motion_state),
+                    )) {
+                        let msg = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "<non-string panic>".to_string());
+                        warn!(target: "evt", "Hub event handler panicked (continuing): {}", msg);
+                    }
                     motion_dirty = true;
                     motion_persistence.mark_dirty();
                 }
@@ -2626,7 +2638,26 @@ pub fn sync_motion_snapshots(state: &SharedState, motion: &MotionTimerState) {
 /// and deferred persist from inline button processing.
 pub fn process_work_item(state: &SharedState, item: WorkItem) {
     let pending_node_id = item.pending_node_id().map(str::to_string);
-    process_work_item_inner(state, item);
+    // Contain panics: this runs on the single cmd-worker thread, which is
+    // never respawned. An unwinding panic here would silently kill the worker
+    // — the bounded work channel then fills and every periodic tick is
+    // dropped forever while the HTTP API stays up.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_work_item_inner(state, item);
+    }));
+    if let Err(panic) = result {
+        let msg = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+        tracing::error!(
+            target: "evt",
+            event = "work_item_panicked",
+            "Work item panicked (worker continuing): {}",
+            msg
+        );
+    }
     if let Some(node_id) = pending_node_id {
         crate::commands::clear_node_dispatch_pending(state, &node_id);
     }
@@ -7266,7 +7297,7 @@ mod tests {
     fn motion_persistence_skips_unchanged_payloads() {
         let saved = Arc::new(Mutex::new(Vec::new()));
         let app = crate::state::AppState {
-            storage: Some(Box::new(MotionTimerTestStorage {
+            storage: Some(std::sync::Arc::new(MotionTimerTestStorage {
                 saved_motion_timers: saved.clone(),
                 ..Default::default()
             })),
@@ -7298,7 +7329,7 @@ mod tests {
     fn motion_persistence_waits_for_coalesce_interval() {
         let saved = Arc::new(Mutex::new(Vec::new()));
         let app = crate::state::AppState {
-            storage: Some(Box::new(MotionTimerTestStorage {
+            storage: Some(std::sync::Arc::new(MotionTimerTestStorage {
                 saved_motion_timers: saved.clone(),
                 ..Default::default()
             })),
@@ -7347,7 +7378,7 @@ mod tests {
     fn motion_persistence_failed_save_stays_dirty_for_retry() {
         let saved = Arc::new(Mutex::new(Vec::new()));
         let app = crate::state::AppState {
-            storage: Some(Box::new(MotionTimerTestStorage {
+            storage: Some(std::sync::Arc::new(MotionTimerTestStorage {
                 saved_motion_timers: saved.clone(),
                 fail_saves: true,
             })),

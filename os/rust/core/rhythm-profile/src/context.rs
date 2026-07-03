@@ -3,7 +3,7 @@
 //! This module provides the [`CurveContext`] struct which carries all
 //! the information a light profile needs to calculate lighting values.
 
-use crate::solar::{SolarTime, SunTimes};
+use crate::solar::{wrap_hour_24, SolarTime, SunTimes};
 
 /// Context for curve calculations.
 ///
@@ -34,15 +34,8 @@ impl CurveContext {
     /// Create a context with offset applied to the current hour.
     pub fn with_offset(&self, offset_minutes: f32) -> Self {
         let offset_hours = offset_minutes / 60.0;
-        let mut target_hour = self.current_hour + offset_hours;
-
-        // Wrap to 0-24 range
-        while target_hour < 0.0 {
-            target_hour += 24.0;
-        }
-        while target_hour >= 24.0 {
-            target_hour -= 24.0;
-        }
+        // Wrapped to 0-24 range; offsets come from unvalidated API floats.
+        let target_hour = wrap_hour_24(self.current_hour + offset_hours);
 
         Self {
             current_hour: target_hour,

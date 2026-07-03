@@ -4,9 +4,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rhythm_core::composite_controller::{
-    HubDispatchCompletion, HubDispatchPolicy, HubDispatchTimeoutScope,
-};
+use rhythm_core::composite_controller::{HubDispatchPolicy, HubDispatchTimeoutScope};
 use rhythm_core::{
     CompositeController, HubDispatchTarget, HubLightController, LightControlError,
     LightControlResult, LightController, LightingCommand, Room,
@@ -49,7 +47,7 @@ impl SlowHubController {
         let (lock, cvar) = &self.started;
         let started = lock.lock().unwrap();
         let _guard = cvar
-            .wait_timeout_while(started, Duration::from_millis(500), |started| !*started)
+            .wait_timeout_while(started, Duration::from_secs(5), |started| !*started)
             .unwrap();
     }
 
@@ -165,35 +163,40 @@ fn route_room(composite: &CompositeController, hub_key: &str, room_id: &str) {
     )]));
 }
 
-fn enqueue_policy() -> HubDispatchPolicy {
+fn slow_hub_policy(dispatch_timeout: Duration, timeout_cooldown: Duration) -> HubDispatchPolicy {
     HubDispatchPolicy {
-        queue_capacity: 1,
-        completion: HubDispatchCompletion::Enqueue,
-        requires_staggering: false,
-        min_dispatch_spacing: Duration::ZERO,
-        dispatch_timeout: Duration::from_millis(250),
-        timeout_cooldown: Duration::from_millis(50),
+        max_in_flight: 2,
+        rate_limit: None,
+        split_device_targets: false,
+        dispatch_timeout,
+        timeout_cooldown,
         timeout_scope: HubDispatchTimeoutScope::Target,
+        query_timeout: Duration::from_secs(1),
     }
 }
 
-fn wait_policy() -> HubDispatchPolicy {
-    HubDispatchPolicy {
-        queue_capacity: 2,
-        completion: HubDispatchCompletion::Wait,
-        requires_staggering: false,
-        min_dispatch_spacing: Duration::ZERO,
-        dispatch_timeout: Duration::from_millis(40),
-        timeout_cooldown: Duration::from_millis(80),
-        timeout_scope: HubDispatchTimeoutScope::Target,
+fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
+    predicate()
 }
 
-#[tokio::test]
-async fn enqueue_policy_reports_full_queue_while_slow_light_command_is_inflight() {
+/// A slow in-flight command must never block or reject later commands:
+/// they are accepted, coalesce latest-wins, and drain after release.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_inflight_command_coalesces_followups_and_never_rejects() {
     let controller = Arc::new(SlowHubController::new());
     let composite = CompositeController::new();
-    composite.register_controller_with_policy("matter@local", controller.clone(), enqueue_policy());
+    composite.register_controller_with_policy(
+        "matter@local",
+        controller.clone(),
+        slow_hub_policy(Duration::from_secs(10), Duration::from_millis(50)),
+    );
     route_room(&composite, "matter@local", "kitchen");
 
     composite
@@ -202,60 +205,71 @@ async fn enqueue_policy_reports_full_queue_while_slow_light_command_is_inflight(
         .unwrap();
     controller.wait_started();
 
+    // Both accepted while the first dispatch is stuck; they coalesce into
+    // one trailing dispatch instead of overflowing a queue.
     composite
         .turn_on("kitchen", LightingCommand::new(70, 3500))
         .await
         .unwrap();
-    let error = composite
+    composite
         .turn_on("kitchen", LightingCommand::new(60, 3200))
         .await
-        .unwrap_err();
-    assert!(matches!(error, LightControlError::CommandFailed(_)));
+        .unwrap();
 
     controller.release();
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < deadline && controller.turn_on_count() < 2 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    assert!(wait_until(Duration::from_secs(5), || {
+        controller.turn_on_count() == 2
+    }));
 
     composite.turn_off("kitchen", Some(120)).await.unwrap();
+    assert!(wait_until(Duration::from_secs(5), || {
+        controller.turn_off_count() == 1
+    }));
 
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < deadline && controller.turn_off_count() == 0 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    assert!(controller.turn_on_count() >= 2);
+    assert_eq!(controller.turn_on_count(), 2);
     assert_eq!(controller.turn_off_count(), 1);
 }
 
-#[tokio::test]
-async fn wait_policy_timeout_cools_down_then_recovers_after_slow_light_command_finishes() {
+/// A dispatch timeout cools the target down (enqueue rejected with a
+/// Timeout error), then commands flow again once the cooldown expires.
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_timeout_cools_down_then_recovers_after_slow_command_finishes() {
     let controller = Arc::new(SlowHubController::new());
     let composite = CompositeController::new();
-    composite.register_controller_with_policy("hue@bridge", controller.clone(), wait_policy());
+    composite.register_controller_with_policy(
+        "hue@bridge",
+        controller.clone(),
+        slow_hub_policy(Duration::from_millis(40), Duration::from_millis(80)),
+    );
     route_room(&composite, "hue@bridge", "kitchen");
 
-    let first = composite
-        .turn_on("kitchen", LightingCommand::new(80, 4000))
-        .await;
-    assert!(first.is_err());
-    controller.wait_started();
-
-    let retry = composite
-        .turn_on("kitchen", LightingCommand::new(70, 3500))
-        .await;
-    assert!(retry.is_err());
-
-    controller.release();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
+    // Accepted (dispatch is fire-and-forget), then times out and cools down.
     composite
-        .turn_on("kitchen", LightingCommand::new(60, 3200))
+        .turn_on("kitchen", LightingCommand::new(80, 4000))
         .await
         .unwrap();
+    controller.wait_started();
 
-    assert_eq!(controller.turn_on_count(), 2);
+    assert!(wait_until(Duration::from_secs(5), || {
+        let retry = futures::executor::block_on(
+            composite.turn_on("kitchen", LightingCommand::new(70, 3500)),
+        );
+        matches!(retry, Err(LightControlError::Timeout(_)))
+    }));
+
+    controller.release();
+
+    // After the cooldown expires the target accepts and dispatches again.
+    assert!(wait_until(Duration::from_secs(5), || {
+        futures::executor::block_on(
+            composite.turn_on("kitchen", LightingCommand::new(60, 3200)),
+        )
+        .is_ok()
+    }));
+    assert!(wait_until(Duration::from_secs(5), || {
+        controller.turn_on_count() == 2
+    }));
+    controller.release();
 }
 
 #[tokio::test]

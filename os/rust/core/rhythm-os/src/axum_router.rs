@@ -370,8 +370,14 @@ async fn delete_device(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResponse {
+    // run_blocking: unpairing can issue a Matter unpair RPC + persistence —
+    // blocking work that must not run inline on a tokio worker (see module
+    // comment on blocking clients panicking in async context).
     match params.get("id") {
-        Some(id) => handlers::handle_delete_device(&state, id),
+        Some(id) => {
+            let id = id.clone();
+            run_blocking(move || handlers::handle_delete_device(&state, &id)).await
+        }
         None => ApiResponse::bad_request("Missing ?id="),
     }
 }

@@ -25,7 +25,7 @@ fn temp_storage_dir() -> std::path::PathBuf {
 
 fn install_storage(harness: &TestHarness, dir: &std::path::Path) {
     let storage = FileStorage::new(dir.to_str().unwrap()).unwrap();
-    harness.state.lock().unwrap().storage = Some(Box::new(storage));
+    harness.state.lock().unwrap().storage = Some(std::sync::Arc::new(storage));
 }
 
 #[test]

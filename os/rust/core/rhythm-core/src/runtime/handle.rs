@@ -776,7 +776,10 @@ where
             if let Some(room) = engine.rooms_mut().get_mut(room_id) {
                 room.rhythm_enabled = state.rhythm_enabled;
                 room.disabled = state.disabled;
-                room.time_offset_minutes = state.time_offset_minutes;
+                // Persisted offsets pre-date clamping (or were hand-edited);
+                // route through the sanitizing setter so junk on disk can't
+                // re-enter the curve math on every boot.
+                room.set_time_offset(state.time_offset_minutes);
                 room.brightness_offset = state.brightness_offset;
                 room.soft_off = state.soft_off && !state.hard_off && !state.mood_active;
                 room.mood_active = state.mood_active && !state.hard_off;

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fs;
-use std::io::{BufRead, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
 use std::time::SystemTime;
@@ -900,12 +900,74 @@ pub fn tail_log_source(state: &SharedState, source_id: &str, lines: usize) -> Re
     })
 }
 
+
+/// Hard per-line byte cap for log scanning. `BufRead::lines()` buffers an
+/// entire line into memory before we get to truncate it — a corrupted log
+/// (e.g. NUL-padded blocks after power loss, which are valid UTF-8 with no
+/// newline) becomes one multi-hundred-MB String and OOM-kills the daemon on
+/// a 512 MB appliance. Bytes past the cap are discarded, not buffered.
+const MAX_SCANNED_LINE_BYTES: usize = 16 * 1024;
+
+struct BoundedLines<R: std::io::BufRead> {
+    reader: R,
+}
+
+impl<R: std::io::BufRead> Iterator for BoundedLines<R> {
+    type Item = std::io::Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut line: Vec<u8> = Vec::new();
+        let mut discarding = false;
+        let mut read_any = false;
+        loop {
+            let buf = match self.reader.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) => return Some(Err(e)),
+            };
+            if buf.is_empty() {
+                if read_any {
+                    break;
+                }
+                return None;
+            }
+            read_any = true;
+            if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                if !discarding {
+                    let take = pos.min(MAX_SCANNED_LINE_BYTES - line.len());
+                    line.extend_from_slice(&buf[..take]);
+                }
+                self.reader.consume(pos + 1);
+                break;
+            }
+            if !discarding {
+                let take = buf.len().min(MAX_SCANNED_LINE_BYTES - line.len());
+                line.extend_from_slice(&buf[..take]);
+                if line.len() >= MAX_SCANNED_LINE_BYTES {
+                    discarding = true;
+                }
+            }
+            let consumed = buf.len();
+            self.reader.consume(consumed);
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        Some(Ok(String::from_utf8_lossy(&line).into_owned()))
+    }
+}
+
+fn bounded_lines(file: fs::File) -> BoundedLines<std::io::BufReader<fs::File>> {
+    BoundedLines {
+        reader: std::io::BufReader::new(file),
+    }
+}
+
 pub fn read_log_tail_lines(path: &Path, source_id: &str, lines: usize) -> Result<Vec<LogTailLine>> {
     let requested_lines = clamp_log_tail_lines(lines);
     let file = fs::File::open(path).with_context(|| format!("opening log {}", path.display()))?;
     let mut tail = VecDeque::<LogTailLine>::new();
 
-    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
+    for (index, line) in bounded_lines(file).enumerate() {
         let line = line.with_context(|| format!("reading log {}", path.display()))?;
         push_limited(
             &mut tail,
@@ -2341,7 +2403,7 @@ fn build_log_summary_json(
             launch_line_count: 0,
         };
 
-        for line in std::io::BufReader::new(file).lines() {
+        for line in bounded_lines(file) {
             let line = match line {
                 Ok(line) => line,
                 Err(err) => {
@@ -3352,7 +3414,7 @@ mod tests {
             guard.platform_type = "appliance";
             guard.platform_context = "rpiz";
             guard.data_dir = data_dir.display().to_string();
-            guard.storage = Some(Box::new(
+            guard.storage = Some(std::sync::Arc::new(
                 rhythm_os::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
             ));
             let dispatch_generation = guard.light_dispatch_generation;

@@ -329,17 +329,29 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
 
         s.light_activity.insert(0, event.clone());
         s.light_activity.truncate(LIGHT_ACTIVITY_HISTORY_LIMIT);
-        if let Some(storage) = s.storage.as_ref() {
-            let history = LightActivityHistory {
-                schema_version: light_activity_schema_version(),
-                activities: s.light_activity.clone(),
-            };
-            if let Err(e) = storage.save_light_activity_history(&history) {
-                log::warn!(target: "cmd", "Failed to save light activity history: {}", e);
-            }
-        }
         event
     };
+
+    // Persist OUTSIDE the state lock: this runs on every button press and the
+    // write is fsync'd — on SD-card storage a slow flush would otherwise hold
+    // the global lock and stall the periodic tick, event loop, and all HTTP.
+    let persist = {
+        let Ok(s) = state.lock() else { return };
+        s.storage.as_ref().map(|storage| {
+            (
+                storage.clone(),
+                LightActivityHistory {
+                    schema_version: light_activity_schema_version(),
+                    activities: s.light_activity.clone(),
+                },
+            )
+        })
+    };
+    if let Some((storage, history)) = persist {
+        if let Err(e) = storage.save_light_activity_history(&history) {
+            log::warn!(target: "cmd", "Failed to save light activity history: {}", e);
+        }
+    }
 
     crate::state::emit_server_event(
         state,

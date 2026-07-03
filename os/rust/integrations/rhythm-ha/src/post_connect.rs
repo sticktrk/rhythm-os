@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn fetch_ha_config_imports_new_location_timezone_and_persists_it() {
         let state = shared_state();
-        state.lock().unwrap().storage = Some(Box::new(temp_storage("import")));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(temp_storage("import")));
         let transport = FakeTransport::ok(json!({
             "latitude": 35.22,
             "longitude": -80.84,

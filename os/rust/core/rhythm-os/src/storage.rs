@@ -2026,7 +2026,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2066,7 +2066,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2105,7 +2105,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2146,7 +2146,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2185,7 +2185,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2298,7 +2298,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2385,7 +2385,7 @@ mod tests {
         };
 
         let mut app = crate::state::AppState {
-            storage: Some(Box::new(storage)),
+            storage: Some(std::sync::Arc::new(storage)),
             ..Default::default()
         };
         load_persisted_state(&mut app);
@@ -2496,7 +2496,7 @@ mod tests {
                 .unwrap();
 
             let mut state = crate::state::AppState {
-                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                storage: Some(std::sync::Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
                 ..Default::default()
             };
             load_persisted_state(&mut state);
@@ -2534,7 +2534,7 @@ mod tests {
 
             let mut app = crate::state::AppState {
                 require_api_auth: true,
-                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                storage: Some(std::sync::Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
                 ..Default::default()
             };
 
@@ -2553,7 +2553,7 @@ mod tests {
 
             let mut app = crate::state::AppState {
                 require_api_auth: true,
-                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                storage: Some(std::sync::Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
                 ..Default::default()
             };
 
@@ -2796,7 +2796,7 @@ mod tests {
         fn load_persisted_state_generates_and_reuses_server_instance_id() {
             let (storage, path) = temp_storage();
             let mut app = crate::state::AppState {
-                storage: Some(Box::new(storage)),
+                storage: Some(std::sync::Arc::new(storage)),
                 ..Default::default()
             };
 
@@ -2812,7 +2812,7 @@ mod tests {
             assert_eq!(persisted.server_instance_id, generated_id);
 
             let mut restarted = crate::state::AppState {
-                storage: Some(Box::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                storage: Some(std::sync::Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
                 ..Default::default()
             };
             load_persisted_state(&mut restarted);

@@ -1541,7 +1541,7 @@ mod tests {
         {
             let mut state = state.lock().unwrap();
             state.data_dir = data_dir.display().to_string();
-            state.storage = Some(Box::new(FileStorage::new(&state.data_dir).unwrap()));
+            state.storage = Some(std::sync::Arc::new(FileStorage::new(&state.data_dir).unwrap()));
         }
         let router = create_router(state);
 

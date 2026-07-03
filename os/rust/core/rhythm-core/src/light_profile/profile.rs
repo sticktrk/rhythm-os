@@ -92,11 +92,11 @@ impl LightProfile {
             LightCurveShape::Palette { .. } => self.config.min_brightness as f32,
             LightCurveShape::InheritActive => self.constant_brightness() as f32,
             LightCurveShape::Constant { brightness, .. } => {
-                let range = self.config.max_brightness as f32 - self.config.min_brightness as f32;
-                (self.config.min_brightness as f32 + range * brightness).clamp(
-                    self.config.min_brightness as f32,
-                    self.config.max_brightness as f32,
-                )
+                // Ordered range: f32::clamp panics on min > max, and imported
+                // profiles can carry reversed ranges. This runs every tick.
+                let (min_b, max_b) = self.config.brightness_range();
+                let range = max_b as f32 - min_b as f32;
+                (min_b as f32 + range * brightness).clamp(min_b as f32, max_b as f32)
             }
         }
     }
@@ -123,11 +123,9 @@ impl LightProfile {
             LightCurveShape::Palette { .. } => 0.0,
             LightCurveShape::InheritActive => self.config.min_color_temp as f32,
             LightCurveShape::Constant { color_temp, .. } => {
-                let range = self.config.max_color_temp as f32 - self.config.min_color_temp as f32;
-                (self.config.min_color_temp as f32 + range * color_temp).clamp(
-                    self.config.min_color_temp as f32,
-                    self.config.max_color_temp as f32,
-                )
+                let (min_c, max_c) = self.config.color_temp_range();
+                let range = max_c as f32 - min_c as f32;
+                (min_c as f32 + range * color_temp).clamp(min_c as f32, max_c as f32)
             }
         }
     }
@@ -258,22 +256,14 @@ impl LightProfileModule for LightProfile {
                 color_temp,
                 direct_color,
             } => {
-                let bri = (self.config.min_brightness as f32
-                    + (self.config.max_brightness as f32 - self.config.min_brightness as f32)
-                        * brightness)
+                let (min_b, max_b) = self.config.brightness_range();
+                let (min_c, max_c) = self.config.color_temp_range();
+                let bri = (min_b as f32 + (max_b as f32 - min_b as f32) * brightness)
                     .round()
-                    .clamp(
-                        self.config.min_brightness as f32,
-                        self.config.max_brightness as f32,
-                    ) as u8;
-                let kelvin = (self.config.min_color_temp as f32
-                    + (self.config.max_color_temp as f32 - self.config.min_color_temp as f32)
-                        * color_temp)
+                    .clamp(min_b as f32, max_b as f32) as u8;
+                let kelvin = (min_c as f32 + (max_c as f32 - min_c as f32) * color_temp)
                     .round()
-                    .clamp(
-                        self.config.min_color_temp as f32,
-                        self.config.max_color_temp as f32,
-                    ) as u16;
+                    .clamp(min_c as f32, max_c as f32) as u16;
 
                 let mut values = LightingValues::new(
                     kelvin,
@@ -297,29 +287,24 @@ impl LightProfileModule for LightProfile {
     }
 
     fn calculate_brightness(&self, ctx: &CurveContext) -> u8 {
-        self.calculate_brightness_value(ctx).round().clamp(
-            self.config.min_brightness as f32,
-            self.config.max_brightness as f32,
-        ) as u8
+        let (min_b, max_b) = self.config.brightness_range();
+        self.calculate_brightness_value(ctx)
+            .round()
+            .clamp(min_b as f32, max_b as f32) as u8
     }
 
     fn calculate_color_temperature(&self, ctx: &CurveContext) -> u16 {
-        self.calculate_color_temperature_value(ctx).round().clamp(
-            self.config.min_color_temp as f32,
-            self.config.max_color_temp as f32,
-        ) as u16
+        let (min_c, max_c) = self.config.color_temp_range();
+        self.calculate_color_temperature_value(ctx)
+            .round()
+            .clamp(min_c as f32, max_c as f32) as u16
     }
 
     fn calculate_with_offset(&self, ctx: &CurveContext, offset_minutes: f32) -> LightingValues {
-        let offset_hours = offset_minutes / 60.0;
-        let mut target_hour = ctx.current_hour + offset_hours;
-        while target_hour < 0.0 {
-            target_hour += 24.0;
-        }
-        while target_hour >= 24.0 {
-            target_hour -= 24.0;
-        }
-        let offset_ctx = CurveContext::new(target_hour, ctx.solar, ctx.sun_times);
+        // with_offset wraps via rem_euclid — a `while ± 24.0` loop here never
+        // terminates for huge/±inf offsets (unvalidated, persisted API floats)
+        // and this runs on every tick while the engine write lock is held.
+        let offset_ctx = ctx.with_offset(offset_minutes);
         self.calculate(&offset_ctx)
     }
 

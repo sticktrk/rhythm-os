@@ -25,6 +25,18 @@ const SSE_IDLE_TIMEOUT_SECS: u64 = 15;
 /// Log an "SSE alive" message at this interval during idle periods.
 const ALIVE_LOG_INTERVAL_SECS: u64 = 300;
 
+/// Bound on the connect + TLS handshake + response-header phase of a stream
+/// request. `connect_timeout` only covers the TCP connect; without this, a
+/// bridge that accepts the connection but never completes the handshake wedges
+/// the reconnect loop forever. Deliberately NOT a whole-request `.timeout()`,
+/// which would kill the infinite SSE body.
+const SSE_CONNECT_TIMEOUT_SECS: u64 = 15;
+
+/// Cap on the buffered partial SSE line. Real Hue payloads are a few KB; a
+/// misbehaving bridge streaming bytes with no `\n` would otherwise grow the
+/// buffer without bound (slow OOM on appliance hardware).
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+
 fn open_fd_count() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
@@ -66,16 +78,30 @@ pub fn start_reqwest_sse(
 ) -> std::sync::mpsc::Receiver<HueSseEvent> {
     let (tx, rx) = sync_channel::<HueSseEvent>(64);
 
-    std::thread::Builder::new()
+    // Spawn/build failures drop `tx`, which the translator observes as a
+    // disconnect — never panic here: this runs on hub-configure paths.
+    let spawn_result = std::thread::Builder::new()
         .name("hue-sse".to_string())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("Failed to build SSE tokio runtime");
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!(target: "sse", "Failed to build SSE tokio runtime: {}", e);
+                    let _ = tx.try_send(HueSseEvent::Disconnected(format!(
+                        "Failed to build SSE runtime: {}",
+                        e
+                    )));
+                    return;
+                }
+            };
             rt.block_on(run_sse_loop(&config, &tx, &shutdown));
-        })
-        .expect("Failed to spawn SSE thread");
+        });
+    if let Err(e) = spawn_result {
+        warn!(target: "sse", "Failed to spawn SSE thread: {}", e);
+    }
 
     rx
 }
@@ -93,6 +119,9 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         connect_count += 1;
         info!(target: "sse", "Connecting SSE to {} (conn #{})...", url, connect_count);
 
+        // Client build fails under fd exhaustion or TLS-init hiccups — both
+        // transient. Retry with backoff; returning here would permanently kill
+        // the SSE loop (no Hue events until process restart).
         let client = match build_sse_client() {
             Ok(c) => c,
             Err(e) => {
@@ -106,7 +135,9 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     "Client build error: {}",
                     e
                 )));
-                return;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
             }
         };
 
@@ -115,8 +146,25 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             .header("hue-application-key", &config.username)
             .header("Accept", "text/event-stream");
 
-        let response = match request.send().await {
-            Ok(response) => match response.error_for_status() {
+        let response = match tokio::time::timeout(
+            Duration::from_secs(SSE_CONNECT_TIMEOUT_SECS),
+            request.send(),
+        )
+        .await
+        {
+            Err(_) => {
+                warn!(
+                    target: "sse",
+                    "SSE connect timed out after {}s{}",
+                    SSE_CONNECT_TIMEOUT_SECS,
+                    fd_log_suffix()
+                );
+                debug!(target: "sse", "Reconnecting SSE in {:?}...", backoff);
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+            Ok(Ok(response)) => match response.error_for_status() {
                 Ok(response) => response,
                 Err(e) => {
                     warn!(
@@ -131,7 +179,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     continue;
                 }
             },
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     target: "sse",
                     "SSE request failed: {}{}",
@@ -179,6 +227,14 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                     chunks_since_alive = chunks_since_alive.saturating_add(1);
                     line_buf.extend_from_slice(&chunk);
                     drain_sse_lines(&mut line_buf, tx, &mut parse_state);
+                    if line_buf.len() > MAX_SSE_LINE_BYTES {
+                        warn!(
+                            target: "sse",
+                            "SSE line exceeded {} bytes without newline, reconnecting",
+                            MAX_SSE_LINE_BYTES
+                        );
+                        break;
+                    }
 
                     if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
                         debug!(

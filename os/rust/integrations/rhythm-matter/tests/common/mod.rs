@@ -54,7 +54,7 @@ where
     {
         let mut state_guard = state.lock().unwrap();
         state_guard.data_dir = data_dir.display().to_string();
-        state_guard.storage = Some(Box::new(
+        state_guard.storage = Some(std::sync::Arc::new(
             FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
         ));
         state_guard.ensure_runtime_fn = Some(Arc::new(|state: &SharedState| {

@@ -599,12 +599,14 @@ pub fn spawn_stored_hub_bootstrap(
             bootstrap_stored_hubs_until_settled(&thread_state, integrations, &mut clock);
         });
 
-    if spawn_result.is_err() {
+    if let Err(e) = spawn_result {
+        // Thread spawn fails under fd/thread exhaustion; panicking here would
+        // abort startup (or the configure request) instead of retrying later.
+        warn!(target: "sys", "Failed to spawn hub bootstrap thread: {}", e);
         if let Ok(mut s) = state.lock() {
             s.finish_hub_bootstrap_worker();
         }
     }
-    spawn_result.expect("Failed to spawn hub bootstrap thread");
 }
 
 fn bootstrap_stored_hubs_until_settled<'a>(

@@ -630,8 +630,12 @@ pub(crate) fn clear_pending_periodic_tick_generation(
 /// The `on_tick` callback is for platform-specific per-tick actions
 /// (for example diagnostic hooks or appliance-side helpers).
 pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
+    // Recover from a poisoned state lock instead of returning: this is the
+    // only exit from the periodic loop, and it is never respawned — a panic
+    // in another thread during boot would otherwise permanently and silently
+    // kill all periodic light updates before "started" is even logged.
     let initial_interval = {
-        let Ok(s) = state.lock() else { return };
+        let s = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         Duration::from_secs(s.runtime_config.update_interval_secs)
     };
 
@@ -641,7 +645,23 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     );
 
     loop {
-        let sleep_for = run_periodic_cycle(state.clone(), on_tick.as_ref());
+        // One bad cycle (bad config, poisoned downstream lock) must not kill
+        // the only periodic thread — log and keep ticking.
+        let cycle = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_periodic_cycle(state.clone(), on_tick.as_ref())
+        }));
+        let sleep_for = match cycle {
+            Ok(sleep_for) => sleep_for,
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic>".to_string());
+                warn!("Periodic cycle panicked (continuing): {}", msg);
+                initial_interval
+            }
+        };
         if !sleep_for.is_zero() {
             thread::sleep(sleep_for);
         }
@@ -1057,14 +1077,29 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         }
     }
 
-    if light_breaker_enabled {
+    // Time-check bookkeeping runs regardless of the light breaker: it is the
+    // appliance watchdog's liveness signal (`last_check_instant`). Gating it
+    // on the breaker made the watchdog reboot the device ~5 min after a user
+    // disabled the breaker, even though this loop was perfectly healthy.
+    // Only the mode-transition side effects stay breaker-gated.
+    {
         let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
-        match check_solar_midnight_at(&state, current_hour, utc_offset, Instant::now()) {
-            PeriodicTimeCheckResult::Continuous { last_hour } => {
-                check_mode_transitions(&state, last_hour, current_hour);
-            }
-            PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
-                replay_missed_mode_transitions(&state);
+        let time_check = check_solar_midnight_at_gated(
+            &state,
+            current_hour,
+            utc_offset,
+            Instant::now(),
+            light_breaker_enabled,
+        );
+        if light_breaker_enabled {
+            match time_check {
+                PeriodicTimeCheckResult::Continuous { last_hour } => {
+                    check_mode_transitions(&state, last_hour, current_hour);
+                }
+                PeriodicTimeCheckResult::Seeded
+                | PeriodicTimeCheckResult::Discontinuous { .. } => {
+                    replay_missed_mode_transitions(&state);
+                }
             }
         }
     }
@@ -1262,12 +1297,34 @@ fn check_solar_midnight_at(
     current_utc_offset_hours: f32,
     observed_at: Instant,
 ) -> PeriodicTimeCheckResult {
+    check_solar_midnight_at_gated(
+        state,
+        current_hour,
+        current_utc_offset_hours,
+        observed_at,
+        true,
+    )
+}
+
+/// Like [`check_solar_midnight_at`] but with the solar-midnight offset reset
+/// optionally suppressed. The time bookkeeping itself always runs — it feeds
+/// the appliance liveness watchdog — while the reset side effect stays gated
+/// on the light breaker.
+fn check_solar_midnight_at_gated(
+    state: &SharedState,
+    current_hour: f32,
+    current_utc_offset_hours: f32,
+    observed_at: Instant,
+    apply_side_effects: bool,
+) -> PeriodicTimeCheckResult {
     let result =
         advance_periodic_time_check(state, current_hour, current_utc_offset_hours, observed_at);
 
     match result {
         PeriodicTimeCheckResult::Continuous { last_hour } => {
-            maybe_reset_on_solar_midnight(state, last_hour, current_hour);
+            if apply_side_effects {
+                maybe_reset_on_solar_midnight(state, last_hour, current_hour);
+            }
         }
         PeriodicTimeCheckResult::Discontinuous {
             last_hour,

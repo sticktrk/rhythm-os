@@ -1027,11 +1027,13 @@ pub fn handle_get_curve_solar(state: &SharedState, date: Option<&str>) -> ApiRes
 
 pub fn handle_put_location(state: &SharedState, body: &Value) -> ApiResponse {
     let lat = match body.get("lat").and_then(|v| v.as_f64()) {
-        Some(v) => v as f32,
+        Some(v) if v.is_finite() && (-90.0..=90.0).contains(&v) => v as f32,
+        Some(_) => return ApiResponse::bad_request("lat must be between -90 and 90"),
         None => return ApiResponse::bad_request("Missing lat"),
     };
     let lon = match body.get("lon").and_then(|v| v.as_f64()) {
-        Some(v) => v as f32,
+        Some(v) if v.is_finite() && (-180.0..=180.0).contains(&v) => v as f32,
+        Some(_) => return ApiResponse::bad_request("lon must be between -180 and 180"),
         None => return ApiResponse::bad_request("Missing lon"),
     };
     let utc_offset = body
@@ -1898,7 +1900,8 @@ pub fn handle_set_brightness(state: &SharedState, body: &Value, persist: bool) -
         };
         let room_id = commands::resolve_node_id(state, raw_room_id);
         let brightness = match item.get("brightness").and_then(|v| v.as_u64()) {
-            Some(b) => b as u8,
+            // Clamp, don't truncate: `256 as u8` wraps to 0 = lights off.
+            Some(b) => b.min(100) as u8,
             None => return ApiResponse::bad_request("Missing brightness"),
         };
 
@@ -1947,7 +1950,8 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
         };
         let node_id = commands::resolve_node_id(state, raw_node_id);
         let brightness = match item.get("brightness").and_then(|v| v.as_u64()) {
-            Some(b) => b as u8,
+            // Clamp, don't truncate: `256 as u8` wraps to 0 = lights off.
+            Some(b) => b.min(100) as u8,
             None => return ApiResponse::bad_request("Missing brightness"),
         };
         updates.push((node_id, brightness));
@@ -2163,7 +2167,10 @@ pub fn handle_set_time_offset(state: &SharedState, body: &Value, persist: bool) 
         };
         let room_id = commands::resolve_node_id(state, raw_room_id);
         let time_offset = match item.get("time_offset").and_then(|v| v.as_f64()) {
-            Some(t) => t as f32,
+            Some(t) if t.is_finite() && t.abs() <= 1440.0 => t as f32,
+            Some(_) => {
+                return ApiResponse::bad_request("time_offset must be within \u{b1}1440 minutes")
+            }
             None => return ApiResponse::bad_request("Missing time_offset"),
         };
 

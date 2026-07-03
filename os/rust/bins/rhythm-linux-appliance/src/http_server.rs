@@ -27,12 +27,28 @@ pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> R
             "/api/wifi",
             get({
                 let provisioning = provisioning.clone();
-                move || async move { handle_get_wifi(&provisioning) }
+                // spawn_blocking: these handlers shell out to wpa_cli /
+                // init scripts. The Pi Zero runtime has a single tokio
+                // worker, so running them inline freezes the whole HTTP/SSE
+                // surface while a subprocess runs (or forever, if wedged).
+                move || async move {
+                    tokio::task::spawn_blocking(move || handle_get_wifi(&provisioning))
+                        .await
+                        .unwrap_or_else(|e| {
+                            ApiResponse::server_error(format!("wifi status task failed: {e}"))
+                        })
+                }
             })
             .delete({
                 let provisioning = provisioning.clone();
                 let state = state.clone();
-                move || async move { handle_delete_wifi(&state, &provisioning) }
+                move || async move {
+                    tokio::task::spawn_blocking(move || handle_delete_wifi(&state, &provisioning))
+                        .await
+                        .unwrap_or_else(|e| {
+                            ApiResponse::server_error(format!("wifi delete task failed: {e}"))
+                        })
+                }
             })
             .put({
                 let state = state.clone();

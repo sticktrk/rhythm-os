@@ -451,7 +451,7 @@ pub struct AppState {
 
     // ---- Storage ----
     /// Platform-specific storage backend.
-    pub storage: Option<Box<dyn Storage>>,
+    pub storage: Option<std::sync::Arc<dyn Storage>>,
     /// Namespaced durable state for plan-based light runtimes.
     ///
     /// Shape: runtime id -> node id -> app-defined key -> JSON value.

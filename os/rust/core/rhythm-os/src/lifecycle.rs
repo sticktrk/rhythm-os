@@ -147,7 +147,7 @@ pub(crate) fn persisted_rooms_look_corrupted(rooms: &rhythm_core::room::RoomMana
 fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEvent> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(HUB_EVENT_CHANNEL_CAPACITY);
 
-    std::thread::Builder::new()
+    let spawn_result = std::thread::Builder::new()
         .name(format!("hub-tag-{}", hub_key))
         .spawn(move || {
             while let Ok(event) = raw_rx.recv() {
@@ -163,8 +163,13 @@ fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEv
                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
                 }
             }
-        })
-        .expect("Failed to spawn hub event tagger thread");
+        });
+    // Spawn failure (thread/fd exhaustion) drops `tx`; the event loop sees a
+    // disconnected receiver. Degraded, but panicking here would abort a hub
+    // configure request instead.
+    if let Err(e) = spawn_result {
+        warn!(target: "evt", "Failed to spawn hub event tagger thread: {}", e);
+    }
 
     rx
 }
@@ -503,7 +508,7 @@ pub fn start_event_translator<E: Send + 'static>(
 ) -> Receiver<HubEvent> {
     let (hub_tx, hub_rx) = std::sync::mpsc::sync_channel::<HubEvent>(HUB_EVENT_CHANNEL_CAPACITY);
 
-    std::thread::Builder::new()
+    let spawn_result = std::thread::Builder::new()
         .name(thread_name.to_string())
         .spawn(move || {
             while let Ok(raw_event) = raw_rx.recv() {
@@ -529,8 +534,10 @@ pub fn start_event_translator<E: Send + 'static>(
                     }
                 }
             }
-        })
-        .expect("Failed to spawn event translator thread");
+        });
+    if let Err(e) = spawn_result {
+        warn!(target: "evt", "Failed to spawn event translator thread: {}", e);
+    }
 
     hub_rx
 }
@@ -1366,7 +1373,7 @@ mod tests {
             guard.utc_offset_hours = 0.0;
             guard.timezone_name = Some("America/New_York".to_string());
             guard.power_save = false;
-            guard.storage = Some(Box::new(LifecycleTestStorage::with_rooms(persisted)));
+            guard.storage = Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms(persisted)));
             guard.topology.insert_room(topology_room_with_binding(
                 "top-kitchen",
                 "Kitchen",
@@ -1418,12 +1425,12 @@ mod tests {
     #[test]
     fn ensure_hub_runtime_defaults_missing_or_corrupted_rooms_to_rhythm_enabled() {
         for storage in [
-            Some(Box::new(LifecycleTestStorage::default()) as Box<dyn Storage>),
-            Some(Box::new(LifecycleTestStorage::with_rooms({
+            Some(std::sync::Arc::new(LifecycleTestStorage::default()) as std::sync::Arc<dyn Storage>),
+            Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms({
                 let mut rooms = RoomManager::new();
                 rooms.add_room(Room::new("hub-kitchen", "Kitchen"));
                 rooms
-            })) as Box<dyn Storage>),
+            })) as std::sync::Arc<dyn Storage>),
         ] {
             let state = shared_state();
             let hub_key = HubKey::new(HubType::new("test"), "hub-1");
@@ -1481,7 +1488,7 @@ mod tests {
             guard.longitude = Some(-80.84);
             guard.utc_offset_hours = -5.0;
             guard.power_save = false;
-            guard.storage = Some(Box::new(LifecycleTestStorage::with_rooms(persisted)));
+            guard.storage = Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms(persisted)));
             guard.topology.insert_room(topology_room_with_binding(
                 "top-kitchen",
                 "Kitchen",
