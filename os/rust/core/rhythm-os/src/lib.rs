@@ -6,6 +6,8 @@
 //! No platform-specific dependencies — concrete storage backends, SSE
 //! transports, and HTTP servers are provided by the consuming binary crate.
 
+pub mod activity;
+pub mod activity_cloud;
 pub mod api_types;
 pub mod auth;
 pub mod bundle;

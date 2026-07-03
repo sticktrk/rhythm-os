@@ -27,5 +27,8 @@ target/
 .codex/
 admin-api/.env
 
+# Local assistant/worktree scratch state.
+.claude/worktrees/
+
 # Local Supabase CLI project metadata.
 tools/app/supabase/.temp/

@@ -428,6 +428,10 @@ pub fn process_button_inline(
                 latency_ms = started.elapsed().as_millis(),
                 "Inline button action applied"
             );
+            let mut record =
+                crate::activity::LightActivityRecord::physical_button(node_id, action, device_id);
+            record.correlation_id = Some(command_id.to_string());
+            crate::activity::record_light_activity(state, record);
             crate::commands::sync_active_mode_from_runtime(state, &runtime);
             if let Ok(mut s) = state.lock() {
                 if s.room_mode_transitions.remove(node_id).is_some() {

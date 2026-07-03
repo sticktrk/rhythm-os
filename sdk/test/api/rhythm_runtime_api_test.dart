@@ -436,6 +436,91 @@ void main() {
       expect(history.activities.single.count, 2);
       expect(presets.presets.single['id'], 'desk');
     });
+
+    test('getHistory sends optional server-side activity filters', () async {
+      when(() => dio.get(
+            'api/history',
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/history'),
+          statusCode: 200,
+          data: {'activities': const []},
+        ),
+      );
+
+      await api.getHistory(
+        limit: 5000,
+        area: 'room-1',
+        source: 'physical_button',
+        action: 'turn_on',
+      );
+
+      verify(() => dio.get(
+            'api/history',
+            queryParameters: {
+              'limit': 5000,
+              'area': 'room-1',
+              'source': 'physical_button',
+              'action': 'turn_on',
+            },
+          )).called(1);
+    });
+
+    test('activity cloud config uses device provisioning routes', () async {
+      when(() => dio.get('api/activity-cloud/config')).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/activity-cloud/config'),
+          statusCode: 200,
+          data: {
+            'configured': true,
+            'hub_id': 'hub-1',
+            'home_id': 'home-1',
+          },
+        ),
+      );
+      when(() => dio.put(
+            'api/activity-cloud/config',
+            data: any(named: 'data'),
+          )).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/activity-cloud/config'),
+          statusCode: 200,
+          data: {'configured': true},
+        ),
+      );
+      when(() => dio.delete('api/activity-cloud/config')).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/activity-cloud/config'),
+          statusCode: 200,
+          data: {'configured': false},
+        ),
+      );
+
+      final status = await api.getActivityCloudConfig();
+      final updated = await api.putActivityCloudConfig({
+        'ingest_url':
+            'https://example.test/functions/v1/server-activity-ingest',
+        'upload_token': 'token',
+        'home_id': 'home-1',
+        'hub_id': 'hub-1',
+      });
+      final cleared = await api.clearActivityCloudConfig();
+
+      expect(status?['hub_id'], 'hub-1');
+      expect(updated?['configured'], isTrue);
+      expect(cleared?['configured'], isFalse);
+      verify(() => dio.put(
+            'api/activity-cloud/config',
+            data: {
+              'ingest_url':
+                  'https://example.test/functions/v1/server-activity-ingest',
+              'upload_token': 'token',
+              'home_id': 'home-1',
+              'hub_id': 'hub-1',
+            },
+          )).called(1);
+    });
   });
 
   group('integration sync and reports', () {

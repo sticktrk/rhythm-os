@@ -1956,6 +1956,7 @@ dependencies = [
  "log",
  "mdns-sd",
  "rand 0.8.6",
+ "reqwest",
  "rhythm-adaptive",
  "rhythm-core",
  "rhythm-devices",

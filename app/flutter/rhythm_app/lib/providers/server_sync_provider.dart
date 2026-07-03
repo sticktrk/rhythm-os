@@ -16,13 +16,16 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../backend/backend.dart' show AuthUser;
 import '../config/feature_flags.dart';
+import '../services/auth_service.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/remote_access_service.dart';
+import '../services/server_activity_cloud_provisioning_service.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
 
@@ -112,6 +115,8 @@ class ServerSyncProvider extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _triageChangedSub;
   StreamSubscription<RhythmConnectionState>? _connectionStateSub;
   StreamSubscription<void>? _demoChangeSub;
+  StreamSubscription<AuthUser?>? _authStateSub;
+  Timer? _activityCloudProvisioningTimer;
 
   /// Suppresses push-back when receiving rhythm_state from server.
   bool _receivingFromServer = false;
@@ -194,6 +199,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Firmware version reported by server in the hello message.
   String _firmwareVersion = '0.0.0';
+  String? _lastServerInstanceId;
+  static const Duration _activityCloudProvisioningInterval =
+      Duration(minutes: 5);
 
   /// Platform type reported by server ("desktop" or "embedded"/"bridge").
   String _serverPlatformType = 'desktop';
@@ -1121,6 +1129,8 @@ class ServerSyncProvider extends ChangeNotifier {
       if (!HueServiceLocator.isDemoMode) return;
       unawaited(_refreshDemoState());
     });
+
+    _authStateSub = AuthService().authStateChanges.listen(_onAuthStateChanged);
   }
 
   void _beginRoomReadinessRefresh() {
@@ -1793,6 +1803,7 @@ class ServerSyncProvider extends ChangeNotifier {
       debugPrint(
           'ServerSync: Server node "${r.name}" kind=${r.kind.name} rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue} transitioning=${r.transitioning}');
     }
+    _lastServerInstanceId = hello.serverInstanceId;
     _firmwareVersion = hello.version;
     _serverPlatformType = hello.platformType;
     _serverPlatformContext = hello.platformContext;
@@ -1875,6 +1886,10 @@ class ServerSyncProvider extends ChangeNotifier {
     // a buffered event after the connection has been torn down (e.g. right
     // after a factory reset), so skip if the underlying api is gone.
     if (_connection.connected) {
+      _ensureServerActivityCloudConfigured(
+        serverInstanceId: hello.serverInstanceId,
+      );
+      _startActivityCloudProvisioningTimer();
       api.getTriageCount().then((data) {
         if (data != null) _onTriageChanged(data);
       });
@@ -1893,6 +1908,49 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     notifyListeners();
+  }
+
+  void _onAuthStateChanged(AuthUser? user) {
+    if (user == null || user.isAnonymous) return;
+    _ensureServerActivityCloudConfigured(
+      serverInstanceId: _lastServerInstanceId,
+    );
+  }
+
+  void _startActivityCloudProvisioningTimer() {
+    if (!_connection.connected || HueServiceLocator.isDemoMode) return;
+    _activityCloudProvisioningTimer ??= Timer.periodic(
+      _activityCloudProvisioningInterval,
+      (_) => _ensureServerActivityCloudConfigured(
+        serverInstanceId: _lastServerInstanceId,
+      ),
+    );
+  }
+
+  void _stopActivityCloudProvisioningTimer() {
+    _activityCloudProvisioningTimer?.cancel();
+    _activityCloudProvisioningTimer = null;
+  }
+
+  void _ensureServerActivityCloudConfigured({String? serverInstanceId}) {
+    if (!_connection.connected) return;
+    final serverHub = _serverHub ?? _homeProvider.activeServerHub;
+    if (serverHub == null || HueServiceLocator.isDemoMode) return;
+    unawaited(
+      ServerActivityCloudProvisioningService.instance
+          .ensureConfigured(
+        serverHub: serverHub,
+        runtimeApi: _connection.runtimeApi,
+        home: _homeProvider.currentHome,
+        serverInstanceId: serverInstanceId,
+      )
+          .catchError((Object error, StackTrace stackTrace) {
+        debugPrint(
+          'ServerSyncProvider: activity cloud provisioning skipped: $error',
+        );
+        debugPrint('$stackTrace');
+      }),
+    );
   }
 
   /// Accept light-addressable nodes from the server as the authoritative source.
@@ -2209,6 +2267,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   void _resetConnectionMetadata() {
     _firmwareVersion = '0.0.0';
+    _lastServerInstanceId = null;
     _serverPlatformType = 'desktop';
     _serverPlatformContext = 'server';
     _powerSave = true;
@@ -2242,6 +2301,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (current != previous &&
         (current == RhythmConnectionState.disconnected ||
             current == RhythmConnectionState.reconnecting)) {
+      _stopActivityCloudProvisioningTimer();
       final clearMetadata = !_hasBeenSynced || _homeEntryRefreshPending;
       debugPrint(
           'ServerSync: Connection lost ($previous → $current) — ${clearMetadata ? 'resetting metadata' : 'keeping synced metadata'} and keeping rooms');
@@ -3789,6 +3849,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _triageChangedSub?.cancel();
     _connectionStateSub?.cancel();
     _demoChangeSub?.cancel();
+    _authStateSub?.cancel();
+    _stopActivityCloudProvisioningTimer();
     _completeHomeEntryRefreshWaiter();
     super.dispose();
   }

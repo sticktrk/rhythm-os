@@ -80,6 +80,12 @@ fn shared_routes() -> Router<SharedState> {
             "/api/remote-access/config",
             put(crate::remote_access::put_config).delete(crate::remote_access::delete_config),
         )
+        .route(
+            "/api/activity-cloud/config",
+            get(crate::activity_cloud::get_config)
+                .put(crate::activity_cloud::put_config)
+                .delete(crate::activity_cloud::delete_config),
+        )
         .route("/api/state", get(get_state))
         .route(
             "/api/profile-bundle",
@@ -102,6 +108,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/factory-reset", post(post_factory_reset))
         .route("/api/backup", get(get_backup).put(put_backup))
         .route("/api/nodes/state", get(get_nodes_state))
+        .route("/api/history", get(get_history))
         .route("/api/events", get(sse_events))
         .route("/api/devices", delete(delete_device))
         .route("/api/config", get(get_config).put(put_config))
@@ -350,6 +357,13 @@ async fn put_backup(State(state): State<SharedState>, Json(body): Json<Value>) -
 
 async fn get_nodes_state(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_nodes_state(&state)
+}
+
+async fn get_history(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    handlers::handle_get_history(&state, &params)
 }
 
 async fn delete_device(
@@ -1056,6 +1070,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::NodeState { .. } => "node_state",
         ServerEvent::MotionTimer { .. } => "motion_timer",
         ServerEvent::InputEvent(_) => "input_event",
+        ServerEvent::ActivityAppended { .. } => "activity_appended",
         ServerEvent::HubStatus { .. } => "hub_status",
         ServerEvent::SettingsChanged { .. } => "settings_changed",
         ServerEvent::LightBreakerChanged { .. } => "light_breaker_changed",
@@ -1157,6 +1172,34 @@ mod tests {
             error: None,
         };
         assert_eq!(server_event_name(&ota), "ota_update_progress");
+
+        let activity = ServerEvent::ActivityAppended {
+            activity: crate::activity::LightActivityEvent {
+                id: "activity-1".to_string(),
+                node_id: "room-1".to_string(),
+                action_id: "turn_on".to_string(),
+                source: crate::activity::LightActivitySource {
+                    raw: "app".to_string(),
+                    kind: "app".to_string(),
+                    marks_touched: true,
+                    control_id: None,
+                },
+                epoch_ms: 1778058932588,
+                server_instance_id: None,
+                server_version: None,
+                platform: None,
+                active_mode: None,
+                target: None,
+                change: None,
+                count: 1,
+                correlation_id: None,
+                fanout_of: None,
+                payload: None,
+                brightness: None,
+                kelvin: None,
+            },
+        };
+        assert_eq!(server_event_name(&activity), "activity_appended");
     }
 
     struct ThreadRecordingRuntime {
