@@ -831,6 +831,122 @@ fn spawn_light_state_poll(state: &SharedState, hub_key: &crate::canonical::ident
     }
 }
 
+fn enqueue_active_reconnect_motion_seeds(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+    motion_states: Vec<crate::discovery::DiscoveredMotionState>,
+) -> (usize, usize, usize) {
+    let active_count = motion_states
+        .iter()
+        .filter(|motion_state| motion_state.is_active)
+        .count();
+    let mut unresolved_count = 0usize;
+    let mut seeds = Vec::with_capacity(active_count);
+
+    for motion_state in motion_states
+        .into_iter()
+        .filter(|motion_state| motion_state.is_active)
+    {
+        match commands::resolve_node_control_target(
+            state,
+            hub_key,
+            &motion_state.sensor_id,
+            &NodeControlKind::Motion,
+        ) {
+            Some((source_node_id, target_node_id)) => {
+                seeds.push(MotionSeedEntry {
+                    source_node_id,
+                    target_node_id,
+                    is_active: true,
+                    stopped_at_epoch_ms: None,
+                    motion_owned: None,
+                    warning_active: false,
+                });
+            }
+            None => unresolved_count += 1,
+        }
+    }
+
+    let queued_count = if seeds.is_empty() {
+        0
+    } else if let Ok(mut s) = state.lock() {
+        let count = seeds.len();
+        s.pending_motion_seed.extend(seeds);
+        count
+    } else {
+        0
+    };
+
+    (active_count, queued_count, unresolved_count)
+}
+
+fn spawn_reconnect_motion_state_poll(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+) {
+    let poll_state = state.clone();
+    let poll_hub_key = hub_key.clone();
+    let thread_name = format!("hub-motion-poll-{}", poll_hub_key.hub_type.as_str());
+
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let discovery = {
+                let Ok(s) = poll_state.lock() else { return };
+                s.hubs
+                    .get(&poll_hub_key)
+                    .and_then(|hub| hub.discovery.clone())
+            };
+            let Some(discovery) = discovery else {
+                return;
+            };
+
+            match discovery.discover_motion_state() {
+                Ok(motion_states) => {
+                    let (active_count, queued_count, unresolved_count) =
+                        enqueue_active_reconnect_motion_seeds(
+                            &poll_state,
+                            &poll_hub_key,
+                            motion_states,
+                        );
+                    if active_count > 0 || unresolved_count > 0 {
+                        info!(
+                            target: "conn",
+                            "Hub {} reconnect motion refresh: queued {} of {} active sensors ({} unresolved)",
+                            poll_hub_key,
+                            queued_count,
+                            active_count,
+                            unresolved_count
+                        );
+                    } else {
+                        debug!(
+                            target: "conn",
+                            "Hub {} reconnect motion refresh: no active sensors",
+                            poll_hub_key
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        target: "conn",
+                        "Hub {} reconnect motion refresh failed: {}",
+                        poll_hub_key,
+                        e
+                    );
+                }
+            }
+        });
+
+    if let Err(e) = spawn_result {
+        warn!(
+            target: "conn",
+            "Failed to spawn reconnect motion-state poll for {}: {}",
+            hub_key,
+            e
+        );
+    }
+}
+
 fn emit_hub_status(
     state: &SharedState,
     hub_key: Option<&crate::canonical::identity::HubKey>,
@@ -1002,6 +1118,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         );
                         spawn_light_state_poll(state, key);
                     }
+                    spawn_reconnect_motion_state_poll(state, key);
                 }
             }
 
@@ -3014,7 +3131,7 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
+    use crate::discovery::{DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery};
     use rhythm_core::runtime::{RoomSnapshot, RuntimeHandle};
     use rhythm_core::{
         HubRegistry, InputEvent, LightProfileConfig, RoomProfileSettings, TimerSetting,
@@ -4042,6 +4159,48 @@ mod tests {
         fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
             Ok(vec![])
         }
+    }
+
+    #[test]
+    fn reconnect_motion_refresh_queues_active_motion_seed() {
+        let state = make_state();
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "192.0.2.10");
+        let source_node_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "motion-native-1",
+            "mud_room",
+            DeviceType::Motion,
+        );
+
+        let (active_count, queued_count, unresolved_count) = enqueue_active_reconnect_motion_seeds(
+            &state,
+            &hub_key,
+            vec![
+                DiscoveredMotionState {
+                    sensor_id: "motion-native-1".into(),
+                    room_id: "mud_room_native".into(),
+                    is_active: true,
+                },
+                DiscoveredMotionState {
+                    sensor_id: "motion-native-2".into(),
+                    room_id: "mud_room_native".into(),
+                    is_active: false,
+                },
+            ],
+        );
+
+        assert_eq!(active_count, 1);
+        assert_eq!(queued_count, 1);
+        assert_eq!(unresolved_count, 0);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.pending_motion_seed.len(), 1);
+        let seed = &s.pending_motion_seed[0];
+        assert_eq!(seed.source_node_id, source_node_id);
+        assert_eq!(seed.target_node_id, "mud_room");
+        assert!(seed.is_active);
+        assert!(seed.stopped_at_epoch_ms.is_none());
     }
 
     #[test]
