@@ -516,6 +516,33 @@ mod tests {
             transition_ms: None,
         })
         .is_empty());
+
+        let mut write_plan = RuntimePlan::noop();
+        write_plan.state_writes.push(StateWrite {
+            node_id: "area".to_string(),
+            key: "last_motion".to_string(),
+            value: serde_json::json!(123),
+        });
+        assert!(!write_plan.is_empty());
+
+        let mut diagnostic_plan = RuntimePlan::noop();
+        diagnostic_plan.diagnostics.push(RuntimeDiagnostic {
+            level: DiagnosticLevel::Warn,
+            message: "motion source was visible but unroutable".to_string(),
+        });
+        assert!(!diagnostic_plan.is_empty());
+    }
+
+    #[test]
+    fn lighting_command_builders_keep_optional_runtime_metadata() {
+        let command = LightingCommand::new(73, 3100)
+            .with_transition(450)
+            .with_purpose("motion_turn_on");
+
+        assert_eq!(command.brightness, 73);
+        assert_eq!(command.kelvin, 3100);
+        assert_eq!(command.transition_ms, Some(450));
+        assert_eq!(command.purpose.as_deref(), Some("motion_turn_on"));
     }
 
     #[test]
@@ -538,5 +565,89 @@ mod tests {
             manifest.extension.endpoints[0].method,
             RuntimeHttpMethod::Put
         );
+    }
+
+    #[test]
+    fn endpoint_convenience_builders_preserve_methods_and_schemas() {
+        let request_schema = serde_json::json!({"type": "object"});
+        let response_schema = serde_json::json!({"type": "array"});
+        let endpoints = [
+            RuntimeEndpointSpec::get("/state"),
+            RuntimeEndpointSpec::post("/actions"),
+            RuntimeEndpointSpec::patch("/settings").with_request_schema(request_schema.clone()),
+            RuntimeEndpointSpec::delete("/settings").with_response_schema(response_schema.clone()),
+        ];
+
+        assert_eq!(endpoints[0].method, RuntimeHttpMethod::Get);
+        assert_eq!(endpoints[1].method, RuntimeHttpMethod::Post);
+        assert_eq!(endpoints[2].method, RuntimeHttpMethod::Patch);
+        assert_eq!(endpoints[2].request_schema, Some(request_schema));
+        assert_eq!(endpoints[3].method, RuntimeHttpMethod::Delete);
+        assert_eq!(endpoints[3].response_schema, Some(response_schema));
+    }
+
+    #[test]
+    fn extension_response_empty_and_json_keep_plan_defaults() {
+        let response = RuntimeExtensionResponse::empty(204);
+        assert_eq!(response.status, 204);
+        assert_eq!(response.body, serde_json::Value::Null);
+        assert!(response.plan.is_empty());
+
+        let planned = RuntimeExtensionResponse::json(serde_json::json!({"ok": true})).with_plan(
+            RuntimePlan::dispatch(DispatchCommand::TurnOn {
+                target: DispatchTarget::Group {
+                    hub_id: "hub-1".to_string(),
+                    control_id: "room-1".to_string(),
+                },
+                command: LightingCommand::new(88, 2700),
+            }),
+        );
+
+        assert_eq!(planned.status, 200);
+        assert_eq!(planned.body, serde_json::json!({"ok": true}));
+        assert_eq!(planned.plan.dispatch.len(), 1);
+    }
+
+    struct DefaultRuntime;
+
+    impl LightRuntime for DefaultRuntime {
+        fn name(&self) -> &str {
+            "default-runtime"
+        }
+
+        fn handle_event(
+            &mut self,
+            _snapshot: &RuntimeSnapshot,
+            _event: RuntimeEvent,
+        ) -> RuntimeResult<RuntimePlan> {
+            Ok(RuntimePlan::noop())
+        }
+    }
+
+    #[test]
+    fn light_runtime_defaults_describe_manifest_and_reject_unknown_extension() {
+        let mut runtime = DefaultRuntime;
+        let manifest = runtime.manifest();
+
+        assert_eq!(manifest.id, "default-runtime");
+        assert_eq!(manifest.name, "default-runtime");
+        assert_eq!(manifest.capabilities, RuntimeCapabilities::light_runtime());
+
+        let error = runtime
+            .handle_extension(
+                &RuntimeSnapshot::default(),
+                RuntimeExtensionRequest {
+                    method: RuntimeHttpMethod::Patch,
+                    path: "/missing".to_string(),
+                    query: BTreeMap::new(),
+                    body: serde_json::Value::Null,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::UnsupportedExtension(message) if message == "Patch /missing"
+        ));
     }
 }

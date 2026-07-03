@@ -167,3 +167,86 @@ impl From<HueRoomDto> for HueRoom {
         HueRoom::new(dto.id, dto.name)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switch_device_dto_round_trip_preserves_assignment_fields() {
+        let device = HueSwitchDevice::new("device-1", "Kitchen Switch")
+            .with_product_name("Hue dimmer switch")
+            .with_button_ids(vec![
+                "button-1".to_string(),
+                "button-2".to_string(),
+                "button-3".to_string(),
+                "button-4".to_string(),
+            ])
+            .with_room_id("room-1");
+
+        let dto = HueSwitchDeviceDto::from(device.clone());
+
+        assert_eq!(dto.id, "device-1");
+        assert_eq!(dto.name, "Kitchen Switch");
+        assert_eq!(dto.product_name.as_deref(), Some("Hue dimmer switch"));
+        assert_eq!(dto.button_ids.len(), 4);
+        assert_eq!(dto.room_id.as_deref(), Some("room-1"));
+        assert_eq!(HueSwitchDevice::from(dto), device);
+    }
+
+    #[test]
+    fn button_dto_round_trip_preserves_owner_device() {
+        let button = HueButton::new("button-1", 2, "device-1");
+        let dto = HueButtonDto::from(button.clone());
+
+        assert_eq!(dto.id, "button-1");
+        assert_eq!(dto.control_id, 2);
+        assert_eq!(dto.owner_device_id, "device-1");
+        assert_eq!(HueButton::from(dto), button);
+    }
+
+    #[test]
+    fn room_dto_round_trip_preserves_room_name() {
+        let room = HueRoom::new("room-1", "Kitchen");
+        let dto = HueRoomDto::from(room.clone());
+
+        assert_eq!(dto.id, "room-1");
+        assert_eq!(dto.name, "Kitchen");
+        assert_eq!(HueRoom::from(dto), room);
+    }
+
+    #[test]
+    fn behavior_tracker_dto_round_trip_restores_configured_devices() {
+        let dto = HueBehaviorTrackerDto {
+            behavior_mappings: vec![
+                BehaviorMappingDto {
+                    behavior_id: "behavior-1".to_string(),
+                    device_id: "device-1".to_string(),
+                },
+                BehaviorMappingDto {
+                    behavior_id: "behavior-2".to_string(),
+                    device_id: "device-1".to_string(),
+                },
+                BehaviorMappingDto {
+                    behavior_id: "behavior-3".to_string(),
+                    device_id: "device-2".to_string(),
+                },
+            ],
+            configured_device_ids: Vec::new(),
+        };
+
+        let tracker = HueBehaviorTracker::from(dto);
+        let dto = HueBehaviorTrackerDto::from(tracker);
+
+        assert_eq!(dto.behavior_mappings.len(), 3);
+        assert_eq!(dto.configured_device_ids.len(), 2);
+        assert!(dto
+            .configured_device_ids
+            .iter()
+            .any(|device_id| device_id == "device-1"));
+        assert!(dto
+            .configured_device_ids
+            .iter()
+            .any(|device_id| device_id == "device-2"));
+    }
+}
