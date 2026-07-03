@@ -628,6 +628,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn profile_config_mutation_and_fallback_sun_times_cover_helper_paths() {
+        let mut profile = LightProfile::new(default_rhythm_profile());
+        let original = profile.calculate(&test_context(12.0));
+
+        let mut config = profile.config().clone();
+        config.min_brightness = 30;
+        config.max_brightness = 30;
+        config.min_color_temp = 3100;
+        config.max_color_temp = 3100;
+        profile.set_config(config);
+
+        let mutated = profile.calculate(&CurveContext::new(12.0, SolarTime::default(), None));
+        assert_ne!(original.brightness, mutated.brightness);
+        assert_eq!(mutated.brightness, 30);
+        assert_eq!(mutated.kelvin, 3100);
+        assert_eq!(profile.min_brightness(), 30);
+        assert_eq!(profile.max_brightness(), 30);
+        assert_eq!(profile.min_color_temp(), 3100);
+        assert_eq!(profile.max_color_temp(), 3100);
+    }
+
+    #[test]
+    fn palette_and_constant_profiles_cover_non_super_gaussian_boundaries() {
+        let palette_profile = LightProfile::new(LightProfileConfig {
+            id: "palette".into(),
+            name: "Palette".into(),
+            curve: LightCurveShape::Palette {
+                keyframes: vec![
+                    rhythm_profile::curve_shape::LightPaletteKeyframe {
+                        hour: 0.0,
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                    },
+                    rhythm_profile::curve_shape::LightPaletteKeyframe {
+                        hour: 12.0,
+                        r: 0,
+                        g: 255,
+                        b: 0,
+                    },
+                ],
+            },
+            min_brightness: 37,
+            max_brightness: 80,
+            min_color_temp: 2200,
+            max_color_temp: 5000,
+            max_dim_steps: 4,
+            fade_ms: TimerSetting::Fixed { value: 750 },
+            motion_timeout_secs: TimerSetting::Fixed { value: 42 },
+            rhythm_interval_secs: TimerSetting::Fixed { value: 11 },
+        });
+
+        let values = palette_profile.calculate(&test_context(6.0));
+        assert_eq!(values.brightness, 37);
+        assert_eq!(values.transition_ms, 750);
+        assert_eq!(values.motion_timeout_secs, 42);
+        assert!(values.is_direct_color);
+        assert!(palette_profile.is_at_minimum(&test_context(6.0)));
+        assert!(palette_profile.is_at_maximum(&test_context(6.0)));
+        assert_eq!(
+            palette_profile
+                .calculate_step(&test_context(6.0), StepAction::Dim)
+                .at_boundary,
+            true
+        );
+
+        let constant = LightProfile::new(LightProfileConfig {
+            id: "constant".into(),
+            name: "Constant".into(),
+            curve: LightCurveShape::Constant {
+                brightness: 2.0,
+                color_temp: -1.0,
+                direct_color: None,
+            },
+            min_brightness: 10,
+            max_brightness: 70,
+            min_color_temp: 2500,
+            max_color_temp: 6500,
+            max_dim_steps: 4,
+            fade_ms: TimerSetting::Auto,
+            motion_timeout_secs: TimerSetting::Auto,
+            rhythm_interval_secs: TimerSetting::Auto,
+        });
+        let values = constant.calculate(&test_context(12.0));
+        assert_eq!(values.brightness, 70);
+        assert_eq!(values.kelvin, 2500);
+        assert!(constant.is_at_minimum(&test_context(12.0)));
+        assert!(constant.is_at_maximum(&test_context(12.0)));
+    }
+
     // ── Sleep profile tests ─────────────────────────────────────
 
     #[test]

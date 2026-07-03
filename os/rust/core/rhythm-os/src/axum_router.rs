@@ -1078,6 +1078,7 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::InputEvent(_) => "input_event",
         ServerEvent::ActivityAppended { .. } => "activity_appended",
         ServerEvent::HubStatus { .. } => "hub_status",
+        ServerEvent::DispatchFailure { .. } => "dispatch_failure",
         ServerEvent::SettingsChanged { .. } => "settings_changed",
         ServerEvent::LightBreakerChanged { .. } => "light_breaker_changed",
         ServerEvent::ModeChanged { .. } => "mode_changed",

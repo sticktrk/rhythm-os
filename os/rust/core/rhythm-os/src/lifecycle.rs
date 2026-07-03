@@ -18,6 +18,39 @@ use crate::state::SharedState;
 
 const HUB_EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// Forward hub dispatch failures to the SSE event bus.
+///
+/// Command dispatch is fire-and-forget: `turn_on`/`turn_off` only enqueue.
+/// Successful deliveries surface as the usual `NodeState` updates; anything
+/// that fails, times out, is cooldown-skipped, or dropped is broadcast as a
+/// `DispatchFailure` event so clients see it without watching server logs.
+pub fn install_dispatch_outcome_listener(
+    state: &SharedState,
+    composite: &rhythm_core::CompositeController,
+) {
+    let state = state.clone();
+    composite.set_outcome_listener(Arc::new(move |outcome| {
+        if outcome.status.is_success() {
+            return;
+        }
+        crate::state::emit_server_event(
+            &state,
+            crate::server_event::ServerEvent::DispatchFailure {
+                hub_type: outcome.hub_type.clone(),
+                hub_key: outcome.hub_key.clone(),
+                node_id: outcome.node_id.clone(),
+                target: outcome.target_label.clone(),
+                kind: outcome.kind.as_str().to_string(),
+                status: outcome.status.as_str().to_string(),
+                detail: outcome.status.detail(),
+                queued_ms: outcome.queued_ms,
+                dispatch_ms: outcome.dispatch_ms,
+                epoch_ms: chrono::Utc::now().timestamp_millis(),
+            },
+        );
+    }));
+}
+
 // ============================================================================
 // connect_hub — replaces connect_hue_sse() and connect_ha()
 // ============================================================================
@@ -574,6 +607,7 @@ pub fn ensure_composite_runtime(
     // Build CompositeController and register per-hub controllers.
     // Collect hub keys first (brief lock), then create controllers outside the lock.
     let composite = std::sync::Arc::new(CompositeController::new());
+    install_dispatch_outcome_listener(state, &composite);
     let hub_keys: Vec<(HubKey, String)> = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hubs

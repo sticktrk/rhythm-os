@@ -1091,7 +1091,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     use crate::controller::NoOpController;
     use crate::runtime::config::RuntimeConfig;
@@ -1121,6 +1122,255 @@ mod tests {
         rt: &RhythmRuntime<NoOpController, MockTimeProvider, NoOpScheduler, SimpleDeviceRegistry>,
     ) -> &dyn RuntimeHandle {
         rt
+    }
+
+    #[derive(Default)]
+    struct DefaultingHandle {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl DefaultingHandle {
+        fn room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+            (room_id == "room-a").then(|| RoomSnapshot {
+                id: "room-a".into(),
+                name: "Room A".into(),
+                kind: LightNodeKind::Room,
+                parent_id: None,
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 15.0,
+                brightness_offset: -4.0,
+                soft_off: true,
+                mood_active: false,
+                standby_enabled: true,
+                hard_off: false,
+                profile_settings: RoomProfileSettings::default(),
+            })
+        }
+
+        fn record(&self, call: impl Into<String>) {
+            self.calls.lock().unwrap().push(call.into());
+        }
+    }
+
+    impl RuntimeHandle for DefaultingHandle {
+        fn handle_event(&self, event: &InputEvent) -> Result<bool> {
+            self.record(format!("event:{}", event.room_id));
+            Ok(true)
+        }
+
+        fn sync_rooms(&self) -> Result<()> {
+            self.record("sync_rooms");
+            Ok(())
+        }
+
+        fn set_solar(&self, _solar: SolarTime) -> Result<()> {
+            self.record("set_solar");
+            Ok(())
+        }
+
+        fn set_light_profile_config(&self, _config: LightProfileConfig) -> Result<()> {
+            self.record("set_light_profile_config");
+            Ok(())
+        }
+
+        fn set_mode_configs(&self, _configs: Vec<ModeConfig>) -> Result<()> {
+            self.record("set_mode_configs");
+            Ok(())
+        }
+
+        fn periodic_tick_room(&self, room_id: &str, current_hour: f32) -> Result<()> {
+            self.record(format!("periodic:{room_id}:{current_hour}"));
+            Ok(())
+        }
+
+        fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
+            self.room_snapshot(room_id)
+        }
+
+        fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
+            vec![self.room_snapshot("room-a").unwrap()]
+        }
+
+        fn restore_room_state(&self, room_id: &str, state: RestoredRoomState) {
+            self.record(format!(
+                "restore:{room_id}:{}:{}:{}",
+                state.rhythm_enabled, state.soft_off, state.hard_off
+            ));
+        }
+
+        fn add_room(&self, room_id: &str, room_name: &str) {
+            self.record(format!("add:{room_id}:{room_name}"));
+        }
+
+        fn remove_room(&self, room_id: &str) {
+            self.record(format!("remove:{room_id}"));
+        }
+
+        fn dim_room(&self, room_id: &str, factor: f32) -> Result<()> {
+            self.record(format!("dim:{room_id}:{factor}"));
+            Ok(())
+        }
+
+        fn turn_on_room(&self, room_id: &str) -> Result<()> {
+            self.record(format!("turn_on:{room_id}"));
+            Ok(())
+        }
+
+        fn apply_room_command(&self, room_id: &str, _command: LightingCommand) -> Result<()> {
+            self.record(format!("apply:{room_id}"));
+            Ok(())
+        }
+
+        fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> Result<()> {
+            self.record(format!("off:{room_id}:{transition_ms:?}"));
+            Ok(())
+        }
+
+        fn set_power_save(&self, enabled: bool) -> Vec<String> {
+            self.record(format!("power_save:{enabled}"));
+            vec!["room-a".into()]
+        }
+
+        fn is_power_save(&self) -> bool {
+            false
+        }
+
+        fn set_room_brightness(&self, room_id: &str, brightness: u8) -> Result<()> {
+            self.record(format!("brightness:{room_id}:{brightness}"));
+            Ok(())
+        }
+
+        fn set_room_time_offset(&self, room_id: &str, offset_minutes: f32) -> Result<()> {
+            self.record(format!("offset:{room_id}:{offset_minutes}"));
+            Ok(())
+        }
+
+        fn idle_brightness(&self) -> u8 {
+            7
+        }
+
+        fn soft_off_tick_room(&self, room_id: &str) -> Result<()> {
+            self.record(format!("soft_off:{room_id}"));
+            Ok(())
+        }
+
+        fn any_lights_on(&self, room_id: &str) -> Result<bool> {
+            self.record(format!("any_lights_on:{room_id}"));
+            Ok(false)
+        }
+
+        fn current_hour(&self) -> f32 {
+            12.5
+        }
+
+        fn set_light_profile(&self, id: &str) -> bool {
+            self.record(format!("profile:{id}"));
+            id == crate::RHYTHM_PROFILE_ID
+        }
+
+        fn active_light_profile_id(&self) -> String {
+            crate::RHYTHM_PROFILE_ID.into()
+        }
+
+        fn available_light_profiles(&self) -> Vec<(String, String)> {
+            vec![(crate::RHYTHM_PROFILE_ID.into(), "Rhythm".into())]
+        }
+    }
+
+    #[test]
+    fn runtime_handle_default_contracts_preserve_legacy_room_runtime_behavior() {
+        let handle = DefaultingHandle::default();
+
+        let input = InputEvent::new("room-a", crate::runtime::events::ButtonAction::OnPress);
+        let outcome = RuntimeHandle::plan_input_event(&handle, &input, Some(false)).unwrap();
+        match outcome {
+            RhythmInputPlanOutcome::Plan {
+                plan,
+                turned_on,
+                dispatch_records,
+            } => {
+                assert!(plan.is_empty());
+                assert!(turned_on);
+                assert!(dispatch_records.is_empty());
+            }
+            other => panic!("unexpected input outcome: {other:?}"),
+        }
+
+        let tick = TickContext {
+            node_id: "device-a".into(),
+            hour: 14.25,
+            epoch_ms: Some(123),
+            metadata: BTreeMap::new(),
+        };
+        let periodic =
+            RuntimeHandle::plan_periodic_node_tick(&handle, &tick, "room-a", Some(true)).unwrap();
+        match periodic {
+            RhythmPeriodicPlanOutcome::Plan {
+                plan,
+                dispatch_records,
+            } => {
+                assert!(plan.is_empty());
+                assert!(dispatch_records.is_empty());
+            }
+            other => panic!("unexpected periodic outcome: {other:?}"),
+        }
+
+        RuntimeHandle::record_rhythm_dispatches(&handle, &[]).unwrap();
+        RuntimeHandle::set_sun_times(
+            &handle,
+            SunTimes {
+                sunrise: 6.25,
+                sunset: 19.75,
+                day_length: 13.5,
+            },
+        )
+        .unwrap();
+        RuntimeHandle::clear_sun_times(&handle).unwrap();
+        assert!(
+            RuntimeHandle::set_room_curve_color_temperature(&handle, "room-a", 2700, true)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+
+        let node = RuntimeHandle::engine_node_snapshot(&handle, "room-a").unwrap();
+        assert_eq!(node.id, "room-a");
+        assert_eq!(node.kind, LightNodeKind::Room);
+        assert_eq!(RuntimeHandle::engine_all_node_snapshots(&handle).len(), 1);
+        assert_eq!(
+            RuntimeHandle::engine_effective_node_snapshot(&handle, "room-a")
+                .unwrap()
+                .brightness_offset,
+            -4.0
+        );
+        assert_eq!(
+            RuntimeHandle::engine_all_effective_node_snapshots(&handle).len(),
+            1
+        );
+
+        let restored_node = RestoredNodeState::from(&node);
+        let restored_room = RestoredRoomState::from(&restored_node);
+        assert!(restored_room.rhythm_enabled);
+        assert!(restored_room.soft_off);
+        RuntimeHandle::restore_node_state(&handle, "room-a", restored_node);
+        RuntimeHandle::add_node(
+            &handle,
+            "device-a",
+            "Device A",
+            LightNodeKind::LightDevice,
+            Some("room-a".into()),
+        );
+        RuntimeHandle::remove_node(&handle, "device-a");
+        RuntimeHandle::mood_tick_room(&handle, "room-a").unwrap();
+
+        let calls = handle.calls.lock().unwrap().clone();
+        assert!(calls.contains(&"event:room-a".to_string()));
+        assert!(calls.contains(&"periodic:room-a:14.25".to_string()));
+        assert!(calls.iter().any(|call| call.starts_with("restore:room-a")));
+        assert!(calls.contains(&"add:device-a:Device A".to_string()));
+        assert!(calls.contains(&"remove:device-a".to_string()));
+        assert!(calls.contains(&"soft_off:room-a".to_string()));
     }
 
     #[test]

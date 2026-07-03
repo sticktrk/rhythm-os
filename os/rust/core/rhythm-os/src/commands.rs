@@ -13195,6 +13195,205 @@ mod tests {
     }
 
     #[test]
+    fn room_display_and_restore_helpers_cover_user_visible_light_states() {
+        let mut app = AppState {
+            latitude: Some(35.0),
+            longitude: Some(-120.0),
+            utc_offset_hours: -8.0,
+            ..Default::default()
+        };
+        app.light_profile_configs.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+            rhythm_core::default_rhythm_profile(),
+        );
+        app.light_profile_configs.insert(
+            rhythm_core::DAY_IDLE_PROFILE_ID.to_string(),
+            rhythm_core::default_day_idle_profile(),
+        );
+        app.set_mode_configs(rhythm_core::default_mode_configs());
+
+        let settings = RoomProfileSettings::default();
+        assert_eq!(
+            compute_room_display_values_for_settings(
+                &app,
+                &settings,
+                RoomModeState::HardOff,
+                0.0,
+                0.0,
+            ),
+            (0, 0)
+        );
+
+        let active = compute_room_display_values_for_settings(
+            &app,
+            &settings,
+            RoomModeState::Active,
+            0.0,
+            10.0,
+        );
+        let warning = compute_room_display_values_for_settings(
+            &app,
+            &settings,
+            RoomModeState::Warning,
+            0.0,
+            10.0,
+        );
+        let standby = compute_room_display_values_for_settings(
+            &app,
+            &settings,
+            RoomModeState::Standby,
+            0.0,
+            40.0,
+        );
+        assert!(active.0 > 0, "active rooms should show visible brightness");
+        assert!(
+            warning.0 <= active.0,
+            "warning state should not render brighter than active output"
+        );
+        assert_eq!(
+            standby.0, 1,
+            "standby display ignores user brightness offset and renders idle profile"
+        );
+
+        let mut room = Room::new("room-restore", "Room Restore");
+        room.rhythm_enabled = true;
+        room.disabled = true;
+        room.time_offset_minutes = -15.0;
+        room.brightness_offset = 12.0;
+        room.soft_off = true;
+        room.mood_active = true;
+        room.hard_off = false;
+        room.standby_enabled = true;
+        let normalized = normalize_legacy_soft_off_room(room.clone());
+        assert!(!normalized.soft_off);
+        assert!(normalized.mood_active);
+
+        let restored_room = restored_room_state_from_room(&room);
+        assert!(restored_room.rhythm_enabled);
+        assert!(restored_room.disabled);
+        assert_eq!(restored_room.time_offset_minutes, -15.0);
+        assert_eq!(restored_room.brightness_offset, 12.0);
+        assert!(!restored_room.soft_off);
+        assert!(restored_room.mood_active);
+        assert!(!restored_room.hard_off);
+
+        let restored_node = restored_node_state_from_room(&room);
+        assert!(restored_node.standby_enabled);
+        assert_eq!(restored_node.profile_settings, room.profile_settings);
+    }
+
+    #[test]
+    fn transition_and_motion_queue_helpers_dedupe_visible_runtime_work() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.room_mode_transitions.insert(
+                "room-active".to_string(),
+                crate::state::RoomModeTransition {
+                    ends_at: std::time::Instant::now() + Duration::from_secs(60),
+                    periodic_resume_at: std::time::Instant::now() + Duration::from_secs(90),
+                },
+            );
+            s.room_mode_transitions.insert(
+                "room-expired".to_string(),
+                crate::state::RoomModeTransition {
+                    ends_at: std::time::Instant::now() - Duration::from_secs(1),
+                    periodic_resume_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        let now = std::time::Instant::now();
+        {
+            let s = state.lock().unwrap();
+            assert!(room_mode_transition_active(
+                &s.room_mode_transitions,
+                "room-active",
+                now
+            ));
+            assert!(!room_mode_transition_active(
+                &s.room_mode_transitions,
+                "room-expired",
+                now
+            ));
+            let active = active_transition_room_ids(&s.room_mode_transitions, now);
+            assert!(active.contains("room-active"));
+            assert!(!active.contains("room-expired"));
+        }
+
+        clear_room_mode_transition(&state, "room-active");
+        queue_motion_timer_clear(&state, "room-active");
+        queue_motion_timer_clear(&state, "room-active");
+        queue_motion_timer_timeout_refresh(&state, "room-active");
+        queue_motion_timer_timeout_refresh(&state, "room-active");
+
+        let s = state.lock().unwrap();
+        assert!(!s.room_mode_transitions.contains_key("room-active"));
+        assert_eq!(s.pending_motion_clear, vec!["room-active".to_string()]);
+        assert_eq!(
+            s.pending_motion_timeout_refresh,
+            vec!["room-active".to_string()]
+        );
+    }
+
+    #[test]
+    fn motion_timeout_refresh_recalculates_warning_and_emits_snapshot() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let state: SharedState = Arc::new(Mutex::new(AppState {
+            event_tx: Some(event_tx),
+            ..Default::default()
+        }));
+        {
+            let mut s = state.lock().unwrap();
+            s.motion_snapshots.insert(
+                "room-motion".to_string(),
+                MotionSnapshot {
+                    motion_active: false,
+                    motion_owned: true,
+                    remaining_secs: Some(20),
+                    timeout_secs: 120,
+                    warning_active: true,
+                },
+            );
+        }
+
+        assert!(refresh_cached_motion_timeout_after_settings_change(
+            &state,
+            "room-motion",
+            240
+        ));
+        let snap = state
+            .lock()
+            .unwrap()
+            .motion_snapshots
+            .get("room-motion")
+            .cloned()
+            .unwrap();
+        assert_eq!(snap.timeout_secs, 240);
+        assert_eq!(snap.remaining_secs, Some(140));
+        assert!(!snap.warning_active);
+
+        let event = event_rx.try_recv().expect("motion timer event should emit");
+        match event {
+            crate::server_event::ServerEvent::MotionTimer { timers } => {
+                assert_eq!(timers.len(), 1);
+                assert_eq!(timers[0].node_id, "room-motion");
+                assert_eq!(timers[0].timeout_secs, 240);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        assert!(!refresh_cached_motion_timeout_after_settings_change(
+            &state,
+            "room-motion",
+            240
+        ));
+        assert!(!refresh_cached_motion_timeout_after_settings_change(
+            &state, "missing", 30
+        ));
+    }
+
+    #[test]
     fn restored_node_state_from_snapshot_applies_legacy_flag_precedence() {
         let mut snap = make_light_child_snapshot("light-1", "room-1");
         snap.rhythm_enabled = false;
@@ -16458,6 +16657,175 @@ mod tests {
             .matching_button_input_binding(&button_id, ButtonAction::OnPress)
             .expect("binding should match selected button");
         assert_eq!(binding.id, binding_id);
+    }
+
+    #[test]
+    fn input_binding_set_validates_user_visible_source_nodes() {
+        let (state, _runtime) = setup_state(vec![]);
+        add_topology_room(&state, "room1", &[]);
+
+        let missing = InputBinding::day_sleep_toggle("missing-node", Some(ButtonAction::OnPress));
+        assert!(do_input_binding_set(&state, missing)
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
+
+        let room_source = InputBinding::day_sleep_toggle("room1", Some(ButtonAction::OnPress));
+        assert!(do_input_binding_set(&state, room_source)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a button device"));
+
+        let light_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new("matter"), "local"),
+            "light-native-1",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&light_id);
+            s.topology.ensure_standalone_device("orphan-button-node");
+        }
+
+        let light_source = InputBinding::day_sleep_toggle(&light_id, Some(ButtonAction::OnPress));
+        assert!(do_input_binding_set(&state, light_source)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a button device"));
+
+        let orphan_source =
+            InputBinding::day_sleep_toggle("orphan-button-node", Some(ButtonAction::OnPress));
+        assert!(do_input_binding_set(&state, orphan_source)
+            .unwrap_err()
+            .to_string()
+            .contains("has no canonical device"));
+
+        let button_id = add_button_device_node(&state, "button-native-2");
+        let mut valid = InputBinding::day_sleep_toggle(&button_id, Some(ButtonAction::OnPress));
+        valid.id = "custom-binding".into();
+        let json = do_input_binding_set(&state, valid).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["bindings"][0]["id"], "custom-binding");
+        assert_eq!(
+            matching_button_input_binding_action(&state, &button_id, ButtonAction::OnPress),
+            Some(AutomationAction::ModeCycle {
+                modes: vec![RhythmMode::Day, RhythmMode::Sleep],
+                transition: ModeTransitionSelection::Auto,
+            })
+        );
+
+        let after_delete = do_input_binding_delete(&state, "custom-binding").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after_delete).unwrap();
+        assert!(parsed["bindings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn endpoint_visibility_reconcile_cleans_hidden_and_keeps_surviving_devices_visible() {
+        let (state, _runtime) = setup_state(vec![]);
+        add_topology_room(&state, "room1", &[]);
+        let hue_key = HubKey::new(HubType::new("hue"), "bridge");
+        let ha_key = HubKey::new(HubType::new("homeassistant"), "ha.local");
+
+        let hidden_id = insert_canonical_device(
+            &state,
+            hue_key.clone(),
+            "hidden-native",
+            "Hidden Lamp",
+            "room1",
+            "Room 1",
+        );
+        let surviving_room_id = insert_canonical_device(
+            &state,
+            hue_key.clone(),
+            "surviving-room-native",
+            "Surviving Room Lamp",
+            "room1",
+            "Room 1",
+        );
+        let surviving_roomless_id = insert_canonical_device(
+            &state,
+            hue_key.clone(),
+            "surviving-roomless-native",
+            "Roomless Lamp",
+            "",
+            "",
+        );
+
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room1", &hidden_id));
+            s.canonical_registry
+                .get_mut(&surviving_room_id)
+                .unwrap()
+                .upsert_endpoint(ha_key.clone(), "ha-room-light".into(), 1001, None);
+            s.canonical_registry
+                .assign_room(&surviving_room_id, Some("room1"));
+            s.canonical_registry
+                .get_mut(&surviving_roomless_id)
+                .unwrap()
+                .upsert_endpoint(ha_key, "ha-roomless-light".into(), 1001, None);
+            s.room_observed_power.insert(
+                hidden_id.clone(),
+                ObservedPowerState::new(true, ObservedPowerSource::Command),
+            );
+            s.motion_snapshots.insert(
+                hidden_id.clone(),
+                MotionSnapshot {
+                    motion_active: false,
+                    motion_owned: true,
+                    remaining_secs: Some(10),
+                    timeout_secs: 60,
+                    warning_active: true,
+                },
+            );
+            s.pending_periodic_ticks.insert(
+                hidden_id.clone(),
+                crate::state::PendingPeriodicTick::new(12.0, 1),
+            );
+            s.pending_motion_clear.push(hidden_id.clone());
+            s.pending_motion_timeout_refresh.push(hidden_id.clone());
+            s.pending_motion_seed.push(crate::state::MotionSeedEntry {
+                source_node_id: hidden_id.clone(),
+                target_node_id: hidden_id.clone(),
+                is_active: false,
+                stopped_at_epoch_ms: Some(10),
+                motion_owned: Some(true),
+                warning_active: true,
+            });
+        }
+
+        let (affected, hidden) =
+            reconcile_hub_endpoint_visibility(&state, &hue_key, &HashSet::new()).unwrap();
+        assert_eq!(affected, 3);
+        assert_eq!(hidden, 1);
+
+        let s = state.lock().unwrap();
+        assert!(s.topology.get_device_node(&hidden_id).is_none());
+        assert_eq!(
+            s.topology
+                .device_parent_room_id(&surviving_room_id)
+                .as_deref(),
+            Some("room1")
+        );
+        assert!(s.topology.get_device_node(&surviving_roomless_id).is_some());
+        assert!(s
+            .topology
+            .device_parent_room_id(&surviving_roomless_id)
+            .is_none());
+        assert!(!s.room_observed_power.contains_key(&hidden_id));
+        assert!(!s.motion_snapshots.contains_key(&hidden_id));
+        assert!(!s.pending_periodic_ticks.contains_key(&hidden_id));
+        assert!(!s
+            .pending_motion_timeout_refresh
+            .iter()
+            .any(|id| id == &hidden_id));
+        assert!(!s
+            .pending_motion_seed
+            .iter()
+            .any(|seed| seed.source_node_id == hidden_id || seed.target_node_id == hidden_id));
     }
 
     #[test]
@@ -22854,6 +23222,86 @@ mod tests {
         assert!(
             !label.contains("matter-100,matter-101"),
             "composite routing still dispatching per-device after sync: target={label:?}"
+        );
+    }
+
+    #[test]
+    fn topology_group_sync_failure_recovers_on_later_topology_change() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_one =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Desk Lamp", "", "");
+        let device_two =
+            insert_canonical_device(&state, hub_key.clone(), "matter-101", "Table Lamp", "", "");
+
+        let recording = Arc::new(RecordingDispatchController::new());
+        let composite = Arc::new(rhythm_core::CompositeController::new());
+        composite.register_controller(&hub_key.to_string(), recording.clone());
+        state.lock().unwrap().composite_controller = Some(composite.clone());
+
+        let control_id = "matter-group-recovered".to_string();
+        let sync_attempts = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_attempts = sync_attempts.clone();
+            let hub_key_for_callback = hub_key.clone();
+            let room_id_for_callback = room_id.clone();
+            let control_id_for_callback = control_id.clone();
+            state.lock().unwrap().sync_topology_groups_fn =
+                Some(Arc::new(move |state: &SharedState| {
+                    let attempt = sync_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt == 1 {
+                        return Err(anyhow::anyhow!("simulated topology group sync timeout"));
+                    }
+
+                    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                    let member_device_ids: Vec<String> = s
+                        .topology
+                        .get(&room_id_for_callback)
+                        .map(|room| {
+                            room.devices
+                                .iter()
+                                .filter_map(|room_device| {
+                                    s.canonical_registry.get(&room_device.device_id)
+                                })
+                                .filter_map(|device| device.preferred_endpoint())
+                                .map(|endpoint| endpoint.native_id.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if member_device_ids.len() >= 2 {
+                        s.topology.upsert_room_binding(
+                            &room_id_for_callback,
+                            crate::topology::HubRoomBinding {
+                                hub_key: hub_key_for_callback.clone(),
+                                hub_room_id: room_id_for_callback.clone(),
+                                control_id: control_id_for_callback.clone(),
+                                light_device_ids: member_device_ids,
+                            },
+                        );
+                    }
+                    Ok(())
+                }));
+        }
+
+        do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
+        wait_for_sync_count(&sync_attempts, 1);
+        do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
+        wait_for_sync_count(&sync_attempts, 2);
+
+        futures::executor::block_on(
+            composite.turn_on(&room_id, rhythm_core::LightingCommand::new(80, 4000)),
+        )
+        .expect("turn_on should succeed after recovered group sync");
+
+        let calls = recording.wait_for_turn_on_calls(1);
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].contains(control_id.as_str()),
+            "recovered topology group sync should rebuild routing to groupcast target, got {:?}",
+            calls[0]
         );
     }
 

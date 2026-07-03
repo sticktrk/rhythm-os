@@ -109,7 +109,11 @@ pub use runtime::{
 #[cfg(feature = "serde")]
 pub use runtime::{DeviceType, HubRegistry};
 
-pub use composite_controller::CompositeController;
+pub use composite_controller::{
+    CompositeController, HubDispatchKind, HubDispatchMetadata, HubDispatchOutcome,
+    HubDispatchOutcomeListener, HubDispatchPolicy, HubDispatchStatus, HubDispatchTimeoutScope,
+    HubRateLimit,
+};
 pub use runtime::{SystemTimeProvider, ThreadScheduler};
 #[cfg(any(test, feature = "test-support"))]
 pub use spy_controller::SpyLightController;

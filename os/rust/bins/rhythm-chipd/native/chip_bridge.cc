@@ -62,7 +62,10 @@ using chip::Controller::DiscoveryType;
 using chip::Controller::OnNOCChainGeneration;
 using chip::Controller::WiFiCredentials;
 
-constexpr std::chrono::seconds kOperationTimeout(30);
+// Must stay below the 8s control-RPC socket timeout in chip_transport.rs so a
+// slow/unreachable bulb produces a real CHIP error response instead of the
+// caller abandoning the socket while this operation keeps a thread pinned.
+constexpr std::chrono::seconds kOperationTimeout(7);
 constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;

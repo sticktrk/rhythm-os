@@ -1797,6 +1797,7 @@ dependencies = [
  "anyhow",
  "rhythm-core",
  "rhythm-runtime-api",
+ "serde_json",
 ]
 
 [[package]]

@@ -3201,6 +3201,68 @@ mod tests {
     }
 
     #[test]
+    fn default_motion_timer_state_is_empty_and_button_debounce_garbage_collects() {
+        let mut state = MotionTimerState::default();
+        let base = Instant::now();
+
+        assert!(state.admit_button_at("room-a", ButtonAction::OnPress, Some("button-a"), base));
+        assert!(
+            !state.admit_button_at(
+                "room-a",
+                ButtonAction::OnPress,
+                Some("button-a"),
+                base + BUTTON_DEBOUNCE_WINDOW / 2,
+            ),
+            "duplicate press inside debounce window should be suppressed"
+        );
+        assert!(
+            state.admit_button_at(
+                "room-a",
+                ButtonAction::OnPress,
+                Some("button-a"),
+                base + BUTTON_DEBOUNCE_WINDOW + Duration::from_millis(1),
+            ),
+            "same press after debounce window should be admitted"
+        );
+        assert!(
+            state.admit_button_at(
+                "room-a",
+                ButtonAction::OnPress,
+                Some("button-b"),
+                base + BUTTON_DEBOUNCE_WINDOW / 2,
+            ),
+            "different source device should not be suppressed"
+        );
+        assert!(
+            state.admit_button_at(
+                "room-a",
+                ButtonAction::OffPress,
+                Some("button-a"),
+                base + BUTTON_DEBOUNCE_WINDOW / 2,
+            ),
+            "different action should not be suppressed"
+        );
+
+        state.button_debounce.insert(
+            ("old-room".to_string(), ButtonAction::OnPress, None),
+            base - BUTTON_DEBOUNCE_WINDOW * 20,
+        );
+        assert!(state.admit_button_at(
+            "room-c",
+            ButtonAction::Toggle,
+            None,
+            base + BUTTON_DEBOUNCE_WINDOW * 11
+        ));
+        assert!(
+            !state
+                .button_debounce
+                .keys()
+                .any(|(node_id, _, _)| node_id == "old-room"),
+            "old debounce rows should be garbage-collected"
+        );
+    }
+
+    #[test]
     fn has_sources_for_target_true() {
         let mut state = MotionTimerState::new();
         state
@@ -3222,6 +3284,26 @@ mod tests {
     }
 
     #[test]
+    fn active_source_detection_distinguishes_running_from_countdown_sources() {
+        let mut state = MotionTimerState::new();
+        state
+            .sensors
+            .insert("active".into(), motion_source("active", "room_a", None));
+        state.sensors.insert(
+            "stopped".into(),
+            motion_source(
+                "stopped",
+                "room_b",
+                Some(Instant::now() - Duration::from_secs(10)),
+            ),
+        );
+
+        assert!(state.has_active_sources_for_target("room_a"));
+        assert!(!state.has_active_sources_for_target("room_b"));
+        assert!(!state.has_active_sources_for_target("missing"));
+    }
+
+    #[test]
     fn snapshot_active_sensor() {
         let mut state = MotionTimerState::new();
         state
@@ -3235,6 +3317,52 @@ mod tests {
         assert!(snap.motion_active);
         assert_eq!(snap.remaining_secs, None);
         assert_eq!(snap.timeout_secs, 300);
+    }
+
+    #[test]
+    fn snapshots_group_multiple_sources_and_keep_warning_countdown_visible() {
+        let mut state = MotionTimerState::new();
+        let stopped_old = Instant::now() - Duration::from_secs(50);
+        let stopped_recent = Instant::now() - Duration::from_secs(5);
+        state.sensors.insert(
+            "sensor_old".into(),
+            motion_source("sensor_old", "room_a", Some(stopped_old)),
+        );
+        state.sensors.insert(
+            "sensor_recent".into(),
+            motion_source("sensor_recent", "room_a", Some(stopped_recent)),
+        );
+        state.warning_active.insert("room_a".into());
+        state.motion_owned.insert("room_a".into());
+
+        let mut timeouts = HashMap::new();
+        timeouts.insert("room_a".to_string(), 120);
+        let snaps = state.snapshots(&timeouts, 300);
+        let snap = snaps.get("room_a").expect("room_a should have a snapshot");
+
+        assert!(!snap.motion_active);
+        assert!(snap.motion_owned);
+        assert!(snap.warning_active);
+        assert_eq!(snap.timeout_secs, 120);
+        assert!(
+            snap.remaining_secs.unwrap() <= 120 && snap.remaining_secs.unwrap() >= 60,
+            "remaining countdown should be based on the oldest stopped source"
+        );
+    }
+
+    #[test]
+    fn inline_runtime_actions_without_runtime_are_safe_noops() {
+        let state = make_state();
+
+        assert!(!process_button_inline(
+            &state,
+            "room-a",
+            ButtonAction::OnPress,
+            Some("button-a"),
+            "cmd-no-runtime"
+        ));
+        assert!(!dim_node_inline(&state, "room-a", 0.5));
+        assert!(!turn_on_node_inline(&state, "room-a"));
     }
 
     #[test]
