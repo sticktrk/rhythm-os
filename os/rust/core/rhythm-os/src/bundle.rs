@@ -142,7 +142,7 @@ pub struct BackupConfiguration {
 }
 
 fn default_light_breaker_enabled() -> bool {
-    true
+    false
 }
 
 impl Default for BackupConfiguration {

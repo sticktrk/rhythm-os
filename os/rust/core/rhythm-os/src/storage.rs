@@ -385,7 +385,7 @@ fn default_auto_update() -> bool {
 }
 
 fn default_light_breaker_enabled() -> bool {
-    true
+    false
 }
 
 /// Runtime motion timer state persisted across process restarts.
@@ -2633,7 +2633,7 @@ mod tests {
         }
 
         #[test]
-        fn settings_missing_auto_update_defaults_true() {
+        fn settings_missing_light_breaker_defaults_false_and_auto_update_defaults_true() {
             let (storage, path) = temp_storage();
             let json = r#"{
               "power_save": false,
@@ -2646,7 +2646,7 @@ mod tests {
             let loaded = storage.load_settings().unwrap();
 
             assert!(!loaded.power_save);
-            assert!(loaded.light_breaker_enabled);
+            assert!(!loaded.light_breaker_enabled);
             assert!(loaded.auto_update);
             cleanup(&path);
         }

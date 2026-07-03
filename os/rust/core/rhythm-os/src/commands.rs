@@ -17486,7 +17486,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_configuration_missing_light_breaker_defaults_enabled() {
+    fn backup_configuration_missing_light_breaker_defaults_disabled() {
         let configuration: BackupConfiguration = serde_json::from_value(serde_json::json!({
             "power_save": false,
             "active_mode": "day",
@@ -17497,7 +17497,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(configuration.light_breaker_enabled);
+        assert!(!configuration.light_breaker_enabled);
     }
 
     #[test]
