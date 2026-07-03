@@ -9,3 +9,4 @@ authors.workspace = true
 rhythm-core = { path = "../../../os/rust/core/rhythm-core" }
 rhythm-runtime-api = { path = "../rhythm-runtime-api" }
 anyhow = "1.0"
+serde_json = { workspace = true }

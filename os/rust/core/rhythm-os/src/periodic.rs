@@ -1964,6 +1964,57 @@ mod tests {
     }
 
     #[test]
+    fn run_periodic_cycle_skips_transition_active_room_then_resumes_after_expiry() {
+        let state = make_state();
+        install_runtime(&state, runtime_with_rooms(&["room-transition"]));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkItem>(4);
+        {
+            let mut s = state.lock().unwrap();
+            s.runtime_config.update_interval_secs = 1;
+            s.periodic_work_tx = Some(tx);
+            let now = Instant::now();
+            s.room_mode_transitions.insert(
+                "room-transition".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: now + Duration::from_secs(1),
+                    periodic_resume_at: now + Duration::from_secs(30),
+                },
+            );
+        }
+
+        run_periodic_cycle::<fn()>(state.clone(), None);
+        assert!(
+            rx.try_recv().is_err(),
+            "transition-active room should not receive a periodic tick"
+        );
+        assert!(state
+            .lock()
+            .unwrap()
+            .room_mode_transitions
+            .contains_key("room-transition"));
+
+        {
+            let mut s = state.lock().unwrap();
+            let now = Instant::now();
+            s.room_mode_transitions.insert(
+                "room-transition".into(),
+                crate::state::RoomModeTransition {
+                    ends_at: now - Duration::from_secs(2),
+                    periodic_resume_at: now - Duration::from_secs(1),
+                },
+            );
+        }
+
+        run_periodic_cycle::<fn()>(state.clone(), None);
+
+        assert_periodic_item_for_room(&rx, "room-transition");
+        assert!(
+            state.lock().unwrap().room_mode_transitions.is_empty(),
+            "expired transition should be removed before periodic dispatch resumes"
+        );
+    }
+
+    #[test]
     fn run_periodic_cycle_ticks_inline_and_emits_node_state_without_queues() {
         let state = make_state();
         install_runtime(&state, runtime_with_rooms(&["room-c"]));

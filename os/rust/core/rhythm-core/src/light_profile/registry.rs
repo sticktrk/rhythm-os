@@ -666,6 +666,37 @@ mod tests {
     }
 
     #[test]
+    fn inherited_state_profile_exposes_active_color_and_fixed_idle_contract() {
+        let registry = LightProfileRegistry::new();
+        let ctx = test_context(8.0);
+        let inherited =
+            registry.profile_for_room_state(RhythmMode::Day, RoomModeState::Standby, None);
+        let active = registry.active_profile();
+
+        let inherited_values = inherited.calculate(&ctx);
+        let active_values = active.calculate(&ctx);
+        assert_eq!(inherited.id(), DAY_IDLE_PROFILE_ID);
+        assert_eq!(inherited.name(), DAY_IDLE_PROFILE_NAME);
+        assert_eq!(inherited_values.kelvin, active_values.kelvin);
+        assert_eq!(inherited_values.brightness, 1);
+        assert_eq!(inherited.calculate_brightness(&ctx), 1);
+        assert_eq!(
+            inherited.calculate_color_temperature(&ctx),
+            active_values.kelvin
+        );
+        assert!(inherited.is_at_minimum(&ctx));
+        assert!(inherited.is_at_maximum(&ctx));
+        assert_eq!(inherited.min_brightness(), 1);
+        assert_eq!(inherited.max_brightness(), 1);
+        assert_eq!(
+            inherited
+                .calculate_step(&ctx, rhythm_profile::StepAction::Brighten)
+                .time_offset_minutes,
+            0.0
+        );
+    }
+
+    #[test]
     fn active_profile_override_uses_resolved_profile_id_not_mode() {
         let mut registry = LightProfileRegistry::new();
         let mut focus = default_rhythm_profile();
@@ -742,6 +773,49 @@ mod tests {
         assert!(!registry.unregister(RHYTHM_PROFILE_ID));
         assert!(!registry.unregister(DAY_IDLE_PROFILE_ID));
         assert!(!registry.unregister(SLEEP_IDLE_PROFILE_ID));
+    }
+
+    #[test]
+    fn registry_selection_and_default_paths_reject_state_profiles() {
+        let mut registry = LightProfileRegistry::new();
+        let mut focus = default_rhythm_profile();
+        focus.id = "focus".into();
+        focus.name = "Focus".into();
+        registry.register_config(focus);
+
+        assert_eq!(registry.default_profile_id(), RHYTHM_PROFILE_ID);
+        assert!(registry.set_default_profile("focus"));
+        assert_eq!(registry.default_profile_id(), "focus");
+        assert!(registry.set_active_profile("focus"));
+        assert_eq!(registry.active_profile_id(), "focus");
+        assert!(!registry.is_sleep_active());
+
+        registry.reset_to_default();
+        assert_eq!(registry.active_profile_id(), "focus");
+        assert!(!registry.set_default_profile(DAY_IDLE_PROFILE_ID));
+        assert!(!registry.set_default_profile("missing"));
+        assert!(!registry.set_active_profile(DAY_IDLE_PROFILE_ID));
+        assert!(!registry.set_active_profile("missing"));
+        assert!(!registry.set_profile_config({
+            let mut missing = default_rhythm_profile();
+            missing.id = "missing".into();
+            missing
+        }));
+        assert!(registry.contains("focus"));
+        assert!(registry.profile_count() >= 5);
+        assert!(registry
+            .profile_configs()
+            .iter()
+            .any(|profile| profile.id == "focus"));
+        assert!(registry.profile_config("focus").is_some());
+        assert!(!registry.unregister("focus"));
+
+        let mut draft = default_rhythm_profile();
+        draft.id = "draft".into();
+        draft.name = "Draft".into();
+        registry.register_config(draft);
+        assert!(registry.unregister("draft"));
+        assert!(!registry.contains("draft"));
     }
 
     #[test]
