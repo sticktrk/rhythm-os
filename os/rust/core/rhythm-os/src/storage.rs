@@ -385,7 +385,7 @@ fn default_auto_update() -> bool {
 }
 
 fn default_light_breaker_enabled() -> bool {
-    true
+    false
 }
 
 /// Runtime motion timer state persisted across process restarts.
@@ -2633,7 +2633,7 @@ mod tests {
         }
 
         #[test]
-        fn settings_missing_auto_update_defaults_true() {
+        fn settings_missing_light_breaker_defaults_false_and_auto_update_defaults_true() {
             let (storage, path) = temp_storage();
             let json = r#"{
               "power_save": false,
@@ -2646,8 +2646,44 @@ mod tests {
             let loaded = storage.load_settings().unwrap();
 
             assert!(!loaded.power_save);
-            assert!(loaded.light_breaker_enabled);
+            assert!(!loaded.light_breaker_enabled);
             assert!(loaded.auto_update);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn settings_legacy_mode_transitions_default_disabled() {
+            let (storage, path) = temp_storage();
+            let json = r#"{
+              "power_save": false,
+              "active_mode": "day",
+              "modes": [],
+              "mode_transitions": [
+                {
+                  "id": "sleep_to_day",
+                  "label": "Sleep to Day",
+                  "from_mode": "sleep",
+                  "to_mode": "day",
+                  "trigger": "civil_twilight"
+                },
+                {
+                  "id": "day_to_sleep",
+                  "label": "Day to Sleep",
+                  "from_mode": "day",
+                  "to_mode": "sleep",
+                  "trigger": "nautical_twilight"
+                }
+              ]
+            }"#;
+            std::fs::write(path.join("settings.json"), json).unwrap();
+
+            let loaded = storage.load_settings().unwrap();
+
+            assert_eq!(loaded.mode_transitions.len(), 2);
+            assert!(loaded
+                .mode_transitions
+                .iter()
+                .all(|transition| !transition.trigger_enabled));
             cleanup(&path);
         }
 
