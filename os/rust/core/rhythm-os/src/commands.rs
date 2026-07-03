@@ -16831,7 +16831,11 @@ mod tests {
     #[test]
     fn automation_mode_cycle_uses_matching_pair_transition() {
         let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        state.lock().unwrap().active_mode = RhythmMode::Sleep;
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            s.set_mode_transition_configs(rhythm_core::default_mode_transition_configs());
+        }
 
         let binding = InputBinding::day_sleep_toggle("button-1", None);
         do_execute_automation_action(&state, &binding.action).unwrap();
@@ -17294,11 +17298,17 @@ mod tests {
     #[test]
     fn build_transitions_dto_matches_state() {
         let (state, _rt) = setup_state(vec![]);
+
         let dto = build_transitions_dto(&state).unwrap();
-        assert_eq!(
-            dto.transitions,
-            rhythm_core::default_mode_transition_configs()
-        );
+        assert!(dto.transitions.is_empty());
+
+        let configs = rhythm_core::default_mode_transition_configs();
+        state
+            .lock()
+            .unwrap()
+            .set_mode_transition_configs(configs.clone());
+        let dto = build_transitions_dto(&state).unwrap();
+        assert_eq!(dto.transitions, configs);
     }
 
     #[test]
@@ -19031,7 +19041,7 @@ mod tests {
         assert!(mode_json["last_change"]["epoch_ms"].as_i64().is_some());
 
         let transitions = build_transitions_dto(&state).unwrap();
-        assert!(!transitions.transitions.is_empty());
+        assert!(transitions.transitions.is_empty());
         let transitions_json: serde_json::Value =
             serde_json::from_str(&build_transitions(&state).unwrap()).unwrap();
         assert!(transitions_json["transitions"].is_array());
@@ -21448,6 +21458,7 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
+            s.set_mode_transition_configs(rhythm_core::default_mode_transition_configs());
             set_observed_lights_on_in_app(&mut s, "r1", true);
             s.motion_snapshots.insert(
                 "r1".into(),

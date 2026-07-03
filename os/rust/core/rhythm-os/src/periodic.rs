@@ -3414,7 +3414,16 @@ mod tests {
     #[test]
     fn astronomical_twilight_sleep_transition_switches_mode_when_trigger_configured() {
         let state = make_state();
-        state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Sleep;
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Sleep,
+                rhythm_core::RhythmMode::Day,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::AstronomicalTwilight)]);
+        }
 
         let astronomical_dawn = (rhythm_core::config::FALLBACK_SUNRISE_HOUR - 1.5).rem_euclid(24.0);
         check_mode_transitions(&state, astronomical_dawn - 0.1, astronomical_dawn + 0.1);
@@ -3428,7 +3437,16 @@ mod tests {
     #[test]
     fn nautical_twilight_day_to_sleep_transition_switches_mode() {
         let state = make_state();
-        state.lock().unwrap().active_mode = rhythm_core::RhythmMode::Day;
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                rhythm_core::RhythmMode::Day,
+                rhythm_core::RhythmMode::Sleep,
+                1_000,
+            )
+            .with_trigger(rhythm_core::ModeTransitionTrigger::NauticalTwilight)]);
+        }
 
         let nautical_dusk = (rhythm_core::config::FALLBACK_SUNSET_HOUR + 1.0).rem_euclid(24.0);
         check_mode_transitions(&state, nautical_dusk - 0.1, nautical_dusk + 0.1);
