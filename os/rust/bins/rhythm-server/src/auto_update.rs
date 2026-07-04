@@ -51,39 +51,29 @@ fn run(state: SharedState) {
     let mut last_attempt: Option<Instant> = None;
 
     loop {
-        thread::sleep(POLL_INTERVAL);
-
         let snapshot = match snapshot_settings(&state) {
             Some(s) => s,
-            None => continue,
+            None => {
+                thread::sleep(POLL_INTERVAL);
+                continue;
+            }
         };
 
-        if !snapshot.auto_update {
-            continue;
-        }
-
         let now = Utc::now();
-        if !clock_is_sane(now) {
+        if snapshot.auto_update && !clock_is_sane(now) {
             warn!(
                 target: "sys",
                 "auto-update: skipping check until wall clock is sane (utc={})",
                 now
             );
-            continue;
         }
 
-        if !in_auto_update_window(now, snapshot.utc_offset_hours) {
-            continue;
+        if should_attempt_update(snapshot, now, last_attempt) {
+            last_attempt = Some(Instant::now());
+            attempt_update(&state);
         }
 
-        if let Some(t) = last_attempt {
-            if t.elapsed() < MIN_BETWEEN_CHECKS {
-                continue;
-            }
-        }
-        last_attempt = Some(Instant::now());
-
-        attempt_update(&state);
+        thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -121,6 +111,24 @@ fn clock_is_sane(now_utc: chrono::DateTime<Utc>) -> bool {
 fn in_auto_update_window(now_utc: chrono::DateTime<Utc>, utc_offset_hours: f32) -> bool {
     let local_hour = local_hour_from_utc(now_utc, utc_offset_hours);
     (WINDOW_START_HOUR..WINDOW_END_HOUR).contains(&local_hour)
+}
+
+fn should_attempt_update(
+    snapshot: LoopSettings,
+    now_utc: chrono::DateTime<Utc>,
+    last_attempt: Option<Instant>,
+) -> bool {
+    if !snapshot.auto_update || !clock_is_sane(now_utc) {
+        return false;
+    }
+
+    if !in_auto_update_window(now_utc, snapshot.utc_offset_hours) {
+        return false;
+    }
+
+    last_attempt
+        .map(|attempted_at| attempted_at.elapsed() >= MIN_BETWEEN_CHECKS)
+        .unwrap_or(true)
 }
 
 fn local_hour_from_utc(now_utc: chrono::DateTime<Utc>, utc_offset_hours: f32) -> u32 {
@@ -250,6 +258,31 @@ mod tests {
 
         assert!(!snapshot.auto_update);
         assert_eq!(snapshot.utc_offset_hours, -4.5);
+    }
+
+    #[test]
+    fn first_iteration_inside_window_attempts_immediately() {
+        let snapshot = LoopSettings {
+            auto_update: true,
+            utc_offset_hours: -4.0,
+        };
+
+        // UTC 18:00 with -4h offset -> local 14:00, inside the daily window.
+        assert!(should_attempt_update(snapshot, utc_at(18), None));
+    }
+
+    #[test]
+    fn recent_attempt_suppresses_duplicate_check() {
+        let snapshot = LoopSettings {
+            auto_update: true,
+            utc_offset_hours: -4.0,
+        };
+
+        assert!(!should_attempt_update(
+            snapshot,
+            utc_at(18),
+            Some(Instant::now())
+        ));
     }
 
     #[test]
