@@ -181,6 +181,17 @@ export type DeviceStatus = {
   errors: Record<string, string>;
 };
 
+export type DeviceOtaAction = {
+  hubId: string;
+  route: 'remote' | 'local';
+  baseUrl: string;
+  action: 'check' | 'update';
+  completedAt: string;
+  tokenAvailable: boolean;
+  hasEncryptedToken: boolean;
+  result: Record<string, unknown>;
+};
+
 export type HomeListItem = {
   customer: SupportCustomer;
   home: SupportHome;

@@ -178,6 +178,52 @@ class DeviceProbeService {
     );
   }
 
+  Future<DeviceOtaActionDto> checkForUpdate({
+    required AdminSession session,
+    required String hubId,
+  }) async {
+    final result = await _fetchFirstJson(
+      session: session,
+      hubId: hubId,
+      path: 'api/ota/check',
+      operation: 'OTA update check',
+    );
+    return DeviceOtaActionDto(
+      hubId: result.hubId,
+      route: result.route,
+      baseUrl: result.baseUrl,
+      action: 'check',
+      completedAt: DateTime.now().toUtc(),
+      tokenAvailable: result.tokenAvailable,
+      hasEncryptedToken: result.hasEncryptedToken,
+      result: result.body,
+    );
+  }
+
+  Future<DeviceOtaActionDto> applyUpdate({
+    required AdminSession session,
+    required String hubId,
+  }) async {
+    final result = await _fetchFirstJson(
+      session: session,
+      hubId: hubId,
+      path: 'api/ota/update',
+      operation: 'OTA update',
+      method: 'POST',
+      timeout: const Duration(minutes: 2),
+    );
+    return DeviceOtaActionDto(
+      hubId: result.hubId,
+      route: result.route,
+      baseUrl: result.baseUrl,
+      action: 'update',
+      completedAt: DateTime.now().toUtc(),
+      tokenAvailable: result.tokenAvailable,
+      hasEncryptedToken: result.hasEncryptedToken,
+      result: result.body,
+    );
+  }
+
   Future<DeviceLogSourcesDto> listLogs({
     required AdminSession session,
     required String hubId,
@@ -421,6 +467,8 @@ class DeviceProbeService {
     required String hubId,
     required String path,
     required String operation,
+    String method = 'GET',
+    Duration timeout = const Duration(seconds: 10),
     Map<String, String>? queryParameters,
   }) async {
     final hub = await _loadHub(session: session, hubId: hubId);
@@ -443,6 +491,8 @@ class DeviceProbeService {
         path: path,
         authToken: token,
         operation: operation,
+        method: method,
+        timeout: timeout,
         queryParameters: queryParameters,
       );
       if (result.success != null) return result.success!;
@@ -474,21 +524,24 @@ class DeviceProbeService {
     required String path,
     required String? authToken,
     required String operation,
+    String method = 'GET',
+    Duration timeout = const Duration(seconds: 10),
     Map<String, String>? queryParameters,
   }) async {
     final baseUrl = candidate.endpoint.baseUrl;
     try {
-      final response = await _http.get(
-        _uriWithAppendedPath(
-          baseUrl,
-          path,
-          queryParameters: queryParameters,
-        ),
-        headers: {
-          'Accept': 'application/json',
-          if (authToken != null) 'Authorization': 'Bearer $authToken',
-        },
-      ).timeout(const Duration(seconds: 10));
+      final uri = _uriWithAppendedPath(
+        baseUrl,
+        path,
+        queryParameters: queryParameters,
+      );
+      final headers = {
+        'Accept': 'application/json',
+        if (authToken != null) 'Authorization': 'Bearer $authToken',
+      };
+      final response = method == 'POST'
+          ? await _http.post(uri, headers: headers).timeout(timeout)
+          : await _http.get(uri, headers: headers).timeout(timeout);
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _JsonEndpointResult.authRequired();
       }
@@ -510,6 +563,8 @@ class DeviceProbeService {
           hubId: hub.id,
           route: candidate.route,
           baseUrl: baseUrl,
+          tokenAvailable: authToken != null,
+          hasEncryptedToken: hub.hasEncryptedToken,
           body: decoded.map((key, value) => MapEntry(key.toString(), value)),
         ),
       );
@@ -838,12 +893,16 @@ class _JsonEndpointSuccess {
     required this.hubId,
     required this.route,
     required this.baseUrl,
+    required this.tokenAvailable,
+    required this.hasEncryptedToken,
     required this.body,
   });
 
   final String hubId;
   final String route;
   final String baseUrl;
+  final bool tokenAvailable;
+  final bool hasEncryptedToken;
   final Map<String, dynamic> body;
 }
 

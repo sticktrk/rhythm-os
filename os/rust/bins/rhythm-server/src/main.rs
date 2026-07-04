@@ -198,7 +198,7 @@ fn main() -> Result<()> {
 
     if appliance_runtime {
         rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
-        rhythm_server::auto_update::spawn(state.clone());
+        info!(target: "sys", "Automatic appliance updates are disabled; use explicit OTA update requests");
     }
 
     // Start tokio runtime for the async HTTP server + mDNS

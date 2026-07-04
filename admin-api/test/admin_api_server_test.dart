@@ -161,6 +161,33 @@ void main() {
         });
       }
 
+      if (request.url.host == 'device.test' &&
+          request.url.path == '/api/ota/check') {
+        deviceRequests.add(request);
+        expect(request.method, 'GET');
+        expect(request.headers['Authorization'], 'Bearer legacy-token');
+        return _jsonResponse({
+          'status': 'ok',
+          'current_version': '0.4.200-beta',
+          'latest_version': '0.6.205-beta',
+          'update_available': true,
+        });
+      }
+
+      if (request.url.host == 'device.test' &&
+          request.url.path == '/api/ota/update') {
+        deviceRequests.add(request);
+        expect(request.method, 'POST');
+        expect(request.headers['Authorization'], 'Bearer legacy-token');
+        return _jsonResponse({
+          'status': 'ok',
+          'message': 'Update started',
+          'current_version': '0.4.200-beta',
+          'latest_version': '0.6.205-beta',
+          'update_available': true,
+        });
+      }
+
       return http.Response('not found', 404);
     });
 
@@ -278,6 +305,43 @@ void main() {
     expect(status['ota']['state'], 'idle');
     expect(status['errors'], isEmpty);
 
+    final otaCheckResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/ota/check'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+        },
+      ),
+    );
+    expect(otaCheckResponse.statusCode, 200);
+    final otaCheck = jsonDecode(await otaCheckResponse.readAsString()) as Map;
+    expect(otaCheck['route'], 'remote');
+    expect(otaCheck['baseUrl'], 'https://device.test:443');
+    expect(otaCheck['action'], 'check');
+    expect(otaCheck['tokenAvailable'], isTrue);
+    expect(otaCheck['result']['update_available'], isTrue);
+    expect(otaCheck['result']['latest_version'], '0.6.205-beta');
+
+    final otaUpdateResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/ota/update'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+        },
+      ),
+    );
+    expect(otaUpdateResponse.statusCode, 200);
+    final otaUpdate = jsonDecode(await otaUpdateResponse.readAsString()) as Map;
+    expect(otaUpdate['route'], 'remote');
+    expect(otaUpdate['baseUrl'], 'https://device.test:443');
+    expect(otaUpdate['action'], 'update');
+    expect(otaUpdate['tokenAvailable'], isTrue);
+    expect(otaUpdate['result']['message'], 'Update started');
+
     final readyResponse = await server.handler(
       Request('GET', Uri.parse('http://admin.test/ready')),
     );
@@ -285,7 +349,7 @@ void main() {
     final ready = jsonDecode(await readyResponse.readAsString()) as Map;
     expect(ready['remoteDebugReady'], isTrue);
     expect(ready['missing'], isEmpty);
-    expect(deviceRequests, hasLength(8));
+    expect(deviceRequests, hasLength(10));
   });
 }
 

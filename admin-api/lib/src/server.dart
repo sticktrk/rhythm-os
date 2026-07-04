@@ -33,6 +33,8 @@ class AdminApiServer {
       ..get('/api/support/snapshot', _supportSnapshot)
       ..post('/api/hubs/<hubId>/probe', _probeHub)
       ..get('/api/hubs/<hubId>/status', _hubStatus)
+      ..post('/api/hubs/<hubId>/ota/check', _checkHubUpdate)
+      ..post('/api/hubs/<hubId>/ota/update', _applyHubUpdate)
       ..post('/api/hubs/<hubId>/debug-bundle', _downloadDebugBundle)
       ..get('/api/hubs/<hubId>/logs', _listHubLogs)
       ..get('/api/hubs/<hubId>/logs/<sourceId>/tail', _tailHubLog);
@@ -107,6 +109,24 @@ class AdminApiServer {
   Future<Response> _hubStatus(Request request, String hubId) async {
     final session = await _requireStaff(request);
     final result = await _probes.loadStatus(session: session, hubId: hubId);
+    return _json(result.toJson());
+  }
+
+  Future<Response> _checkHubUpdate(Request request, String hubId) async {
+    final session = await _requireStaff(request);
+    final result = await _probes.checkForUpdate(
+      session: session,
+      hubId: hubId,
+    );
+    return _json(result.toJson());
+  }
+
+  Future<Response> _applyHubUpdate(Request request, String hubId) async {
+    final session = await _requireStaff(request);
+    final result = await _probes.applyUpdate(
+      session: session,
+      hubId: hubId,
+    );
     return _json(result.toJson());
   }
 
