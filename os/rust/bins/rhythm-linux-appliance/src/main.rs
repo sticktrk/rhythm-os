@@ -269,7 +269,7 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic thread");
     }
     rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
-    info!(target: "sys", "Automatic appliance updates are disabled; use explicit OTA update requests");
+    rhythm_server::auto_update::spawn(state.clone());
 
     let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string(), state.clone());
     if let Err(e) = provisioning.ensure_running_if_needed("startup") {

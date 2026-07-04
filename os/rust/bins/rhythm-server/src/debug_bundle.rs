@@ -37,6 +37,7 @@ const DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT: u64 = 1024 * 1024;
 const DEBUG_BUNDLE_LOG_CAPTURE_ROTATION_LIMIT: u32 = 1;
 const EXACT_PERSISTED_FILES: &[&str] = &["topology.json", "canonical_registry.json", "rooms.json"];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
+const OTA_DEBUG_FILES: &[&str] = &[crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
 #[cfg(target_os = "linux")]
 const THREAD_SNAPSHOT_ENTRY_LIMIT: usize = 64;
@@ -900,7 +901,6 @@ pub fn tail_log_source(state: &SharedState, source_id: &str, lines: usize) -> Re
     })
 }
 
-
 /// Hard per-line byte cap for log scanning. `BufRead::lines()` buffers an
 /// entire line into memory before we get to truncate it — a corrupted log
 /// (e.g. NUL-padded blocks after power loss, which are valid UTF-8 with no
@@ -1219,6 +1219,16 @@ fn discover_persisted_artifacts(
     }
 
     for file_name in REMOTE_ACCESS_DEBUG_FILES {
+        let source_path = data_dir.join(file_name);
+        if source_path.is_file() {
+            discovered.push(FileArtifact {
+                source_path,
+                archive_path: format!("persisted/{file_name}"),
+            });
+        }
+    }
+
+    for file_name in OTA_DEBUG_FILES {
         let source_path = data_dir.join(file_name);
         if source_path.is_file() {
             discovered.push(FileArtifact {
@@ -3024,6 +3034,12 @@ mod tests {
         fs::write(data_dir.join("canonical_registry.json"), b"{}").unwrap();
         fs::write(data_dir.join("hub_registry_z.json"), b"{}").unwrap();
         fs::write(data_dir.join("hub_registry_a.json"), b"{}").unwrap();
+        fs::create_dir_all(data_dir.join("ota")).unwrap();
+        fs::write(
+            data_dir.join(crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH),
+            br#"{"schema_version":1}"#,
+        )
+        .unwrap();
 
         let generated_at = Utc
             .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
@@ -3057,6 +3073,7 @@ mod tests {
                 "persisted/canonical_registry.json",
                 "persisted/hub_registry_a.json",
                 "persisted/hub_registry_z.json",
+                "persisted/ota/auto-update-state.json",
                 "persisted/topology.json"
             ]
         );
@@ -3405,6 +3422,12 @@ mod tests {
             br#"{"schema_version":1,"enabled":true,"hostname":"hub.devices.rhythm.lighting","connector_token":"secret-token","tunnel_id":"tunnel-id","tunnel_name":"tunnel-name","updated_at_epoch_ms":1780588319000}"#,
         )
         .unwrap();
+        fs::create_dir_all(data_dir.join("ota")).unwrap();
+        fs::write(
+            data_dir.join(crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH),
+            br#"{"schema_version":1,"last_check":{"decision":"up_to_date"}}"#,
+        )
+        .unwrap();
 
         let state: SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
@@ -3472,6 +3495,12 @@ mod tests {
                 .map(Vec::as_slice),
             Some(b"state=running\nrestart_count=1\n".as_slice())
         );
+        assert_eq!(
+            files
+                .get("persisted/ota/auto-update-state.json")
+                .map(Vec::as_slice),
+            Some(br#"{"schema_version":1,"last_check":{"decision":"up_to_date"}}"#.as_slice())
+        );
         assert!(!files.contains_key("persisted/cloudflared/connector_token"));
         assert!(files.contains_key("state.json"));
         assert!(files.contains_key("profile_bundle.json"));
@@ -3494,7 +3523,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            5
+            6
         );
         assert!(manifest["missing_persisted_files"]
             .as_array()

@@ -50,7 +50,9 @@ pub fn create_router(state: SharedState) -> Router {
                 "/api/ota/status",
                 get({
                     let ota_status = ota_status.clone();
-                    move || ota_status_snapshot(ota_status.clone())
+                    move |State(state): State<SharedState>| {
+                        ota_status_snapshot(state, ota_status.clone())
+                    }
                 }),
             )
             .route(
@@ -580,9 +582,19 @@ async fn ota_capabilities(ota_status: crate::self_update::OtaStatusHandle) -> Re
     }
 }
 
-async fn ota_status_snapshot(ota_status: crate::self_update::OtaStatusHandle) -> Response {
+async fn ota_status_snapshot(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+) -> Response {
     match serde_json::to_value(ota_status.snapshot()) {
-        Ok(value) => json_status(StatusCode::OK, value),
+        Ok(mut value) => {
+            if let Some(auto_update_status) = crate::auto_update::load_status_json(&state) {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("auto_update_status".to_string(), auto_update_status);
+                }
+            }
+            json_status(StatusCode::OK, value)
+        }
         Err(e) => err_500(e),
     }
 }
@@ -1207,6 +1219,15 @@ mod tests {
 
     #[tokio::test]
     async fn ota_status_endpoints_serialize_handle_state() {
+        let data_dir = unique_test_dir("ota-status");
+        std::fs::create_dir_all(data_dir.join("ota")).unwrap();
+        std::fs::write(
+            data_dir.join(crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH),
+            br#"{"schema_version":1,"last_check":{"decision":"up_to_date"}}"#,
+        )
+        .unwrap();
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().data_dir = data_dir.display().to_string();
         let ota_status = crate::self_update::OtaStatusHandle::new("0.4.192-beta");
 
         let capabilities = ota_capabilities(ota_status.clone()).await;
@@ -1217,12 +1238,19 @@ mod tests {
         assert_eq!(capabilities["requires_restart"], true);
 
         ota_status.mark_checking();
-        let status = ota_status_snapshot(ota_status).await;
+        let status = ota_status_snapshot(state, ota_status).await;
         assert_eq!(status.status(), StatusCode::OK);
         let status = response_json(status).await;
         assert_eq!(status["state"], "checking");
         assert_eq!(status["current_version"], "0.4.192-beta");
         assert_eq!(status["message"], "Checking for updates...");
+        assert_eq!(status["auto_update_status"]["schema_version"], 1);
+        assert_eq!(
+            status["auto_update_status"]["last_check"]["decision"],
+            "up_to_date"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
@@ -1541,7 +1569,9 @@ mod tests {
         {
             let mut state = state.lock().unwrap();
             state.data_dir = data_dir.display().to_string();
-            state.storage = Some(std::sync::Arc::new(FileStorage::new(&state.data_dir).unwrap()));
+            state.storage = Some(std::sync::Arc::new(
+                FileStorage::new(&state.data_dir).unwrap(),
+            ));
         }
         let router = create_router(state);
 
