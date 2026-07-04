@@ -4,6 +4,7 @@ import type {
   DebugBundleDownload,
   DeviceLogSources,
   DeviceLogTail,
+  DeviceOtaAction,
   DeviceStatus,
   MeResponse,
   ProbeResult,
@@ -68,6 +69,28 @@ export async function fetchHubStatus(
   return apiFetch<DeviceStatus>(
     `/api/hubs/${encodeURIComponent(hubId)}/status`,
     accessToken
+  );
+}
+
+export async function checkHubUpdate(
+  accessToken: string,
+  hubId: string
+): Promise<DeviceOtaAction> {
+  return apiFetch<DeviceOtaAction>(
+    `/api/hubs/${encodeURIComponent(hubId)}/ota/check`,
+    accessToken,
+    { method: 'POST' }
+  );
+}
+
+export async function applyHubUpdate(
+  accessToken: string,
+  hubId: string
+): Promise<DeviceOtaAction> {
+  return apiFetch<DeviceOtaAction>(
+    `/api/hubs/${encodeURIComponent(hubId)}/ota/update`,
+    accessToken,
+    { method: 'POST' }
   );
 }
 

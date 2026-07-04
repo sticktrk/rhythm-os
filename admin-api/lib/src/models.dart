@@ -606,6 +606,39 @@ class DeviceStatusDto {
       };
 }
 
+class DeviceOtaActionDto {
+  const DeviceOtaActionDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.action,
+    required this.completedAt,
+    required this.tokenAvailable,
+    required this.hasEncryptedToken,
+    required this.result,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final String action;
+  final DateTime completedAt;
+  final bool tokenAvailable;
+  final bool hasEncryptedToken;
+  final Map<String, dynamic> result;
+
+  Map<String, dynamic> toJson() => {
+        'hubId': hubId,
+        'route': route,
+        'baseUrl': baseUrl,
+        'action': action,
+        'completedAt': completedAt.toIso8601String(),
+        'tokenAvailable': tokenAvailable,
+        'hasEncryptedToken': hasEncryptedToken,
+        'result': result,
+      };
+}
+
 Map<String, dynamic>? asStringMap(Object? value) {
   if (value is! Map) return null;
   return value.map((key, value) => MapEntry(key.toString(), value));

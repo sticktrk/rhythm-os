@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 
 import {
+  applyHubUpdate,
+  checkHubUpdate,
   downloadDebugBundle,
   fetchHealth,
   fetchHubStatus,
@@ -36,6 +38,7 @@ import type {
   AdminApiReadiness,
   DeviceLogSource,
   DeviceLogTail,
+  DeviceOtaAction,
   DeviceStatus,
   MeResponse,
   ProbeResult,
@@ -73,6 +76,13 @@ type StatusState = {
   result?: DeviceStatus;
 };
 
+type OtaState = {
+  checking: boolean;
+  updating: boolean;
+  error?: string;
+  result?: DeviceOtaAction;
+};
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
@@ -97,6 +107,7 @@ export default function App() {
   const [statusStates, setStatusStates] = useState<Record<string, StatusState>>(
     {}
   );
+  const [otaStates, setOtaStates] = useState<Record<string, OtaState>>({});
 
   useEffect(() => {
     if (!supabase) {
@@ -124,6 +135,7 @@ export default function App() {
       setBundleStates({});
       setLogStates({});
       setStatusStates({});
+      setOtaStates({});
     });
 
     return () => {
@@ -288,6 +300,95 @@ export default function App() {
     }
   }
 
+  async function handleCheckUpdate(hub: SupportHub) {
+    if (!session) return;
+    setOtaStates((current) => ({
+      ...current,
+      [hub.id]: {
+        ...current[hub.id],
+        checking: true,
+        updating: current[hub.id]?.updating ?? false,
+        error: undefined
+      }
+    }));
+    try {
+      const result = await checkHubUpdate(session.access_token, hub.id);
+      setOtaStates((current) => ({
+        ...current,
+        [hub.id]: {
+          checking: false,
+          updating: current[hub.id]?.updating ?? false,
+          result
+        }
+      }));
+      mergeOtaResultIntoStatus(hub.id, result);
+    } catch (error) {
+      setOtaStates((current) => ({
+        ...current,
+        [hub.id]: {
+          ...current[hub.id],
+          checking: false,
+          updating: current[hub.id]?.updating ?? false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    }
+  }
+
+  async function handleApplyUpdate(hub: SupportHub) {
+    if (!session) return;
+    const confirmed = window.confirm(`Run OTA update for ${hub.name}?`);
+    if (!confirmed) return;
+    setOtaStates((current) => ({
+      ...current,
+      [hub.id]: {
+        ...current[hub.id],
+        checking: current[hub.id]?.checking ?? false,
+        updating: true,
+        error: undefined
+      }
+    }));
+    try {
+      const result = await applyHubUpdate(session.access_token, hub.id);
+      setOtaStates((current) => ({
+        ...current,
+        [hub.id]: {
+          checking: current[hub.id]?.checking ?? false,
+          updating: false,
+          result
+        }
+      }));
+      mergeOtaResultIntoStatus(hub.id, result);
+    } catch (error) {
+      setOtaStates((current) => ({
+        ...current,
+        [hub.id]: {
+          ...current[hub.id],
+          checking: current[hub.id]?.checking ?? false,
+          updating: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    }
+  }
+
+  function mergeOtaResultIntoStatus(hubId: string, action: DeviceOtaAction) {
+    setStatusStates((current) => {
+      const existing = current[hubId];
+      if (!existing?.opened || !existing.result) return current;
+      return {
+        ...current,
+        [hubId]: {
+          ...existing,
+          result: {
+            ...existing.result,
+            ota: action.result
+          }
+        }
+      };
+    });
+  }
+
   async function handleLoadLogs(hub: SupportHub, sourceId?: string) {
     if (!session) return;
     const existing = logStates[hub.id];
@@ -441,10 +542,13 @@ export default function App() {
               probeStates={probeStates}
               bundleStates={bundleStates}
               statusStates={statusStates}
+              otaStates={otaStates}
               logStates={logStates}
               onProbe={handleProbe}
               onDownloadBundle={handleDownloadBundle}
               onLoadStatus={handleLoadStatus}
+              onCheckUpdate={handleCheckUpdate}
+              onApplyUpdate={handleApplyUpdate}
               onLoadLogs={handleLoadLogs}
             />
           ) : (
@@ -603,20 +707,26 @@ function HomeDetail({
   probeStates,
   bundleStates,
   statusStates,
+  otaStates,
   logStates,
   onProbe,
   onDownloadBundle,
   onLoadStatus,
+  onCheckUpdate,
+  onApplyUpdate,
   onLoadLogs
 }: {
   item: HomeListItem;
   probeStates: Record<string, ProbeState>;
   bundleStates: Record<string, BundleState>;
   statusStates: Record<string, StatusState>;
+  otaStates: Record<string, OtaState>;
   logStates: Record<string, LogState>;
   onProbe: (hub: SupportHub) => void;
   onDownloadBundle: (hub: SupportHub) => void;
   onLoadStatus: (hub: SupportHub) => void;
+  onCheckUpdate: (hub: SupportHub) => void;
+  onApplyUpdate: (hub: SupportHub) => void;
   onLoadLogs: (hub: SupportHub, sourceId?: string) => void;
 }) {
   return (
@@ -662,10 +772,13 @@ function HomeDetail({
               probeState={probeStates[hub.id]}
               bundleState={bundleStates[hub.id]}
               statusState={statusStates[hub.id]}
+              otaState={otaStates[hub.id]}
               logState={logStates[hub.id]}
               onProbe={() => onProbe(hub)}
               onDownloadBundle={() => onDownloadBundle(hub)}
               onLoadStatus={() => onLoadStatus(hub)}
+              onCheckUpdate={() => onCheckUpdate(hub)}
+              onApplyUpdate={() => onApplyUpdate(hub)}
               onLoadLogs={(sourceId) => onLoadLogs(hub, sourceId)}
             />
           ))}
@@ -680,23 +793,30 @@ function HubRow({
   probeState,
   bundleState,
   statusState,
+  otaState,
   logState,
   onProbe,
   onDownloadBundle,
   onLoadStatus,
+  onCheckUpdate,
+  onApplyUpdate,
   onLoadLogs
 }: {
   hub: SupportHub;
   probeState?: ProbeState;
   bundleState?: BundleState;
   statusState?: StatusState;
+  otaState?: OtaState;
   logState?: LogState;
   onProbe: () => void;
   onDownloadBundle: () => void;
   onLoadStatus: () => void;
+  onCheckUpdate: () => void;
+  onApplyUpdate: () => void;
   onLoadLogs: (sourceId?: string) => void;
 }) {
   const result = probeState?.result;
+  const otaBusy = Boolean(otaState?.checking || otaState?.updating);
   return (
     <div className="hubRow">
       <div className="hubMain">
@@ -733,6 +853,24 @@ function HubRow({
         <button className="probeButton" type="button" onClick={onProbe} disabled={probeState?.loading}>
           {probeState?.loading ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
           <span>Probe</span>
+        </button>
+        <button
+          className="probeButton"
+          type="button"
+          onClick={onCheckUpdate}
+          disabled={otaBusy}
+        >
+          {otaState?.checking ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          <span>Check</span>
+        </button>
+        <button
+          className="probeButton"
+          type="button"
+          onClick={onApplyUpdate}
+          disabled={otaBusy}
+        >
+          {otaState?.updating ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+          <span>Update</span>
         </button>
         <button
           className="probeButton"
@@ -778,9 +916,18 @@ function HubRow({
         </div>
       ) : null}
 
-      {probeState?.error || result?.message || bundleState?.error ? (
+      {probeState?.error || result?.message || bundleState?.error || otaState?.error ? (
         <div className="hubMessage">
-          {bundleState?.error ?? probeState?.error ?? result?.message}
+          {otaState?.error ?? bundleState?.error ?? probeState?.error ?? result?.message}
+        </div>
+      ) : null}
+
+      {otaState?.result ? (
+        <div className="hubMessage success">
+          {otaActionMessage(otaState.result)}
+          {' via '}
+          {otaState.result.route}
+          {otaState.result.completedAt ? ` at ${formatDateTime(otaState.result.completedAt)}` : ''}
         </div>
       ) : null}
 
@@ -1062,6 +1209,31 @@ function ProbeBadge({ state }: { state?: ProbeState }) {
       Offline
     </span>
   );
+}
+
+function otaActionMessage(action: DeviceOtaAction): string {
+  const message = nonEmptyString(action.result.message);
+  if (message) return message;
+
+  const latest = nonEmptyString(action.result.latest_version);
+  const current = nonEmptyString(action.result.current_version);
+  if (action.action === 'check') {
+    if (action.result.update_available === true && latest) {
+      return `Update available: v${latest}`;
+    }
+    if (action.result.update_available === false) {
+      return current ? `Already current: v${current}` : 'Already current';
+    }
+    return 'Update check completed';
+  }
+
+  return latest ? `Update requested: v${latest}` : 'Update requested';
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : undefined;
 }
 
 function flattenHomes(snapshot: SupportSnapshot | null): HomeListItem[] {

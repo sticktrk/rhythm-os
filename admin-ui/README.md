@@ -20,7 +20,8 @@ those two browser-safe settings.
 From the dashboard, staff can probe a Light Box to verify remote/local
 reachability, open a detailed status summary, inspect remote rpiz log tails, and
 collect its `rhythm-debug-bundle-*.tar.gz` attachment through `admin-api` for
-deeper debugging.
+deeper debugging. Staff can also run explicit OTA checks and updates from each
+Light Box row without exposing device tokens to the browser.
 
 The dashboard reads `GET /ready` from `admin-api` after sign-in and warns when
 remote rpiz debugging is not fully configured. A ready deployment reports
