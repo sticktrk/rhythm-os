@@ -192,6 +192,30 @@ export type DeviceOtaAction = {
   result: Record<string, unknown>;
 };
 
+export type DeviceAdminMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+export type DeviceAdminProxyRequest = {
+  method: DeviceAdminMethod;
+  path: string;
+  query?: Record<string, string>;
+  body?: unknown;
+  timeoutSeconds?: number;
+};
+
+export type DeviceAdminProxyResponse = {
+  hubId: string;
+  route: 'remote' | 'local';
+  baseUrl: string;
+  method: DeviceAdminMethod;
+  path: string;
+  queryParameters?: Record<string, string>;
+  statusCode: number;
+  completedAt: string;
+  tokenAvailable: boolean;
+  hasEncryptedToken: boolean;
+  body: unknown;
+};
+
 export type HomeListItem = {
   customer: SupportCustomer;
   home: SupportHome;

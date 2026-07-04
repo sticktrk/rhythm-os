@@ -38,7 +38,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -152,7 +153,8 @@ code {
   background: var(--surface-muted);
 }
 
-.iconButton.danger {
+.iconButton.danger,
+.probeButton.danger {
   color: var(--red);
 }
 
@@ -474,7 +476,8 @@ code {
 .inventory,
 .hubMessage,
 .logPanel,
-.statusPanel {
+.statusPanel,
+.deviceAdminPanel {
   grid-column: 1 / -1;
   padding-left: 50px;
 }
@@ -495,6 +498,108 @@ code {
 .statusPanel {
   display: grid;
   gap: 10px;
+}
+
+.deviceAdminPanel {
+  display: grid;
+  gap: 12px;
+}
+
+.deviceAdminHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.deviceAdminHeader h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+.deviceAdminDescription {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.deviceAdminGrid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 130px minmax(120px, 0.35fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.deviceAdminGrid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.deviceAdminGrid label.wide {
+  grid-column: 1 / -1;
+}
+
+.deviceAdminGrid input,
+.deviceAdminGrid select,
+.deviceAdminGrid textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.deviceAdminGrid input,
+.deviceAdminGrid select {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.deviceAdminGrid textarea {
+  min-height: 88px;
+  resize: vertical;
+  padding: 10px;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.deviceAdminGrid input:focus,
+.deviceAdminGrid select:focus,
+.deviceAdminGrid textarea:focus {
+  border-color: var(--green);
+  outline: 3px solid var(--green-soft);
+}
+
+.deviceAdminResult {
+  display: grid;
+  gap: 8px;
+}
+
+.deviceAdminResult pre {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafb;
+  padding: 12px;
+  color: var(--text);
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .statusGrid {
@@ -823,12 +928,19 @@ code {
   .inventory,
   .hubMessage,
   .logPanel,
-  .statusPanel {
+  .statusPanel,
+  .deviceAdminPanel {
     padding-left: 0;
   }
 
-  .statusGrid {
+  .statusGrid,
+  .deviceAdminGrid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .deviceAdminHeader {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .homeHeader {

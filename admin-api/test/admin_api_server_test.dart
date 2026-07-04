@@ -188,6 +188,48 @@ void main() {
         });
       }
 
+      if (request.url.host == 'device.test' &&
+          request.url.path == '/api/settings') {
+        deviceRequests.add(request);
+        expect(request.method, 'PUT');
+        expect(request.url.queryParameters['source'], 'admin');
+        expect(request.headers['Authorization'], 'Bearer legacy-token');
+        expect(request.headers['content-type'], contains('application/json'));
+        expect(
+          jsonDecode((request as http.Request).body),
+          {'auto_update': false},
+        );
+        return _jsonResponse({
+          'auto_update': false,
+          'power_save': false,
+        });
+      }
+
+      if (request.url.host == 'device.test' &&
+          request.url.path == '/api/future-settings') {
+        deviceRequests.add(request);
+        expect(request.method, 'PATCH');
+        expect(request.headers['Authorization'], 'Bearer legacy-token');
+        expect(
+          jsonDecode((request as http.Request).body),
+          {
+            'zones': ['kitchen', 'den']
+          },
+        );
+        return _jsonResponse([
+          {'id': 'kitchen', 'enabled': true},
+          {'id': 'den', 'enabled': true},
+        ]);
+      }
+
+      if (request.url.host == 'device.test' &&
+          request.url.path == '/api/future-settings/kitchen') {
+        deviceRequests.add(request);
+        expect(request.method, 'DELETE');
+        expect(request.headers['Authorization'], 'Bearer legacy-token');
+        return http.Response('', 204);
+      }
+
       return http.Response('not found', 404);
     });
 
@@ -342,6 +384,111 @@ void main() {
     expect(otaUpdate['tokenAvailable'], isTrue);
     expect(otaUpdate['result']['message'], 'Update started');
 
+    final adminProxyResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': '/api/settings',
+          'query': {'source': 'admin'},
+          'body': {'auto_update': false},
+        }),
+      ),
+    );
+    expect(adminProxyResponse.statusCode, 200);
+    final adminProxy =
+        jsonDecode(await adminProxyResponse.readAsString()) as Map;
+    expect(adminProxy['route'], 'remote');
+    expect(adminProxy['baseUrl'], 'https://device.test:443');
+    expect(adminProxy['method'], 'PUT');
+    expect(adminProxy['path'], 'api/settings');
+    expect(adminProxy['statusCode'], 200);
+    expect(adminProxy['tokenAvailable'], isTrue);
+    expect(adminProxy['body'], {
+      'auto_update': false,
+      'power_save': false,
+    });
+
+    final patchProxyResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PATCH',
+          'path': 'api/future-settings',
+          'body': {
+            'zones': ['kitchen', 'den'],
+          },
+        }),
+      ),
+    );
+    expect(patchProxyResponse.statusCode, 200);
+    final patchProxy =
+        jsonDecode(await patchProxyResponse.readAsString()) as Map;
+    expect(patchProxy['method'], 'PATCH');
+    expect(patchProxy['path'], 'api/future-settings');
+    expect(patchProxy['body'], [
+      {'id': 'kitchen', 'enabled': true},
+      {'id': 'den', 'enabled': true},
+    ]);
+
+    final deleteProxyResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'DELETE',
+          'path': 'api/future-settings/kitchen',
+        }),
+      ),
+    );
+    expect(deleteProxyResponse.statusCode, 200);
+    final deleteProxy =
+        jsonDecode(await deleteProxyResponse.readAsString()) as Map;
+    expect(deleteProxy['method'], 'DELETE');
+    expect(deleteProxy['path'], 'api/future-settings/kitchen');
+    expect(deleteProxy['statusCode'], 204);
+    expect(deleteProxy['body'], isNull);
+
+    final invalidProxyResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'GET',
+          'path': 'https://device.test/api/settings',
+        }),
+      ),
+    );
+    expect(invalidProxyResponse.statusCode, 400);
+    final invalidProxy =
+        jsonDecode(await invalidProxyResponse.readAsString()) as Map;
+    expect(
+      invalidProxy['error'],
+      'Device admin path must be a relative device API path.',
+    );
+
     final readyResponse = await server.handler(
       Request('GET', Uri.parse('http://admin.test/ready')),
     );
@@ -349,7 +496,7 @@ void main() {
     final ready = jsonDecode(await readyResponse.readAsString()) as Map;
     expect(ready['remoteDebugReady'], isTrue);
     expect(ready['missing'], isEmpty);
-    expect(deviceRequests, hasLength(10));
+    expect(deviceRequests, hasLength(13));
   });
 }
 

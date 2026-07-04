@@ -29,13 +29,22 @@ import {
   fetchMe,
   fetchReadiness,
   fetchSupportSnapshot,
-  probeHub
+  probeHub,
+  runDeviceAdminProxy
 } from './api';
+import {
+  DEVICE_ADMIN_OPERATIONS,
+  operationToBodyText,
+  operationToQueryText,
+  type DeviceAdminOperation
+} from './deviceAdminOperations';
 import { isSupabaseConfigured, supabase } from './supabaseClient';
 import type {
   HomeListItem,
   AdminApiHealth,
   AdminApiReadiness,
+  DeviceAdminMethod,
+  DeviceAdminProxyResponse,
   DeviceLogSource,
   DeviceLogTail,
   DeviceOtaAction,
@@ -83,6 +92,19 @@ type OtaState = {
   result?: DeviceOtaAction;
 };
 
+type DeviceAdminState = {
+  opened: boolean;
+  loading: boolean;
+  selectedOperationId: string;
+  method: DeviceAdminMethod;
+  path: string;
+  queryText: string;
+  bodyText: string;
+  timeoutSeconds?: number;
+  error?: string;
+  result?: DeviceAdminProxyResponse;
+};
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
@@ -108,6 +130,9 @@ export default function App() {
     {}
   );
   const [otaStates, setOtaStates] = useState<Record<string, OtaState>>({});
+  const [deviceAdminStates, setDeviceAdminStates] = useState<
+    Record<string, DeviceAdminState>
+  >({});
 
   useEffect(() => {
     if (!supabase) {
@@ -136,6 +161,7 @@ export default function App() {
       setLogStates({});
       setStatusStates({});
       setOtaStates({});
+      setDeviceAdminStates({});
     });
 
     return () => {
@@ -435,6 +461,119 @@ export default function App() {
     }
   }
 
+  function handleToggleDeviceAdmin(hub: SupportHub) {
+    setDeviceAdminStates((current) => {
+      const existing = current[hub.id];
+      if (existing) {
+        return {
+          ...current,
+          [hub.id]: { ...existing, opened: !existing.opened }
+        };
+      }
+      return {
+        ...current,
+        [hub.id]: initialDeviceAdminState()
+      };
+    });
+  }
+
+  function handleSelectDeviceAdminOperation(
+    hub: SupportHub,
+    operationId: string
+  ) {
+    const operation =
+      DEVICE_ADMIN_OPERATIONS.find((item) => item.id === operationId) ??
+      DEVICE_ADMIN_OPERATIONS[0];
+    setDeviceAdminStates((current) => ({
+      ...current,
+      [hub.id]: stateFromDeviceAdminOperation(operation)
+    }));
+  }
+
+  function handleDeviceAdminStateChange(
+    hub: SupportHub,
+    patch: Partial<DeviceAdminState>
+  ) {
+    setDeviceAdminStates((current) => ({
+      ...current,
+      [hub.id]: {
+        ...(current[hub.id] ?? initialDeviceAdminState()),
+        ...patch,
+        opened: true,
+        error: undefined
+      }
+    }));
+  }
+
+  async function handleRunDeviceAdmin(hub: SupportHub) {
+    if (!session) return;
+    const current = deviceAdminStates[hub.id] ?? initialDeviceAdminState();
+    const operation = DEVICE_ADMIN_OPERATIONS.find(
+      (item) => item.id === current.selectedOperationId
+    );
+    if (operation?.danger) {
+      const confirmed = window.confirm(`Run ${operation.label} on ${hub.name}?`);
+      if (!confirmed) return;
+    }
+
+    let query: Record<string, string>;
+    let body: unknown;
+    try {
+      query = parseQueryText(current.queryText);
+      body = parseOptionalJson(current.bodyText, 'Body');
+    } catch (error) {
+      setDeviceAdminStates((states) => ({
+        ...states,
+        [hub.id]: {
+          ...current,
+          opened: true,
+          loading: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+      return;
+    }
+
+    setDeviceAdminStates((states) => ({
+      ...states,
+      [hub.id]: {
+        ...current,
+        opened: true,
+        loading: true,
+        error: undefined
+      }
+    }));
+
+    try {
+      const result = await runDeviceAdminProxy(session.access_token, hub.id, {
+        method: current.method,
+        path: current.path,
+        query,
+        ...(body === undefined ? {} : { body }),
+        timeoutSeconds: current.timeoutSeconds
+      });
+      setDeviceAdminStates((states) => ({
+        ...states,
+        [hub.id]: {
+          ...(states[hub.id] ?? current),
+          opened: true,
+          loading: false,
+          result
+        }
+      }));
+    } catch (error) {
+      setDeviceAdminStates((states) => ({
+        ...states,
+        [hub.id]: {
+          ...(states[hub.id] ?? current),
+          opened: true,
+          loading: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }));
+    }
+  }
+
   if (!isSupabaseConfigured) {
     return <SetupScreen />;
   }
@@ -544,12 +683,17 @@ export default function App() {
               statusStates={statusStates}
               otaStates={otaStates}
               logStates={logStates}
+              deviceAdminStates={deviceAdminStates}
               onProbe={handleProbe}
               onDownloadBundle={handleDownloadBundle}
               onLoadStatus={handleLoadStatus}
               onCheckUpdate={handleCheckUpdate}
               onApplyUpdate={handleApplyUpdate}
               onLoadLogs={handleLoadLogs}
+              onToggleDeviceAdmin={handleToggleDeviceAdmin}
+              onSelectDeviceAdminOperation={handleSelectDeviceAdminOperation}
+              onDeviceAdminStateChange={handleDeviceAdminStateChange}
+              onRunDeviceAdmin={handleRunDeviceAdmin}
             />
           ) : (
             <div className="emptyPane">
@@ -709,12 +853,17 @@ function HomeDetail({
   statusStates,
   otaStates,
   logStates,
+  deviceAdminStates,
   onProbe,
   onDownloadBundle,
   onLoadStatus,
   onCheckUpdate,
   onApplyUpdate,
-  onLoadLogs
+  onLoadLogs,
+  onToggleDeviceAdmin,
+  onSelectDeviceAdminOperation,
+  onDeviceAdminStateChange,
+  onRunDeviceAdmin
 }: {
   item: HomeListItem;
   probeStates: Record<string, ProbeState>;
@@ -722,12 +871,23 @@ function HomeDetail({
   statusStates: Record<string, StatusState>;
   otaStates: Record<string, OtaState>;
   logStates: Record<string, LogState>;
+  deviceAdminStates: Record<string, DeviceAdminState>;
   onProbe: (hub: SupportHub) => void;
   onDownloadBundle: (hub: SupportHub) => void;
   onLoadStatus: (hub: SupportHub) => void;
   onCheckUpdate: (hub: SupportHub) => void;
   onApplyUpdate: (hub: SupportHub) => void;
   onLoadLogs: (hub: SupportHub, sourceId?: string) => void;
+  onToggleDeviceAdmin: (hub: SupportHub) => void;
+  onSelectDeviceAdminOperation: (
+    hub: SupportHub,
+    operationId: string
+  ) => void;
+  onDeviceAdminStateChange: (
+    hub: SupportHub,
+    patch: Partial<DeviceAdminState>
+  ) => void;
+  onRunDeviceAdmin: (hub: SupportHub) => void;
 }) {
   return (
     <div className="homeDetail">
@@ -774,12 +934,21 @@ function HomeDetail({
               statusState={statusStates[hub.id]}
               otaState={otaStates[hub.id]}
               logState={logStates[hub.id]}
+              deviceAdminState={deviceAdminStates[hub.id]}
               onProbe={() => onProbe(hub)}
               onDownloadBundle={() => onDownloadBundle(hub)}
               onLoadStatus={() => onLoadStatus(hub)}
               onCheckUpdate={() => onCheckUpdate(hub)}
               onApplyUpdate={() => onApplyUpdate(hub)}
               onLoadLogs={(sourceId) => onLoadLogs(hub, sourceId)}
+              onToggleDeviceAdmin={() => onToggleDeviceAdmin(hub)}
+              onSelectDeviceAdminOperation={(operationId) =>
+                onSelectDeviceAdminOperation(hub, operationId)
+              }
+              onDeviceAdminStateChange={(patch) =>
+                onDeviceAdminStateChange(hub, patch)
+              }
+              onRunDeviceAdmin={() => onRunDeviceAdmin(hub)}
             />
           ))}
         </div>
@@ -795,12 +964,17 @@ function HubRow({
   statusState,
   otaState,
   logState,
+  deviceAdminState,
   onProbe,
   onDownloadBundle,
   onLoadStatus,
   onCheckUpdate,
   onApplyUpdate,
-  onLoadLogs
+  onLoadLogs,
+  onToggleDeviceAdmin,
+  onSelectDeviceAdminOperation,
+  onDeviceAdminStateChange,
+  onRunDeviceAdmin
 }: {
   hub: SupportHub;
   probeState?: ProbeState;
@@ -808,12 +982,17 @@ function HubRow({
   statusState?: StatusState;
   otaState?: OtaState;
   logState?: LogState;
+  deviceAdminState?: DeviceAdminState;
   onProbe: () => void;
   onDownloadBundle: () => void;
   onLoadStatus: () => void;
   onCheckUpdate: () => void;
   onApplyUpdate: () => void;
   onLoadLogs: (sourceId?: string) => void;
+  onToggleDeviceAdmin: () => void;
+  onSelectDeviceAdminOperation: (operationId: string) => void;
+  onDeviceAdminStateChange: (patch: Partial<DeviceAdminState>) => void;
+  onRunDeviceAdmin: () => void;
 }) {
   const result = probeState?.result;
   const otaBusy = Boolean(otaState?.checking || otaState?.updating);
@@ -899,6 +1078,10 @@ function HubRow({
           {logState?.loading ? <Loader2 className="spin" size={16} /> : <FileText size={16} />}
           <span>Logs</span>
         </button>
+        <button className="probeButton" type="button" onClick={onToggleDeviceAdmin}>
+          <Server size={16} />
+          <span>{deviceAdminState?.opened ? 'Close' : 'Enter'}</span>
+        </button>
       </div>
 
       {result ? (
@@ -948,6 +1131,15 @@ function HubRow({
           state={logState}
           onSourceChange={(sourceId) => onLoadLogs(sourceId)}
           onRefresh={() => onLoadLogs(logState.selectedSourceId)}
+        />
+      ) : null}
+
+      {deviceAdminState?.opened ? (
+        <DeviceAdminPanel
+          state={deviceAdminState}
+          onOperationChange={onSelectDeviceAdminOperation}
+          onStateChange={onDeviceAdminStateChange}
+          onRun={onRunDeviceAdmin}
         />
       ) : null}
     </div>
@@ -1168,6 +1360,144 @@ function LogPanel({
   );
 }
 
+function DeviceAdminPanel({
+  state,
+  onOperationChange,
+  onStateChange,
+  onRun
+}: {
+  state: DeviceAdminState;
+  onOperationChange: (operationId: string) => void;
+  onStateChange: (patch: Partial<DeviceAdminState>) => void;
+  onRun: () => void;
+}) {
+  const selectedOperation = DEVICE_ADMIN_OPERATIONS.find(
+    (operation) => operation.id === state.selectedOperationId
+  );
+  return (
+    <div className="deviceAdminPanel">
+      <div className="deviceAdminHeader">
+        <div>
+          <div className="eyebrow">Device Admin</div>
+          <h4>{selectedOperation?.label ?? 'Custom JSON request'}</h4>
+        </div>
+        <button
+          className={selectedOperation?.danger ? 'probeButton danger' : 'probeButton'}
+          type="button"
+          onClick={onRun}
+          disabled={state.loading}
+        >
+          {state.loading ? <Loader2 className="spin" size={16} /> : <Activity size={16} />}
+          <span>Run</span>
+        </button>
+      </div>
+
+      {selectedOperation?.description ? (
+        <div className="deviceAdminDescription">
+          {selectedOperation.description}
+        </div>
+      ) : null}
+
+      <div className="deviceAdminGrid">
+        <label>
+          <span>Operation</span>
+          <select
+            value={state.selectedOperationId}
+            onChange={(event) => onOperationChange(event.target.value)}
+          >
+            {DEVICE_ADMIN_OPERATIONS.map((operation) => (
+              <option key={operation.id} value={operation.id}>
+                {operation.category} / {operation.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Method</span>
+          <select
+            value={state.method}
+            onChange={(event) =>
+              onStateChange({ method: event.target.value as DeviceAdminMethod })
+            }
+          >
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+          </select>
+        </label>
+
+        <label className="wide">
+          <span>Path</span>
+          <input
+            value={state.path}
+            onChange={(event) => onStateChange({ path: event.target.value })}
+            spellCheck={false}
+          />
+        </label>
+
+        <label>
+          <span>Timeout seconds</span>
+          <input
+            type="number"
+            min={1}
+            max={120}
+            value={state.timeoutSeconds ?? ''}
+            onChange={(event) =>
+              onStateChange({
+                timeoutSeconds:
+                  event.target.value.trim() === ''
+                    ? undefined
+                    : Number(event.target.value)
+              })
+            }
+          />
+        </label>
+
+        <label className="wide">
+          <span>Query JSON</span>
+          <textarea
+            value={state.queryText}
+            onChange={(event) => onStateChange({ queryText: event.target.value })}
+            spellCheck={false}
+            rows={4}
+          />
+        </label>
+
+        <label className="wide">
+          <span>Body JSON</span>
+          <textarea
+            value={state.bodyText}
+            onChange={(event) => onStateChange({ bodyText: event.target.value })}
+            spellCheck={false}
+            rows={8}
+          />
+        </label>
+      </div>
+
+      {state.error ? <div className="hubMessage">{state.error}</div> : null}
+
+      {state.result ? (
+        <div className="deviceAdminResult">
+          <div className="logMeta">
+            <span>
+              {state.result.method} /{state.result.path}
+            </span>
+            <span>
+              {state.result.route} {state.result.baseUrl}
+            </span>
+            <span>HTTP {state.result.statusCode}</span>
+            <span>{formatDateTime(state.result.completedAt)}</span>
+          </div>
+          <pre>{JSON.stringify(state.result.body, null, 2) ?? 'null'}</pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ProbeBadge({ state }: { state?: ProbeState }) {
   if (state?.loading) {
     return (
@@ -1234,6 +1564,57 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0
     ? value.trim()
     : undefined;
+}
+
+function initialDeviceAdminState(): DeviceAdminState {
+  return stateFromDeviceAdminOperation(DEVICE_ADMIN_OPERATIONS[0]);
+}
+
+function stateFromDeviceAdminOperation(
+  operation: DeviceAdminOperation
+): DeviceAdminState {
+  return {
+    opened: true,
+    loading: false,
+    selectedOperationId: operation.id,
+    method: operation.method,
+    path: operation.path,
+    queryText: operationToQueryText(operation),
+    bodyText: operationToBodyText(operation),
+    timeoutSeconds: operation.timeoutSeconds
+  };
+}
+
+function parseQueryText(text: string): Record<string, string> {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!isPlainObject(parsed)) {
+    throw new Error('Query JSON must be an object.');
+  }
+  return Object.fromEntries(
+    Object.entries(parsed)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [key, String(value)])
+  );
+}
+
+function parseOptionalJson(text: string, label: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch (error) {
+    throw new Error(
+      `${label} JSON is invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function flattenHomes(snapshot: SupportSnapshot | null): HomeListItem[] {
