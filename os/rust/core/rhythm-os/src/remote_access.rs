@@ -508,6 +508,34 @@ fn current_epoch_secs() -> u64 {
 }
 
 fn cloudflared_version_for(bin: &Path) -> Option<String> {
+    // Fork/exec of the (large, Go) cloudflared binary takes seconds on a
+    // Pi Zero and this runs on every status poll, starving the single core.
+    // The version only changes when the binary does, so cache by mtime.
+    type VersionCache = std::collections::HashMap<PathBuf, (SystemTime, Option<String>)>;
+    static VERSION_CACHE: std::sync::OnceLock<Mutex<VersionCache>> = std::sync::OnceLock::new();
+
+    let modified = std::fs::metadata(bin).and_then(|m| m.modified()).ok();
+    let cache = VERSION_CACHE.get_or_init(Default::default);
+    if let Some(modified) = modified {
+        if let Ok(cache) = cache.lock() {
+            if let Some((cached_mtime, version)) = cache.get(bin) {
+                if *cached_mtime == modified {
+                    return version.clone();
+                }
+            }
+        }
+    }
+
+    let version = probe_cloudflared_version(bin);
+    if let Some(modified) = modified {
+        if let Ok(mut cache) = cache.lock() {
+            cache.insert(bin.to_path_buf(), (modified, version.clone()));
+        }
+    }
+    version
+}
+
+fn probe_cloudflared_version(bin: &Path) -> Option<String> {
     // Bounded wait: `.output()` has no timeout, and this runs on every
     // remote-access status poll — a wedged/corrupt cloudflared binary would
     // otherwise pin the calling thread forever.
@@ -583,6 +611,11 @@ fn parse_pid(value: &str) -> Option<u32> {
 }
 
 fn pid_running(pid: u32) -> bool {
+    // /proc lookup avoids a fork/exec per check on Linux appliances; the
+    // `kill -0` fallback covers macOS/dev hosts.
+    if Path::new("/proc").is_dir() {
+        return Path::new(&format!("/proc/{pid}")).is_dir();
+    }
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())

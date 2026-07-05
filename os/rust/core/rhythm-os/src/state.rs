@@ -419,6 +419,12 @@ pub struct AppState {
     ///
     /// Used to tolerate DST offset changes when validating wall-clock continuity.
     pub last_check_utc_offset_hours: Option<f32>,
+    /// The effective periodic cycle chosen by the pacing math (profiles can
+    /// stretch it well beyond `runtime_config.update_interval_secs`). The
+    /// liveness watchdog must scale its staleness threshold to this value,
+    /// not the configured interval, or it reboots healthy appliances whose
+    /// cycles legitimately run long.
+    pub effective_periodic_interval_secs: Option<u64>,
     /// Epoch milliseconds of the most recent periodic tick (for client bootstrap).
     pub last_tick_epoch_ms: u64,
 
@@ -729,6 +735,7 @@ impl Default for AppState {
             last_check_hour: None,
             last_check_instant: None,
             last_check_utc_offset_hours: None,
+            effective_periodic_interval_secs: None,
             last_tick_epoch_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
