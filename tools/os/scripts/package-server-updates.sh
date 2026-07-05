@@ -9,8 +9,9 @@
 #   <output>/<target>[-stable]/latest/sdcard.img.gz         (optional latest alias)
 #   <output>/<target>[-stable]/latest/rootfs.ext2.gz        (optional latest alias)
 #
-# Binary-only rpiz releases intentionally emit an empty `images` array. Full
-# image entries are published only when --image-root is supplied.
+# Binary-only rpiz releases reuse the newest rootfs image from supplied
+# previous manifests. Full image entries are published directly only when
+# --image-root is supplied.
 
 set -euo pipefail
 
@@ -21,7 +22,7 @@ ARTIFACT_ROOT="$PROJECT_ROOT/dist/bin"
 OUTPUT_DIR="$PROJECT_ROOT/out/server-updates"
 VERSION=""
 IMAGE_ROOT=""
-PREVIOUS_RPIZ_MANIFEST=""
+PREVIOUS_RPIZ_MANIFESTS=()
 CHANNEL=""
 DRY_RUN=false
 
@@ -43,6 +44,160 @@ json_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+parse_rpiz_manifest_spec() {
+    local spec="$1"
+    local source_feed=""
+    local manifest_path="$spec"
+
+    case "$spec" in
+        rpiz=*|rpiz-stable=*)
+            source_feed="${spec%%=*}"
+            manifest_path="${spec#*=}"
+            ;;
+    esac
+
+    if [ -z "$source_feed" ]; then
+        case "$(basename "$(dirname "$manifest_path")")" in
+            rpiz|rpiz-stable)
+                source_feed="$(basename "$(dirname "$manifest_path")")"
+                ;;
+        esac
+    fi
+
+    printf '%s|%s\n' "$source_feed" "$manifest_path"
+}
+
+parse_release_version_parts() {
+    local value="${1#v}"
+    local core pre major minor patch extra
+
+    value="${value%%+*}"
+    core="${value%%-*}"
+    pre=""
+    if [[ "$value" == *-* ]]; then
+        pre="${value#*-}"
+    fi
+
+    IFS=. read -r major minor patch extra <<EOF
+$core
+EOF
+
+    if [ -n "${extra:-}" ] \
+        || ! [[ "${major:-}" =~ ^[0-9]+$ ]] \
+        || ! [[ "${minor:-}" =~ ^[0-9]+$ ]] \
+        || ! [[ "${patch:-}" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    printf '%s %s %s %s\n' "$major" "$minor" "$patch" "$pre"
+}
+
+release_version_gt() {
+    local left="$1"
+    local right="$2"
+    local left_parts right_parts
+    local l_major l_minor l_patch l_pre
+    local r_major r_minor r_patch r_pre
+
+    [ -n "$left" ] || return 1
+    if [ -z "$right" ]; then
+        return 0
+    fi
+
+    left_parts="$(parse_release_version_parts "$left")" || return 1
+    right_parts="$(parse_release_version_parts "$right")" || return 0
+    read -r l_major l_minor l_patch l_pre <<EOF
+$left_parts
+EOF
+    read -r r_major r_minor r_patch r_pre <<EOF
+$right_parts
+EOF
+
+    if (( 10#$l_major != 10#$r_major )); then
+        (( 10#$l_major > 10#$r_major ))
+        return
+    fi
+    if (( 10#$l_minor != 10#$r_minor )); then
+        (( 10#$l_minor > 10#$r_minor ))
+        return
+    fi
+    if (( 10#$l_patch != 10#$r_patch )); then
+        (( 10#$l_patch > 10#$r_patch ))
+        return
+    fi
+
+    if [ -z "$l_pre" ] && [ -n "$r_pre" ]; then
+        return 0
+    fi
+    if [ -n "$l_pre" ] && [ -z "$r_pre" ]; then
+        return 1
+    fi
+    [[ "$l_pre" > "$r_pre" ]]
+}
+
+manifest_latest_rootfs_version() {
+    local manifest_path="$1"
+    local version best_version=""
+
+    while IFS= read -r version; do
+        [ -n "$version" ] || continue
+        if release_version_gt "$version" "$best_version"; then
+            best_version="$version"
+        fi
+    done < <(jq -r '.images[]? | select(.kind == "rootfs_image") | .version // empty' "$manifest_path")
+
+    echo "$best_version"
+}
+
+manifest_images_json() {
+    local manifest_path="$1"
+    local source_feed="$2"
+    local target_feed="$3"
+
+    if [ -n "$source_feed" ] && [ "$source_feed" != "$target_feed" ]; then
+        jq -c --arg source_feed "$source_feed" '
+            (.images // [])
+            | map(
+                if ((.url? | type) == "string"
+                    and ((.url | test("^[A-Za-z][A-Za-z0-9+.-]*:"))
+                        or (.url | startswith("/"))
+                        or (.url | startswith("../"))))
+                then .
+                else . + {"url": ("../" + $source_feed + "/" + (.url // ""))}
+                end
+            )
+        ' "$manifest_path"
+    else
+        jq -c '.images // []' "$manifest_path"
+    fi
+}
+
+select_previous_rpiz_images_json() {
+    local target_feed="$1"
+    local spec source_feed manifest_path version
+    local best_feed="" best_manifest="" best_version=""
+
+    for spec in "${PREVIOUS_RPIZ_MANIFESTS[@]}"; do
+        source_feed="${spec%%|*}"
+        manifest_path="${spec#*|}"
+        [ -n "$source_feed" ] || source_feed="$target_feed"
+
+        version="$(manifest_latest_rootfs_version "$manifest_path")"
+        [ -n "$version" ] || continue
+
+        if release_version_gt "$version" "$best_version"; then
+            best_feed="$source_feed"
+            best_manifest="$manifest_path"
+            best_version="$version"
+        fi
+    done
+
+    if [ -n "$best_manifest" ]; then
+        echo "Carried forward rpiz image entries from $best_manifest (rootfs v$best_version)" >&2
+        manifest_images_json "$best_manifest" "$best_feed" "$target_feed"
+    fi
+}
+
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
@@ -56,9 +211,10 @@ Options:
   --channel CHANNEL     OTA channel to package: beta or stable (default: infer from VERSION)
   --image-root PATH     Optional rpiz image directory to publish alongside the OTA manifest
   --previous-rpiz-manifest PATH
-                       Deprecated compatibility input. Binary-only releases do
-                       not carry forward previous image entries; use
-                       --image-root to publish full-image artifacts.
+                       Existing rpiz manifest whose images may be carried
+                       forward when this package has no --image-root. Can be
+                       repeated. Prefix with rpiz= or rpiz-stable= when PATH
+                       does not live under a feed-named directory.
   --dry-run             Print planned outputs without writing files
   -h, --help            Show this help
 EOF
@@ -87,7 +243,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --previous-rpiz-manifest)
-            PREVIOUS_RPIZ_MANIFEST="$2"
+            PREVIOUS_RPIZ_MANIFESTS+=("$(parse_rpiz_manifest_spec "$2")")
             shift 2
             ;;
         --dry-run)
@@ -139,11 +295,18 @@ if [ -n "$IMAGE_ROOT" ] && [ ! -d "$IMAGE_ROOT" ]; then
     echo "Error: --image-root does not exist: $IMAGE_ROOT"
     exit 1
 fi
-if [ -n "$PREVIOUS_RPIZ_MANIFEST" ]; then
-    if [ ! -f "$PREVIOUS_RPIZ_MANIFEST" ]; then
-        echo "Error: --previous-rpiz-manifest does not exist: $PREVIOUS_RPIZ_MANIFEST"
+if [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: --previous-rpiz-manifest requires jq" >&2
         exit 1
     fi
+    for manifest_spec in "${PREVIOUS_RPIZ_MANIFESTS[@]}"; do
+        manifest_path="${manifest_spec#*|}"
+        if [ ! -f "$manifest_path" ]; then
+            echo "Error: --previous-rpiz-manifest does not exist: $manifest_path"
+            exit 1
+        fi
+    done
 fi
 
 TARGETS="macos-arm64 macos-x86_64 linux-amd64 linux-aarch64 rpiz"
@@ -263,8 +426,11 @@ for target in $TARGETS; do
             images_json="$images_json${image_entries[$i]}"
         done
         images_json="$images_json]"
-    elif [ "$target" = "rpiz" ] && [ -n "$PREVIOUS_RPIZ_MANIFEST" ]; then
-        echo "Ignoring previous rpiz image entries from $PREVIOUS_RPIZ_MANIFEST; binary-only releases publish no image artifacts"
+    elif [ "$target" = "rpiz" ] && [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
+        carried_images_json="$(select_previous_rpiz_images_json "$feed_target")"
+        if [ -n "$carried_images_json" ]; then
+            images_json="$carried_images_json"
+        fi
     fi
 
     cat > "$manifest_path" <<EOF
