@@ -18,36 +18,61 @@ use crate::state::SharedState;
 
 const HUB_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Forward hub dispatch failures to the SSE event bus.
+/// Forward hub dispatch failures to the SSE event bus and hold the
+/// user-visible `pending_dispatch` flag until the physical outcome.
 ///
 /// Command dispatch is fire-and-forget: `turn_on`/`turn_off` only enqueue.
 /// Successful deliveries surface as the usual `NodeState` updates; anything
 /// that fails, times out, is cooldown-skipped, or dropped is broadcast as a
 /// `DispatchFailure` event so clients see it without watching server logs.
+///
+/// Queued events mark the node pending and their paired outcomes clear it,
+/// so the app's spinner ends when the lights actually resolved — not when
+/// the command was merely handed to the hub mailbox. Only nodes that already
+/// have user-initiated pending work get marked: periodic ticks dispatch
+/// through the same mailboxes, and flagging them would paint card spinners
+/// every rhythm cycle (for seconds at a time on a slow or failing target).
 pub fn install_dispatch_outcome_listener(
     state: &SharedState,
     composite: &rhythm_core::CompositeController,
 ) {
+    // Both listeners run inline: queued events fire on the engine's dispatch
+    // stack, which never holds engine locks across `turn_on`/`turn_off` (the
+    // plan is computed under the lock, dispatch happens after it drops), and
+    // inline execution keeps mark/clear strictly ordered — deferring to a
+    // task pool could run a clear before its mark and leak the flag.
+    let queued_state = state.clone();
+    composite.set_queued_listener(Arc::new(move |queued| {
+        if let Some(old) = queued.superseded_node_id.as_deref() {
+            crate::commands::clear_node_dispatch_pending(&queued_state, old);
+        }
+        if crate::commands::node_has_user_pending_dispatch(&queued_state, &queued.node_id) {
+            crate::commands::mark_node_dispatch_pending(&queued_state, &queued.node_id);
+        }
+    }));
+
     let state = state.clone();
     composite.set_outcome_listener(Arc::new(move |outcome| {
-        if outcome.status.is_success() {
-            return;
+        if !outcome.status.is_success() {
+            // Broadcast the failure before clearing pending so clients hold
+            // the failure by the time the spinner flag drops.
+            crate::state::emit_server_event(
+                &state,
+                crate::server_event::ServerEvent::DispatchFailure {
+                    hub_type: outcome.hub_type.clone(),
+                    hub_key: outcome.hub_key.clone(),
+                    node_id: outcome.node_id.clone(),
+                    target: outcome.target_label.clone(),
+                    kind: outcome.kind.as_str().to_string(),
+                    status: outcome.status.as_str().to_string(),
+                    detail: outcome.status.detail(),
+                    queued_ms: outcome.queued_ms,
+                    dispatch_ms: outcome.dispatch_ms,
+                    epoch_ms: chrono::Utc::now().timestamp_millis(),
+                },
+            );
         }
-        crate::state::emit_server_event(
-            &state,
-            crate::server_event::ServerEvent::DispatchFailure {
-                hub_type: outcome.hub_type.clone(),
-                hub_key: outcome.hub_key.clone(),
-                node_id: outcome.node_id.clone(),
-                target: outcome.target_label.clone(),
-                kind: outcome.kind.as_str().to_string(),
-                status: outcome.status.as_str().to_string(),
-                detail: outcome.status.detail(),
-                queued_ms: outcome.queued_ms,
-                dispatch_ms: outcome.dispatch_ms,
-                epoch_ms: chrono::Utc::now().timestamp_millis(),
-            },
-        );
+        crate::commands::clear_node_dispatch_pending(&state, &outcome.node_id);
     }));
 }
 

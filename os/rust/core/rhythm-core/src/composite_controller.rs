@@ -313,6 +313,28 @@ pub type HubDispatchOutcomeListener = Arc<dyn Fn(HubDispatchOutcome) + Send + Sy
 
 type SharedOutcomeListener = Arc<RwLock<Option<HubDispatchOutcomeListener>>>;
 
+/// A command accepted into a hub mailbox.
+///
+/// Every queued event is matched by exactly one [`HubDispatchOutcome`] later
+/// (dispatch result, cooldown drop, or close drop) — enqueue-time rejections
+/// emit a synthetic queued event immediately before their outcome to keep the
+/// pairing exact. A coalesce that changes the node a mailbox slot addresses
+/// carries the superseded node so listeners can rebalance per-node counters.
+#[derive(Clone, Debug)]
+pub struct HubDispatchQueued {
+    pub hub_key: String,
+    pub hub_type: String,
+    /// Topology node the engine addressed.
+    pub node_id: String,
+    /// Node a coalesce displaced from this mailbox slot, if any.
+    pub superseded_node_id: Option<String>,
+}
+
+/// Callback invoked when a command is accepted into a hub mailbox.
+pub type HubDispatchQueuedListener = Arc<dyn Fn(HubDispatchQueued) + Send + Sync>;
+
+type SharedQueuedListener = Arc<RwLock<Option<HubDispatchQueuedListener>>>;
+
 pub(crate) fn format_node_log_label(node_id: &str, node_name: Option<&str>) -> String {
     match node_name
         .map(str::trim)
@@ -487,6 +509,7 @@ struct DispatcherShared {
     queue: Mutex<DispatchQueue>,
     notify: Notify,
     listener: SharedOutcomeListener,
+    queued_listener: SharedQueuedListener,
 }
 
 impl DispatcherShared {
@@ -545,6 +568,18 @@ impl DispatcherShared {
         }
     }
 
+    fn emit_queued(&self, node_id: &str, superseded_node_id: Option<String>) {
+        let listener = self.queued_listener.read().ok().and_then(|l| l.clone());
+        if let Some(listener) = listener {
+            listener(HubDispatchQueued {
+                hub_key: self.key.clone(),
+                hub_type: self.hub_type.clone(),
+                node_id: node_id.to_string(),
+                superseded_node_id,
+            });
+        }
+    }
+
     fn outcome_for(
         &self,
         node_id: &str,
@@ -591,6 +626,9 @@ impl DispatcherShared {
         if let Some(remaining) = queue.active_cooldown(&key, now) {
             drop(queue);
             let remaining_ms = remaining.as_millis() as u64;
+            // Synthetic queued event so this enqueue-time rejection still
+            // pairs 1:1 with the outcome below.
+            self.emit_queued(node_id, None);
             self.emit(self.outcome_for(
                 node_id,
                 &action,
@@ -605,11 +643,15 @@ impl DispatcherShared {
             )));
         }
 
-        match queue.pending.get_mut(&key) {
+        // A coalesce reuses the slot's eventual single outcome, so it emits a
+        // queued event only when it changes which node the slot addresses.
+        let queued_change = match queue.pending.get_mut(&key) {
             Some(job) => {
+                let superseded = (job.node_id != node_id).then(|| job.node_id.clone());
                 job.action = action;
                 job.node_id = node_id.to_string();
                 job.coalesced += 1;
+                superseded.map(|old| (node_id.to_string(), Some(old)))
             }
             None => {
                 queue.pending.insert(
@@ -622,9 +664,13 @@ impl DispatcherShared {
                     },
                 );
                 queue.order.push_back(key);
+                Some((node_id.to_string(), None))
             }
-        }
+        };
         drop(queue);
+        if let Some((queued_node, superseded)) = queued_change {
+            self.emit_queued(&queued_node, superseded);
+        }
         self.notify.notify_one();
         Ok(())
     }
@@ -885,6 +931,7 @@ impl HubDispatcher {
         controller: Arc<dyn HubLightController>,
         policy: HubDispatchPolicy,
         listener: SharedOutcomeListener,
+        queued_listener: SharedQueuedListener,
     ) -> Self {
         let shared = Arc::new(DispatcherShared {
             key: key.to_string(),
@@ -894,6 +941,7 @@ impl HubDispatcher {
             queue: Mutex::new(DispatchQueue::new(policy.rate_limit.as_ref())),
             notify: Notify::new(),
             listener,
+            queued_listener,
         });
         dispatch_runtime().spawn(run_dispatch_worker(shared.clone()));
         Self { shared }
@@ -995,6 +1043,8 @@ pub struct CompositeController {
     node_labels: RwLock<HashMap<String, String>>,
     /// Listener receiving every dispatch outcome.
     outcome_listener: SharedOutcomeListener,
+    /// Listener receiving every mailbox-queued event.
+    queued_listener: SharedQueuedListener,
 }
 
 impl CompositeController {
@@ -1005,6 +1055,7 @@ impl CompositeController {
             routing: RwLock::new(HashMap::new()),
             node_labels: RwLock::new(HashMap::new()),
             outcome_listener: Arc::new(RwLock::new(None)),
+            queued_listener: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1014,6 +1065,17 @@ impl CompositeController {
     /// fire-and-forget), so this is the channel through which they surface.
     pub fn set_outcome_listener(&self, listener: HubDispatchOutcomeListener) {
         if let Ok(mut slot) = self.outcome_listener.write() {
+            *slot = Some(listener);
+        }
+    }
+
+    /// Install the listener that receives every [`HubDispatchQueued`] event.
+    ///
+    /// Paired 1:1 with outcomes, this lets callers track how many commands a
+    /// node still has physically unresolved (e.g. a user-visible pending flag
+    /// that holds until the lights actually changed).
+    pub fn set_queued_listener(&self, listener: HubDispatchQueuedListener) {
+        if let Ok(mut slot) = self.queued_listener.write() {
             *slot = Some(listener);
         }
     }
@@ -1035,6 +1097,7 @@ impl CompositeController {
             controller,
             policy,
             self.outcome_listener.clone(),
+            self.queued_listener.clone(),
         ));
         let replaced = self
             .controllers
@@ -2041,6 +2104,107 @@ mod tests {
             .wait_for(Duration::from_secs(5), |o| o.coalesced == 3)
             .expect("trailing dispatch outcome should record 3 superseded commands");
         assert!(coalesced.status.is_success());
+    }
+
+    #[test]
+    fn queued_events_pair_one_to_one_with_outcomes() {
+        let composite = CompositeController::new();
+        let outcomes = OutcomeCollector::install(&composite);
+        let queued_events = Arc::new(Mutex::new(Vec::<HubDispatchQueued>::new()));
+        {
+            let sink = queued_events.clone();
+            composite.set_queued_listener(Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+            }));
+        }
+        composite.register_controller("hub_a", Arc::new(MockController::new("a")));
+        composite.update_routing(route(&[("room1", "hub_a", group_target("room1"))]));
+
+        block_on(composite.turn_on("room1", LightingCommand::new(50, 3000))).unwrap();
+
+        let outcome = outcomes
+            .wait_for(Duration::from_secs(5), |o| o.node_id == "room1")
+            .expect("dispatch outcome");
+        assert!(outcome.status.is_success());
+
+        let queued = queued_events.lock().unwrap().clone();
+        assert_eq!(queued.len(), 1, "one enqueue must emit one queued event");
+        assert_eq!(queued[0].node_id, "room1");
+        assert_eq!(queued[0].superseded_node_id, None);
+        assert_eq!(queued[0].hub_key, "hub_a");
+    }
+
+    #[test]
+    fn coalesce_reports_superseded_node_and_keeps_pairing_balanced() {
+        let blocking = Arc::new(BlockingController::new());
+        let composite = Arc::new(CompositeController::new());
+        let outcomes = OutcomeCollector::install(&composite);
+        let queued_events = Arc::new(Mutex::new(Vec::<HubDispatchQueued>::new()));
+        {
+            let sink = queued_events.clone();
+            composite.set_queued_listener(Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+            }));
+        }
+        composite.register_controller_with_policy(
+            "hub_a",
+            blocking.clone(),
+            HubDispatchPolicy {
+                dispatch_timeout: Duration::from_secs(10),
+                ..fast_timeout_policy()
+            },
+        );
+        // Two nodes share one hub-native target, so their commands coalesce
+        // into the same mailbox slot.
+        composite.update_routing(route(&[
+            ("room1", "hub_a", group_target("shared")),
+            ("room2", "hub_a", group_target("shared")),
+        ]));
+
+        // Occupy the target, then queue room1 and coalesce room2 over it.
+        block_on(composite.turn_on("room1", LightingCommand::new(10, 2000))).unwrap();
+        assert!(blocking.wait_started_timeout(Duration::from_secs(5)));
+        block_on(composite.turn_on("room1", LightingCommand::new(20, 2000))).unwrap();
+        block_on(composite.turn_on("room2", LightingCommand::new(30, 2000))).unwrap();
+        blocking.release();
+
+        // Consume in arrival order — wait_for drops non-matching messages.
+        let first = outcomes
+            .wait_for(Duration::from_secs(5), |o| o.node_id == "room1")
+            .expect("in-flight dispatch outcome");
+        let trailing = outcomes
+            .wait_for(Duration::from_secs(5), |o| o.node_id == "room2")
+            .expect("coalesced dispatch outcome");
+        assert!(trailing.status.is_success());
+
+        let queued = queued_events.lock().unwrap().clone();
+        assert_eq!(queued.len(), 3);
+        assert_eq!(queued[0].superseded_node_id, None);
+        assert_eq!(queued[1].superseded_node_id, None);
+        assert_eq!(
+            queued[2].superseded_node_id.as_deref(),
+            Some("room1"),
+            "a coalesce that changes the addressed node must report the displaced one"
+        );
+
+        // Per-node accounting balances: marks from queued events equal clears
+        // from outcomes plus superseded rebalances.
+        let mut counts = std::collections::HashMap::<String, i64>::new();
+        for event in &queued {
+            *counts.entry(event.node_id.clone()).or_default() += 1;
+            if let Some(old) = &event.superseded_node_id {
+                *counts.entry(old.clone()).or_default() -= 1;
+            }
+        }
+        // Two outcomes total: the in-flight room1 dispatch and the trailing
+        // coalesced room2 dispatch.
+        for outcome in [&first, &trailing] {
+            *counts.entry(outcome.node_id.clone()).or_default() -= 1;
+        }
+        assert!(
+            counts.values().all(|count| *count == 0),
+            "queued/outcome pairing must balance per node: {counts:?}"
+        );
     }
 
     #[test]

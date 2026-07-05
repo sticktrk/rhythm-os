@@ -5173,6 +5173,23 @@ fn emit_node_state_event_for_dispatch_pending_change(state: &SharedState, node_i
     }
 }
 
+/// Whether this node (or its topology parent room) currently has
+/// user-initiated pending work.
+///
+/// Gates hub-mailbox pending marks: user commands enqueue while their work
+/// item still holds the node's pending count, so this distinguishes them from
+/// periodic-tick dispatches, which must never surface as a card spinner.
+/// Group/device jobs enqueue under device ids while the user's work item
+/// marks the room, hence the parent check.
+pub(crate) fn node_has_user_pending_dispatch(state: &SharedState, node_id: &str) -> bool {
+    let Ok(s) = state.lock() else { return false };
+    if s.pending_node_dispatches.contains_key(node_id) {
+        return true;
+    }
+    parent_node_id_for_pending_dispatch(&s, node_id)
+        .is_some_and(|parent| s.pending_node_dispatches.contains_key(&parent))
+}
+
 pub(crate) fn mark_node_dispatch_pending(state: &SharedState, node_id: &str) {
     let became_pending = {
         let Ok(mut s) = state.lock() else { return };

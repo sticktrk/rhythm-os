@@ -2093,6 +2093,11 @@ class ServerSyncProvider extends ChangeNotifier {
           ? state.pendingDispatch &&
               _roomProvider.isNodeDispatchPending(state.nodeId)
           : state.pendingDispatch;
+      if (pendingDispatch) {
+        // A new attempt is in flight — the spinner supersedes any stale
+        // failure badge; a repeat failure arrives as a fresh event.
+        _clearRecentDispatchFailure(state.nodeId);
+      }
       _roomProvider.applyServerNodeState(
         state.nodeId,
         rhythmEnabled: state.rhythmEnabled,
@@ -2138,22 +2143,42 @@ class ServerSyncProvider extends ChangeNotifier {
       failure: failure,
       receivedAt: DateTime.now(),
     );
+    // Re-notify at window expiry so the failure badge disappears on its own.
+    _dispatchFailureExpiryTimers[failure.nodeId]?.cancel();
+    _dispatchFailureExpiryTimers[failure.nodeId] =
+        Timer(_dispatchFailureWindow, () {
+      _dispatchFailureExpiryTimers.remove(failure.nodeId);
+      if (_recentDispatchFailures.remove(failure.nodeId) != null) {
+        notifyListeners();
+      }
+    });
     notifyListeners();
   }
 
+  static const _dispatchFailureWindow = Duration(seconds: 30);
   final Map<String, ({RhythmDispatchFailure failure, DateTime receivedAt})>
       _recentDispatchFailures = {};
+  final Map<String, Timer> _dispatchFailureExpiryTimers = {};
 
   /// The most recent dispatch failure for [nodeId], if it happened within
-  /// the last 30 seconds. Cards can use this to show delivery problems.
+  /// the last [_dispatchFailureWindow]. Cards use this to show delivery
+  /// problems in place of the in-flight spinner.
   RhythmDispatchFailure? recentDispatchFailureForNode(String nodeId) {
     final entry = _recentDispatchFailures[nodeId];
     if (entry == null) return null;
-    if (DateTime.now().difference(entry.receivedAt) >
-        const Duration(seconds: 30)) {
+    if (DateTime.now().difference(entry.receivedAt) > _dispatchFailureWindow) {
       return null;
     }
     return entry.failure;
+  }
+
+  /// Drop the stored failure for [nodeId] — a new command attempt supersedes
+  /// it (the spinner takes over; a repeat failure arrives as a fresh event).
+  void _clearRecentDispatchFailure(String nodeId) {
+    _dispatchFailureExpiryTimers.remove(nodeId)?.cancel();
+    if (_recentDispatchFailures.remove(nodeId) != null) {
+      notifyListeners();
+    }
   }
 
   /// Handle motion timer updates from server.
@@ -2439,6 +2464,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return true; // optimistic UI already applied
     }
     if (!_connection.connected) return false;
+    _clearRecentDispatchFailure(nodeId);
     _connection.api
         .nodeAction(nodeId: nodeId, action: action)
         .then((serverState) {
@@ -2459,6 +2485,9 @@ class ServerSyncProvider extends ChangeNotifier {
   Future<bool> dispatchBatchNodeActions(
       List<({String nodeId, String action})> actions) async {
     if (!_connection.connected || actions.isEmpty) return false;
+    for (final action in actions) {
+      _clearRecentDispatchFailure(action.nodeId);
+    }
     final states = await _connection.api.nodeActionBatch(actions);
     for (final state in states) {
       _onRhythmState(state, fromActionResponse: true);
@@ -2503,6 +2532,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return true;
     }
     if (!_connection.connected) return false;
+    _clearRecentDispatchFailure(nodeId);
     _connection.api
         .nodeCurveBrightness(nodeId: nodeId, brightness: brightness)
         .then((serverState) {
@@ -2550,6 +2580,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return true;
     }
     if (!_connection.connected) return false;
+    _clearRecentDispatchFailure(nodeId);
     _connection.api
         .nodeCurveColorTemperature(
       nodeId: nodeId,
@@ -2713,6 +2744,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
     if (!_connection.connected) return;
+    _clearRecentDispatchFailure(nodeId);
     _connection.api
         .nodeAction(nodeId: nodeId, action: 'reset')
         .then((serverState) {
@@ -3884,6 +3916,10 @@ class ServerSyncProvider extends ChangeNotifier {
     _helloSub?.cancel();
     _rhythmStateSub?.cancel();
     _dispatchFailureSub?.cancel();
+    for (final timer in _dispatchFailureExpiryTimers.values) {
+      timer.cancel();
+    }
+    _dispatchFailureExpiryTimers.clear();
     _hubEventSub?.cancel();
     _sourceChangedSub?.cancel();
     _motionTimerSub?.cancel();

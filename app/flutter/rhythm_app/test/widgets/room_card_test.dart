@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -137,6 +139,16 @@ class _TestRhythmConnection extends RhythmConnection {
   @override
   final _FakeRhythmServerApi api;
 
+  final _dispatchFailures = StreamController<RhythmDispatchFailure>.broadcast();
+
+  @override
+  Stream<RhythmDispatchFailure> get dispatchFailureEvents =>
+      _dispatchFailures.stream;
+
+  void emitDispatchFailure(RhythmDispatchFailure failure) {
+    _dispatchFailures.add(failure);
+  }
+
   @override
   bool get connected => true;
 
@@ -151,6 +163,12 @@ class _TestRhythmConnection extends RhythmConnection {
 
   @override
   void disconnect() {}
+
+  @override
+  void dispose() {
+    _dispatchFailures.close();
+    super.dispose();
+  }
 }
 
 CurveData _curveDataWithKelvins(List<int> kelvins) {
@@ -442,6 +460,88 @@ void main() {
     await tester.pump(); // rebuild after the fallback notifies
     await tester.pump(const Duration(milliseconds: 200)); // switcher exit
     expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('dispatch failure shows red badge with tappable popover',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    // On-curve room (no offsets): the off-curve reset clasp overlays the
+    // card's top-right corner and would sit above the failure badge.
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'hue',
+      hubKey: 'hue@192.168.5.1',
+      nodeId: 'room-1',
+      target: 'grouped_light/abc',
+      kind: 'turn_on',
+      status: 'timed_out',
+      detail: 'exceeded 4500ms',
+      dispatchMs: 4500,
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    final badge = find.byKey(const ValueKey('room_dispatch_failure_badge'));
+    expect(badge, findsOneWidget);
+
+    // Tapping reveals the failure popover.
+    await tester.tap(badge);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Failed to turn on Kitchen'), findsOneWidget);
+
+    // Tapping outside dismisses it.
+    await tester.tapAt(const Offset(5, 500));
+    await tester.pump();
+    expect(find.text('Failed to turn on Kitchen'), findsNothing);
+
+    // The badge expires with the failure window.
+    await tester.pump(const Duration(seconds: 31));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(badge, findsNothing);
   });
 
   testWidgets('mood segment sends mood room state', (tester) async {
