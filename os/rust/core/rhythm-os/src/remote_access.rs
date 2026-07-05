@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -686,6 +687,18 @@ pub struct InitScriptRemoteAccessController {
     child_pidfile: PathBuf,
     metrics_addr: String,
     stop_delay: Duration,
+    actions: Arc<InitScriptActions>,
+}
+
+/// Start/stop fire detached threads; without coordination a delayed stop can
+/// run after a newer restart and kill the fresh connector, and concurrent
+/// restarts interleave the init script's stop+start phases.
+#[derive(Debug, Default)]
+struct InitScriptActions {
+    /// Serializes init-script invocations.
+    run_lock: Mutex<()>,
+    /// Monotonic action id; a pending action aborts if superseded.
+    generation: AtomicU64,
 }
 
 impl InitScriptRemoteAccessController {
@@ -702,7 +715,16 @@ impl InitScriptRemoteAccessController {
             child_pidfile: child_pidfile.into(),
             metrics_addr: DEFAULT_METRICS_ADDR.to_string(),
             stop_delay: Duration::from_millis(750),
+            actions: Arc::new(InitScriptActions::default()),
         }
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.actions.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn is_current_generation(&self, generation: u64) -> bool {
+        self.actions.generation.load(Ordering::SeqCst) == generation
     }
 
     pub fn with_metrics_addr(mut self, metrics_addr: impl Into<String>) -> Self {
@@ -790,8 +812,18 @@ impl RemoteAccessController for InitScriptRemoteAccessController {
         if !self.init_script.exists() {
             return Ok(());
         }
+        let generation = self.next_generation();
         let controller = self.clone();
         thread::spawn(move || {
+            let _guard = controller
+                .actions
+                .run_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A newer start/stop request replaces this one.
+            if !controller.is_current_generation(generation) {
+                return;
+            }
             if let Err(error) = controller.run_init_script("restart") {
                 log::warn!(
                     target: "sys",
@@ -807,9 +839,19 @@ impl RemoteAccessController for InitScriptRemoteAccessController {
         if !self.init_script.exists() {
             return Ok(());
         }
+        let generation = self.next_generation();
         let controller = self.clone();
         thread::spawn(move || {
             thread::sleep(controller.stop_delay);
+            let _guard = controller
+                .actions
+                .run_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // If a start arrived while we slept, do not tear it down.
+            if !controller.is_current_generation(generation) {
+                return;
+            }
             let _ = controller.run_init_script("stop");
         });
         Ok(())

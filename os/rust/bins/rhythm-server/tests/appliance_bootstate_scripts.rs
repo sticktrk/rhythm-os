@@ -307,4 +307,7 @@ fn cloudflared_service_is_manual_and_resource_guarded() {
     assert!(body.contains("RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB"));
     assert!(body.contains("start_cloudflared_child"));
     assert!(body.contains("connector restart limit reached"));
+    // Stale pidfiles must never leave an orphaned connector running: stop()
+    // sweeps by binary name, not just recorded pids.
+    assert!(body.contains("kill_stray_connectors"));
 }

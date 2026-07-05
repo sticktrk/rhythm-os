@@ -99,6 +99,43 @@ terminate_pid() {
     wait_pid_exit "$pid" || true
 }
 
+# Pidfiles can go stale (a kill -9'd supervisor skips its cleanup trap and
+# orphans the connector), leaving a tunnel that "won't go down". Sweep any
+# process running the connector binary, regardless of recorded pids.
+# The appliance busybox has no pkill/pgrep, so match /proc cmdlines directly.
+connector_pids() {
+    for proc_dir in /proc/[0-9]*; do
+        [ -d "$proc_dir" ] || continue
+        pid="${proc_dir#/proc/}"
+        [ "$pid" = "$$" ] && continue
+        [ -r "$proc_dir/cmdline" ] || continue
+        cmdline="$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null || true)"
+        case " $cmdline " in
+            *" $CLOUDFLARED_BIN "*) printf '%s\n' "$pid" ;;
+        esac
+    done
+}
+
+kill_stray_connectors() {
+    pids="$(connector_pids)"
+    [ -n "$pids" ] || return 0
+
+    # shellcheck disable=SC2086
+    log "terminating stray connector processes:" $pids
+    for pid in $pids; do
+        kill "$pid" 2>/dev/null || true
+    done
+    remaining="$STOP_TIMEOUT_SECS"
+    while [ -n "$(connector_pids)" ] && [ "$remaining" -gt 0 ]; do
+        sleep 1 || true
+        remaining=$((remaining - 1))
+    done
+    for pid in $(connector_pids); do
+        log "stray connector pid=$pid did not exit after ${STOP_TIMEOUT_SECS}s; killing"
+        kill -9 "$pid" 2>/dev/null || true
+    done
+}
+
 epoch_secs() {
     date +%s 2>/dev/null || printf '0\n'
 }
@@ -281,6 +318,7 @@ stop() {
 
     child_pid="${child_pid:-$(cat "$CHILD_PIDFILE" 2>/dev/null || true)}"
     terminate_pid "$child_pid" "connector"
+    kill_stray_connectors
 
     rm -f "$PIDFILE" "$CHILD_PIDFILE"
     state="stopped"
