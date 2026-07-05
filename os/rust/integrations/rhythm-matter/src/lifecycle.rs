@@ -35,14 +35,7 @@ pub fn connect_matter(
     let hub_key = HubKey::new(HubType::new("matter"), "local");
     let commissioned = transport.list_devices().unwrap_or_default();
     let cloud_profiles = crate::cloud_profiles::load_or_sync_for_state(state);
-    let initial_metadata = load_initial_device_metadata(
-        state,
-        &transport,
-        &commissioned,
-        &cloud_profiles,
-        CONNECT_PROBE_TIMEOUT,
-    );
-    let commissioned = commissioned_with_reachability(commissioned, &initial_metadata);
+    let initial_metadata = fallback_initial_device_metadata(state, &commissioned, &hub_key);
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -64,23 +57,17 @@ pub fn connect_matter(
     let commissioned_for_closure = commissioned.clone();
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
+    let cloud_profiles_for_hub_data = cloud_profiles.clone();
+    let hub_key_for_refresh = hub_key.clone();
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
-    let node_proof_of_life_for_loop = node_proof_of_life.clone();
     let node_proof_of_life_for_closure = node_proof_of_life.clone();
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let _ = event_tx.send(HubEvent::Connected {
         hub_key: Some(hub_key.clone()),
     });
-    start_attribute_report_loop(
-        hub_key.clone(),
-        transport.clone(),
-        initial_metadata.subscription_targets.clone(),
-        node_proof_of_life_for_loop,
-        event_tx.clone(),
-    );
 
-    rhythm_os::lifecycle::connect_hub(
+    let (hub, event_rx) = rhythm_os::lifecycle::connect_hub(
         state,
         HubType::new("matter"),
         hub_key,
@@ -102,7 +89,7 @@ pub fn connect_matter(
                 next_node_id: std::sync::atomic::AtomicU64::new(next_node_id),
                 device_caps: std::sync::Mutex::new(initial_metadata.device_caps.clone()),
                 device_quirks: std::sync::Mutex::new(initial_metadata.device_quirks.clone()),
-                cloud_profiles: std::sync::Mutex::new(cloud_profiles.clone()),
+                cloud_profiles: std::sync::Mutex::new(cloud_profiles_for_hub_data.clone()),
                 decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
                 recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
                 node_proof_of_life: node_proof_of_life_for_closure.clone(),
@@ -110,7 +97,21 @@ pub fn connect_matter(
             }))
         },
         move |_registry, _shutdown| event_rx,
-    )
+    )?;
+
+    if let Some(hub_data) = hub.data::<Arc<MatterHubData>>().cloned() {
+        start_initial_metadata_refresh(
+            state.clone(),
+            transport,
+            commissioned,
+            cloud_profiles,
+            hub_key_for_refresh,
+            hub_data,
+            CONNECT_PROBE_TIMEOUT,
+        );
+    }
+
+    Ok((hub, event_rx))
 }
 
 fn configured_fabric_id(state: &SharedState, hub_key: &HubKey) -> String {
@@ -137,6 +138,53 @@ struct InitialDeviceMetadata {
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
     subscription_targets: Vec<MatterSubscriptionTarget>,
     unreachable_nodes: HashSet<u64>,
+}
+
+fn fallback_initial_device_metadata(
+    state: &SharedState,
+    commissioned: &[MatterDeviceInfo],
+    hub_key: &HubKey,
+) -> InitialDeviceMetadata {
+    let mut device_caps = HashMap::new();
+    let mut device_quirks = HashMap::new();
+    let commissioned_nodes = commissioned
+        .iter()
+        .map(|info| info.node_id)
+        .collect::<HashSet<_>>();
+
+    let mut insert_fallback = |device_id: String| {
+        device_caps
+            .entry(device_id.clone())
+            .or_insert_with(crate::commissioning::fallback_device_capabilities);
+        device_quirks.entry(device_id).or_default();
+    };
+
+    for info in commissioned {
+        insert_fallback(format_device_id(info.node_id, 1));
+    }
+
+    if let Ok(state) = state.lock() {
+        for device in state.canonical_registry.devices() {
+            for endpoint in device.active_endpoints() {
+                if &endpoint.hub_key != hub_key {
+                    continue;
+                }
+                let Some((node_id, _endpoint_id)) = parse_device_id(&endpoint.native_id) else {
+                    continue;
+                };
+                if commissioned_nodes.contains(&node_id) {
+                    insert_fallback(endpoint.native_id.clone());
+                }
+            }
+        }
+    }
+
+    InitialDeviceMetadata {
+        device_caps,
+        device_quirks,
+        subscription_targets: Vec::new(),
+        unreachable_nodes: HashSet::new(),
+    }
 }
 
 /// Probe a node but give up after `timeout`, so a single unreachable device
@@ -240,6 +288,78 @@ fn commissioned_with_reachability(
         .collect()
 }
 
+fn start_initial_metadata_refresh(
+    state: SharedState,
+    transport: Arc<dyn MatterTransport>,
+    commissioned: Vec<MatterDeviceInfo>,
+    cloud_profiles: crate::cloud_profiles::CloudMatterProfileCatalog,
+    hub_key: HubKey,
+    hub_data: Arc<MatterHubData>,
+    probe_timeout: Duration,
+) {
+    if commissioned.is_empty() {
+        return;
+    }
+
+    let spawn_result = std::thread::Builder::new()
+        .name("matter-initial-metadata".to_string())
+        .spawn(move || {
+            let device_count = commissioned.len();
+            let metadata = load_initial_device_metadata(
+                &state,
+                &transport,
+                &commissioned,
+                &cloud_profiles,
+                probe_timeout,
+            );
+            let subscription_targets = metadata.subscription_targets.clone();
+            let subscription_count = subscription_targets.len();
+            let refreshed = commissioned_with_reachability(commissioned, &metadata);
+
+            if let Ok(mut list) = hub_data.commissioned.lock() {
+                for device in refreshed {
+                    if let Some(existing) = list
+                        .iter_mut()
+                        .find(|existing| existing.node_id == device.node_id)
+                    {
+                        *existing = device;
+                    } else {
+                        list.push(device);
+                    }
+                }
+            }
+
+            if let Ok(mut device_caps) = hub_data.device_caps.lock() {
+                device_caps.extend(metadata.device_caps);
+            }
+            if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
+                device_quirks.extend(metadata.device_quirks);
+            }
+
+            info!(
+                target: "sys",
+                "Matter: initial metadata refresh complete for {} device(s), live subscriptions={}",
+                device_count,
+                subscription_count
+            );
+            start_attribute_report_loop(
+                hub_key,
+                transport,
+                subscription_targets,
+                hub_data.node_proof_of_life.clone(),
+                hub_data.event_tx.clone(),
+            );
+        });
+
+    if let Err(error) = spawn_result {
+        warn!(
+            target: "sys",
+            "Matter: failed to spawn initial metadata refresh: {}",
+            error
+        );
+    }
+}
+
 fn start_attribute_report_loop(
     hub_key: HubKey,
     transport: Arc<dyn MatterTransport>,
@@ -333,6 +453,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
     use rhythm_os::state::AppState;
 
     use crate::provider::matter_credentials;
@@ -514,6 +636,17 @@ mod tests {
         }
     }
 
+    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < timeout {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        condition()
+    }
+
     #[test]
     fn parse_simple_device_id() {
         assert_eq!(parse_device_id("matter-100"), Some((100, 1)));
@@ -561,6 +694,32 @@ mod tests {
     }
 
     #[test]
+    fn fallback_initial_metadata_includes_persisted_endpoint_ids() {
+        let state = shared_state("fallback-endpoints");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let identity = DiscoveredIdentity {
+            native_id: "matter-12-2".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Endpoint two bulb".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter("12")],
+            manufacturer: None,
+            model: None,
+        };
+        state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .resolve(&identity, &key, 100);
+
+        let metadata = fallback_initial_device_metadata(&state, &[device_info(12)], &key);
+
+        assert!(metadata.device_caps.contains_key("matter-12"));
+        assert!(metadata.device_caps.contains_key("matter-12-2"));
+    }
+
+    #[test]
     fn connect_matter_builds_hub_data_from_commissioned_devices_and_tags_events() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
@@ -585,15 +744,23 @@ mod tests {
         let data = hub.data::<Arc<MatterHubData>>().unwrap();
         assert_eq!(data.fabric_id, "fabric-test");
         assert_eq!(data.commissioned.lock().unwrap().len(), 2);
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-10"));
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-12"));
+
         assert!(
-            !data
-                .commissioned
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|device| device.node_id == 12)
-                .unwrap()
-                .reachable
+            wait_until(Duration::from_secs(1), || {
+                let caps_ready = data.device_caps.lock().unwrap().contains_key("matter-10-2");
+                let unreachable_marked = !data
+                    .commissioned
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|device| device.node_id == 12)
+                    .unwrap()
+                    .reachable;
+                caps_ready && unreachable_marked
+            }),
+            "initial Matter metadata refresh did not complete"
         );
         assert_eq!(
             data.next_node_id.load(std::sync::atomic::Ordering::SeqCst),
@@ -622,6 +789,57 @@ mod tests {
                 .subscribe_calls
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+        std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
+    }
+
+    #[test]
+    fn connect_matter_returns_before_initial_probe_refresh_finishes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
+        let state = shared_state("connect-async-probe");
+        let mut probe_failures = HashMap::new();
+        probe_failures.insert(12, "probe failed".to_string());
+        let transport = Arc::new(
+            FakeMatterTransport::new(vec![device_info(12)], probe_failures)
+                .with_probe_delay(12, Duration::from_millis(800)),
+        );
+
+        let started = std::time::Instant::now();
+        let (hub, _event_rx) = connect_matter(&state, transport).unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "Matter connect waited for initial probe refresh: {:?}",
+            elapsed
+        );
+
+        let data = hub.data::<Arc<MatterHubData>>().unwrap();
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-12"));
+        assert!(
+            data.commissioned
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|device| device.node_id == 12)
+                .unwrap()
+                .reachable,
+            "connect should expose cached commissioned devices before live reachability probing"
+        );
+
+        assert!(
+            wait_until(Duration::from_secs(2), || {
+                !data
+                    .commissioned
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|device| device.node_id == 12)
+                    .unwrap()
+                    .reachable
+            }),
+            "background metadata refresh did not mark the failed node unreachable"
         );
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
