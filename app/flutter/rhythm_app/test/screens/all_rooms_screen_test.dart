@@ -125,6 +125,20 @@ const _bulb1 = RoomDto(
   brightnessOffset: 0,
 );
 
+const _bulb2 = RoomDto(
+  id: 'bulb-2',
+  name: 'Bulb 2',
+  source: RoomSourceDto.hue,
+  kind: RoomNodeKind.lightDevice,
+  parentId: 'room-1',
+  deviceIds: ['device-2'],
+  rhythmEnabled: true,
+  disabled: false,
+  lightsOn: true,
+  timeOffsetMinutes: 0,
+  brightnessOffset: 0,
+);
+
 const _room1 = RoomDto(
   id: 'room-1',
   name: 'Kitchen',
@@ -372,7 +386,8 @@ void main() {
     expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
   });
 
-  testWidgets('rooms and bulbs share the half-width grid', (tester) async {
+  testWidgets('rooms stay full-width while bulbs use the compact grid',
+      (tester) async {
     await _pumpAllRooms(
       tester,
       rooms: const [_bulb1, _room1, _switch1],
@@ -382,9 +397,9 @@ void main() {
     final room = tester.getRect(_roomCardContainer('room-1'));
     final fullWidth = tester.getRect(_roomCardContainer('switch-1'));
 
-    expect(bulb.top, closeTo(room.top, 0.1));
-    expect(bulb.width, closeTo(room.width, 0.1));
-    expect(fullWidth.width, greaterThan(bulb.width * 1.8));
+    expect(room.top, greaterThan(bulb.top));
+    expect(room.width, greaterThan(bulb.width * 1.8));
+    expect(fullWidth.width, closeTo(room.width, 0.1));
     expect(fullWidth.left, closeTo(bulb.left, 0.1));
   });
 
@@ -440,7 +455,7 @@ void main() {
   });
 
   testWidgets(
-      'half-width room and bulb cards stay compact when long-press enters edit mode',
+      'full-width room and compact bulb sizes persist when edit mode starts',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
@@ -491,7 +506,7 @@ void main() {
     final beforeBulb1 = tester.getRect(_roomCardContainer('bulb-1'));
     final beforeRoom1 = tester.getRect(_roomCardContainer('room-1'));
 
-    expect(beforeBulb1.width, closeTo(beforeRoom1.width, 0.1));
+    expect(beforeRoom1.width, greaterThan(beforeBulb1.width * 1.8));
 
     await tester.longPress(find.text('Bulb 1'));
     await tester.pump();
@@ -504,13 +519,13 @@ void main() {
 
     expect(afterBulb1.width, closeTo(beforeBulb1.width, 0.1));
     expect(afterRoom1.width, closeTo(beforeRoom1.width, 0.1));
-    expect(afterBulb1.top, closeTo(afterRoom1.top, 0.1));
+    expect(afterRoom1.top, greaterThan(afterBulb1.top));
   });
 
-  testWidgets('edit-mode drag reorders half-width tiles', (tester) async {
+  testWidgets('edit-mode drag reorders compact bulb tiles', (tester) async {
     final harness = await _pumpAllRooms(
       tester,
-      rooms: const [_bulb1, _room1],
+      rooms: const [_bulb1, _bulb2],
     );
 
     await tester.longPress(find.text('Bulb 1'));
@@ -519,25 +534,25 @@ void main() {
     expect(find.text('Edit Rooms'), findsOneWidget);
     expect(
       harness.roomPageProvider
-          .getRoomsForPage(0, const [_bulb1, _room1]).map((room) => room.id),
-      ['bulb-1', 'room-1'],
+          .getRoomsForPage(0, const [_bulb1, _bulb2]).map((room) => room.id),
+      ['bulb-1', 'bulb-2'],
     );
 
     final bulb = tester.getRect(_roomCardContainer('bulb-1'));
-    final room = tester.getRect(_roomCardContainer('room-1'));
+    final bulb2 = tester.getRect(_roomCardContainer('bulb-2'));
     final gesture = await tester.startGesture(bulb.center);
     await tester.pump(const Duration(milliseconds: 20));
     await gesture.moveBy(const Offset(24, 0));
     await tester.pump(const Duration(milliseconds: 20));
-    await gesture.moveTo(Offset(room.right - 2, room.center.dy));
+    await gesture.moveTo(Offset(bulb2.right - 2, bulb2.center.dy));
     await tester.pump(const Duration(milliseconds: 20));
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(
       harness.roomPageProvider
-          .getRoomsForPage(0, const [_bulb1, _room1]).map((room) => room.id),
-      ['room-1', 'bulb-1'],
+          .getRoomsForPage(0, const [_bulb1, _bulb2]).map((room) => room.id),
+      ['bulb-2', 'bulb-1'],
     );
   });
 
