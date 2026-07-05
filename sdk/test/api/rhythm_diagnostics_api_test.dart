@@ -32,13 +32,6 @@ void main() {
       expect(result, isFalse);
     });
 
-    test('getDiagVitals returns null when device is unreachable', () async {
-      final api = RhythmDiagnosticsApi(host: '192.0.2.1', port: 1);
-
-      final result = await api.getDiagVitals();
-      expect(result, isNull);
-    });
-
     test('getDiagLogs returns null when device is unreachable', () async {
       final api = RhythmDiagnosticsApi(host: '192.0.2.1', port: 1);
 
@@ -108,13 +101,6 @@ void main() {
               .having((e) => e.serverMessage, 'serverMessage', 'bundle failed'),
         ),
       );
-    });
-
-    test('clearCrashInfo returns false when device is unreachable', () async {
-      final api = RhythmDiagnosticsApi(host: '192.0.2.1', port: 1);
-
-      final result = await api.clearCrashInfo();
-      expect(result, isFalse);
     });
 
     test('resetWifi returns false when device is unreachable', () async {

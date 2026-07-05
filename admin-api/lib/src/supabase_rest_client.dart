@@ -5,16 +5,6 @@ import 'package:http/http.dart' as http;
 import 'config.dart';
 import 'models.dart';
 
-class AdminApiException implements Exception {
-  const AdminApiException(this.statusCode, this.message);
-
-  final int statusCode;
-  final String message;
-
-  @override
-  String toString() => message;
-}
-
 class SupabaseRestClient {
   SupabaseRestClient({
     required this.config,

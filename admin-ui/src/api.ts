@@ -5,6 +5,8 @@ import type {
   DeviceLogSources,
   DeviceLogTail,
   DeviceOtaAction,
+  DeviceAdminProxyRequest,
+  DeviceAdminProxyResponse,
   DeviceStatus,
   MeResponse,
   ProbeResult,
@@ -145,6 +147,21 @@ export async function fetchHubLogTail(
       sourceId
     )}/tail?${params}`,
     accessToken
+  );
+}
+
+export async function runDeviceAdminProxy(
+  accessToken: string,
+  hubId: string,
+  request: DeviceAdminProxyRequest
+): Promise<DeviceAdminProxyResponse> {
+  return apiFetch<DeviceAdminProxyResponse>(
+    `/api/hubs/${encodeURIComponent(hubId)}/device-admin/proxy`,
+    accessToken,
+    {
+      method: 'POST',
+      body: JSON.stringify(request)
+    }
   );
 }
 

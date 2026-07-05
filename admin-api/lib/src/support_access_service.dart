@@ -20,12 +20,18 @@ class SupportAccessService {
   static const _envelopeVersion = 'support_access_token_v1';
   static const _algorithm = 'aes-gcm-256';
   static const _keyDerivation = 'sha256-env-v1';
+  static const _sessionTokenTtl = Duration(minutes: 15);
+
+  /// Reuse window for minted session tokens. Kept below the requested TTL so
+  /// a cached token is never handed out moments before the device expires it.
+  static const _sessionTokenReuse = Duration(minutes: 14);
 
   final AdminApiConfig _config;
   final SupabaseRestClient _supabase;
   final http.Client _http;
   final AesGcm _cipher = AesGcm.with256bits();
   final Sha256 _sha256 = Sha256();
+  final Map<String, _CachedSessionToken> _sessionTokens = {};
 
   bool get canUseSupportAccess =>
       _supabase.canUseServiceRole && _config.hasSupportAccessEncryptionKey;
@@ -36,6 +42,15 @@ class SupportAccessService {
     required String baseUrl,
   }) async {
     if (!canUseSupportAccess || !session.staff.isAdmin) return null;
+
+    // Session tokens are valid for [_sessionTokenTtl]; reuse them instead of
+    // minting one per proxied request (grant lookup + decrypt + device POST).
+    final cacheKey = _sessionTokenCacheKey(session, hubId, baseUrl);
+    final cached = _sessionTokens[cacheKey];
+    if (cached != null && cached.expiresAt.isAfter(DateTime.now().toUtc())) {
+      return cached.token;
+    }
+    _sessionTokens.remove(cacheKey);
 
     final grant = await _loadActiveGrant(hubId);
     if (grant == null) return null;
@@ -53,7 +68,7 @@ class SupportAccessService {
           },
           body: jsonEncode({
             'label': _sessionLabel(session),
-            'ttl_seconds': 15 * 60,
+            'ttl_seconds': _sessionTokenTtl.inSeconds,
           }),
         )
         .timeout(const Duration(seconds: 5));
@@ -64,7 +79,28 @@ class SupportAccessService {
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) return null;
     final token = decoded['token'];
-    return token is String && token.trim().isNotEmpty ? token.trim() : null;
+    if (token is! String || token.trim().isEmpty) return null;
+    final trimmed = token.trim();
+    _sessionTokens[cacheKey] = _CachedSessionToken(
+      token: trimmed,
+      expiresAt: DateTime.now().toUtc().add(_sessionTokenReuse),
+    );
+    return trimmed;
+  }
+
+  /// Drop cached session tokens for a hub endpoint after the device rejects
+  /// one (revoked token, device restart, clock skew).
+  void invalidateSessionToken({required String hubId, required String baseUrl}) {
+    final suffix = '|$hubId|${baseUrl.trim().toLowerCase()}';
+    _sessionTokens.removeWhere((key, _) => key.endsWith(suffix));
+  }
+
+  String _sessionTokenCacheKey(
+    AdminSession session,
+    String hubId,
+    String baseUrl,
+  ) {
+    return '${session.user.id}|$hubId|${baseUrl.trim().toLowerCase()}';
   }
 
   Future<Map<String, dynamic>?> _loadActiveGrant(String hubId) async {
@@ -165,4 +201,11 @@ class SupportAccessService {
     }
     return base64.decode(normalized);
   }
+}
+
+class _CachedSessionToken {
+  const _CachedSessionToken({required this.token, required this.expiresAt});
+
+  final String token;
+  final DateTime expiresAt;
 }

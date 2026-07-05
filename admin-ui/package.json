@@ -5,14 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run check:device-admin-coverage && tsc --noEmit && vite build",
+    "check:device-admin-coverage": "node scripts/check-device-admin-coverage.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

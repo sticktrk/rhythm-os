@@ -1,3 +1,13 @@
+class AdminApiException implements Exception {
+  const AdminApiException(this.statusCode, this.message);
+
+  final int statusCode;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class AdminUser {
   const AdminUser({
     required this.id,
@@ -636,6 +646,144 @@ class DeviceOtaActionDto {
         'tokenAvailable': tokenAvailable,
         'hasEncryptedToken': hasEncryptedToken,
         'result': result,
+      };
+}
+
+class DeviceAdminProxyRequestDto {
+  const DeviceAdminProxyRequestDto({
+    required this.method,
+    required this.path,
+    required this.queryParameters,
+    required this.body,
+    required this.timeout,
+  });
+
+  final String method;
+  final String path;
+  final Map<String, String> queryParameters;
+  final Object? body;
+  final Duration timeout;
+
+  factory DeviceAdminProxyRequestDto.fromJson(Map<String, dynamic> json) {
+    final method = (json['method'] as String? ?? 'GET').trim().toUpperCase();
+    final path = _normalizeDeviceAdminPath(json['path']);
+    final query =
+        _parseStringQueryMap(json['query'] ?? json['queryParameters']);
+    final requestedTimeoutSeconds =
+        (json['timeoutSeconds'] as num?)?.toInt() ?? 20;
+    final timeoutSeconds = requestedTimeoutSeconds < 1
+        ? 1
+        : requestedTimeoutSeconds > 120
+            ? 120
+            : requestedTimeoutSeconds;
+    if (!const {'GET', 'POST', 'PUT', 'PATCH', 'DELETE'}.contains(method)) {
+      throw const AdminApiException(
+        400,
+        'Device admin method must be GET, POST, PUT, PATCH, or DELETE.',
+      );
+    }
+
+    return DeviceAdminProxyRequestDto(
+      method: method,
+      path: path,
+      queryParameters: query,
+      body: json.containsKey('body') ? json['body'] : null,
+      timeout: Duration(seconds: timeoutSeconds),
+    );
+  }
+
+  static String _normalizeDeviceAdminPath(Object? value) {
+    if (value is! String || value.trim().isEmpty) {
+      throw const AdminApiException(400, 'Device admin path is required.');
+    }
+    var path = value.trim();
+    if (path.startsWith('/')) path = path.substring(1);
+    final lower = path.toLowerCase();
+    if (lower.startsWith('http://') ||
+        lower.startsWith('https://') ||
+        path.contains('?') ||
+        path.contains('#') ||
+        path.contains('\\') ||
+        path.split('/').any((part) => part == '..')) {
+      throw const AdminApiException(
+        400,
+        'Device admin path must be a relative device API path.',
+      );
+    }
+    if (!(path == 'health' || path.startsWith('api/'))) {
+      throw const AdminApiException(
+        400,
+        'Device admin path must target health or /api/*.',
+      );
+    }
+    if (path == 'api/diag/debug-bundle' || path == 'api/ota/upload') {
+      throw const AdminApiException(
+        400,
+        'This endpoint is not available through the JSON device admin proxy.',
+      );
+    }
+    return path;
+  }
+
+  static Map<String, String> _parseStringQueryMap(Object? value) {
+    if (value == null) return const {};
+    if (value is! Map) {
+      throw const AdminApiException(
+        400,
+        'Device admin query parameters must be an object.',
+      );
+    }
+    final result = <String, String>{};
+    for (final entry in value.entries) {
+      final key = entry.key.toString().trim();
+      if (key.isEmpty) continue;
+      final queryValue = entry.value;
+      if (queryValue == null) continue;
+      result[key] = queryValue.toString();
+    }
+    return result;
+  }
+}
+
+class DeviceAdminProxyResultDto {
+  const DeviceAdminProxyResultDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.method,
+    required this.path,
+    required this.queryParameters,
+    required this.statusCode,
+    required this.completedAt,
+    required this.tokenAvailable,
+    required this.hasEncryptedToken,
+    required this.body,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final String method;
+  final String path;
+  final Map<String, String> queryParameters;
+  final int statusCode;
+  final DateTime completedAt;
+  final bool tokenAvailable;
+  final bool hasEncryptedToken;
+  final Object? body;
+
+  Map<String, dynamic> toJson() => {
+        'hubId': hubId,
+        'route': route,
+        'baseUrl': baseUrl,
+        'method': method,
+        'path': path,
+        if (queryParameters.isNotEmpty) 'queryParameters': queryParameters,
+        'statusCode': statusCode,
+        'completedAt': completedAt.toIso8601String(),
+        'tokenAvailable': tokenAvailable,
+        'hasEncryptedToken': hasEncryptedToken,
+        'body': body,
       };
 }
 

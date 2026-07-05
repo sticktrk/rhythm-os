@@ -311,6 +311,72 @@ class DeviceProbeService {
     );
   }
 
+  Future<DeviceAdminProxyResultDto> proxyJson({
+    required AdminSession session,
+    required String hubId,
+    required DeviceAdminProxyRequestDto request,
+  }) async {
+    final hub = await _loadHub(session: session, hubId: hubId);
+    final candidates = _endpointCandidates(hub);
+    if (candidates.isEmpty) {
+      throw const AdminApiException(
+        400,
+        'No endpoint is configured for this Light Box.',
+      );
+    }
+
+    final failures = <String>[];
+    var sawAuthRequired = false;
+    for (final candidate in candidates) {
+      final baseUrl = candidate.endpoint.baseUrl;
+      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      var result = await _proxyJsonFromEndpoint(
+        hub: hub,
+        candidate: candidate,
+        request: request,
+        authToken: token,
+      );
+      if (result.authRequired && hub.authToken == null && token != null) {
+        // The cached support-session token was rejected (revoked or the
+        // device restarted); mint a fresh one and retry this endpoint once.
+        _supportAccess?.invalidateSessionToken(
+          hubId: hub.id,
+          baseUrl: baseUrl,
+        );
+        final freshToken =
+            await _supportAccessSessionToken(session, hub, baseUrl);
+        if (freshToken != null && freshToken != token) {
+          result = await _proxyJsonFromEndpoint(
+            hub: hub,
+            candidate: candidate,
+            request: request,
+            authToken: freshToken,
+          );
+        }
+      }
+      if (result.success != null) return result.success!;
+      if (result.authRequired) sawAuthRequired = true;
+      if (result.message != null) {
+        failures.add('${candidate.route} $baseUrl: ${result.message}');
+      }
+    }
+
+    if (sawAuthRequired) {
+      throw AdminApiException(
+        403,
+        _operationAuthRequiredMessage(hub, request.path),
+      );
+    }
+
+    throw AdminApiException(
+      502,
+      failures.isEmpty
+          ? 'No configured endpoint completed ${request.method} /${request.path}.'
+          : 'No configured endpoint completed ${request.method} /${request.path}. '
+              '${failures.join(' ')}',
+    );
+  }
+
   Future<DeviceProbeResultDto> _probeEndpoint(
     AdminSession session,
     _ProbeHub hub,
@@ -346,6 +412,10 @@ class DeviceProbeService {
     final stateAuthToken = hub.authToken ?? supportSessionToken;
     final state = await _fetchState(baseUrl, stateAuthToken);
     if (state.authRequired) {
+      if (supportSessionToken != null) {
+        // Don't keep serving a token the device just rejected.
+        _supportAccess?.invalidateSessionToken(hubId: hub.id, baseUrl: baseUrl);
+      }
       return DeviceProbeResultDto(
         hubId: hub.id,
         status: 'auth_required',
@@ -372,6 +442,80 @@ class DeviceProbeService {
       serverInstanceId: hello?.serverInstanceId ?? hub.serverInstanceId,
       message: state.error,
     );
+  }
+
+  Future<_ProxyJsonEndpointResult> _proxyJsonFromEndpoint({
+    required _ProbeHub hub,
+    required ({String route, HubEndpointDto endpoint}) candidate,
+    required DeviceAdminProxyRequestDto request,
+    required String? authToken,
+  }) async {
+    final baseUrl = candidate.endpoint.baseUrl;
+    try {
+      final uri = _uriWithAppendedPath(
+        baseUrl,
+        request.path,
+        queryParameters:
+            request.queryParameters.isEmpty ? null : request.queryParameters,
+      );
+      final outbound = http.Request(request.method, uri)
+        ..headers.addAll({
+          'Accept': 'application/json',
+          if (authToken != null) 'Authorization': 'Bearer $authToken',
+        });
+      if (request.method != 'GET' && request.body != null) {
+        outbound.headers['Content-Type'] = 'application/json';
+        outbound.body = jsonEncode(request.body);
+      }
+
+      final streamed = await _http.send(outbound).timeout(request.timeout);
+      final response = await http.Response.fromStream(streamed);
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        return const _ProxyJsonEndpointResult.authRequired();
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return _ProxyJsonEndpointResult.error(
+          '${request.method} /${request.path} returned HTTP ${response.statusCode}'
+          '${_responseErrorSuffix(response)}.',
+        );
+      }
+
+      final trimmedBody = response.body.trim();
+      Object? decoded;
+      if (trimmedBody.isNotEmpty) {
+        try {
+          decoded = jsonDecode(response.body);
+        } catch (_) {
+          return _ProxyJsonEndpointResult.error(
+            '${request.method} /${request.path} returned invalid JSON.',
+          );
+        }
+      }
+
+      return _ProxyJsonEndpointResult.success(
+        DeviceAdminProxyResultDto(
+          hubId: hub.id,
+          route: candidate.route,
+          baseUrl: baseUrl,
+          method: request.method,
+          path: request.path,
+          queryParameters: request.queryParameters,
+          statusCode: response.statusCode,
+          completedAt: DateTime.now().toUtc(),
+          tokenAvailable: authToken != null,
+          hasEncryptedToken: hub.hasEncryptedToken,
+          body: decoded,
+        ),
+      );
+    } on TimeoutException {
+      return _ProxyJsonEndpointResult.error(
+        '${request.method} /${request.path} request timed out.',
+      );
+    } catch (error) {
+      return _ProxyJsonEndpointResult.error(
+        '${request.method} /${request.path} request failed: $error',
+      );
+    }
   }
 
   Future<_DebugBundleEndpointResult> _downloadDebugBundleFromEndpoint({
@@ -884,6 +1028,27 @@ class _DebugBundleEndpointResult {
       : this._(authRequired: true, message: 'authentication required');
 
   final DeviceDebugBundleDto? bundle;
+  final String? message;
+  final bool authRequired;
+}
+
+class _ProxyJsonEndpointResult {
+  const _ProxyJsonEndpointResult._({
+    this.success,
+    this.message,
+    this.authRequired = false,
+  });
+
+  const _ProxyJsonEndpointResult.success(DeviceAdminProxyResultDto success)
+      : this._(success: success);
+
+  const _ProxyJsonEndpointResult.error(String message)
+      : this._(message: message);
+
+  const _ProxyJsonEndpointResult.authRequired()
+      : this._(authRequired: true, message: 'authentication required');
+
+  final DeviceAdminProxyResultDto? success;
   final String? message;
   final bool authRequired;
 }

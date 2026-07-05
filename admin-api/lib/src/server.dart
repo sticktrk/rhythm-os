@@ -37,7 +37,8 @@ class AdminApiServer {
       ..post('/api/hubs/<hubId>/ota/update', _applyHubUpdate)
       ..post('/api/hubs/<hubId>/debug-bundle', _downloadDebugBundle)
       ..get('/api/hubs/<hubId>/logs', _listHubLogs)
-      ..get('/api/hubs/<hubId>/logs/<sourceId>/tail', _tailHubLog);
+      ..get('/api/hubs/<hubId>/logs/<sourceId>/tail', _tailHubLog)
+      ..post('/api/hubs/<hubId>/device-admin/proxy', _deviceAdminProxy);
 
     return Pipeline()
         .addMiddleware(logRequests())
@@ -166,6 +167,37 @@ class AdminApiServer {
       hubId: hubId,
       sourceId: sourceId,
       lines: int.tryParse(request.url.queryParameters['lines'] ?? '') ?? 200,
+    );
+    return _json(result.toJson());
+  }
+
+  Future<Response> _deviceAdminProxy(Request request, String hubId) async {
+    final session = await _requireStaff(request);
+    final rawBody = await request.readAsString();
+    if (rawBody.trim().isEmpty) {
+      throw const AdminApiException(400, 'Device admin request body is empty.');
+    }
+    final Map<String, dynamic> body;
+    try {
+      final decoded = jsonDecode(rawBody);
+      if (decoded is! Map) {
+        throw const AdminApiException(
+          400,
+          'Device admin request body must be a JSON object.',
+        );
+      }
+      body = decoded.map((key, value) => MapEntry(key.toString(), value));
+    } on FormatException {
+      throw const AdminApiException(
+        400,
+        'Device admin request body is not valid JSON.',
+      );
+    }
+    final proxyRequest = DeviceAdminProxyRequestDto.fromJson(body);
+    final result = await _probes.proxyJson(
+      session: session,
+      hubId: hubId,
+      request: proxyRequest,
     );
     return _json(result.toJson());
   }
