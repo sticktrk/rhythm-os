@@ -1,7 +1,8 @@
 //! Device-side cloud upload for server-origin light activity.
 //!
 //! The app provisions a scoped upload token, but Rhythm OS owns the event path:
-//! local history remains the retry source and uploads go directly to Supabase.
+//! the local buffer is the retry source, uploads go directly to Supabase, and
+//! successfully uploaded events are drained from the buffer.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -163,10 +164,10 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
         return;
     }
 
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        log::debug!(
+    let Some(handle) = upload_runtime_handle(state) else {
+        log::warn!(
             target: "cmd",
-            "Skipping server activity cloud upload outside a Tokio runtime"
+            "Skipping server activity cloud upload: no Tokio runtime handle available"
         );
         return;
     };
@@ -174,8 +175,9 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
     let state_for_result = state.clone();
     handle.spawn(async move {
         let attempt_epoch_ms = current_epoch_ms();
-        match upload_activity_batch(config.clone(), activities).await {
+        match upload_activity_batch(&config, &activities).await {
             Ok(()) => {
+                crate::activity::remove_uploaded_light_activity(&state_for_result, &activities);
                 if let Err(error) =
                     record_upload_success(&state_for_result, &config, attempt_epoch_ms)
                 {
@@ -204,6 +206,18 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
             }
         }
     });
+}
+
+/// Resolve a Tokio runtime handle for spawning the upload task.
+///
+/// Activity is recorded on plain worker threads (`http-handler`, event-loop
+/// dispatch) where `Handle::try_current()` fails, so fall back to the handle
+/// captured into state at server startup.
+fn upload_runtime_handle(state: &SharedState) -> Option<tokio::runtime::Handle> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return Some(handle);
+    }
+    state.lock().ok().and_then(|s| s.tokio_handle.clone())
 }
 
 fn config_from_body(body: PutActivityCloudConfig) -> Result<StoredActivityCloudConfig, String> {
@@ -269,14 +283,14 @@ struct ActivityCloudUploadBody<'a> {
 }
 
 async fn upload_activity_batch(
-    config: StoredActivityCloudConfig,
-    activities: Vec<LightActivityEvent>,
+    config: &StoredActivityCloudConfig,
+    activities: &[LightActivityEvent],
 ) -> Result<(), UploadFailure> {
     let body = ActivityCloudUploadBody {
         home_id: &config.home_id,
         hub_id: &config.hub_id,
         server_instance_id: config.server_instance_id.as_deref(),
-        events: &activities,
+        events: activities,
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -372,16 +386,32 @@ fn record_upload_failure(
     })
 }
 
+/// Serializes read-modify-write cycles on the stored config now that the
+/// global state lock is no longer held across the storage I/O — the save is
+/// fsync'd, and on SD-card storage a slow flush under the state lock stalls
+/// light dispatch.
+static CONFIG_STORAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Grab the storage handle and release the state lock before any I/O.
+fn storage_handle(
+    state: &SharedState,
+) -> anyhow::Result<std::sync::Arc<dyn crate::storage::Storage>> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    state
+        .storage
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("storage not configured"))
+}
+
 fn update_stored_config_after_upload(
     state: &SharedState,
     attempted_config: &StoredActivityCloudConfig,
     update: impl FnOnce(&mut StoredActivityCloudConfig),
 ) -> anyhow::Result<()> {
-    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+    let storage = storage_handle(state)?;
+    let _guard = CONFIG_STORAGE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(mut current) = storage
         .load_activity_cloud_config()?
         .map(StoredActivityCloudConfig::normalized)
@@ -457,31 +487,25 @@ fn upload_status(config: &StoredActivityCloudConfig) -> &'static str {
 }
 
 fn load_config(state: &SharedState) -> anyhow::Result<Option<StoredActivityCloudConfig>> {
-    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+    let storage = storage_handle(state)?;
     Ok(storage
         .load_activity_cloud_config()?
         .map(StoredActivityCloudConfig::normalized))
 }
 
 fn save_config(state: &SharedState, config: &StoredActivityCloudConfig) -> anyhow::Result<()> {
-    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+    let storage = storage_handle(state)?;
+    let _guard = CONFIG_STORAGE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     storage.save_activity_cloud_config(config)
 }
 
 fn clear_config(state: &SharedState) -> anyhow::Result<()> {
-    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+    let storage = storage_handle(state)?;
+    let _guard = CONFIG_STORAGE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     storage.clear_activity_cloud_config()
 }
 
@@ -515,6 +539,7 @@ fn current_epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Storage as _;
 
     #[test]
     fn status_body_redacts_upload_token() {
@@ -607,5 +632,256 @@ mod tests {
         assert_eq!(json["needs_reprovision"], true);
         assert_eq!(json["upload_status"], UPLOAD_STATUS_AUTH_FAILED);
         assert_eq!(json["last_upload_http_status"], 403);
+    }
+
+    fn test_state() -> SharedState {
+        std::sync::Arc::new(std::sync::Mutex::new(crate::state::AppState::default()))
+    }
+
+    fn usable_config(ingest_url: &str) -> StoredActivityCloudConfig {
+        StoredActivityCloudConfig {
+            schema_version: ACTIVITY_CLOUD_SCHEMA_VERSION,
+            enabled: true,
+            ingest_url: ingest_url.into(),
+            upload_token: "token-1".into(),
+            home_id: "home-1".into(),
+            hub_id: "hub-1".into(),
+            token_id: None,
+            server_instance_id: None,
+            upload_status: Some(UPLOAD_STATUS_PENDING.into()),
+            last_upload_attempt_epoch_ms: None,
+            last_upload_success_epoch_ms: None,
+            last_upload_failure_epoch_ms: None,
+            last_upload_http_status: None,
+            last_upload_error: None,
+            auth_failed_at_epoch_ms: None,
+            updated_at_epoch_ms: 1,
+        }
+    }
+
+    fn test_activity() -> LightActivityEvent {
+        LightActivityEvent {
+            id: "activity-1-1783281103022".to_string(),
+            node_id: "room-1".to_string(),
+            action_id: "turn_on".to_string(),
+            source: crate::activity::LightActivitySource {
+                raw: "api".to_string(),
+                kind: "app".to_string(),
+                marks_touched: true,
+                control_id: None,
+            },
+            epoch_ms: 1_783_281_103_022,
+            server_instance_id: None,
+            server_version: None,
+            platform: None,
+            active_mode: None,
+            target: None,
+            change: None,
+            count: 1,
+            correlation_id: None,
+            fanout_of: None,
+            payload: None,
+            brightness: None,
+            kelvin: None,
+        }
+    }
+
+    #[test]
+    fn upload_runtime_handle_prefers_ambient_runtime() {
+        let state = test_state();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        assert!(upload_runtime_handle(&state).is_some());
+    }
+
+    #[test]
+    fn upload_runtime_handle_falls_back_to_stored_handle() {
+        let state = test_state();
+        assert!(
+            upload_runtime_handle(&state).is_none(),
+            "no ambient runtime and no stored handle should resolve to None"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        state.lock().unwrap().tokio_handle = Some(runtime.handle().clone());
+        assert!(upload_runtime_handle(&state).is_some());
+    }
+
+    /// Regression: activity is recorded on plain worker threads (http-handler,
+    /// event-loop dispatch) with no ambient Tokio runtime. The upload must
+    /// still be attempted via the handle captured at startup.
+    #[test]
+    fn enqueue_attempts_upload_from_plain_thread_via_stored_handle() {
+        // Reserve a local port with no listener so the upload fails fast
+        // (connection refused) without DNS lookups.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+
+        let data_dir = std::env::temp_dir().join(format!(
+            "rhythm_activity_cloud_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = crate::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap();
+        storage
+            .save_activity_cloud_config(&usable_config(&format!("http://127.0.0.1:{port}/ingest")))
+            .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let state = test_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(std::sync::Arc::new(
+                crate::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
+            ));
+            s.light_activity.push(test_activity());
+            s.tokio_handle = Some(runtime.handle().clone());
+        }
+
+        // Test threads have no ambient runtime, matching the production
+        // worker threads that record activity.
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        enqueue_recent_activity_upload(&state);
+
+        let mut recorded = None;
+        for _ in 0..200 {
+            let config = storage.load_activity_cloud_config().unwrap().unwrap();
+            if config.last_upload_attempt_epoch_ms.is_some() {
+                recorded = Some(config);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        std::fs::remove_dir_all(&data_dir).ok();
+
+        let config = recorded.expect("upload attempt was never recorded");
+        assert_eq!(config.upload_status.as_deref(), Some(UPLOAD_STATUS_FAILED));
+        assert!(config.last_upload_error.is_some());
+        assert_eq!(
+            state.lock().unwrap().light_activity.len(),
+            1,
+            "failed uploads must keep events buffered for retry"
+        );
+    }
+
+    /// Accept one HTTP request, read it fully, and answer 200.
+    fn spawn_one_shot_ok_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        fn request_complete(buf: &[u8]) -> bool {
+            let Some(headers_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+                return false;
+            };
+            let headers = String::from_utf8_lossy(&buf[..headers_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            buf.len() >= headers_end + 4 + content_length
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while !request_complete(&buf) {
+                match socket.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => buf.extend_from_slice(&chunk[..read]),
+                }
+            }
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}");
+            let _ = socket.flush();
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn successful_upload_drains_uploaded_events() {
+        let (addr, server) = spawn_one_shot_ok_server();
+
+        let data_dir = std::env::temp_dir().join(format!(
+            "rhythm_activity_cloud_drain_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = crate::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap();
+        storage
+            .save_activity_cloud_config(&usable_config(&format!("http://{addr}/ingest")))
+            .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let state = test_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(std::sync::Arc::new(
+                crate::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
+            ));
+            s.light_activity.push(test_activity());
+            s.tokio_handle = Some(runtime.handle().clone());
+        }
+
+        enqueue_recent_activity_upload(&state);
+
+        let mut drained_and_recorded = false;
+        for _ in 0..200 {
+            let drained = state.lock().unwrap().light_activity.is_empty();
+            let recorded_ok = storage
+                .load_activity_cloud_config()
+                .unwrap()
+                .unwrap()
+                .upload_status
+                .as_deref()
+                == Some(UPLOAD_STATUS_OK);
+            if drained && recorded_ok {
+                drained_and_recorded = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        server.join().ok();
+        std::fs::remove_dir_all(&data_dir).ok();
+
+        assert!(
+            drained_and_recorded,
+            "successful upload should drain the buffer and record ok status"
+        );
     }
 }

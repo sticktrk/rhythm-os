@@ -188,6 +188,8 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
 }
 
 async fn run_server(state: SharedState, port: u16) -> Result<()> {
+    rhythm_os::state::capture_tokio_runtime_handle(&state);
+
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 

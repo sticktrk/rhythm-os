@@ -689,6 +689,13 @@ pub struct AppState {
     /// Broadcast sender for SSE server events.
     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::server_event::ServerEvent>>,
 
+    /// Handle to the main Tokio runtime, captured at server startup.
+    ///
+    /// Activity recording runs on plain worker threads (`http-handler`,
+    /// event-loop dispatch) where `Handle::try_current()` fails, so async
+    /// work spawned from those paths must go through this stored handle.
+    pub tokio_handle: Option<tokio::runtime::Handle>,
+
     /// Whether the stored-hub bootstrap worker thread is currently running.
     pub hub_bootstrap_worker_running: bool,
 }
@@ -789,6 +796,7 @@ impl Default for AppState {
             listen_port: None,
             platform: PlatformConfig::default(),
             event_tx: None,
+            tokio_handle: None,
             hub_bootstrap_worker_running: false,
         };
         state.sync_active_mode_runtime_overrides();
@@ -1170,6 +1178,17 @@ pub fn light_breaker_enabled(state: &SharedState) -> bool {
 pub fn emit_server_event(state: &SharedState, event: crate::server_event::ServerEvent) {
     if let Ok(s) = state.lock() {
         s.emit_event(event);
+    }
+}
+
+/// Capture the ambient Tokio runtime handle into state.
+///
+/// Must be called from async context at server startup so plain worker
+/// threads (`http-handler`, event-loop dispatch) can spawn async work.
+pub fn capture_tokio_runtime_handle(state: &SharedState) {
+    let handle = tokio::runtime::Handle::current();
+    if let Ok(mut s) = state.lock() {
+        s.tokio_handle = Some(handle);
     }
 }
 

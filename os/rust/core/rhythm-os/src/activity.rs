@@ -339,9 +339,17 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
         s.light_activity.truncate(LIGHT_ACTIVITY_HISTORY_LIMIT);
     }
 
-    // Persist OUTSIDE the state lock: this runs on every button press and the
-    // write is fsync'd — on SD-card storage a slow flush would otherwise hold
-    // the global lock and stall the periodic tick, event loop, and all HTTP.
+    persist_light_activity_history(state);
+
+    crate::activity_cloud::enqueue_light_activity_upload(state);
+}
+
+/// Persist the in-memory activity buffer to storage.
+///
+/// Persists OUTSIDE the state lock: this runs on every button press and the
+/// write is fsync'd — on SD-card storage a slow flush would otherwise hold
+/// the global lock and stall the periodic tick, event loop, and all HTTP.
+pub(crate) fn persist_light_activity_history(state: &SharedState) {
     let persist = {
         let Ok(s) = state.lock() else { return };
         s.storage.as_ref().map(|storage| {
@@ -359,8 +367,28 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
             log::warn!(target: "cmd", "Failed to save light activity history: {}", e);
         }
     }
+}
 
-    crate::activity_cloud::enqueue_light_activity_upload(state);
+/// Drain events that were successfully uploaded to the cloud from the buffer.
+///
+/// Matches by (id, epoch_ms) rather than id alone: pre-epoch-suffix builds
+/// reused ids across reboots, and events recorded while the upload was in
+/// flight must survive for the next batch.
+pub(crate) fn remove_uploaded_light_activity(state: &SharedState, uploaded: &[LightActivityEvent]) {
+    let uploaded_keys: std::collections::HashSet<(&str, u64)> = uploaded
+        .iter()
+        .map(|event| (event.id.as_str(), event.epoch_ms))
+        .collect();
+    let removed = {
+        let Ok(mut s) = state.lock() else { return };
+        let before = s.light_activity.len();
+        s.light_activity
+            .retain(|event| !uploaded_keys.contains(&(event.id.as_str(), event.epoch_ms)));
+        s.light_activity.len() != before
+    };
+    if removed {
+        persist_light_activity_history(state);
+    }
 }
 
 fn build_light_activity_target(state: &SharedState, node_id: &str) -> Option<LightActivityTarget> {
@@ -555,5 +583,19 @@ mod tests {
 
         assert!(id.starts_with("activity-"));
         assert!(id.ends_with("-1783278659924"));
+    }
+
+    #[test]
+    fn remove_uploaded_light_activity_keeps_events_recorded_mid_upload() {
+        let state = test_state();
+        record_light_activity(&state, LightActivityRecord::app("bedroom", "on"));
+        let uploaded = state.lock().unwrap().light_activity.clone();
+        record_light_activity(&state, LightActivityRecord::app("kitchen", "off"));
+
+        remove_uploaded_light_activity(&state, &uploaded);
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_activity.len(), 1);
+        assert_eq!(s.light_activity[0].node_id, "kitchen");
     }
 }
