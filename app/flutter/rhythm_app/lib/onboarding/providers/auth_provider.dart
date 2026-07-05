@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
 import '../../backend/backend.dart';
-import '../../services/account_data_encryption_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/settings_service.dart';
@@ -133,16 +132,10 @@ class AuthProvider extends ChangeNotifier {
       return false;
     }
 
-    final success = await _runAuthOperation(
+    return _runAuthOperation(
       operationName: 'Email account',
       operation: () => _createOrSignInWithEmailPassword(email, password),
     );
-    _rememberEmailPasswordKeyMaterialIfAuthenticated(
-      email: email,
-      password: password,
-      success: success,
-    );
-    return success;
   }
 
   /// Sign in with email and password.
@@ -171,33 +164,21 @@ class AuthProvider extends ChangeNotifier {
       return false;
     }
 
-    final success = await _runAuthOperation(
+    return _runAuthOperation(
       operationName: 'Sign in',
       operation: () => _authService.signInWithEmailPassword(email, password),
     );
-    _rememberEmailPasswordKeyMaterialIfAuthenticated(
-      email: email,
-      password: password,
-      success: success,
-    );
-    return success;
   }
 
   /// Create account with email and password.
   /// If user is currently anonymous, links credentials to preserve uid.
   Future<bool> createAccount(String email, String password) async {
     _email = email;
-    final success = await _runAuthOperation(
+    return _runAuthOperation(
       operationName: 'Account creation',
       operation: () =>
           _authService.createAccountWithEmailPassword(email, password),
     );
-    _rememberEmailPasswordKeyMaterialIfAuthenticated(
-      email: email,
-      password: password,
-      success: success,
-    );
-    return success;
   }
 
   Future<bool> sendPasswordResetEmail(String email) async {
@@ -226,14 +207,6 @@ class AuthProvider extends ChangeNotifier {
 
       final user = await _authService.updatePassword(password);
       _user = user ?? _authService.currentUser;
-      final email = _user?.email;
-      if (_user != null && email != null && !_user!.isAnonymous) {
-        AccountDataEncryptionService.instance.rememberEmailPasswordKeyMaterial(
-          userId: _user!.id,
-          email: email,
-          password: password,
-        );
-      }
       _state = AuthState.authenticated;
       notifyListeners();
       return true;
@@ -276,21 +249,6 @@ class AuthProvider extends ChangeNotifier {
         lowerMessage.contains('already exists') ||
         lowerMessage.contains('email exists') ||
         lowerMessage.contains('email address has already');
-  }
-
-  void _rememberEmailPasswordKeyMaterialIfAuthenticated({
-    required String email,
-    required String password,
-    required bool success,
-  }) {
-    final user = _user;
-    if (!success || user == null || user.isAnonymous) return;
-
-    AccountDataEncryptionService.instance.rememberEmailPasswordKeyMaterial(
-      userId: user.id,
-      email: email,
-      password: password,
-    );
   }
 
   /// Helper method to run authentication operations with consistent error handling.
@@ -378,8 +336,9 @@ class AuthProvider extends ChangeNotifier {
   /// Sign out.
   Future<void> signOut() async {
     // Note: Demo mode is cleared in AuthService.signOut()
+    // The per-user data-encryption key intentionally stays in the keychain so
+    // account data can be decrypted again after re-login.
     await _authService.signOut();
-    AccountDataEncryptionService.instance.clearRememberedKeyMaterial();
     _state = AuthState.initial;
     _email = null;
     _errorMessage = null;

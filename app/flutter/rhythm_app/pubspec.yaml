@@ -54,6 +54,9 @@ dependencies:
   # Storage (shared_preferences only used for one-time migration to Hive)
   shared_preferences: ^2.2.2
 
+  # Platform keychain / keystore (account data-encryption keys)
+  flutter_secure_storage: ^9.2.4
+
   # Package info
   package_info_plus: ^9.0.0
 

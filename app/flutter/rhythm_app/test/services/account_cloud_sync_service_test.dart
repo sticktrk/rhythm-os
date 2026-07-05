@@ -248,6 +248,49 @@ void main() {
       expect(restored, 'owner-token');
     });
 
+    test(
+        'flags hubs whose local token could not be encrypted so sync logs '
+        'the skip', () {
+      final hubWithToken = Hub.server(
+        id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
+        homeId: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Kitchen Server',
+        host: '192.168.5.123',
+        token: 'owner-token',
+      );
+      final hubWithoutToken = Hub.server(
+        id: '22222222-2222-4222-8222-222222222222',
+        homeId: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Garage Server',
+        host: '192.168.5.124',
+      );
+
+      // Local token present but encryption unavailable -> warn.
+      expect(
+        hubTokenEncryptionUnavailableForTesting(
+          hub: hubWithToken,
+          encryptedToken: null,
+        ),
+        isTrue,
+      );
+      // Encryption produced an envelope -> nothing to warn about.
+      expect(
+        hubTokenEncryptionUnavailableForTesting(
+          hub: hubWithToken,
+          encryptedToken: {'version': 'account_secret_v1'},
+        ),
+        isFalse,
+      );
+      // No local token -> nothing was lost.
+      expect(
+        hubTokenEncryptionUnavailableForTesting(
+          hub: hubWithoutToken,
+          encryptedToken: null,
+        ),
+        isFalse,
+      );
+    });
+
     test('groups account Homes with their server hubs', () {
       final homeA = Home.create(
         id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',

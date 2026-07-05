@@ -166,6 +166,15 @@ class AccountCloudSyncService {
 
       for (final hub in serverHubs) {
         final encryptedToken = await _encryptedHubToken(hub);
+        if (hubTokenEncryptionUnavailableForTesting(
+          hub: hub,
+          encryptedToken: encryptedToken,
+        )) {
+          debugPrint(
+            'AccountCloudSyncService: hub token encryption unavailable for '
+            'hub=${hub.id} — encrypted_token not synced',
+          );
+        }
         await _upsertServerHub(client, hub, encryptedToken);
       }
 
@@ -445,6 +454,17 @@ class AccountCloudSyncService {
     if (auth is SupabaseAuthBackend) return auth.client;
     return null;
   }
+}
+
+/// True when a hub has a local owner token but encryption produced no
+/// envelope, meaning `encrypted_token` will not be synced for it.
+@visibleForTesting
+bool hubTokenEncryptionUnavailableForTesting({
+  required Hub hub,
+  required Map<String, dynamic>? encryptedToken,
+}) {
+  final token = hub.token?.trim();
+  return encryptedToken == null && token != null && token.isNotEmpty;
 }
 
 @visibleForTesting
