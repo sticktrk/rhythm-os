@@ -22,6 +22,20 @@ int? jsonInt(
   return jsonNum(value, preferredKeys: preferredKeys)?.toInt();
 }
 
+/// Lenient bool parsing: accepts bool, 0/1 numbers, and "true"/"false"
+/// strings. A malformed field must degrade to [fallback] rather than throw —
+/// a throw here would drop the whole SSE event or poll cycle it arrived in.
+bool jsonBool(dynamic value, {bool fallback = false}) {
+  if (value is bool) return value;
+  if (value is num) return value != 0;
+  if (value is String) {
+    final normalized = value.trim().toLowerCase();
+    if (normalized == 'true' || normalized == '1') return true;
+    if (normalized == 'false' || normalized == '0') return false;
+  }
+  return fallback;
+}
+
 double? jsonDouble(
   dynamic value, {
   Iterable<String> preferredKeys = const <String>[],

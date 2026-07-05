@@ -4,7 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RoomModeState;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmSceneDefinition, RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
@@ -113,10 +114,10 @@ class _RoomCardState extends State<RoomCard> {
     _showMoodScenePicker();
   }
 
-  void _applyModeChange(RoomMode newMode) {
+  Future<void> _applyModeChange(RoomMode newMode) {
     final roomProvider = context.read<RoomProvider>();
     final room = roomProvider.getRoom(widget.roomId);
-    if (room == null) return;
+    if (room == null) return Future.value();
     final previousMode =
         _analyticsModeForState(roomProvider.getDisplayRoomState(widget.roomId));
 
@@ -126,7 +127,7 @@ class _RoomCardState extends State<RoomCard> {
         roomProvider.getDisplayRoomState(widget.roomId) == RoomModeState.mood) {
       HapticFeedback.lightImpact();
       _showMoodScenePicker();
-      return;
+      return Future.value();
     }
 
     // Optimistic local state update
@@ -153,32 +154,28 @@ class _RoomCardState extends State<RoomCard> {
         roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.hardOff);
     }
 
-    switch (newMode) {
-      case RoomMode.mood:
-        serverSync.pushNodePreferences(
+    final push = switch (newMode) {
+      RoomMode.mood => serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.mood,
           profileSettings: const {'mood_enabled': true},
-        );
-      case RoomMode.on:
-        serverSync.pushNodePreferences(
+        ),
+      RoomMode.on => serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.active,
-        );
-      case RoomMode.standby:
-        serverSync.pushNodePreferences(
+        ),
+      RoomMode.standby => serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
           state: RoomModeState.standby,
-        );
-      case RoomMode.off:
-        serverSync.pushNodePreferences(
+        ),
+      RoomMode.off => serverSync.pushNodePreferences(
           widget.roomId,
           state: RoomModeState.hardOff,
-        );
-    }
+        ),
+    };
 
     setState(() {
       _sliderBrightness = null;
@@ -190,6 +187,7 @@ class _RoomCardState extends State<RoomCard> {
       previousMode: previousMode,
       nextMode: newMode.name,
     );
+    return push;
   }
 
   void _showMoodScenePicker() {
@@ -310,8 +308,13 @@ class _RoomCardState extends State<RoomCard> {
   /// turn the room on and reset it to the live adaptive curve — same outcome as
   /// the "Reset to curve" affordance.
   void _resetToOn() {
-    _applyModeChange(RoomMode.on);
-    context.read<ServerSyncProvider>().dispatchResetNode(widget.roomId);
+    final serverSync = context.read<ServerSyncProvider>();
+    // Sequence the two writes: fired concurrently, the reset can land before
+    // the preferences-set, which then re-raises server-side work the reset
+    // already settled.
+    unawaited(_applyModeChange(RoomMode.on).then((_) {
+      serverSync.dispatchResetNode(widget.roomId);
+    }));
   }
 
   /// Reset this node to its adaptive curve position.
@@ -454,8 +457,11 @@ class _RoomCardState extends State<RoomCard> {
         // palette badge so the card reflects whatever the mood actually is.
         final moodPalette = <Color>[];
         if (mode == RoomMode.mood) {
+          // select (not read): scenes load asynchronously after the card
+          // builds, and the badge must pick up the palette when they land.
           final scene = moodSceneId != null
-              ? context.read<ServerSyncProvider>().sceneById(moodSceneId)
+              ? context.select<ServerSyncProvider, RhythmSceneDefinition?>(
+                  (p) => p.sceneById(moodSceneId))
               : null;
           if (scene != null) {
             moodPalette.addAll(rhythmSceneSwatch(scene));
@@ -1694,6 +1700,13 @@ class _MotionIndicatorState extends State<_MotionIndicator>
       _pulseController.value = 0;
       _interpolatedRemaining = widget.info.remainingSecs!;
       _startCountdown();
+    } else {
+      // Inactive with no countdown: stop everything, or the pulse ticker
+      // keeps running invisibly.
+      _countdownTimer?.cancel();
+      _countdownTimer = null;
+      _pulseController.stop();
+      _pulseController.value = 0;
     }
   }
 

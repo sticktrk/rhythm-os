@@ -14,6 +14,7 @@ export 'src/models/rhythm_connection_state.dart';
 export 'src/models/rhythm_curve_config.dart';
 export 'src/models/rhythm_curve_data.dart';
 export 'src/models/rhythm_debug_bundle.dart';
+export 'src/models/rhythm_dispatch_failure.dart';
 export 'src/models/rhythm_firmware.dart';
 export 'src/models/rhythm_capabilities.dart';
 export 'src/models/rhythm_hello.dart';

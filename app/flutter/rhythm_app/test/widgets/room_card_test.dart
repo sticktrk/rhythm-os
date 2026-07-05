@@ -435,6 +435,13 @@ void main() {
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
     expect(_roomCardSurfaceColor(tester, 'room-1'), const Color(0xFF1B222C));
+
+    // A missed server clear must not spin forever: the fallback timeout
+    // clears the flag on its own.
+    await tester.pump(const Duration(seconds: 26));
+    await tester.pump(); // rebuild after the fallback notifies
+    await tester.pump(const Duration(milliseconds: 200)); // switcher exit
+    expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
   testWidgets('mood segment sends mood room state', (tester) async {

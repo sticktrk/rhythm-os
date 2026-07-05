@@ -18,6 +18,7 @@ import '../api/rhythm_runtime_api.dart';
 import '../api/rhythm_server_api.dart';
 import '../json_parsing.dart';
 import '../models/rhythm_connection_state.dart';
+import '../models/rhythm_dispatch_failure.dart';
 import '../models/rhythm_environment.dart';
 import '../models/rhythm_firmware.dart';
 import '../models/rhythm_hello.dart';
@@ -110,6 +111,8 @@ class RhythmConnection {
       StreamController<RhythmPairingProgress>.broadcast();
   final _otaUpdateProgressController =
       StreamController<RhythmOtaUpdateProgress>.broadcast();
+  final _dispatchFailureController =
+      StreamController<RhythmDispatchFailure>.broadcast();
 
   // Connection state.
   RhythmConnectionState _connectionState = RhythmConnectionState.disconnected;
@@ -159,6 +162,17 @@ class RhythmConnection {
   final Map<String, bool> _cachedHubConnected = {};
   final Set<String> _reHelloSuppressedNodeIds = {};
   DateTime _lastFreshStateAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // Ordering guards. State arrives from three unordered sources (SSE, polls,
+  // action responses) with no server-side sequence numbers, so an older
+  // response applied after a newer one silently reverts state.
+  /// Bumped whenever SSE applies node state; an in-flight poll captured
+  /// before the bump must discard its response.
+  int _sseApplyGeneration = 0;
+
+  /// Bumped by [_stopPolling]; an in-flight poll from a cancelled cycle must
+  /// discard its response.
+  int _pollEpoch = 0;
 
   // Optional web base URL (consumer passes Uri.base.toString() on web).
   String? _webBaseUrl;
@@ -213,6 +227,13 @@ class RhythmConnection {
   Stream<RhythmOtaUpdateProgress> get otaUpdateProgressEvents =>
       _otaUpdateProgressController.stream;
 
+  /// Hub light commands that failed, timed out, or were dropped.
+  ///
+  /// Dispatch is fire-and-forget server-side, so this stream is the only
+  /// signal that a light command did not physically reach its target.
+  Stream<RhythmDispatchFailure> get dispatchFailureEvents =>
+      _dispatchFailureController.stream;
+
   RhythmConnectionState get connectionState => _connectionState;
   bool get connected => _connectionState == RhythmConnectionState.connected;
   String? get host => _host;
@@ -261,19 +282,24 @@ class RhythmConnection {
       return;
     }
 
+    // Tear down transport state for any prior connection attempt — including
+    // same-params re-entry while reconnecting, which would otherwise leave a
+    // stale reconnect timer racing this call with a duplicate hello and leak
+    // the old Dio client.
+    _stopPolling();
+    _disconnectSse();
+    _sseReconnectTimer?.cancel();
+    _sseReconnectTimer = null;
+    _sseReconnectAttempts = 0;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempts = 0;
+
     if (_host != null &&
         (_host != host ||
             _port != port ||
             _useSsl != useSsl ||
             _authToken != authToken)) {
-      _stopPolling();
-      _disconnectSse();
-      _sseReconnectTimer?.cancel();
-      _sseReconnectTimer = null;
-      _sseReconnectAttempts = 0;
-      _reconnectTimer?.cancel();
-      _reconnectTimer = null;
-      _reconnectAttempts = 0;
       _cachedNodeStates.clear();
       _cachedHubConnected.clear();
       _reHelloSuppressedNodeIds.clear();
@@ -287,6 +313,7 @@ class RhythmConnection {
     _webBaseUrl = webBaseUrl;
     _authToken = authToken;
     final baseUrl = _buildBaseUrl(host, port, useSsl, webBaseUrl);
+    _dio?.close();
     _dio = Dio(BaseOptions(
       baseUrl: baseUrl,
       connectTimeout: const Duration(seconds: 5),
@@ -413,6 +440,7 @@ class RhythmConnection {
     _connectionStateController.close();
     _pairingProgressController.close();
     _otaUpdateProgressController.close();
+    _dispatchFailureController.close();
     _settingsChangedSuppressTimer?.cancel();
   }
 
@@ -447,7 +475,7 @@ class RhythmConnection {
           brightnessOffset: node.brightnessOffset,
           state: node.state,
           transitioning: node.transitioning,
-          pendingDispatch: _pendingDispatchForRoom(node),
+          pendingDispatch: node.pendingDispatch,
           powerFresh: node.powerFresh,
           powerSource: node.powerSource,
           lightsOn: node.lightsOn,
@@ -520,13 +548,25 @@ class RhythmConnection {
     _pollTimer?.cancel();
     _pollTimer = null;
     _consecutivePollFailures = 0;
+    // Invalidate any in-flight poll: its response must not apply after the
+    // poller was stopped (e.g. SSE just became authoritative).
+    _pollEpoch++;
   }
 
   Future<void> _poll() async {
     if (_dio == null || !connected) return;
 
+    final pollEpoch = _pollEpoch;
+    final sseGeneration = _sseApplyGeneration;
     try {
       final response = await _dio!.get('api/nodes/state');
+      // Discard stale responses: if SSE applied fresher state or the poller
+      // was stopped while this request was in flight, applying the response
+      // would revert newer state (the poll diffs against the *current* cache,
+      // so an older snapshot registers as a "change").
+      if (pollEpoch != _pollEpoch || sseGeneration != _sseApplyGeneration) {
+        return;
+      }
       final data = response.data as Map<String, dynamic>;
       _consecutivePollFailures = 0;
       _lastFreshStateAt = DateTime.now();
@@ -578,7 +618,7 @@ class RhythmConnection {
             cached.brightnessOffset != nodeState.brightnessOffset ||
             cached.state != nodeState.state ||
             cached.transitioning != nodeState.transitioning ||
-            cached.pendingDispatch != _pendingDispatchForState(nodeState) ||
+            cached.pendingDispatch != nodeState.pendingDispatch ||
             cached.lightsOn != nodeState.lightsOn ||
             cached.powerFresh != nextPowerFresh ||
             cached.powerSource != nextPowerSource ||
@@ -599,7 +639,7 @@ class RhythmConnection {
             brightnessOffset: nodeState.brightnessOffset,
             state: nodeState.state,
             transitioning: nodeState.transitioning,
-            pendingDispatch: _pendingDispatchForState(nodeState),
+            pendingDispatch: nodeState.pendingDispatch,
             mode: nodeState.mode,
             powerFresh: nextPowerFresh,
             powerSource: nextPowerSource,
@@ -685,8 +725,11 @@ class RhythmConnection {
   void _connectSse() async {
     if (_dio == null || !connected || !_sseSupported || _sseConnecting) return;
 
-    _sseConnecting = true;
+    // Order matters: _disconnectSse resets _sseConnecting, so the guard must
+    // be raised after it or concurrent callers (reconnect timer, watchdog,
+    // pingOrReconnect) race each other mid-handshake.
     _disconnectSse();
+    _sseConnecting = true;
 
     final cancelToken = CancelToken();
     _sseCancelToken = cancelToken;
@@ -721,9 +764,18 @@ class RhythmConnection {
         cancelToken: cancelToken,
       );
 
+      // A newer connect/disconnect superseded this attempt during the
+      // handshake — its state must not be touched by this stale one.
+      if (!identical(cancelToken, _sseCancelToken) || cancelToken.isCancelled) {
+        return;
+      }
+
       final stream = (response.data as ResponseBody?)?.stream;
       if (stream == null) {
         _sseConnecting = false;
+        // Treat like any other transport failure so SSE retries instead of
+        // staying dead until the next app-resume ping.
+        _handleSseDisconnect();
         return;
       }
 
@@ -736,6 +788,13 @@ class RhythmConnection {
       // so we don't keep hitting /api/nodes/state while the stream is healthy.
       _stopPolling();
       _startSseWatchdog();
+      // Resync once if state is stale: anything broadcast while SSE was down
+      // was silently lost — there is no Last-Event-ID resume, and the
+      // periodic poller is now stopped. The freshness debounce keeps rapid
+      // stream flaps from hammering the server with a poll per reconnect.
+      if (DateTime.now().difference(_lastFreshStateAt) >= _fastPollDebounce) {
+        unawaited(_poll());
+      }
 
       String? eventType;
       final dataBuffer = StringBuffer();
@@ -752,7 +811,10 @@ class RhythmConnection {
             eventType = line.substring(6).trim();
           } else if (line.startsWith('data:')) {
             if (dataBuffer.isNotEmpty) dataBuffer.write('\n');
-            dataBuffer.write(line.substring(5).trim());
+            // Per the SSE spec, strip at most one leading space — trimming
+            // corrupts whitespace-significant payloads.
+            final value = line.substring(5);
+            dataBuffer.write(value.startsWith(' ') ? value.substring(1) : value);
           } else if (line.isEmpty && eventType != null) {
             _handleSseEvent(eventType!, dataBuffer.toString());
             eventType = null;
@@ -773,6 +835,9 @@ class RhythmConnection {
         },
       );
     } on DioException catch (e) {
+      // A superseding attempt owns the state now — don't reset its guard or
+      // schedule retries on its behalf.
+      if (!identical(cancelToken, _sseCancelToken)) return;
       _sseConnecting = false;
       if (e.type == DioExceptionType.cancel) return;
       if (e.response?.statusCode == 404) {
@@ -786,6 +851,7 @@ class RhythmConnection {
         _handleSseDisconnect();
       }
     } catch (e) {
+      if (!identical(cancelToken, _sseCancelToken)) return;
       _sseConnecting = false;
       if (useDirectSse) {
         _log.warning('SSE direct connect error, retrying via proxy', e);
@@ -814,9 +880,16 @@ class RhythmConnection {
           final nodes = payload['nodes'] as List<dynamic>? ??
               payload['rooms'] as List<dynamic>? ??
               [];
+          _sseApplyGeneration++;
           for (final raw in nodes) {
-            final node = raw as Map<String, dynamic>;
-            final nodeState = RhythmRoomState.fromJson(node);
+            // One malformed node must not drop the rest of the event.
+            final RhythmRoomState nodeState;
+            try {
+              nodeState = RhythmRoomState.fromJson(raw as Map<String, dynamic>);
+            } catch (e) {
+              _log.warning('Skipping malformed node in $eventType event', e);
+              continue;
+            }
             final nodeId = nodeState.nodeId;
             if (nodeId.isEmpty) continue;
 
@@ -833,7 +906,7 @@ class RhythmConnection {
               brightnessOffset: nodeState.brightnessOffset,
               state: nodeState.state,
               transitioning: nodeState.transitioning,
-              pendingDispatch: _pendingDispatchForState(nodeState),
+              pendingDispatch: nodeState.pendingDispatch,
               mode: nodeState.mode,
               powerFresh: nodeState.powerFresh ?? existing?.powerFresh,
               powerSource: nodeState.powerSource ?? existing?.powerSource,
@@ -1079,6 +1152,13 @@ class RhythmConnection {
               .add(RhythmOtaUpdateProgress.fromJson(payload));
           break;
 
+        case 'dispatch_failure':
+          final json = jsonDecode(data) as Map<String, dynamic>;
+          final payload = json['data'] as Map<String, dynamic>? ?? json;
+          _dispatchFailureController
+              .add(RhythmDispatchFailure.fromJson(payload));
+          break;
+
         case 'lagged':
           reconnect();
           break;
@@ -1181,7 +1261,13 @@ class RhythmConnection {
         brightnessOffset: state.brightnessOffset,
         state: state.state,
         transitioning: state.transitioning,
-        pendingDispatch: _pendingDispatchForState(state),
+        // pending_dispatch is SSE-authoritative: action responses are
+        // snapshotted while the command is still queued (pending=true), and
+        // for fast hubs the SSE clear can beat the HTTP response — letting
+        // the response raise the flag would re-assert a stale spinner. A
+        // response may only keep or lower it.
+        pendingDispatch:
+            (existing?.pendingDispatch ?? false) && state.pendingDispatch,
         mode: state.mode ?? existing?.mode,
         powerFresh: state.powerFresh ?? existing?.powerFresh,
         powerSource: state.powerSource ?? existing?.powerSource,
@@ -1219,21 +1305,5 @@ class RhythmConnection {
     }
     final scheme = useSsl ? 'https' : 'http';
     return '$scheme://$host:$port/';
-  }
-
-  static bool _pendingDispatchForRoom(RhythmRoom room) {
-    try {
-      return room.pendingDispatch;
-    } on TypeError {
-      return false;
-    }
-  }
-
-  static bool _pendingDispatchForState(RhythmRoomState state) {
-    try {
-      return state.pendingDispatch;
-    } on TypeError {
-      return false;
-    }
   }
 }

@@ -104,6 +104,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
+  StreamSubscription<RhythmDispatchFailure>? _dispatchFailureSub;
   StreamSubscription<({String event, String? hubType, String? address})>?
       _hubEventSub;
   StreamSubscription<RoomSourceDto>? _sourceChangedSub;
@@ -717,7 +718,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
-      pendingDispatch: _pendingDispatchForNode(previous),
+      pendingDispatch: previous.pendingDispatch,
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -846,7 +847,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
-      pendingDispatch: _pendingDispatchForNode(previous),
+      pendingDispatch: previous.pendingDispatch,
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -1106,6 +1107,8 @@ class ServerSyncProvider extends ChangeNotifier {
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
+    _dispatchFailureSub =
+        _connection.dispatchFailureEvents.listen(_onDispatchFailure);
     _hubEventSub = _connection.hubEvents.listen(_onHubEvent);
     _motionTimerSub = _connection.motionTimerEvents.listen(_onMotionTimer);
     _modeChangedSub = _connection.modeChangedEvents.listen(_onModeChanged);
@@ -2042,7 +2045,7 @@ class ServerSyncProvider extends ChangeNotifier {
             brightnessOffset: sr.brightnessOffset,
             state: sr.state,
             transitioning: sr.transitioning,
-            pendingDispatch: _pendingDispatchForNode(sr),
+            pendingDispatch: sr.pendingDispatch,
             lightsOn: sr.lightsOn,
             brightness: sr.brightness,
             kelvin: sr.kelvin,
@@ -2074,12 +2077,22 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Handle rhythm_state from server (button event, tick, poll diff).
-  void _onRhythmState(RhythmRoomState state) {
+  ///
+  /// [fromActionResponse] marks states returned by dispatch HTTP calls. Those
+  /// are snapshotted server-side while the command is still queued
+  /// (`pending_dispatch=true`), and the SSE clear can beat the HTTP response —
+  /// so a response may keep or lower the pending flag but never raise it, or
+  /// a stale snapshot re-lights the spinner with nothing left to clear it.
+  void _onRhythmState(RhythmRoomState state, {bool fromActionResponse = false}) {
     _receivingFromServer = true;
     var helloChanged = false;
     var moodSceneOverrideCleared = false;
     try {
       if (_roomProvider.getNode(state.nodeId) == null) return;
+      final pendingDispatch = fromActionResponse
+          ? state.pendingDispatch &&
+              _roomProvider.isNodeDispatchPending(state.nodeId)
+          : state.pendingDispatch;
       _roomProvider.applyServerNodeState(
         state.nodeId,
         rhythmEnabled: state.rhythmEnabled,
@@ -2087,7 +2100,7 @@ class ServerSyncProvider extends ChangeNotifier {
         brightnessOffset: state.brightnessOffset,
         state: state.state,
         transitioning: state.transitioning,
-        pendingDispatch: _pendingDispatchForState(state),
+        pendingDispatch: pendingDispatch,
         mode: state.mode,
         lightsOn: state.lightsOn,
         brightness: state.brightness,
@@ -2111,6 +2124,36 @@ class ServerSyncProvider extends ChangeNotifier {
     if (helloChanged || moodSceneOverrideCleared) {
       notifyListeners();
     }
+  }
+
+  /// Handle a hub light command that failed, timed out, or was dropped.
+  ///
+  /// Dispatch is fire-and-forget server-side, so this event is the only
+  /// signal that a command never physically reached its target — the node's
+  /// pending flag still clears and the UI would otherwise read as success.
+  void _onDispatchFailure(RhythmDispatchFailure failure) {
+    debugPrint(
+        'ServerSync: dispatch failure node=${failure.nodeId} $failure');
+    _recentDispatchFailures[failure.nodeId] = (
+      failure: failure,
+      receivedAt: DateTime.now(),
+    );
+    notifyListeners();
+  }
+
+  final Map<String, ({RhythmDispatchFailure failure, DateTime receivedAt})>
+      _recentDispatchFailures = {};
+
+  /// The most recent dispatch failure for [nodeId], if it happened within
+  /// the last 30 seconds. Cards can use this to show delivery problems.
+  RhythmDispatchFailure? recentDispatchFailureForNode(String nodeId) {
+    final entry = _recentDispatchFailures[nodeId];
+    if (entry == null) return null;
+    if (DateTime.now().difference(entry.receivedAt) >
+        const Duration(seconds: 30)) {
+      return null;
+    }
+    return entry.failure;
   }
 
   /// Handle motion timer updates from server.
@@ -2399,7 +2442,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _connection.api
         .nodeAction(nodeId: nodeId, action: action)
         .then((serverState) {
-      if (serverState != null) _onRhythmState(serverState);
+      if (serverState != null) {
+        _onRhythmState(serverState, fromActionResponse: true);
+      }
     });
     return true;
   }
@@ -2416,7 +2461,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected || actions.isEmpty) return false;
     final states = await _connection.api.nodeActionBatch(actions);
     for (final state in states) {
-      _onRhythmState(state);
+      _onRhythmState(state, fromActionResponse: true);
     }
     return true;
   }
@@ -2461,7 +2506,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _connection.api
         .nodeCurveBrightness(nodeId: nodeId, brightness: brightness)
         .then((serverState) {
-      if (serverState != null) _onRhythmState(serverState);
+      if (serverState != null) {
+        _onRhythmState(serverState, fromActionResponse: true);
+      }
     });
     return true;
   }
@@ -2510,7 +2557,9 @@ class ServerSyncProvider extends ChangeNotifier {
       preserveBrightness: preserveBrightness,
     )
         .then((serverState) {
-      if (serverState != null) _onRhythmState(serverState);
+      if (serverState != null) {
+        _onRhythmState(serverState, fromActionResponse: true);
+      }
     });
     return true;
   }
@@ -2576,17 +2625,19 @@ class ServerSyncProvider extends ChangeNotifier {
       dispatchNodeColor(roomId, r, g, b);
 
   /// Push node preferences to the server (user-state only, no topology).
-  void pushNodePreferences(String nodeId,
+  /// Returns a future completing when the server acknowledged the write, so
+  /// callers that must order a follow-up request can await it.
+  Future<void> pushNodePreferences(String nodeId,
       {bool? rhythmEnabled,
       bool? disabled,
       bool? standbyEnabled,
       RoomModeState? state,
-      Map<String, dynamic>? profileSettings}) {
+      Map<String, dynamic>? profileSettings}) async {
     if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
     if (!_connection.connected || _receivingFromServer) return;
     debugPrint(
         'ServerSync: pushNodePreferences $nodeId rhythmEnabled=$rhythmEnabled disabled=$disabled standbyEnabled=$standbyEnabled state=${state?.wireValue}');
-    api.nodePreferencesSet(
+    await api.nodePreferencesSet(
       nodeId: nodeId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -2665,7 +2716,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _connection.api
         .nodeAction(nodeId: nodeId, action: 'reset')
         .then((serverState) {
-      if (serverState != null) _onRhythmState(serverState);
+      if (serverState != null) {
+        _onRhythmState(serverState, fromActionResponse: true);
+      }
       _roomProvider.bumpResetGeneration();
     });
   }
@@ -3511,7 +3564,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: state.state,
       transitioning: state.transitioning,
-      pendingDispatch: _pendingDispatchForState(state),
+      pendingDispatch: state.pendingDispatch,
       rhythmEnabled: state.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: state.timeOffset,
@@ -3559,7 +3612,7 @@ class ServerSyncProvider extends ChangeNotifier {
       groupedLightId: previous.groupedLightId,
       state: previous.state,
       transitioning: previous.transitioning,
-      pendingDispatch: _pendingDispatchForNode(previous),
+      pendingDispatch: previous.pendingDispatch,
       rhythmEnabled: previous.rhythmEnabled,
       disabled: previous.disabled,
       timeOffset: previous.timeOffset,
@@ -3604,7 +3657,7 @@ class ServerSyncProvider extends ChangeNotifier {
         left.placement != right.placement ||
         left.state != right.state ||
         left.transitioning != right.transitioning ||
-        _pendingDispatchForNode(left) != _pendingDispatchForNode(right) ||
+        left.pendingDispatch != right.pendingDispatch ||
         left.rhythmEnabled != right.rhythmEnabled ||
         left.disabled != right.disabled ||
         left.timeOffset != right.timeOffset ||
@@ -3634,23 +3687,6 @@ class ServerSyncProvider extends ChangeNotifier {
       if (left[i] != right[i]) return false;
     }
     return true;
-  }
-
-  bool _pendingDispatchForNode(RhythmRoom? node) {
-    if (node == null) return false;
-    try {
-      return node.pendingDispatch;
-    } on TypeError {
-      return false;
-    }
-  }
-
-  bool _pendingDispatchForState(RhythmRoomState state) {
-    try {
-      return state.pendingDispatch;
-    } on TypeError {
-      return false;
-    }
   }
 
   List<RhythmRoom> _buildRoomSummaries() {
@@ -3695,7 +3731,7 @@ class ServerSyncProvider extends ChangeNotifier {
         groupedLightId: state?.groupedLightId ?? '',
         state: state?.state ?? RoomModeState.active,
         transitioning: state?.transitioning ?? false,
-        pendingDispatch: _pendingDispatchForNode(state),
+        pendingDispatch: state?.pendingDispatch ?? false,
         rhythmEnabled: state?.rhythmEnabled ?? false,
         disabled: state?.disabled ?? false,
         timeOffset: state?.timeOffset ?? 0,
@@ -3847,6 +3883,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _roomReadinessGraceTimer?.cancel();
     _helloSub?.cancel();
     _rhythmStateSub?.cancel();
+    _dispatchFailureSub?.cancel();
     _hubEventSub?.cancel();
     _sourceChangedSub?.cancel();
     _motionTimerSub?.cancel();

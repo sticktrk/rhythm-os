@@ -15,6 +15,11 @@ import '../services/settings_service.dart';
 
 const _roomTransitionFallbackTimeout = Duration(seconds: 15);
 
+/// Cap on how long one `pending_dispatch=true` assertion can show the card
+/// spinner without the server re-asserting it. A missed clear (SSE event lost
+/// in a connection blip, server restart mid-action) must not spin forever.
+const _nodeDispatchPendingFallbackTimeout = Duration(seconds: 25);
+
 /// Replace rooms from a source while preserving runtime state.
 ///
 /// Preserves:
@@ -94,7 +99,8 @@ class MotionTimerInfo {
           motionOwned == other.motionOwned &&
           remainingSecs == other.remainingSecs &&
           timeoutSecs == other.timeoutSecs &&
-          warningActive == other.warningActive;
+          warningActive == other.warningActive &&
+          receivedAt == other.receivedAt;
 
   @override
   int get hashCode => Object.hash(
@@ -103,6 +109,7 @@ class MotionTimerInfo {
         remainingSecs,
         timeoutSecs,
         warningActive,
+        receivedAt,
       );
 }
 
@@ -155,6 +162,15 @@ class RoomProvider extends ChangeNotifier {
   /// not immediately flip the UI back.
   final Map<String, DateTime> _roomStateLockedUntil = {};
 
+  /// Server values suppressed by an active optimistic lock.
+  ///
+  /// Re-applied when the lock expires: if the hub dropped the command, no
+  /// further server event arrives (nothing changed server-side), so without
+  /// this the optimistic value would stay on screen indefinitely.
+  final Map<String, RoomModeState> _suppressedRoomStates = {};
+  final Map<String, bool> _suppressedLightsOn = {};
+  final Map<String, Timer> _lockExpiryTimers = {};
+
   /// Per-room mode state from the server, tracked separately from RoomDto.
   final Map<String, RoomModeState> _roomStates = {};
 
@@ -167,6 +183,7 @@ class RoomProvider extends ChangeNotifier {
 
   /// Per-room command dispatch flag from the server.
   final Map<String, bool> _nodeDispatchPending = {};
+  final Map<String, Timer> _nodeDispatchPendingTimers = {};
 
   /// Per-room brightness from server (effective brightness after offsets).
   final Map<String, int> _roomBrightness = {};
@@ -263,9 +280,18 @@ class RoomProvider extends ChangeNotifier {
       rooms.any((room) => _roomTransitioning[room.id] ?? false);
 
   bool _setNodeDispatchPending(String nodeId, bool pending) {
+    _nodeDispatchPendingTimers.remove(nodeId)?.cancel();
+
     final current = _nodeDispatchPending[nodeId] ?? false;
     if (pending) {
       _nodeDispatchPending[nodeId] = true;
+      _nodeDispatchPendingTimers[nodeId] =
+          Timer(_nodeDispatchPendingFallbackTimeout, () {
+        _nodeDispatchPendingTimers.remove(nodeId);
+        if (_nodeDispatchPending.remove(nodeId) != null) {
+          notifyListeners();
+        }
+      });
       return !current;
     }
     if (!current) {
@@ -274,6 +300,13 @@ class RoomProvider extends ChangeNotifier {
     }
     _nodeDispatchPending.remove(nodeId);
     return true;
+  }
+
+  void _cancelNodeDispatchPendingTimers() {
+    for (final timer in _nodeDispatchPendingTimers.values) {
+      timer.cancel();
+    }
+    _nodeDispatchPendingTimers.clear();
   }
 
   bool _setRoomTransitioning(
@@ -313,6 +346,7 @@ class RoomProvider extends ChangeNotifier {
   void _clearRoomTransitioningState(String roomId) {
     _roomTransitionTimers.remove(roomId)?.cancel();
     _roomTransitioning.remove(roomId);
+    _nodeDispatchPendingTimers.remove(roomId)?.cancel();
     _nodeDispatchPending.remove(roomId);
   }
 
@@ -322,8 +356,63 @@ class RoomProvider extends ChangeNotifier {
     if (previous == state) return;
     _roomStateLockedUntil[roomId] =
         DateTime.now().add(const Duration(seconds: 3));
+    // A fresh optimistic action supersedes whatever the previous lock
+    // suppressed — re-applying it now would fight this toggle.
+    _suppressedRoomStates.remove(roomId);
     _roomStates[roomId] = state;
     notifyListeners();
+  }
+
+  /// Re-apply server values a lock suppressed once that lock expires.
+  ///
+  /// Fires slightly after the latest known expiry; each value re-checks its
+  /// own lock so a re-lock in the meantime wins.
+  void _armLockExpiryTimer(String roomId, DateTime lockedUntil) {
+    final delay =
+        lockedUntil.difference(DateTime.now()) + const Duration(milliseconds: 50);
+    _lockExpiryTimers[roomId]?.cancel();
+    _lockExpiryTimers[roomId] =
+        Timer(delay.isNegative ? Duration.zero : delay, () {
+      _lockExpiryTimers.remove(roomId);
+      var changed = false;
+      var persist = false;
+
+      final suppressedState = _suppressedRoomStates.remove(roomId);
+      if (suppressedState != null) {
+        final lock = _roomStateLockedUntil[roomId];
+        if ((lock == null || DateTime.now().isAfter(lock)) &&
+            _roomStates[roomId] != suppressedState) {
+          _roomStates[roomId] = suppressedState;
+          changed = true;
+        }
+      }
+
+      final suppressedLights = _suppressedLightsOn.remove(roomId);
+      if (suppressedLights != null) {
+        final lock = _lightsOnLockedUntil[roomId];
+        final room = getRoom(roomId);
+        if ((lock == null || DateTime.now().isAfter(lock)) &&
+            room != null &&
+            room.lightsOn != suppressedLights) {
+          _state = room_state.setRoomLightsOn(
+              state: _state, roomId: roomId, lightsOn: suppressedLights);
+          changed = true;
+          persist = true;
+        }
+      }
+
+      if (persist) unawaited(_save());
+      if (changed) notifyListeners();
+    });
+  }
+
+  void _cancelLockExpiryTimers() {
+    for (final timer in _lockExpiryTimers.values) {
+      timer.cancel();
+    }
+    _lockExpiryTimers.clear();
+    _suppressedRoomStates.clear();
+    _suppressedLightsOn.clear();
   }
 
   // Display value getters (from server)
@@ -726,9 +815,18 @@ class RoomProvider extends ChangeNotifier {
     final roomStateLocked = _roomStateLockedUntil[roomId];
     final roomStateUnlocked =
         roomStateLocked == null || DateTime.now().isAfter(roomStateLocked);
-    if (roomStateUnlocked && _roomStates[roomId] != state) {
-      _roomStates[roomId] = state;
-      changed = true;
+    if (roomStateUnlocked) {
+      _suppressedRoomStates.remove(roomId);
+      if (_roomStates[roomId] != state) {
+        _roomStates[roomId] = state;
+        changed = true;
+      }
+    } else if (_roomStates[roomId] != state) {
+      // Locked: remember the server value and re-apply it on lock expiry.
+      _suppressedRoomStates[roomId] = state;
+      _armLockExpiryTimer(roomId, roomStateLocked);
+    } else {
+      _suppressedRoomStates.remove(roomId);
     }
     if (_setRoomTransitioning(roomId, transitioning)) {
       changed = true;
@@ -744,11 +842,18 @@ class RoomProvider extends ChangeNotifier {
     if (lightsOn != null) {
       final lockedUntil = _lightsOnLockedUntil[roomId];
       if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
+        _suppressedLightsOn.remove(roomId);
         if (room.lightsOn != lightsOn) {
           _state = room_state.setRoomLightsOn(
               state: _state, roomId: roomId, lightsOn: lightsOn);
           changed = true;
         }
+      } else if (room.lightsOn != lightsOn) {
+        // Locked: remember the server value and re-apply it on lock expiry.
+        _suppressedLightsOn[roomId] = lightsOn;
+        _armLockExpiryTimer(roomId, lockedUntil);
+      } else {
+        _suppressedLightsOn.remove(roomId);
       }
     }
     // Update display values
@@ -846,8 +951,14 @@ class RoomProvider extends ChangeNotifier {
   Future<void> setRoomLightsOn(String roomId, bool lightsOn) async {
     final lockedUntil = _lightsOnLockedUntil[roomId];
     if (lockedUntil != null && DateTime.now().isBefore(lockedUntil)) {
-      return; // suppress stale external override
+      // Suppressed by the optimistic lock — remember it so the real state
+      // shows through once the lock expires (a dropped command produces no
+      // further events to correct the optimistic value).
+      _suppressedLightsOn[roomId] = lightsOn;
+      _armLockExpiryTimer(roomId, lockedUntil);
+      return;
     }
+    _suppressedLightsOn.remove(roomId);
     _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
@@ -864,6 +975,9 @@ class RoomProvider extends ChangeNotifier {
   Future<void> setRoomLightsOnLocal(String roomId, bool lightsOn) async {
     _lightsOnLockedUntil[roomId] =
         DateTime.now().add(const Duration(seconds: 3));
+    // A fresh optimistic toggle supersedes whatever the previous lock
+    // suppressed — re-applying it now would fight this toggle.
+    _suppressedLightsOn.remove(roomId);
     _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
@@ -992,10 +1106,12 @@ class RoomProvider extends ChangeNotifier {
     _roomsWithSensors.clear();
     _lightsOnLockedUntil.clear();
     _roomStateLockedUntil.clear();
+    _cancelLockExpiryTimers();
     _roomStates.clear();
     _roomModes.clear();
     _cancelRoomTransitionTimers();
     _roomTransitioning.clear();
+    _cancelNodeDispatchPendingTimers();
     _nodeDispatchPending.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
@@ -1011,6 +1127,8 @@ class RoomProvider extends ChangeNotifier {
   @override
   void dispose() {
     _cancelRoomTransitionTimers();
+    _cancelNodeDispatchPendingTimers();
+    _cancelLockExpiryTimers();
     _sourceChangedController.close();
     super.dispose();
   }
@@ -1023,10 +1141,12 @@ class RoomProvider extends ChangeNotifier {
     _roomsWithSensors.clear();
     _lightsOnLockedUntil.clear();
     _roomStateLockedUntil.clear();
+    _cancelLockExpiryTimers();
     _roomStates.clear();
     _roomModes.clear();
     _cancelRoomTransitionTimers();
     _roomTransitioning.clear();
+    _cancelNodeDispatchPendingTimers();
     _nodeDispatchPending.clear();
     _roomBrightness.clear();
     _roomKelvin.clear();
