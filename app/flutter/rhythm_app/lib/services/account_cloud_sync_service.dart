@@ -125,6 +125,7 @@ class AccountCloudSyncService {
     required Home? home,
     required Iterable<Hub> hubs,
     required String reason,
+    Set<String> clearRemoteEndpointHubIds = const <String>{},
   }) async {
     final auth = AuthService();
     final userId = auth.currentUserId;
@@ -175,7 +176,12 @@ class AccountCloudSyncService {
             'hub=${hub.id} — encrypted_token not synced',
           );
         }
-        await _upsertServerHub(client, hub, encryptedToken);
+        await _upsertServerHub(
+          client,
+          hub,
+          encryptedToken,
+          clearRemoteEndpoint: clearRemoteEndpointHubIds.contains(hub.id),
+        );
       }
 
       debugPrint(
@@ -271,7 +277,8 @@ class AccountCloudSyncService {
       if (includeServerInstanceId && hub.serverInstanceId != null)
         'server_instance_id': hub.serverInstanceId,
       if (hub.remoteEndpoint != null || clearRemoteEndpoint)
-        'remote_endpoint': hub.remoteEndpoint?.toJson(),
+        'remote_endpoint':
+            clearRemoteEndpoint ? null : hub.remoteEndpoint?.toJson(),
       'token': useLegacyEncryptedTokenStorage && encryptedToken != null
           ? jsonEncode(encryptedToken)
           : null,
@@ -365,8 +372,9 @@ class AccountCloudSyncService {
   Future<void> _upsertServerHub(
     SupabaseClient client,
     Hub hub,
-    Map<String, dynamic>? encryptedToken,
-  ) async {
+    Map<String, dynamic>? encryptedToken, {
+    required bool clearRemoteEndpoint,
+  }) async {
     final attempts = <({
       bool includeServerInstanceId,
       bool useLegacyEncryptedTokenStorage,
@@ -401,6 +409,7 @@ class AccountCloudSyncService {
               serverHubSnapshotPayload(
                 hub,
                 encryptedToken: encryptedToken,
+                clearRemoteEndpoint: clearRemoteEndpoint,
                 includeServerInstanceId: attempt.includeServerInstanceId,
                 useLegacyEncryptedTokenStorage:
                     attempt.useLegacyEncryptedTokenStorage,

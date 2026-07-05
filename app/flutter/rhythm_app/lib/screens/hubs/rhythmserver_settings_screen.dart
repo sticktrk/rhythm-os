@@ -2561,7 +2561,10 @@ class _RhythmServerAdvancedSettingsScreenState
         updatedHub = await service.disableForHub(serverHub, home: home);
       }
 
-      final saved = await homeProvider.updateHub(updatedHub);
+      final saved = await homeProvider.updateHub(
+        updatedHub,
+        clearCloudRemoteEndpoint: !enabled,
+      );
       if (!saved) {
         throw StateError('Could not save the remote access setting.');
       }

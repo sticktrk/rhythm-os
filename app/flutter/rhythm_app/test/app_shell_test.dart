@@ -14,7 +14,6 @@ import 'package:rhythm_app/providers/room_page_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
-import 'package:rhythm_app/screens/all_rooms_screen.dart';
 import 'package:rhythm_app/screens/server_disconnected_screen.dart';
 import 'package:rhythm_app/screens/settings/automations_screen.dart';
 import 'package:rhythm_app/screens/settings/settings_screen.dart';

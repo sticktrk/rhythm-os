@@ -64,14 +64,22 @@ void main() {
       );
 
       final body = RemoteAccessService.buildTeardownBody(
-        serverHub: _serverHub(),
+        serverHub: _serverHub(
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.devices.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+        ),
         home: home,
       );
+      final hubPayload = Map<String, dynamic>.from(body['server_hub'] as Map);
 
       expect(body['hub_id'], 'hub-1');
       expect(body['action'], 'disable');
       expect(body['home'], isA<Map<String, dynamic>>());
       expect(body['server_hub'], isA<Map<String, dynamic>>());
+      expect(hubPayload, containsPair('remote_endpoint', null));
     });
 
     test('enable provisions the tunnel and grants support access', () async {

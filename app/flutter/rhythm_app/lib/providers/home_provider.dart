@@ -189,6 +189,7 @@ class HomeProvider extends ChangeNotifier {
   StreamSubscription<List<Home>>? _homesSubscription;
   StreamSubscription<List<Hub>>? _hubsSubscription;
   Timer? _accountCloudSyncDebounce;
+  final Set<String> _pendingCloudRemoteEndpointClears = <String>{};
 
   // Initialization tracking
   Completer<void>? _initCompleter;
@@ -544,9 +545,15 @@ class HomeProvider extends ChangeNotifier {
         updated = updated.copyWith(endpoint: cloudHub.endpoint);
       }
 
-      final latestRemote = cloudHub.remoteEndpoint;
-      if (latestRemote != null && latestRemote != serverHub.remoteEndpoint) {
-        updated = updated.copyWith(remoteEndpoint: latestRemote);
+      final cloudRemote = cloudHub.remoteEndpoint;
+      final cloudCanUpdateRemoteEndpoint = !serverHub.pendingSync ||
+          cloudHub.updatedAt.isAfter(serverHub.updatedAt);
+      if (cloudCanUpdateRemoteEndpoint &&
+          cloudRemote != serverHub.remoteEndpoint) {
+        updated = updated.copyWith(
+          remoteEndpoint: cloudRemote,
+          clearRemoteEndpoint: cloudRemote == null,
+        );
       }
 
       if (updated.endpoint == serverHub.endpoint &&
@@ -894,7 +901,13 @@ class HomeProvider extends ChangeNotifier {
   }
 
   /// Update a hub.
-  Future<bool> updateHub(Hub hub) async {
+  Future<bool> updateHub(
+    Hub hub, {
+    bool clearCloudRemoteEndpoint = false,
+  }) async {
+    if (clearCloudRemoteEndpoint) {
+      _pendingCloudRemoteEndpointClears.add(hub.id);
+    }
     try {
       await _repository.updateHub(hub);
       _loadCurrentHomeHubs();
@@ -904,6 +917,9 @@ class HomeProvider extends ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e) {
+      if (clearCloudRemoteEndpoint) {
+        _pendingCloudRemoteEndpointClears.remove(hub.id);
+      }
       _error = 'Failed to update hub: $e';
       notifyListeners();
       return false;
@@ -1152,11 +1168,15 @@ class HomeProvider extends ChangeNotifier {
     _accountCloudSyncDebounce = Timer(const Duration(milliseconds: 500), () {
       final home = _currentHome;
       final hubs = List<Hub>.from(_currentHomeHubs);
+      final clearRemoteEndpointHubIds =
+          Set<String>.from(_pendingCloudRemoteEndpointClears);
+      _pendingCloudRemoteEndpointClears.removeAll(clearRemoteEndpointHubIds);
       unawaited(
         AccountCloudSyncService.instance.syncHomeAndServerHubs(
           home: home,
           hubs: hubs,
           reason: reason,
+          clearRemoteEndpointHubIds: clearRemoteEndpointHubIds,
         ),
       );
     });
@@ -1200,12 +1220,17 @@ Hub mergeCloudServerHubForLocalStorageForTesting({
   if (existing == null) return cloudHub;
 
   final existingToken = existing.token?.trim();
+  final cloudRemote = cloudHub.remoteEndpoint;
+  final keepExistingRemote =
+      cloudRemote == null && existing.updatedAt.isAfter(cloudHub.updatedAt);
   return cloudHub.copyWith(
     token: existingToken != null && existingToken.isNotEmpty
         ? existingToken
         : cloudHub.token,
     lastConnected: cloudHub.lastConnected ?? existing.lastConnected,
-    remoteEndpoint: cloudHub.remoteEndpoint ?? existing.remoteEndpoint,
+    remoteEndpoint:
+        cloudRemote ?? (keepExistingRemote ? existing.remoteEndpoint : null),
+    clearRemoteEndpoint: cloudRemote == null && !keepExistingRemote,
     serverInstanceId: cloudHub.serverInstanceId ?? existing.serverInstanceId,
   );
 }

@@ -58,7 +58,10 @@ class _TestHomeProvider extends HomeProvider {
   }
 
   @override
-  Future<bool> updateHub(Hub hub) async {
+  Future<bool> updateHub(
+    Hub hub, {
+    bool clearCloudRemoteEndpoint = false,
+  }) async {
     final index = _hubs.indexWhere((saved) => saved.id == hub.id);
     if (index == -1) {
       _hubs.add(hub);

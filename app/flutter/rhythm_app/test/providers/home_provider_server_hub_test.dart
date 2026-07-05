@@ -135,6 +135,83 @@ void main() {
       expect(merged.remoteEndpoint?.host, 'rpiz-a.rhythm.lighting');
     });
 
+    test('cloud server hub import clears stale local remote endpoint', () {
+      final local = Hub(
+        id: 'rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Local Server',
+        endpoint: const HubEndpoint(host: '192.168.5.10', port: 54448),
+        enabled: true,
+        requiresCredentials: false,
+        token: 'local-owner-token',
+        remoteEndpoint: const HubEndpoint(
+          host: 'rpiz-a.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+        createdAt: DateTime.utc(2026, 6, 1),
+        updatedAt: DateTime.utc(2026, 6, 1),
+      );
+      final cloud = Hub(
+        id: 'rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Remote Server',
+        endpoint: const HubEndpoint(host: '192.168.5.10', port: 54448),
+        enabled: true,
+        requiresCredentials: false,
+        createdAt: DateTime.utc(2026, 6, 2),
+        updatedAt: DateTime.utc(2026, 6, 2),
+      );
+
+      final merged = mergeCloudServerHubForLocalStorageForTesting(
+        cloudHub: cloud,
+        existingHubs: [local],
+      );
+
+      expect(merged.token, 'local-owner-token');
+      expect(merged.remoteEndpoint, isNull);
+    });
+
+    test('cloud server hub import preserves newer local remote endpoint', () {
+      final local = Hub(
+        id: 'rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Local Server',
+        endpoint: const HubEndpoint(host: '192.168.5.10', port: 54448),
+        remoteEndpoint: const HubEndpoint(
+          host: 'rpiz-a.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+        enabled: true,
+        requiresCredentials: false,
+        token: 'local-owner-token',
+        createdAt: DateTime.utc(2026, 6, 3),
+        updatedAt: DateTime.utc(2026, 6, 3),
+      );
+      final cloud = Hub(
+        id: 'rpiz-a',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'Remote Server',
+        endpoint: const HubEndpoint(host: '192.168.5.10', port: 54448),
+        enabled: true,
+        requiresCredentials: false,
+        createdAt: DateTime.utc(2026, 6, 2),
+        updatedAt: DateTime.utc(2026, 6, 2),
+      );
+
+      final merged = mergeCloudServerHubForLocalStorageForTesting(
+        cloudHub: cloud,
+        existingHubs: [local],
+      );
+
+      expect(merged.remoteEndpoint?.host, 'rpiz-a.rhythm.lighting');
+    });
+
     test('cloud server hub import merges by server identity when IP changed',
         () {
       final local = _serverHub(
