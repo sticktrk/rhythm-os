@@ -1076,7 +1076,6 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::NodeState { .. } => "node_state",
         ServerEvent::MotionTimer { .. } => "motion_timer",
         ServerEvent::InputEvent(_) => "input_event",
-        ServerEvent::ActivityAppended { .. } => "activity_appended",
         ServerEvent::HubStatus { .. } => "hub_status",
         ServerEvent::DispatchFailure { .. } => "dispatch_failure",
         ServerEvent::SettingsChanged { .. } => "settings_changed",
@@ -1179,34 +1178,6 @@ mod tests {
             error: None,
         };
         assert_eq!(server_event_name(&ota), "ota_update_progress");
-
-        let activity = ServerEvent::ActivityAppended {
-            activity: crate::activity::LightActivityEvent {
-                id: "activity-1".to_string(),
-                node_id: "room-1".to_string(),
-                action_id: "turn_on".to_string(),
-                source: crate::activity::LightActivitySource {
-                    raw: "app".to_string(),
-                    kind: "app".to_string(),
-                    marks_touched: true,
-                    control_id: None,
-                },
-                epoch_ms: 1778058932588,
-                server_instance_id: None,
-                server_version: None,
-                platform: None,
-                active_mode: None,
-                target: None,
-                change: None,
-                count: 1,
-                correlation_id: None,
-                fanout_of: None,
-                payload: None,
-                brightness: None,
-                kelvin: None,
-            },
-        };
-        assert_eq!(server_event_name(&activity), "activity_appended");
     }
 
     struct ThreadRecordingRuntime {

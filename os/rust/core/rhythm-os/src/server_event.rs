@@ -47,10 +47,6 @@ pub enum ServerEvent {
     MotionTimer { timers: Vec<MotionTimerEvent> },
     /// Raw physical input observed from a hub before/while it is routed.
     InputEvent(InputEventResource),
-    /// A user-intent light activity was appended to the local activity feed.
-    ActivityAppended {
-        activity: crate::activity::LightActivityEvent,
-    },
     /// Hub connected/disconnected (per-hub status).
     HubStatus {
         /// Which hub type this status is for (e.g. "hue", "homeassistant").

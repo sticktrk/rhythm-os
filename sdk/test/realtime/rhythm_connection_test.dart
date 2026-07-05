@@ -229,8 +229,6 @@ void main() {
       sseEventChunks = [
         'event: outdoor_changed\n'
             'data: {"type":"outdoor_changed","data":{"outdoor":{"outdoor_factor":0.4,"source":"weather","is_fallback":false,"diagnostics":{"sun_position":0.7,"sun_elevation_degrees":25.0,"sun_angle_factor":0.7,"sky_condition":"rain","sky_multiplier":0.35}}}}\n\n',
-        'event: activity_appended\n'
-            'data: {"type":"activity_appended","data":{"activity":{"id":"act-1","node_id":"room-1","action_id":"set_brightness","source":{"raw":"webserver","kind":"app","marks_touched":true},"epoch_ms":1778058932588}}}\n\n',
         'event: scope_node_changed\n'
             'data: {"type":"scope_node_changed","data":{"node_id":"room-1"}}\n\n',
         'event: pipeline_trace_available\n'
@@ -246,9 +244,6 @@ void main() {
       addTearDown(connection.dispose);
 
       final outdoorFuture = connection.outdoorChangedEvents.first.timeout(
-        const Duration(seconds: 2),
-      );
-      final activityFuture = connection.activityAppendedEvents.first.timeout(
         const Duration(seconds: 2),
       );
       final scopeFuture = connection.scopeNodeChangedEvents.first.timeout(
@@ -272,7 +267,6 @@ void main() {
 
       expect(connection.runtimeApi, isA<RhythmRuntimeApi>());
       final outdoor = await outdoorFuture;
-      final activity = await activityFuture;
       final scopeNodeId = await scopeFuture;
       final trace = await traceFuture;
       final schedules = await schedulesFuture;
@@ -281,8 +275,6 @@ void main() {
 
       expect(outdoor.source, RhythmEnvironmentSource.weather);
       expect(outdoor.diagnostics.skyCondition, RhythmSkyCondition.rain);
-      expect(activity.id, 'act-1');
-      expect(activity.source.kind, 'app');
       expect(scopeNodeId, 'room-1');
       expect(trace.nodeId, 'room-1');
       expect(trace.trace.entries.single.stageId, 'base_curve');

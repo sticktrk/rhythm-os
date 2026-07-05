@@ -48,3 +48,7 @@ verify_jwt = false
 
 [functions.support-access-grant]
 verify_jwt = false
+
+# Devices authenticate with a hashed upload token, not a Supabase JWT.
+[functions.server-activity-ingest]
+verify_jwt = false

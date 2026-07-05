@@ -94,8 +94,6 @@ class RhythmConnection {
       StreamController<RhythmLightBreaker>.broadcast();
   final _outdoorChangedController =
       StreamController<RhythmEnvironmentSnapshot>.broadcast();
-  final _activityAppendedController =
-      StreamController<RhythmActivityEvent>.broadcast();
   final _scopeNodeChangedController = StreamController<String>.broadcast();
   final _pipelineTraceAvailableController =
       StreamController<RhythmPipelineTraceEvent>.broadcast();
@@ -191,8 +189,6 @@ class RhythmConnection {
       _lightBreakerChangedController.stream;
   Stream<RhythmEnvironmentSnapshot> get outdoorChangedEvents =>
       _outdoorChangedController.stream;
-  Stream<RhythmActivityEvent> get activityAppendedEvents =>
-      _activityAppendedController.stream;
   Stream<String> get scopeNodeChangedEvents =>
       _scopeNodeChangedController.stream;
   Stream<RhythmPipelineTraceEvent> get pipelineTraceAvailableEvents =>
@@ -408,7 +404,6 @@ class RhythmConnection {
     _settingsChangedController.close();
     _lightBreakerChangedController.close();
     _outdoorChangedController.close();
-    _activityAppendedController.close();
     _scopeNodeChangedController.close();
     _pipelineTraceAvailableController.close();
     _powerSchedulesChangedController.close();
@@ -1016,18 +1011,6 @@ class RhythmConnection {
           _outdoorChangedController.add(
             RhythmEnvironmentSnapshot.fromJson(
               Map<String, dynamic>.from(outdoorJson),
-            ),
-          );
-          break;
-
-        case 'activity_appended':
-          final json = jsonDecode(data) as Map<String, dynamic>;
-          final payload = json['data'] as Map<String, dynamic>? ?? json;
-          final activityJson =
-              payload['activity'] as Map<String, dynamic>? ?? payload;
-          _activityAppendedController.add(
-            RhythmActivityEvent.fromJson(
-              Map<String, dynamic>.from(activityJson),
             ),
           );
           break;

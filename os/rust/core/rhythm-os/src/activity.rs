@@ -300,7 +300,7 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
     let epoch_ms = crate::state::current_epoch_ms();
     let target = build_light_activity_target(state, &record.node_id);
 
-    let event = {
+    {
         let Ok(mut s) = state.lock() else { return };
         let event = LightActivityEvent {
             id: crate::logging::next_command_id("activity"),
@@ -327,10 +327,9 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
             kelvin: record.kelvin,
         };
 
-        s.light_activity.insert(0, event.clone());
+        s.light_activity.insert(0, event);
         s.light_activity.truncate(LIGHT_ACTIVITY_HISTORY_LIMIT);
-        event
-    };
+    }
 
     // Persist OUTSIDE the state lock: this runs on every button press and the
     // write is fsync'd — on SD-card storage a slow flush would otherwise hold
@@ -353,10 +352,6 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
         }
     }
 
-    crate::state::emit_server_event(
-        state,
-        crate::server_event::ServerEvent::ActivityAppended { activity: event },
-    );
     crate::activity_cloud::enqueue_light_activity_upload(state);
 }
 
@@ -529,22 +524,20 @@ mod tests {
     }
 
     #[test]
-    fn emits_activity_appended_server_event() {
+    fn record_light_activity_does_not_broadcast_server_events() {
         let state = test_state();
         let (tx, mut rx) = tokio::sync::broadcast::channel(4);
         state.lock().unwrap().event_tx = Some(tx);
 
         record_light_activity(&state, LightActivityRecord::app("bedroom", "on"));
 
-        let event = rx.try_recv().expect("expected activity SSE event");
-        match event {
-            crate::server_event::ServerEvent::ActivityAppended { activity } => {
-                assert_eq!(activity.node_id, "bedroom");
-                assert_eq!(activity.action_id, "turn_on");
-                assert_eq!(activity.source.kind, "app");
-                assert!(activity.server_instance_id.is_some());
-            }
-            other => panic!("unexpected server event: {:?}", other),
-        }
+        assert!(
+            rx.try_recv().is_err(),
+            "activity recording is analytics-only and must not emit SSE events"
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_activity.len(), 1);
+        assert_eq!(s.light_activity[0].action_id, "turn_on");
+        assert!(s.light_activity[0].server_instance_id.is_some());
     }
 }
