@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../backend/auth/supabase_auth_backend.dart';
 import '../backend/backend_provider.dart';
@@ -108,6 +109,7 @@ class RemoteAccessService {
 
   static final RemoteAccessService instance = RemoteAccessService._();
   static const _bootstrapFunctionName = 'remote-access-bootstrap';
+  static const _optOutPrefsKey = 'remote_access_opt_out_hub_ids';
 
   @visibleForTesting
   factory RemoteAccessService.testing({
@@ -147,6 +149,8 @@ class RemoteAccessService {
   final RemoteAccessSupportGrant _supportGrant;
   final bool? _canUseRemoteAccessOverride;
   final Set<String> _autoEnableInFlight = <String>{};
+  Set<String>? _optOutHubIds;
+  Future<Set<String>>? _optOutHubIdsLoad;
 
   bool get isEnabledByFlag => FeatureFlags.remoteAccessTunnel;
 
@@ -164,6 +168,9 @@ class RemoteAccessService {
     bool requireSupportGrant = false,
   }) async {
     _ensureCanUse(serverHub);
+
+    // An explicit enable always wins over a previously recorded opt-out.
+    await _clearOptOut(serverHub.id);
 
     await AccountCloudSyncService.instance.syncHomeAndServerHubs(
       home: home,
@@ -314,6 +321,14 @@ class RemoteAccessService {
         return;
       }
 
+      if (await _isOptedOut(hub.id)) {
+        debugPrint(
+          'RemoteAccessService: auto-enable skipped: user disabled remote '
+          'access for hub=${hub.id}',
+        );
+        return;
+      }
+
       final tokenHub = await ensureOwnerTokenForHub(hub);
       if (tokenHub.token != hub.token) {
         final saved = await saveHub(tokenHub);
@@ -424,11 +439,24 @@ class RemoteAccessService {
       throw StateError('Remote access has no endpoint to disable.');
     }
 
-    await _tearDownCloudRemoteAccess(
-      serverHub,
-      home: home,
-      serverInstanceId: serverInstanceId,
-    );
+    // Record the user's intent as soon as the device tunnel is cleared so a
+    // cloud-teardown failure cannot resurrect the tunnel via auto-enable.
+    await _recordOptOut(serverHub.id);
+
+    try {
+      await _tearDownCloudRemoteAccess(
+        serverHub,
+        home: home,
+        serverInstanceId: serverInstanceId,
+      );
+    } catch (error) {
+      // The device tunnel is already off and the opt-out is recorded; a
+      // cloud-teardown failure must not make the disable look failed.
+      debugPrint(
+        'RemoteAccessService: cloud teardown failed after device config '
+        'clear for hub=${serverHub.id}: $error',
+      );
+    }
 
     final stableServerInstanceId =
         serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
@@ -438,6 +466,57 @@ class RemoteAccessService {
       updatedAt: DateTime.now(),
       pendingSync: true,
     );
+  }
+
+  /// Hub ids for which the user explicitly disabled remote access. Persisted
+  /// so auto-enable never resurrects a tunnel the user turned off.
+  Future<Set<String>> _optOutIds() async {
+    final cached = _optOutHubIds;
+    if (cached != null) return cached;
+    final load = _optOutHubIdsLoad ??= _readOptOutHubIds();
+    final loaded = await load;
+    return _optOutHubIds ??= loaded;
+  }
+
+  Future<Set<String>> _readOptOutHubIds() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return (prefs.getStringList(_optOutPrefsKey) ?? const []).toSet();
+    } catch (error) {
+      debugPrint(
+          'RemoteAccessService: failed to load remote access opt-outs: '
+          '$error');
+      return <String>{};
+    }
+  }
+
+  Future<bool> _isOptedOut(String hubId) async {
+    return (await _optOutIds()).contains(hubId);
+  }
+
+  Future<void> _recordOptOut(String hubId) async {
+    final ids = await _optOutIds();
+    if (!ids.add(hubId)) return;
+    await _persistOptOutHubIds(ids);
+  }
+
+  Future<void> _clearOptOut(String hubId) async {
+    final ids = await _optOutIds();
+    if (!ids.remove(hubId)) return;
+    await _persistOptOutHubIds(ids);
+  }
+
+  Future<void> _persistOptOutHubIds(Set<String> ids) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_optOutPrefsKey, ids.toList()..sort());
+    } catch (error) {
+      // Keep the in-memory set as the source of truth for this session even
+      // if persistence fails.
+      debugPrint(
+          'RemoteAccessService: failed to persist remote access opt-outs: '
+          '$error');
+    }
   }
 
   void _ensureCanUse(Hub serverHub) {

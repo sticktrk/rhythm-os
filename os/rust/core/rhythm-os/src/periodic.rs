@@ -858,6 +858,11 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         power_save,
     );
     let phase_gap = dispatch_spacing(cycle_duration, periodic_nodes.len());
+    // Publish the effective cadence so the liveness watchdog scales its
+    // staleness threshold to what this loop actually does.
+    if let Ok(mut s) = state.lock() {
+        s.effective_periodic_interval_secs = Some(cycle_duration.as_secs());
+    }
     let command_id = logging::next_command_id("periodic");
 
     if transition_skipped > 0

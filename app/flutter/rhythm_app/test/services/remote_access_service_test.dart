@@ -2,9 +2,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+const _optOutPrefsKey = 'remote_access_opt_out_hub_ids';
 
 void main() {
   group('RemoteAccessService', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+    });
+
     test('bootstrap body includes local home and server hub repair snapshots',
         () {
       final home = Home.create(
@@ -523,6 +530,112 @@ void main() {
       );
       expect(calls, ['http://192.168.5.123:54448']);
       expect(supabase.functions.invocations, isEmpty);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList(_optOutPrefsKey), isNull);
+    });
+
+    test('disable records the opt-out even when cloud teardown fails',
+        () async {
+      final supabase = _FakeSupabaseClient(
+        invokeError: const RhythmApiException('cloud teardown unavailable'),
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+      );
+
+      final updated = await service.disableForHub(_serverHub());
+
+      expect(updated.remoteEndpoint, isNull);
+      expect(updated.pendingSync, isTrue);
+      expect(supabase.functions.invocations, hasLength(1));
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList(_optOutPrefsKey), ['hub-1']);
+    });
+
+    test('auto-enable is skipped for a hub the user opted out of', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        _optOutPrefsKey: <String>['hub-1'],
+      });
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final saved = <Hub>[];
+      final supabase = _FakeSupabaseClient();
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          throw StateError('device api should not be used');
+        },
+        authApiFactory: ({required String baseUrl}) {
+          throw StateError('owner token claim should not be called');
+        },
+        supabaseClientFactory: () => supabase,
+        supportGrant: (_) async {
+          throw StateError('support grant should not be called');
+        },
+        canUseRemoteAccessOverride: true,
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(saved, isEmpty);
+      expect(supabase.functions.invocations, isEmpty);
+    });
+
+    test('explicit enable clears a previously recorded opt-out', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        _optOutPrefsKey: <String>['hub-1', 'hub-2'],
+      });
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(_serverHub(), home: home);
+
+      expect(result.updatedHub.remoteEndpoint, isNotNull);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList(_optOutPrefsKey), ['hub-2']);
     });
   });
 }
@@ -660,16 +773,20 @@ class _FakeAuthApi extends RhythmAuthApi {
 }
 
 class _FakeSupabaseClient {
-  _FakeSupabaseClient({Object? responseData})
-      : functions = _FakeFunctions(responseData ?? const {'status': 'ok'});
+  _FakeSupabaseClient({Object? responseData, Object? invokeError})
+      : functions = _FakeFunctions(
+          responseData ?? const {'status': 'ok'},
+          invokeError,
+        );
 
   final _FakeFunctions functions;
 }
 
 class _FakeFunctions {
-  _FakeFunctions(this.responseData);
+  _FakeFunctions(this.responseData, [this.invokeError]);
 
   final Object? responseData;
+  final Object? invokeError;
   final invocations = <({String name, Map<String, dynamic> body})>[];
 
   Future<_FakeFunctionResponse> invoke(
@@ -680,6 +797,8 @@ class _FakeFunctions {
       name: name,
       body: Map<String, dynamic>.from(body as Map),
     ));
+    final error = invokeError;
+    if (error != null) throw error;
     return _FakeFunctionResponse(responseData);
   }
 }

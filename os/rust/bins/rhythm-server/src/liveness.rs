@@ -71,7 +71,7 @@ fn try_acquire_liveness_view(
             Ok(s) => {
                 return LivenessView::Acquired {
                     last_check_instant: s.last_check_instant,
-                    update_interval_secs: s.runtime_config.update_interval_secs,
+                    update_interval_secs: watchdog_interval_secs(&s),
                     oldest_pending_periodic_tick_age_secs: oldest_pending_periodic_tick_age_secs(
                         &s,
                     ),
@@ -82,7 +82,7 @@ fn try_acquire_liveness_view(
                 let s = poisoned.into_inner();
                 return LivenessView::Acquired {
                     last_check_instant: s.last_check_instant,
-                    update_interval_secs: s.runtime_config.update_interval_secs,
+                    update_interval_secs: watchdog_interval_secs(&s),
                     oldest_pending_periodic_tick_age_secs: oldest_pending_periodic_tick_age_secs(
                         &s,
                     ),
@@ -130,6 +130,16 @@ fn evaluate_liveness(
     }
 }
 
+/// The pacing math can stretch the actual periodic cadence well past the
+/// configured interval (e.g. 60s configured, 180s effective on a loaded
+/// appliance). Staleness thresholds must scale to the cadence the loop
+/// actually runs at, or the watchdog reboots healthy devices.
+fn watchdog_interval_secs(s: &rhythm_os::state::AppState) -> u64 {
+    s.runtime_config
+        .update_interval_secs
+        .max(s.effective_periodic_interval_secs.unwrap_or(0))
+}
+
 fn oldest_pending_periodic_tick_age_secs(s: &rhythm_os::state::AppState) -> Option<u64> {
     s.pending_periodic_ticks
         .values()
@@ -170,6 +180,25 @@ mod tests {
     #[test]
     fn periodic_liveness_threshold_uses_minimum_for_default_interval() {
         assert_eq!(periodic_liveness_threshold_secs(60), 300);
+    }
+
+    #[test]
+    fn watchdog_interval_scales_to_effective_periodic_cycle() {
+        // The pacing math can stretch the real cadence (e.g. 180s) past the
+        // configured interval (60s). The watchdog must scale with the real
+        // cadence or it reboots healthy appliances: 60s configured gave a
+        // 300s threshold while healthy cycles stamped only every ~180s.
+        let mut state = AppState::default();
+        state.runtime_config.update_interval_secs = 60;
+        assert_eq!(watchdog_interval_secs(&state), 60);
+
+        state.effective_periodic_interval_secs = Some(180);
+        assert_eq!(watchdog_interval_secs(&state), 180);
+        assert_eq!(periodic_liveness_threshold_secs(180), 900);
+
+        // Effective never lowers the threshold below the configured interval.
+        state.effective_periodic_interval_secs = Some(10);
+        assert_eq!(watchdog_interval_secs(&state), 60);
     }
 
     #[test]
