@@ -141,6 +141,12 @@ pub enum WorkItem {
 
 impl WorkItem {
     /// Node whose visible dispatch state should stay pending while this item is queued/running.
+    ///
+    /// Only user-initiated work counts: `pending_dispatch` drives the room-card
+    /// spinner in the app. Periodic ticks are autonomous and run every cycle —
+    /// flagging them paints spinners during routine background work, and on the
+    /// single worker one slow hub target (e.g. an unreachable Matter bulb
+    /// timing out) holds every queued tick's flag for seconds.
     pub(crate) fn pending_node_id(&self) -> Option<&str> {
         match self {
             WorkItem::QueuedNodeAction { node_id, .. }
@@ -148,9 +154,10 @@ impl WorkItem {
             | WorkItem::SetNodeCurveModifier { node_id, .. }
             | WorkItem::SetNodePreferences { node_id, .. }
             | WorkItem::ApplyNodeCommand { node_id, .. }
-            | WorkItem::LightsOffRoom { node_id, .. }
-            | WorkItem::PeriodicNodeTick { node_id, .. } => Some(node_id.as_str()),
-            WorkItem::DeferredPersist { .. } | WorkItem::DeferredPersistState => None,
+            | WorkItem::LightsOffRoom { node_id, .. } => Some(node_id.as_str()),
+            WorkItem::PeriodicNodeTick { .. }
+            | WorkItem::DeferredPersist { .. }
+            | WorkItem::DeferredPersistState => None,
         }
     }
 }
