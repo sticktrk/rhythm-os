@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -134,6 +136,57 @@ void main() {
       expect(grants, hasLength(1));
       expect(grants.single.remoteEndpoint?.host, 'hub.devices.rhythm.lighting');
       expect(grants.single.token, 'owner-token');
+    });
+
+    test('enable does not wait forever for optional support access grant',
+        () async {
+      final grantStarted = Completer<void>();
+      final grantCompleter = Completer<void>();
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) {
+          grantStarted.complete();
+          return grantCompleter.future;
+        },
+        supportGrantTimeout: const Duration(milliseconds: 1),
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service
+          .enableForHub(_serverHub(), home: home)
+          .timeout(const Duration(seconds: 1));
+
+      expect(result.updatedHub.remoteEndpoint?.host,
+          'hub.devices.rhythm.lighting');
+      expect(result.updatedHub.serverInstanceId, 'srv-test-instance');
+      expect(grantStarted.isCompleted, isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
     });
 
     test('enable waits for the public remote hostname to route', () async {

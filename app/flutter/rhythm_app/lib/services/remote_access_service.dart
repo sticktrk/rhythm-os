@@ -94,6 +94,7 @@ class RemoteAccessService {
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
     RemoteAccessSupportGrant? supportGrant,
+    Duration supportGrantTimeout = const Duration(seconds: 15),
     bool? canUseRemoteAccessOverride,
   })  : _apiFactory = apiFactory ?? _defaultApiFactory,
         _activationPollDelay = activationPollDelay,
@@ -105,6 +106,7 @@ class RemoteAccessService {
         _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
         _supportGrant =
             supportGrant ?? SupportAccessService.instance.grantForHub,
+        _supportGrantTimeout = supportGrantTimeout,
         _canUseRemoteAccessOverride = canUseRemoteAccessOverride;
 
   static final RemoteAccessService instance = RemoteAccessService._();
@@ -122,6 +124,7 @@ class RemoteAccessService {
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
     RemoteAccessSupportGrant? supportGrant,
+    Duration supportGrantTimeout = const Duration(milliseconds: 10),
     bool? canUseRemoteAccessOverride,
   }) {
     return RemoteAccessService._(
@@ -134,6 +137,7 @@ class RemoteAccessService {
       stateLoader: stateLoader ?? _emptyStateLoader,
       authApiFactory: authApiFactory,
       supportGrant: supportGrant,
+      supportGrantTimeout: supportGrantTimeout,
       canUseRemoteAccessOverride: canUseRemoteAccessOverride,
     );
   }
@@ -147,6 +151,7 @@ class RemoteAccessService {
   final RemoteAccessStateLoader _stateLoader;
   final RemoteAccessAuthApiFactory _authApiFactory;
   final RemoteAccessSupportGrant _supportGrant;
+  final Duration _supportGrantTimeout;
   final bool? _canUseRemoteAccessOverride;
   final Set<String> _autoEnableInFlight = <String>{};
   Set<String>? _optOutHubIds;
@@ -238,9 +243,9 @@ class RemoteAccessService {
       pendingSync: true,
     );
     if (requireSupportGrant) {
-      await _supportGrant(updatedHub);
+      await _supportGrant(updatedHub).timeout(_supportGrantTimeout);
     } else {
-      await _grantSupportAccessForHub(updatedHub);
+      unawaited(_grantSupportAccessForHub(updatedHub));
     }
 
     return RemoteAccessEnableResult(
@@ -356,7 +361,12 @@ class RemoteAccessService {
 
   Future<void> _grantSupportAccessForHub(Hub hub) async {
     try {
-      await _supportGrant(hub);
+      await _supportGrant(hub).timeout(_supportGrantTimeout);
+    } on TimeoutException {
+      debugPrint(
+        'RemoteAccessService: support access auto-grant timed out for '
+        'hub=${hub.id}',
+      );
     } catch (error) {
       debugPrint(
           'RemoteAccessService: support access auto-grant failed: $error');
@@ -483,8 +493,7 @@ class RemoteAccessService {
       final prefs = await SharedPreferences.getInstance();
       return (prefs.getStringList(_optOutPrefsKey) ?? const []).toSet();
     } catch (error) {
-      debugPrint(
-          'RemoteAccessService: failed to load remote access opt-outs: '
+      debugPrint('RemoteAccessService: failed to load remote access opt-outs: '
           '$error');
       return <String>{};
     }

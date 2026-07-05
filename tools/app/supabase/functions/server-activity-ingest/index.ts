@@ -82,9 +82,10 @@ Deno.serve(async (req) => {
       return jsonResponse({ status: 'ok', inserted: 0 })
     }
 
+    const uniqueRows = uniqueRowsByConflictKey(rows)
     const { error } = await adminClient
       .from('server_light_activity_events')
-      .upsert(rows, { onConflict: 'user_id,hub_id,event_id' })
+      .upsert(uniqueRows, { onConflict: 'user_id,hub_id,event_id' })
     if (error) throw new Error(error.message)
 
     await adminClient
@@ -94,7 +95,8 @@ Deno.serve(async (req) => {
 
     return jsonResponse({
       status: 'ok',
-      inserted: rows.length,
+      inserted: uniqueRows.length,
+      deduplicated: rows.length - uniqueRows.length,
     })
   } catch (error) {
     return jsonResponse({ error: errorMessage(error) }, 500)
@@ -246,6 +248,28 @@ function readEvents(body: JsonObject): JsonObject[] | Response {
     return jsonResponse({ error: 'events must contain objects' }, 400)
   }
   return events.slice(0, 2000)
+}
+
+function uniqueRowsByConflictKey(
+  rows: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const rowsByKey = new Map<string, Record<string, unknown>>()
+  for (const row of rows) {
+    const key = [
+      String(row.user_id ?? ''),
+      String(row.hub_id ?? ''),
+      String(row.event_id ?? ''),
+    ].join('\0')
+    const current = rowsByKey.get(key)
+    if (!current || rowEpochMs(row) > rowEpochMs(current)) {
+      rowsByKey.set(key, row)
+    }
+  }
+  return Array.from(rowsByKey.values())
+}
+
+function rowEpochMs(row: Record<string, unknown>): number {
+  return typeof row.epoch_ms === 'number' ? row.epoch_ms : 0
 }
 
 async function readJson(req: Request): Promise<JsonObject> {

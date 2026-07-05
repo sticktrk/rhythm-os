@@ -2554,7 +2554,6 @@ class _RhythmServerAdvancedSettingsScreenState
         final result = await service.enableForHub(
           tokenHub,
           home: home,
-          requireSupportGrant: true,
         );
         updatedHub = result.updatedHub;
       } else {

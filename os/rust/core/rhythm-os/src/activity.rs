@@ -161,6 +161,14 @@ fn default_count() -> u32 {
     1
 }
 
+fn activity_event_id(epoch_ms: u64) -> String {
+    format!(
+        "{}-{}",
+        crate::logging::next_command_id("activity"),
+        epoch_ms
+    )
+}
+
 impl LightActivityEvent {
     fn response_value(&self) -> Value {
         let ts = self.epoch_ms as f64 / 1000.0;
@@ -303,7 +311,7 @@ pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecor
     {
         let Ok(mut s) = state.lock() else { return };
         let event = LightActivityEvent {
-            id: crate::logging::next_command_id("activity"),
+            id: activity_event_id(epoch_ms),
             node_id: record.node_id,
             action_id: record.action_id,
             source: LightActivitySource {
@@ -539,5 +547,13 @@ mod tests {
         assert_eq!(s.light_activity.len(), 1);
         assert_eq!(s.light_activity[0].action_id, "turn_on");
         assert!(s.light_activity[0].server_instance_id.is_some());
+    }
+
+    #[test]
+    fn activity_event_ids_include_epoch_component() {
+        let id = activity_event_id(1_783_278_659_924);
+
+        assert!(id.starts_with("activity-"));
+        assert!(id.ends_with("-1783278659924"));
     }
 }
