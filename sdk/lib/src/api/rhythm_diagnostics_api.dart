@@ -111,17 +111,6 @@ class RhythmDiagnosticsApi {
     }
   }
 
-  /// Get diagnostic vitals.
-  Future<Map<String, dynamic>?> getDiagVitals() async {
-    try {
-      final response = await _dio.get('api/diag/vitals');
-      return Map<String, dynamic>.from(response.data);
-    } catch (e) {
-      _log.warning('getDiagVitals failed', e);
-      return null;
-    }
-  }
-
   /// Get diagnostic log entries.
   Future<List<Map<String, dynamic>>?> getDiagLogs({
     int limit = 50,
@@ -173,17 +162,6 @@ class RhythmDiagnosticsApi {
         e,
         message: 'Failed to generate debug bundle',
       );
-    }
-  }
-
-  /// Clear persisted crash info.
-  Future<bool> clearCrashInfo() async {
-    try {
-      await _dio.delete('api/diag/crash');
-      return true;
-    } catch (e) {
-      _log.warning('clearCrashInfo failed', e);
-      return false;
     }
   }
 

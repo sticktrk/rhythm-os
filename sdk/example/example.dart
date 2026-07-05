@@ -32,8 +32,8 @@ void main() async {
 
   // --- Diagnostics (standalone) ---
   final diag = RhythmDiagnosticsApi(host: '192.168.1.100');
-  final vitals = await diag.getDiagVitals();
-  print('Vitals: $vitals');
+  final deviceHealthy = await diag.healthCheck();
+  print('Device healthy: $deviceHealthy');
 
   // --- OTA ---
   final ota = RhythmOtaApi();
