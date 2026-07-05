@@ -48,14 +48,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     path: 'api/nodes/state'
   },
   {
-    id: 'node-now',
-    category: 'State',
-    label: 'Read node now',
-    description: 'Fetch the current sampled state for a node.',
-    method: 'GET',
-    path: 'api/nodes/{node_id}/now'
-  },
-  {
     id: 'health',
     category: 'State',
     label: 'Read health',
@@ -210,14 +202,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     method: 'DELETE',
     path: 'api/input-bindings/{binding_id}',
     danger: true
-  },
-  {
-    id: 'input-actions-get',
-    category: 'Global Settings',
-    label: 'Read input actions',
-    description: 'Fetch the available input action catalog.',
-    method: 'GET',
-    path: 'api/input-actions'
   },
   {
     id: 'location-set',
@@ -488,126 +472,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { node_id: '{node_id}', profile_overrides: {} }
   },
   {
-    id: 'node-layer',
-    category: 'Node Runtime',
-    label: 'Set node layer',
-    description: 'Write a runtime layer for a node.',
-    method: 'PUT',
-    path: 'api/nodes/{node_id}/layer',
-    body: {}
-  },
-  {
-    id: 'node-slider-preview',
-    category: 'Node Runtime',
-    label: 'Preview node slider',
-    description: 'Preview time, brightness, or color-temperature changes.',
-    method: 'POST',
-    path: 'api/nodes/{node_id}/slider-preview',
-    body: {
-      time_offset: 15,
-      brightness: 80,
-      color_temperature: 3000,
-      preserve_brightness: true
-    }
-  },
-  {
-    id: 'node-layer-promote',
-    category: 'Node Runtime',
-    label: 'Promote node layer',
-    description: 'Promote an active runtime layer to persistent state.',
-    method: 'POST',
-    path: 'api/nodes/{node_id}/promote',
-    body: {}
-  },
-  {
-    id: 'node-layer-clear',
-    category: 'Node Runtime',
-    label: 'Clear node layer',
-    description: 'Clear runtime layer values for a node.',
-    method: 'POST',
-    path: 'api/nodes/{node_id}/clear',
-    body: { axis: 'brightness', cascade: false }
-  },
-  {
-    id: 'node-freeze',
-    category: 'Node Runtime',
-    label: 'Set freeze layer',
-    description: 'Freeze or clear curve position for one or more nodes.',
-    method: 'PUT',
-    path: 'api/nodes/freeze',
-    body: [{ node_id: '{node_id}', frozen_at_hour: 12, expires_in_secs: 1800 }]
-  },
-  {
-    id: 'node-boost',
-    category: 'Node Runtime',
-    label: 'Set boost layer',
-    description: 'Boost or clear brightness for one or more nodes.',
-    method: 'PUT',
-    path: 'api/nodes/boost',
-    body: [{ node_id: '{node_id}', brightness: 20, expires_in_secs: 1800 }]
-  },
-  {
-    id: 'node-auto-off',
-    category: 'Node Runtime',
-    label: 'Set auto-off layer',
-    description: 'Arm or clear auto-off for one or more nodes.',
-    method: 'PUT',
-    path: 'api/nodes/auto-off',
-    body: [{ node_id: '{node_id}', expires_in_secs: 1800, mode: 'replace' }]
-  },
-  {
-    id: 'power-schedule-get',
-    category: 'Node Runtime',
-    label: 'Read power schedules',
-    description: 'Fetch node power schedules.',
-    method: 'GET',
-    path: 'api/nodes/power-schedule'
-  },
-  {
-    id: 'power-schedule-set',
-    category: 'Node Runtime',
-    label: 'Set power schedules',
-    description: 'Replace node power schedules.',
-    method: 'PUT',
-    path: 'api/nodes/power-schedule',
-    body: { schedules: [] }
-  },
-  {
-    id: 'outdoor-get',
-    category: 'Node Runtime',
-    label: 'Read outdoor context',
-    description: 'Fetch outdoor environment snapshot.',
-    method: 'GET',
-    path: 'api/outdoor'
-  },
-  {
-    id: 'outdoor-override',
-    category: 'Node Runtime',
-    label: 'Set outdoor override',
-    description: 'Override outdoor sky condition.',
-    method: 'PUT',
-    path: 'api/outdoor/override',
-    body: { condition: 'clear', expires_in_secs: 3600 }
-  },
-  {
-    id: 'outdoor-clear',
-    category: 'Node Runtime',
-    label: 'Clear outdoor override',
-    description: 'Clear the outdoor condition override.',
-    method: 'PUT',
-    path: 'api/outdoor/override',
-    body: { clear: true }
-  },
-  {
-    id: 'environment-learn',
-    category: 'Node Runtime',
-    label: 'Learn environment baselines',
-    description: 'Train environment baselines from lux samples.',
-    method: 'POST',
-    path: 'api/environment/learn-baselines',
-    body: { lux_samples: [12, 18, 24] }
-  },
-  {
     id: 'scenes-get',
     category: 'Scenes',
     label: 'Read scenes',
@@ -871,33 +735,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { device_id: '{device_id}', apply_local: true }
   },
   {
-    id: 'integrations-sync-devices',
-    category: 'Devices & Topology',
-    label: 'Sync integration devices',
-    description: 'Trigger integration device sync.',
-    method: 'POST',
-    path: 'api/integrations/sync-devices',
-    timeoutSeconds: 45
-  },
-  {
-    id: 'integrations-sync-controls',
-    category: 'Devices & Topology',
-    label: 'Sync integration controls',
-    description: 'Trigger integration control sync.',
-    method: 'POST',
-    path: 'api/integrations/sync-controls',
-    timeoutSeconds: 45
-  },
-  {
-    id: 'devices-report',
-    category: 'Devices & Topology',
-    label: 'Report devices',
-    description: 'Submit an integration device report payload.',
-    method: 'POST',
-    path: 'api/devices/report',
-    body: {}
-  },
-  {
     id: 'hub-credentials',
     category: 'Devices & Topology',
     label: 'Set hub credentials',
@@ -1067,58 +904,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     danger: true
   },
   {
-    id: 'filter-presets-get',
-    category: 'Remote & Cloud',
-    label: 'Read filter presets',
-    description: 'Fetch filter preset document.',
-    method: 'GET',
-    path: 'api/filter-presets'
-  },
-  {
-    id: 'filter-presets',
-    category: 'Remote & Cloud',
-    label: 'Set filter presets',
-    description: 'Replace filter preset document.',
-    method: 'PUT',
-    path: 'api/filter-presets',
-    body: {}
-  },
-  {
-    id: 'control-pause',
-    category: 'Remote & Cloud',
-    label: 'Pause control',
-    description: 'Pause an integration control temporarily.',
-    method: 'PUT',
-    path: 'api/controls/{control_id}/pause',
-    body: { expires_in_secs: 1800 }
-  },
-  {
-    id: 'control-pause-clear',
-    category: 'Remote & Cloud',
-    label: 'Clear control pause',
-    description: 'Clear a paused integration control.',
-    method: 'PUT',
-    path: 'api/controls/{control_id}/pause',
-    body: { clear: true }
-  },
-  {
-    id: 'control-hardware-get',
-    category: 'Remote & Cloud',
-    label: 'Read control hardware',
-    description: 'Fetch hardware settings for a control.',
-    method: 'GET',
-    path: 'api/controls/{control_id}/hardware-settings'
-  },
-  {
-    id: 'control-hardware',
-    category: 'Remote & Cloud',
-    label: 'Set control hardware',
-    description: 'Patch hardware settings for a control.',
-    method: 'PUT',
-    path: 'api/controls/{control_id}/hardware-settings',
-    body: {}
-  },
-  {
     id: 'history-get',
     category: 'Remote & Cloud',
     label: 'Read history',
@@ -1126,14 +911,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     method: 'GET',
     path: 'api/history',
     query: { limit: 100 }
-  },
-  {
-    id: 'diag-vitals',
-    category: 'Diagnostics & Appliance',
-    label: 'Read diagnostics vitals',
-    description: 'Fetch diagnostic vitals.',
-    method: 'GET',
-    path: 'api/diag/vitals'
   },
   {
     id: 'auth-status',
@@ -1223,15 +1000,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     method: 'PUT',
     path: 'api/wifi',
     body: { ssid: '{ssid}', password: '{password}' },
-    danger: true
-  },
-  {
-    id: 'crash-clear',
-    category: 'Diagnostics & Appliance',
-    label: 'Clear crash info',
-    description: 'Clear persisted crash diagnostic information.',
-    method: 'DELETE',
-    path: 'api/diag/crash',
     danger: true
   },
   {

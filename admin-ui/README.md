@@ -17,11 +17,47 @@ When `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY` are not set in
 `admin-ui/.env`, Vite falls back to the existing Flutter app `.env` values for
 those two browser-safe settings.
 
-From the dashboard, staff can probe a Light Box to verify remote/local
-reachability, open a detailed status summary, inspect remote rpiz log tails, and
-collect its `rhythm-debug-bundle-*.tar.gz` attachment through `admin-api` for
-deeper debugging. Staff can also run explicit OTA checks and updates from each
-Light Box row without exposing device tokens to the browser.
+## Structure
+
+Two surfaces behind one Supabase sign-in:
+
+- **Support dashboard** (`/`, light theme) — customer/home/hub inventory.
+  Per hub: probe, status, OTA check/update, debug bundle, log tails.
+- **Device console** (`/hubs/:hubId/*`, dark theme) — full-featured per-device
+  admin opened by each hub row's **Enter** button. Side-nav sections:
+
+| Route | Section |
+|---|---|
+| `overview` | Identity, vitals, day/sleep mode switch, light-breaker kill switch |
+| `nodes` | Live room/node tree; per-node actions, brightness/CCT sliders, color wheel, preferences, time offset |
+| `profiles` | Curve profile editor — device-sampled chart (`POST api/curve`), all five curve shapes, envelopes, timer unions, time simulator with absorb |
+| `scenes` | Scene list/editor, apply, draft preview with commit/cancel |
+| `modes` | Mode configs, transitions (clock dial trigger editor, manual trigger), light runtime |
+| `inputs` | Input binding CRUD (action, target, raw JSON) |
+| `topology` | Canonical devices, rooms, triage queue, pairing (Matter), hub credentials, Wi-Fi |
+| `environment` | Location and solar times |
+| `history` | Activity log with filters |
+| `remote` | Cloudflare tunnel config/status, activity cloud |
+| `security` | Auth status, owner claim, support tokens, require-auth toggle |
+| `system` | Settings, OTA, logs, debug bundle, backup/restore, danger zone |
+| `console` | Raw JSON request runner over the full operation catalog (escape hatch) |
+
+All device traffic goes through `POST /api/hubs/:id/device-admin/proxy` on
+admin-api — no new backend endpoints. Pages poll (5–60s, paused when the tab is
+hidden) and refetch after every write; device payloads are parsed tolerantly
+and every card has a "Raw JSON" disclosure as the escape hatch. Destructive
+operations sit behind an in-app confirm dialog; the worst (factory reset,
+backup restore, Wi-Fi reset) require typing a confirmation phrase.
+
+`src/deviceAdminOperations.ts` remains the canonical operation catalog checked
+by `scripts/check-device-admin-coverage.mjs` at build time — add new SDK
+endpoints there first, then (optionally) to the typed layer in `src/device/`.
+
+## Deployment note
+
+The app uses `BrowserRouter`; whatever serves `dist/` must rewrite unknown
+paths to `index.html` (Vite dev/preview do this automatically). If that is not
+possible on your host, switch to `HashRouter` in `src/App.tsx`.
 
 The dashboard reads `GET /ready` from `admin-api` after sign-in and warns when
 remote rpiz debugging is not fully configured. A ready deployment reports

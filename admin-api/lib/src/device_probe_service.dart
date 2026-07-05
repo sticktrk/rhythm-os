@@ -330,12 +330,30 @@ class DeviceProbeService {
     for (final candidate in candidates) {
       final baseUrl = candidate.endpoint.baseUrl;
       final token = await _authTokenForEndpoint(session, hub, baseUrl);
-      final result = await _proxyJsonFromEndpoint(
+      var result = await _proxyJsonFromEndpoint(
         hub: hub,
         candidate: candidate,
         request: request,
         authToken: token,
       );
+      if (result.authRequired && hub.authToken == null && token != null) {
+        // The cached support-session token was rejected (revoked or the
+        // device restarted); mint a fresh one and retry this endpoint once.
+        _supportAccess?.invalidateSessionToken(
+          hubId: hub.id,
+          baseUrl: baseUrl,
+        );
+        final freshToken =
+            await _supportAccessSessionToken(session, hub, baseUrl);
+        if (freshToken != null && freshToken != token) {
+          result = await _proxyJsonFromEndpoint(
+            hub: hub,
+            candidate: candidate,
+            request: request,
+            authToken: freshToken,
+          );
+        }
+      }
       if (result.success != null) return result.success!;
       if (result.authRequired) sawAuthRequired = true;
       if (result.message != null) {
@@ -394,6 +412,10 @@ class DeviceProbeService {
     final stateAuthToken = hub.authToken ?? supportSessionToken;
     final state = await _fetchState(baseUrl, stateAuthToken);
     if (state.authRequired) {
+      if (supportSessionToken != null) {
+        // Don't keep serving a token the device just rejected.
+        _supportAccess?.invalidateSessionToken(hubId: hub.id, baseUrl: baseUrl);
+      }
       return DeviceProbeResultDto(
         hubId: hub.id,
         status: 'auth_required',

@@ -1,0 +1,270 @@
+/* Phase 5 pages: Scenes, Modes & Transitions, Inputs & Controls.
+   Prefixed p5* to avoid collisions with shared console/controls styles. */
+
+.p5Split {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .p5Split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.p5SceneList {
+  display: grid;
+  gap: 4px;
+}
+
+.p5SceneItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  padding: 9px 10px;
+  color: var(--text);
+  text-align: left;
+}
+
+.p5SceneItem:hover {
+  background: var(--surface-muted);
+}
+
+.p5SceneItem.selected {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.p5SceneName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13.5px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.p5SceneMeta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.p5Swatch {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+}
+
+.p5Swatch.large {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+
+.p5Palette {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.p5SubHeading {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.p5Output {
+  display: grid;
+  gap: 10px;
+}
+
+.p5OutputRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.p5WheelRow {
+  display: flex;
+  justify-content: flex-start;
+  padding: 4px 0;
+}
+
+.p5Entry {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-deep, var(--surface-muted));
+  padding: 12px;
+}
+
+.p5EntryHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.p5ApplyRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.p5StickyBar {
+  position: sticky;
+  top: 10px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--amber);
+  border-radius: 10px;
+  background: var(--amber-soft);
+  box-shadow: var(--shadow);
+  padding: 10px 14px;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.p5StickyActions {
+  display: flex;
+  gap: 8px;
+}
+
+.p5ConfigGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.p5Config {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 12px;
+}
+
+.p5TransitionList {
+  display: grid;
+  gap: 6px;
+}
+
+.p5TransitionRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.p5Dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.p5Dot.off {
+  background: var(--dim);
+}
+
+.p5RowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.p5Editor {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-deep, var(--surface-muted));
+  padding: 14px;
+}
+
+.p5EditorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.p5DialRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.p5TableWrap {
+  overflow-x: auto;
+}
+
+.p5TableWrap.tall {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.p5Table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.p5Table th {
+  position: sticky;
+  top: 0;
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--surface);
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.p5Table td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px;
+  color: var(--text);
+  vertical-align: top;
+}
+
+.p5Table td.mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.p5Table .p5SceneMeta {
+  display: block;
+  margin-left: 0;
+}

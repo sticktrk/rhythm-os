@@ -13,7 +13,8 @@
     "@supabase/supabase-js": "^2.108.2",
     "lucide-react": "^1.21.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
