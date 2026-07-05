@@ -5,6 +5,7 @@ mod harness;
 
 use rhythm_matter::transport::MatterTransport;
 use rhythm_os::hub::ExternalLightHubIntegration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn scenario_restart_persistence() {
@@ -32,6 +33,17 @@ fn scenario_restart_persistence() {
         });
     harness::store_commissioning_wifi(&restarted.state, "RhythmNet", "secret");
 
+    assert!(
+        wait_until(Duration::from_secs(1), || {
+            let cached_caps = restarted.hub_data.device_caps.lock().unwrap();
+            cached_caps
+                .get("matter-100")
+                .map(|caps| caps.supports_color_temp() && !caps.supports_xy_color())
+                .unwrap_or(false)
+        }),
+        "restarted Matter hub should warm capability cache with probed metadata"
+    );
+
     let cached_caps = restarted.hub_data.device_caps.lock().unwrap();
     let restored_caps = cached_caps
         .get("matter-100")
@@ -57,4 +69,15 @@ fn scenario_restart_persistence() {
     );
     assert_eq!(second_session.device.unwrap().device_id, "matter-101");
     assert_eq!(restarted.hub_data.reserve_node_id(), 102);
+}
+
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    condition()
 }
