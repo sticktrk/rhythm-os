@@ -308,7 +308,7 @@ APPLE_ID="${APPLE_ID:-}"
 TEAM_ID="${TEAM_ID:-}"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-}"
-APP_NAME="RhythmLighting"
+APP_NAME="Rhythm Lighting"
 
 # TestFlight configuration
 ASC_API_KEY_PATH="$HOME/.config/rhythm/asc_api_key.json"
@@ -862,7 +862,7 @@ else
             echo ""
             echo "Creating DMG..."
 
-            APP_PATH="$FLUTTER_APP/build/macos/Build/Products/Release/RhythmLighting.app"
+            APP_PATH="$FLUTTER_APP/build/macos/Build/Products/Release/$APP_NAME.app"
             DMG_PATH="$FLUTTER_APP/build/$APP_NAME.dmg"
             DMG_STAGING="$FLUTTER_APP/build/dmg_staging"
 
@@ -910,7 +910,7 @@ else
 
                 # 3. Sign the main executable with entitlements
                 echo "  -> Signing main executable..."
-                codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS" "$APP_PATH/Contents/MacOS/RhythmLighting"
+                codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp --entitlements "$ENTITLEMENTS" "$APP_PATH/Contents/MacOS/$APP_NAME"
 
                 # 4. Sign the entire app bundle with entitlements
                 echo "  -> Signing app bundle..."
