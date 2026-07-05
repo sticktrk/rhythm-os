@@ -58,20 +58,28 @@ class SupportAccessService {
     final durableToken = await _decryptGrantToken(grant);
     if (durableToken == null) return null;
 
-    final response = await _http
-        .post(
-          _uriWithAppendedPath(baseUrl, 'api/auth/support-session-token'),
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $durableToken',
-          },
-          body: jsonEncode({
-            'label': _sessionLabel(session),
-            'ttl_seconds': _sessionTokenTtl.inSeconds,
-          }),
-        )
-        .timeout(const Duration(seconds: 5));
+    // Network failures (dead tunnel hostname, offline device, timeout) mean
+    // "no token from this endpoint" — the caller falls through to the next
+    // endpoint candidate. They must not escape as unhandled 500s.
+    final http.Response response;
+    try {
+      response = await _http
+          .post(
+            _uriWithAppendedPath(baseUrl, 'api/auth/support-session-token'),
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $durableToken',
+            },
+            body: jsonEncode({
+              'label': _sessionLabel(session),
+              'ttl_seconds': _sessionTokenTtl.inSeconds,
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+    } on Exception {
+      return null;
+    }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return null;
