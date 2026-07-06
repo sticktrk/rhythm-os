@@ -130,8 +130,13 @@ class _RoomCardState extends State<RoomCard> {
       return Future.value();
     }
 
+    final effectiveMode = newMode == RoomMode.off &&
+            serverSync.standbyEnabledForNode(widget.roomId)
+        ? RoomMode.standby
+        : newMode;
+
     // Optimistic local state update
-    switch (newMode) {
+    switch (effectiveMode) {
       case RoomMode.mood:
         HapticFeedback.lightImpact();
         roomProvider.setRoomLightsOnLocal(widget.roomId, true);
@@ -154,7 +159,7 @@ class _RoomCardState extends State<RoomCard> {
         roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.hardOff);
     }
 
-    final push = switch (newMode) {
+    final push = switch (effectiveMode) {
       RoomMode.mood => serverSync.pushNodePreferences(
           widget.roomId,
           rhythmEnabled: true,
@@ -185,7 +190,7 @@ class _RoomCardState extends State<RoomCard> {
     AnalyticsService().logRoomModeChanged(
       roomId: widget.roomId,
       previousMode: previousMode,
-      nextMode: newMode.name,
+      nextMode: effectiveMode.name,
     );
     return push;
   }

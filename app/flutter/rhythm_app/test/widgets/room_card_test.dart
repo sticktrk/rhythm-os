@@ -59,6 +59,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<Map<String, dynamic>?> getTriageCount() async => null;
 
   @override
+  Future<List<RhythmTopologyNode>> getTopologyNodes() async => const [];
+
+  @override
   Future<void> nodeBrightness({
     required String nodeId,
     required int brightness,
@@ -139,11 +142,19 @@ class _TestRhythmConnection extends RhythmConnection {
   @override
   final _FakeRhythmServerApi api;
 
+  final _helloController = StreamController<RhythmHello>.broadcast();
   final _dispatchFailures = StreamController<RhythmDispatchFailure>.broadcast();
+
+  @override
+  Stream<RhythmHello> get helloEvents => _helloController.stream;
 
   @override
   Stream<RhythmDispatchFailure> get dispatchFailureEvents =>
       _dispatchFailures.stream;
+
+  void emitHello(RhythmHello hello) {
+    _helloController.add(hello);
+  }
 
   void emitDispatchFailure(RhythmDispatchFailure failure) {
     _dispatchFailures.add(failure);
@@ -166,6 +177,7 @@ class _TestRhythmConnection extends RhythmConnection {
 
   @override
   void dispose() {
+    _helloController.close();
     _dispatchFailures.close();
     super.dispose();
   }
@@ -599,6 +611,87 @@ void main() {
     expect(call.state, RoomModeState.mood);
     expect(call.state?.wireValue, 'mood');
     expect(call.profileSettings, {'mood_enabled': true});
+  });
+
+  testWidgets('off segment sends standby when room standby is enabled',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 1,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'device_ids': ['light-1'],
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0,
+            'brightness_offset': 1,
+            'state': 'active',
+            'standby_enabled': true,
+          },
+        ],
+      }),
+    );
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(serverSync.standbyEnabledForNode('room-1'), isTrue);
+
+    await _tapRoomSegment(tester, 'Off');
+
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.standby);
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    final call = connection.api.nodePreferenceCalls.single;
+    expect(call.nodeId, 'room-1');
+    expect(call.rhythmEnabled, isTrue);
+    expect(call.state, RoomModeState.standby);
+    expect(call.state?.wireValue, 'standby');
   });
 
   testWidgets('first Mood tap shows the explainer and defers the mode change',
