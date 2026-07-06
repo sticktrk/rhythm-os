@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmConnection,
@@ -10,6 +9,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmOtaUpdateStage;
 
 import '../../services/ota_service.dart';
+import '../../widgets/solar_orbit.dart' show CelestialColors;
 import '../../widgets/stage_timeline.dart';
 
 String _formatOtaVersionLabel(String version) {
@@ -31,7 +31,11 @@ class OtaUpdateOverlay extends StatefulWidget {
   final OtaService otaService;
   final RhythmConnection? connection;
 
-  const OtaUpdateOverlay({required this.otaService, this.connection});
+  const OtaUpdateOverlay({
+    super.key,
+    required this.otaService,
+    this.connection,
+  });
 
   static Future<void> show(
     BuildContext context, {

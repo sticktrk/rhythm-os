@@ -14,11 +14,9 @@ import '../../providers/home_provider.dart';
 import '../../services/account_cloud_sync_service.dart';
 import '../../services/analytics_service.dart';
 import '../../services/ble_provisioning_service.dart';
-import '../../services/ota_service.dart';
 import '../../services/recent_servers_service.dart';
 import '../../widgets/solar_orbit.dart';
 import 'add_home_flow.dart';
-import 'ota_update_overlay.dart';
 
 enum _ProvisioningPhase {
   scanning,
@@ -90,6 +88,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   BleDevice? _selectedDevice;
   BleDeviceInfo? _deviceInfo;
   String? _provisionedIp;
+  String? _provisioningStatusMessage;
   String? _errorMessage;
   String? _wifiErrorMessage;
   bool _obscurePassword = true;
@@ -145,6 +144,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _selectedDevice = null;
         _deviceInfo = null;
         _provisionedIp = null;
+        _provisioningStatusMessage = null;
         _hasAttemptedScan = false;
       });
       final initialDevice = widget.initialDevice;
@@ -307,6 +307,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
+      _provisioningStatusMessage = null;
       _hasAttemptedScan = true;
     });
 
@@ -451,10 +452,15 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _errorMessage = null;
       _wifiErrorMessage = null;
       _provisionedIp = null;
+      _provisioningStatusMessage = null;
     });
 
     try {
-      final result = await _bleService.sendWifiCredentials(ssid, password);
+      final result = await _bleService.sendWifiCredentials(
+        ssid,
+        password,
+        onStatus: _handleProvisioningStatus,
+      );
       final ip = result.ip;
       if (!mounted) return;
 
@@ -462,16 +468,21 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _provisionedIp = ip;
       });
 
-      final online = await _waitForServerHealth(ip);
+      final online = result.restartPending
+          ? await _waitForServerRestartAndHealth(ip)
+          : await _waitForServerHealth(ip);
       if (!mounted) return;
       if (!online) {
         AnalyticsService().logEvent('ble_provisioning_failed', {
-          'stage': 'health_timeout',
+          'stage': result.restartPending
+              ? 'post_update_health_timeout'
+              : 'health_timeout',
         });
         setState(() {
           _phase = _ProvisioningPhase.error;
-          _errorMessage =
-              'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
+          _errorMessage = result.restartPending
+              ? 'Your Rhythm Box installed an update but did not come back online in time. Make sure you\'re on the same network and try again.'
+              : 'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
         });
         return;
       }
@@ -480,12 +491,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ip,
         result.ownerToken,
       );
-      if (!mounted) return;
-
-      // Bring a freshly provisioned (or factory-reset) box up to the latest
-      // stable build before it becomes usable. Failures here never block
-      // onboarding — the box already works on its current firmware.
-      await _runOnboardingOtaUpdate(ip, ownerToken);
       if (!mounted) return;
 
       await _persistServerHub(ip, ownerToken);
@@ -535,7 +540,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     final deadline = DateTime.now().add(const Duration(seconds: 30));
 
     while (DateTime.now().isBefore(deadline)) {
-      if (await client.healthCheck()) {
+      if (await _serverIsHealthy(client)) {
         return true;
       }
       await Future<void>.delayed(const Duration(seconds: 1));
@@ -543,72 +548,56 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     return false;
   }
 
-  /// Check the freshly provisioned box for a stable update and, when one is
-  /// available, drive it to completion behind the shared full-screen update
-  /// overlay before onboarding continues.
-  ///
-  /// This is best-effort by design: an unreachable update server, a check that
-  /// can't complete, a non-self-pull device, or a failed install all fall
-  /// through to a graceful continue so the user is never locked out of a box
-  /// that already works on its current firmware.
-  Future<void> _runOnboardingOtaUpdate(String ip, String? ownerToken) async {
-    final otaService = OtaService();
+  Future<bool> _serverIsHealthy(RhythmDiagnosticsApi client) async {
     try {
-      await otaService.initialize(
-        host: ip,
-        port: 54448,
-        authToken: ownerToken,
-      );
+      return await client.healthCheck();
+    } catch (_) {
+      return false;
+    }
+  }
 
-      // Only rhythm-server boxes expose the self-pull flow. Legacy/bridge
-      // devices resolve to a different strategy — skip the blocking step.
-      if (!otaService.isSelfPull) return;
+  Future<bool> _waitForServerRestartAndHealth(String ip) async {
+    final client = RhythmDiagnosticsApi(host: ip, port: 54448);
+    final offlineDeadline = DateTime.now().add(const Duration(seconds: 90));
+    var sawOffline = false;
 
-      await otaService.checkForUpdate(otaService.currentVersion);
-      if (!mounted) return;
+    while (DateTime.now().isBefore(offlineDeadline)) {
+      if (!await _serverIsHealthy(client)) {
+        sawOffline = true;
+        break;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
 
-      // "Out of date" is decided server-side by /api/ota/check; anything other
-      // than an available update (up to date, error, unreachable) continues.
-      if (otaService.state != OtaState.available) return;
+    if (!sawOffline) return false;
 
-      AnalyticsService().logEvent('ble_provisioning_ota_started');
+    final onlineDeadline = DateTime.now().add(const Duration(minutes: 5));
+    while (DateTime.now().isBefore(onlineDeadline)) {
+      if (await _serverIsHealthy(client)) {
+        return true;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    return false;
+  }
+
+  void _handleProvisioningStatus(ProvisioningStatusMessage status) {
+    if (!mounted) return;
+    if (status.ip != null && status.ip!.isNotEmpty) {
+      _provisionedIp = status.ip;
+    }
+    if (status.status == 'updating' || status.status == 'restarting') {
+      final message = status.message?.trim();
       setState(() {
         _phase = _ProvisioningPhase.updating;
+        _provisioningStatusMessage =
+            message == null || message.isEmpty ? null : message;
       });
-
-      unawaited(otaService.startUpdate(
-        ip,
-        port: 54448,
-        authToken: ownerToken,
-      ));
-
-      // Reuse the settings-screen update overlay. With connection == null it
-      // renders staged progress from OtaService and finishes on the terminal
-      // state; the awaited future resolves once the user dismisses it.
-      await OtaUpdateOverlay.show(
-        context,
-        otaService: otaService,
-        connection: null,
-      );
-      if (!mounted) return;
-
-      if (otaService.state == OtaState.complete) {
-        AnalyticsService().logEvent('ble_provisioning_ota_completed');
-        // The box reboots while flashing; confirm it is reachable again before
-        // finishing onboarding.
-        await _waitForServerHealth(ip);
-      } else {
-        AnalyticsService().logEvent('ble_provisioning_ota_skipped', {
-          'stage': 'update_failed',
-        });
-      }
-    } catch (error) {
-      debugPrint('[BLE] onboarding OTA skipped: $error');
-      AnalyticsService().logEvent('ble_provisioning_ota_skipped', {
-        'stage': 'exception',
+    } else if (status.status == 'connecting') {
+      setState(() {
+        _phase = _ProvisioningPhase.provisioning;
+        _provisioningStatusMessage = null;
       });
-    } finally {
-      otaService.dispose();
     }
   }
 
@@ -786,6 +775,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
+      _provisioningStatusMessage = null;
       _hasAttemptedScan = false;
     });
   }
@@ -942,7 +932,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               : 'Joined at $_provisionedIp — finishing setup...',
         ),
       _ProvisioningPhase.updating => _buildProgressCard(
-          'Updating to the latest version...',
+          _provisioningStatusMessage ?? 'Updating to the latest version...',
         ),
       _ProvisioningPhase.success => _buildSuccessBody(),
       _ProvisioningPhase.error => _buildErrorBody(),
