@@ -14,10 +14,16 @@ class AccountScreen extends StatefulWidget {
   final FutureOr<void> Function()? onComplete;
   final FutureOr<void> Function()? onSignedInComplete;
 
+  /// Shown to users who already have a local (anonymous) setup from before
+  /// accounts became mandatory: swaps the copy to explain that sign-in is now
+  /// required and that their existing setup is preserved.
+  final bool existingUserPrompt;
+
   const AccountScreen({
     super.key,
     this.onComplete,
     this.onSignedInComplete,
+    this.existingUserPrompt = false,
   });
 
   @override
@@ -278,28 +284,9 @@ class _AccountScreenState extends State<AccountScreen>
     context.read<AuthProvider>().resetState();
   }
 
-  Future<void> _continueLocal() async {
-    final onboardingProvider = context.read<OnboardingProvider>();
-
-    // Track account choice
-    AnalyticsService().logOnboardingAccountChoice('local');
-
-    // Save preferences locally (keep the anonymous user!)
-    await context
-        .read<AuthProvider>()
-        .savePreferences(onboardingProvider.preferences);
-
-    // Mark onboarding complete - anonymous user is preserved
-    await _complete();
-  }
-
   Future<void> _completeSignedIn() async {
     final callback = widget.onSignedInComplete ?? widget.onComplete;
     await Future<void>.sync(() => callback?.call());
-  }
-
-  Future<void> _complete() async {
-    await Future<void>.sync(() => widget.onComplete?.call());
   }
 
   @override
@@ -372,8 +359,10 @@ class _AccountScreenState extends State<AccountScreen>
                         width: 2,
                       ),
                     ),
-                    child: const Icon(
-                      Icons.person_add_rounded,
+                    child: Icon(
+                      widget.existingUserPrompt
+                          ? Icons.lock_person_rounded
+                          : Icons.person_add_rounded,
                       color: OnboardingColors.sunWarm,
                       size: 32,
                     ),
@@ -384,9 +373,11 @@ class _AccountScreenState extends State<AccountScreen>
           ),
           const SizedBox(height: 24),
           // Header
-          const Text(
-            'Create Your Account',
-            style: TextStyle(
+          Text(
+            widget.existingUserPrompt
+                ? 'Sign In Required'
+                : 'Create Your Account',
+            style: const TextStyle(
               color: OnboardingColors.textPrimary,
               fontSize: 28,
               fontWeight: FontWeight.bold,
@@ -394,10 +385,14 @@ class _AccountScreenState extends State<AccountScreen>
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Sync your settings across all devices',
+          Text(
+            widget.existingUserPrompt
+                ? 'Rhythm now requires an account. Your rooms and '
+                    'settings stay on this device and will be linked '
+                    'to your account.'
+                : 'Sync your settings across all devices',
             textAlign: TextAlign.center,
-            style: TextStyle(
+            style: const TextStyle(
               color: OnboardingColors.textSecondary,
               fontSize: 16,
               height: 1.5,
@@ -429,14 +424,6 @@ class _AccountScreenState extends State<AccountScreen>
           ),
 
           const SizedBox(height: 32),
-
-          // Continue without cloud sync
-          TextLinkButton(
-            text: 'Continue local-only',
-            onPressed: _continueLocal,
-          ),
-
-          const SizedBox(height: 24),
 
           // Terms and Privacy links
           Row(

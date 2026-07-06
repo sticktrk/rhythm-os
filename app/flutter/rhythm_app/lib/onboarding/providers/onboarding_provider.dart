@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import '../../config/feature_flags.dart';
 
 /// User preferences collected during onboarding.
 class OnboardingPreferences {
@@ -44,10 +43,9 @@ class OnboardingProvider extends ChangeNotifier {
   OnboardingPreferences get preferences => _preferences;
   bool get isSignInMode => _isSignInMode;
 
-  /// Total number of screens in the onboarding flow.
-  /// 1 page when sign-in disabled (Welcome), 2 when enabled (+ Account).
+  /// Total number of screens in the onboarding flow (Welcome + Account).
   /// Location is collected later, during Home creation.
-  int get totalPages => FeatureFlags.onboardingSignIn ? 2 : 1;
+  int get totalPages => 2;
 
   /// Navigate to next page.
   void nextPage() {
@@ -74,9 +72,7 @@ class OnboardingProvider extends ChangeNotifier {
   }
 
   /// Enable sign-in mode (skip to account screen).
-  /// No-op when onboarding sign-in is disabled.
   void enableSignInMode() {
-    if (!FeatureFlags.onboardingSignIn) return;
     _isSignInMode = true;
     _currentPage = 1; // Account screen
     notifyListeners();

@@ -28,3 +28,4 @@ admin-api/.env
 
 # Local Supabase CLI project metadata.
 tools/app/supabase/.temp/
+supabase/.temp/

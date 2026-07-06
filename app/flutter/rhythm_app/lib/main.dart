@@ -15,6 +15,7 @@ import 'app_shell.dart';
 import 'backend/backend.dart';
 import 'models/config_model.dart';
 import 'api/hybrid_client.dart';
+import 'onboarding/screens/account_gate_screen.dart';
 import 'onboarding/screens/password_recovery_screen.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
@@ -269,6 +270,11 @@ class AuthGate extends StatefulWidget {
 
 class _AuthGateState extends State<AuthGate> {
   bool _isLoading = true;
+  bool _requiresAccount = false;
+
+  /// The device had an anonymous session from before accounts became
+  /// mandatory — the gate shows migration copy instead of first-run copy.
+  bool _existingAnonymousUser = false;
   bool _showPasswordRecovery = false;
   StreamSubscription<AuthEvent>? _authEventSubscription;
   StreamSubscription<Uri>? _passwordRecoveryLinkSubscription;
@@ -486,6 +492,10 @@ class _AuthGateState extends State<AuthGate> {
       debugPrint(
           'Recovering session from Keychain: ${authService.currentUserId}');
 
+      // A recovered anonymous session predates the account requirement:
+      // this user chose (or defaulted to) local-only before it was removed.
+      _existingAnonymousUser = authService.isAnonymous;
+
       if (authService.currentUserId != null) {
         AnalyticsService().identifyUser(authService.currentUserId!);
       }
@@ -511,6 +521,38 @@ class _AuthGateState extends State<AuthGate> {
     if (!mounted) return;
     setState(() {
       _isLoading = false;
+      _requiresAccount = _computeRequiresAccount();
+    });
+    _refreshAppStateInBackground();
+  }
+
+  /// Whether the account gate must be shown before entering the app.
+  ///
+  /// Accounts are required wherever the cloud backend runs. The anonymous
+  /// bootstrap session doesn't count — it only exists so sign-in can link it
+  /// to a permanent identity. Web and no-backend (HA add-on) builds have no
+  /// account infrastructure and are exempt.
+  bool _computeRequiresAccount() {
+    if (kIsWeb || !BackendProvider.isInitialized) return false;
+    final authService = AuthService();
+    return authService.currentUser == null || authService.isAnonymous;
+  }
+
+  Future<void> _onAccountGateSignedIn() async {
+    await SettingsService.instance.setOnboardingComplete(true);
+
+    final authService = AuthService();
+    final userId = authService.currentUserId;
+    if (userId != null) {
+      AnalyticsService().identifyUser(userId);
+      AnalyticsService()
+          .setAccountStatus(authService.isAnonymous ? 'anonymous' : 'email');
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _requiresAccount = _computeRequiresAccount();
+      if (!_requiresAccount) _existingAnonymousUser = false;
     });
     _refreshAppStateInBackground();
   }
@@ -539,6 +581,7 @@ class _AuthGateState extends State<AuthGate> {
     setState(() {
       _showPasswordRecovery = false;
       _isLoading = false;
+      _requiresAccount = _computeRequiresAccount();
     });
     _refreshAppStateInBackground();
   }
@@ -568,6 +611,10 @@ class _AuthGateState extends State<AuthGate> {
     setState(() {
       _showPasswordRecovery = false;
       _isLoading = false;
+      _requiresAccount = _computeRequiresAccount();
+      // Post-logout/reset local state is wiped — the gate shows first-run
+      // copy, not the migration prompt.
+      _existingAnonymousUser = false;
     });
     _refreshAppStateInBackground();
   }
@@ -586,6 +633,13 @@ class _AuthGateState extends State<AuthGate> {
             valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF9A825)),
           ),
         ),
+      );
+    }
+
+    if (_requiresAccount) {
+      return AccountGateScreen(
+        onSignedIn: _onAccountGateSignedIn,
+        existingUser: _existingAnonymousUser,
       );
     }
 
