@@ -202,6 +202,48 @@ fn bootstate_success_marks_pending_slot_last_good_and_writes_hashed_backup() {
 }
 
 #[test]
+fn bootstate_success_rolls_back_when_running_version_misses_pending_target() {
+    let root = unique_dir("success-version-mismatch");
+    write_fake_server(&root, "0.4.1");
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(&root, &pending_bootstate_body("booting"));
+
+    assert_success(run_bootstate(&root, "success"));
+
+    let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
+    assert!(cmdline.contains("root=/dev/mmcblk0p2"));
+    assert!(!cmdline.contains("root=/dev/mmcblk0p3"));
+
+    let body = read_bootstate(&root);
+    assert_eq!(bootstate_value(&body, "RHYTHM_ACTIVE_SLOT"), Some("b"));
+    assert_eq!(bootstate_value(&body, "RHYTHM_LAST_GOOD_SLOT"), Some("a"));
+    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_SLOT"), Some(""));
+    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_VERSION"), Some(""));
+    assert_eq!(
+        bootstate_value(&body, "RHYTHM_ACTIVE_VERSION"),
+        Some("0.4.1")
+    );
+    assert_eq!(bootstate_value(&body, "RHYTHM_BOOT_STATUS"), Some("idle"));
+    assert_eq!(
+        bootstate_value(&body, "RHYTHM_LAST_ROLLBACK_SLOT"),
+        Some("b")
+    );
+    assert_eq!(
+        bootstate_value(&body, "RHYTHM_LAST_ROLLBACK_VERSION"),
+        Some("0.4.2")
+    );
+}
+
+#[test]
 fn bootstate_fail_rolls_cmdline_back_and_records_failed_version() {
     let root = unique_dir("fail");
     write_fake_server(&root, "0.4.2");
