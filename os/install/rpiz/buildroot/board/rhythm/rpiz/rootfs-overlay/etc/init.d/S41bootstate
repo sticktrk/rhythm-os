@@ -312,6 +312,11 @@ success() {
     [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ] || return 0
 
     active_version="$(current_version || true)"
+    if [ -n "${RHYTHM_PENDING_VERSION:-}" ] && [ "$active_version" != "$RHYTHM_PENDING_VERSION" ]; then
+        rollback_pending_boot "$slot" "$active_version"
+        return 0
+    fi
+
     RHYTHM_ACTIVE_SLOT="$slot"
     RHYTHM_LAST_GOOD_SLOT="$slot"
     RHYTHM_PENDING_SLOT=""
