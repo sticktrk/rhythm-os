@@ -682,7 +682,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
-  bool _isHalfWidthCard(RoomDto room) => room.kind == RoomNodeKind.lightDevice;
+  bool _isHalfWidthCard(RoomDto room) => false;
 
   List<_RoomGridItem> _roomGridItems(List<RoomDto> rooms) {
     return [

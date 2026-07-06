@@ -529,6 +529,14 @@ void main() {
     );
 
     expect(find.text('Setting up...'), findsOneWidget);
+    expect(find.byTooltip('Choose Home'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Choose Home'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+
+    expect(find.byIcon(Icons.close), findsOneWidget);
+    expect(find.text('Welcome to Rhythm'), findsOneWidget);
   });
 
   testWidgets(

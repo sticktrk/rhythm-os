@@ -386,7 +386,7 @@ void main() {
     expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
   });
 
-  testWidgets('rooms stay full-width while bulbs use the compact grid',
+  testWidgets('rooms and individual bulbs both use full-width cards',
       (tester) async {
     await _pumpAllRooms(
       tester,
@@ -398,12 +398,12 @@ void main() {
     final fullWidth = tester.getRect(_roomCardContainer('switch-1'));
 
     expect(room.top, greaterThan(bulb.top));
-    expect(room.width, greaterThan(bulb.width * 1.8));
+    expect(bulb.width, closeTo(room.width, 0.1));
     expect(fullWidth.width, closeTo(room.width, 0.1));
     expect(fullWidth.left, closeTo(bulb.left, 0.1));
   });
 
-  testWidgets('compact bulb cards show mood for mood state', (tester) async {
+  testWidgets('bulb cards show mood for mood state', (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
@@ -454,8 +454,7 @@ void main() {
     expect(find.text('Scenes'), findsOneWidget);
   });
 
-  testWidgets(
-      'full-width room and compact bulb sizes persist when edit mode starts',
+  testWidgets('full-width room and bulb sizes persist when edit mode starts',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
@@ -506,7 +505,7 @@ void main() {
     final beforeBulb1 = tester.getRect(_roomCardContainer('bulb-1'));
     final beforeRoom1 = tester.getRect(_roomCardContainer('room-1'));
 
-    expect(beforeRoom1.width, greaterThan(beforeBulb1.width * 1.8));
+    expect(beforeBulb1.width, closeTo(beforeRoom1.width, 0.1));
 
     await tester.longPress(find.text('Bulb 1'));
     await tester.pump();
@@ -522,7 +521,7 @@ void main() {
     expect(afterRoom1.top, greaterThan(afterBulb1.top));
   });
 
-  testWidgets('edit-mode drag reorders compact bulb tiles', (tester) async {
+  testWidgets('edit-mode drag reorders full-width bulb cards', (tester) async {
     final harness = await _pumpAllRooms(
       tester,
       rooms: const [_bulb1, _bulb2],
@@ -542,9 +541,9 @@ void main() {
     final bulb2 = tester.getRect(_roomCardContainer('bulb-2'));
     final gesture = await tester.startGesture(bulb.center);
     await tester.pump(const Duration(milliseconds: 20));
-    await gesture.moveBy(const Offset(24, 0));
+    await gesture.moveBy(const Offset(0, 24));
     await tester.pump(const Duration(milliseconds: 20));
-    await gesture.moveTo(Offset(bulb2.right - 2, bulb2.center.dy));
+    await gesture.moveTo(Offset(bulb2.center.dx, bulb2.bottom - 2));
     await tester.pump(const Duration(milliseconds: 20));
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 300));

@@ -912,38 +912,58 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   Widget _buildServerConnectingState() {
     return SafeArea(
       bottom: false,
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 40),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _PulsingIcon(
-                icon: Icons.hub,
-                color: CelestialColors.accentBlue,
+      child: Stack(
+        children: [
+          Positioned(
+            top: 8,
+            left: 12,
+            child: IconButton(
+              tooltip: 'Choose Home',
+              onPressed: () => ConnectHubScreen.show(
+                context,
+                mode: ConnectHubMode.rhythmServer,
               ),
-              const SizedBox(height: 24),
-              Text(
-                'Setting up...',
-                style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
-                ),
+              icon: Icon(
+                Icons.home_rounded,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.82),
               ),
-              const SizedBox(height: 12),
-              Text(
-                'Connecting to your lights',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-                  fontSize: 15,
-                  height: 1.5,
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _PulsingIcon(
+                    icon: Icons.hub,
+                    color: CelestialColors.accentBlue,
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Setting up...',
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Connecting to your lights',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.7),
+                      fontSize: 15,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
