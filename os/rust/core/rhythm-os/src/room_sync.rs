@@ -381,6 +381,8 @@ fn sync_with_discovery(
 
             let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
             let mut room_light_device_ids: HashMap<String, Vec<String>> = HashMap::new();
+            let mut new_light_canonical_ids: HashSet<String> = HashSet::new();
+            let mut sleep_default_nodes_to_seed: Vec<String> = Vec::new();
 
             {
                 let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -428,12 +430,15 @@ fn sync_with_discovery(
                     let result = s
                         .canonical_registry
                         .resolve(identity, &canonical_hub_key, now);
-                    let canonical_id = match result {
-                        ResolveResult::AlreadyKnown { canonical_id } => canonical_id,
-                        ResolveResult::ReApproved { canonical_id } => canonical_id,
+                    let (canonical_id, created_canonical_device) = match result {
+                        ResolveResult::AlreadyKnown { canonical_id } => (canonical_id, false),
+                        ResolveResult::ReApproved { canonical_id } => (canonical_id, false),
                         ResolveResult::Queued { .. } => continue,
-                        ResolveResult::Created { canonical_id } => canonical_id,
+                        ResolveResult::Created { canonical_id } => (canonical_id, true),
                     };
+                    if created_canonical_device && identity.device_type == DeviceType::Light {
+                        new_light_canonical_ids.insert(canonical_id.clone());
+                    }
 
                     let Some(hub_room_id) = identity.room_id.clone() else {
                         let still_unassigned = s
@@ -444,6 +449,9 @@ fn sync_with_discovery(
                         if still_unassigned {
                             s.canonical_registry.assign_room(&canonical_id, None);
                             s.topology.ensure_standalone_device(&canonical_id);
+                            if new_light_canonical_ids.contains(&canonical_id) {
+                                sleep_default_nodes_to_seed.push(canonical_id.clone());
+                            }
                         }
                         continue;
                     };
@@ -513,6 +521,9 @@ fn sync_with_discovery(
                     for (canonical_id, assigned_room_id) in &canonical_room_assignments {
                         s.canonical_registry
                             .assign_room(canonical_id, Some(assigned_room_id));
+                        if new_light_canonical_ids.contains(canonical_id) {
+                            sleep_default_nodes_to_seed.push(assigned_room_id.clone());
+                        }
                     }
 
                     // Queue room binding proposals for cross-hub name matches
@@ -564,6 +575,12 @@ fn sync_with_discovery(
                 // Persist canonical registry and topology
                 commands::persist_canonical(&s);
                 commands::persist_topology(&s);
+            }
+
+            sleep_default_nodes_to_seed.sort();
+            sleep_default_nodes_to_seed.dedup();
+            for node_id in &sleep_default_nodes_to_seed {
+                commands::ensure_sleep_mode_hard_off_default(state, node_id);
             }
 
             let (affected_devices, hidden_devices) = commands::reconcile_hub_endpoint_visibility(

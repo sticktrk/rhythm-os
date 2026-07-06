@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use rhythm_core::{
     normalize_mode_transition_configs, ButtonAction, LightProfileConfig, ModeChangeCause,
-    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState, RuntimeConfig, RuntimeHandle,
+    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeDefault, RoomModeState, RuntimeConfig,
+    RuntimeHandle,
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 
@@ -914,6 +915,31 @@ impl AppState {
             config.normalize_profile_ids();
             self.mode_configs.insert(config.mode, config);
         }
+    }
+
+    /// Ensure a node defaults to fully off when Sleep mode activates.
+    ///
+    /// Existing room defaults are preserved so user-selected Sleep behavior is
+    /// not overwritten by later syncs.
+    pub fn ensure_sleep_mode_hard_off_default(&mut self, node_id: &str) -> bool {
+        let sleep_config = self
+            .mode_configs
+            .entry(RhythmMode::Sleep)
+            .or_insert_with(|| ModeConfig::default_for_mode(RhythmMode::Sleep));
+
+        if sleep_config
+            .room_defaults
+            .iter()
+            .any(|default| default.room_id == node_id)
+        {
+            return false;
+        }
+
+        sleep_config.room_defaults.push(RoomModeDefault {
+            room_id: node_id.to_string(),
+            state: RoomModeState::HardOff,
+        });
+        true
     }
 
     /// Insert or replace a stored profile config.

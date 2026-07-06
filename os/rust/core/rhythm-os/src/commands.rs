@@ -2185,6 +2185,44 @@ fn persist_settings_locked(s: &AppState) {
     }
 }
 
+fn propagate_mode_configs_to_runtimes(
+    runtimes: Vec<Arc<dyn RuntimeHandle>>,
+    configs: Vec<ModeConfig>,
+) {
+    for runtime in runtimes {
+        if let Err(e) = runtime.set_mode_configs(configs.clone()) {
+            warn!(
+                target: "cmd",
+                "Failed to propagate updated mode configs to runtime: {}",
+                e
+            );
+        }
+    }
+}
+
+/// Add an explicit Sleep HardOff default for a node if it has no Sleep default.
+pub(crate) fn ensure_sleep_mode_hard_off_default(state: &SharedState, node_id: &str) -> bool {
+    let (configs, runtimes) = {
+        let Ok(mut s) = state.lock() else {
+            return false;
+        };
+        if !s.ensure_sleep_mode_hard_off_default(node_id) {
+            return false;
+        }
+        let configs = s.mode_configs();
+        let runtimes = s
+            .hubs
+            .values()
+            .filter_map(|hub| hub.runtime.clone())
+            .collect::<Vec<_>>();
+        persist_settings_locked(&s);
+        (configs, runtimes)
+    };
+
+    propagate_mode_configs_to_runtimes(runtimes, configs);
+    true
+}
+
 pub(crate) fn sync_active_mode_from_runtime(
     state: &SharedState,
     runtime: &Arc<dyn rhythm_core::RuntimeHandle>,
@@ -8033,18 +8071,25 @@ pub fn do_room_set(
         .ok_or_else(|| anyhow::anyhow!("No hub registry available for {}", hub_key))?;
 
     // Dedup: skip write if the targeted registry already matches.
-    let room_unchanged = registry
+    let (room_unchanged, room_has_new_light_device_ids) = registry
         .lock()
         .ok()
         .map(|reg| {
-            reg.room_matches(
+            let room_unchanged = reg.room_matches(
                 &params.id,
                 &params.name,
                 &params.grouped_light_id,
                 &params.device_ids,
-            )
+            );
+            let existing_device_ids: HashSet<String> =
+                reg.devices_for_room(&params.id).into_iter().collect();
+            let room_has_new_light_device_ids = params
+                .device_ids
+                .iter()
+                .any(|device_id| !existing_device_ids.contains(device_id));
+            (room_unchanged, room_has_new_light_device_ids)
         })
-        .unwrap_or(false);
+        .unwrap_or((false, false));
     if room_unchanged {
         if apply_runtime {
             if let Ok(room_state) = build_room_rhythm_state(state, &params.id) {
@@ -8076,9 +8121,9 @@ pub fn do_room_set(
     }
 
     // Determine engine room ID: always use topology room IDs for the engine.
-    let engine_room_id = {
+    let (engine_room_id, topology_room_created) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.topology.translate_or_create(
+        s.topology.translate_or_create_with_status(
             hub_key,
             &params.id,
             &params.name,
@@ -8086,6 +8131,9 @@ pub fn do_room_set(
             &params.device_ids,
         )
     };
+    if topology_room_created || room_has_new_light_device_ids {
+        ensure_sleep_mode_hard_off_default(state, &engine_room_id);
+    }
 
     if !apply_runtime {
         if persist {
@@ -11257,6 +11305,14 @@ pub fn do_canonical_assign_room(
     let was_topology_standalone = s.topology.device_parent_room_id(device_id).is_none();
     let assigning_standalone_light_child =
         room_id.is_some() && was_topology_standalone && matches!(&device_type, DeviceType::Light);
+    let sleep_default_node_to_seed = if matches!(&device_type, DeviceType::Light) {
+        room_id
+            .filter(|_| assigning_standalone_light_child)
+            .or_else(|| room_id.is_none().then_some(device_id))
+            .map(str::to_string)
+    } else {
+        None
+    };
     let old_room_id = s
         .topology
         .device_parent_room_id(device_id)
@@ -11368,6 +11424,9 @@ pub fn do_canonical_assign_room(
     }
 
     persist_registry(state);
+    if let Some(node_id) = sleep_default_node_to_seed.as_deref() {
+        ensure_sleep_mode_hard_off_default(state, node_id);
+    }
     reconcile_runtime_from_state(state)?;
     if assigning_standalone_light_child {
         clear_runtime_node_off_flags(state, device_id)?;

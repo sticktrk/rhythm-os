@@ -1898,11 +1898,31 @@ impl RoomTopologyStore {
         control_id: &str,
         light_device_ids: &[String],
     ) -> String {
+        self.translate_or_create_with_status(
+            hub_key,
+            hub_room_id,
+            room_name,
+            control_id,
+            light_device_ids,
+        )
+        .0
+    }
+
+    /// Like [`translate_or_create`], but reports whether a new Rhythm room was
+    /// created.
+    pub fn translate_or_create_with_status(
+        &mut self,
+        hub_key: &HubKey,
+        hub_room_id: &str,
+        room_name: &str,
+        control_id: &str,
+        light_device_ids: &[String],
+    ) -> (String, bool) {
         let index_key = (hub_key.to_string(), hub_room_id.to_string());
 
         // Rule 1: Already mapped — return existing topology room ID.
         if let Some(rhythm_room_id) = self.hub_room_index.get(&index_key) {
-            return rhythm_room_id.clone();
+            return (rhythm_room_id.clone(), false);
         }
 
         // Rule 2a: Check for a previously-approved binding.
@@ -1925,7 +1945,7 @@ impl RoomTopologyStore {
                     "translate_or_create: re-applied approved binding '{}' → '{}'",
                     hub_room_id, target_id
                 );
-                return target_id;
+                return (target_id, false);
             }
             // Target was deleted — fall through to create new
         }
@@ -1948,7 +1968,7 @@ impl RoomTopologyStore {
             "translate_or_create: created room '{}' ({}) for hub room '{}'",
             room_name, rhythm_room_id, hub_room_id
         );
-        rhythm_room_id
+        (rhythm_room_id, true)
     }
 
     fn light_device_endpoint_route(

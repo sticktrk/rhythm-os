@@ -3,6 +3,7 @@
 #[path = "common/mod.rs"]
 mod harness;
 
+use rhythm_core::{RhythmMode, RoomModeState};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ExternalLightHubIntegration, HubType};
 
@@ -31,8 +32,21 @@ fn scenario_pair_queues_unassigned_device() {
         .find_by_native_id(&hub_key, "matter-100")
         .expect("paired Matter device should be in canonical registry");
     let canonical_id = canonical.id.clone();
+    let sleep_config = state
+        .mode_configs()
+        .into_iter()
+        .find(|config| config.mode == RhythmMode::Sleep)
+        .expect("sleep mode config should exist");
 
     assert!(canonical.room_id.is_none());
+    assert!(
+        sleep_config
+            .room_defaults
+            .iter()
+            .any(|default| default.room_id == canonical_id
+                && default.state == RoomModeState::HardOff),
+        "paired roomless Matter devices should default off in Sleep mode"
+    );
     assert_eq!(
         canonical
             .endpoint_by_native_id("matter-100")

@@ -3,6 +3,7 @@
 #[path = "common/mod.rs"]
 mod harness;
 
+use rhythm_core::{RhythmMode, RoomModeState};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::HubType;
 
@@ -28,6 +29,19 @@ fn scenario_sync_imports_roomless_commissioned_device() {
     assert_eq!(canonical.model.as_deref(), Some("Lamp"));
     assert!(canonical.room_id.is_none());
     let canonical_id = canonical.id.clone();
+    let sleep_config = state
+        .mode_configs()
+        .into_iter()
+        .find(|config| config.mode == RhythmMode::Sleep)
+        .expect("sleep mode config should exist");
+    assert!(
+        sleep_config
+            .room_defaults
+            .iter()
+            .any(|default| default.room_id == canonical_id
+                && default.state == RoomModeState::HardOff),
+        "synced roomless Matter devices should default off in Sleep mode"
+    );
     assert_eq!(
         state.canonical_registry.triage().pending_unassigned_count(),
         1
