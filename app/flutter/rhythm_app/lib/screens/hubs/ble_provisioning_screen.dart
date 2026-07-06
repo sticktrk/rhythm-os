@@ -24,6 +24,7 @@ enum _ProvisioningPhase {
   connecting,
   credentials,
   provisioning,
+  updating,
   success,
   error,
 }
@@ -87,6 +88,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   BleDevice? _selectedDevice;
   BleDeviceInfo? _deviceInfo;
   String? _provisionedIp;
+  String? _provisioningStatusMessage;
   String? _errorMessage;
   String? _wifiErrorMessage;
   bool _obscurePassword = true;
@@ -142,6 +144,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _selectedDevice = null;
         _deviceInfo = null;
         _provisionedIp = null;
+        _provisioningStatusMessage = null;
         _hasAttemptedScan = false;
       });
       final initialDevice = widget.initialDevice;
@@ -304,6 +307,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
+      _provisioningStatusMessage = null;
       _hasAttemptedScan = true;
     });
 
@@ -448,10 +452,15 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _errorMessage = null;
       _wifiErrorMessage = null;
       _provisionedIp = null;
+      _provisioningStatusMessage = null;
     });
 
     try {
-      final result = await _bleService.sendWifiCredentials(ssid, password);
+      final result = await _bleService.sendWifiCredentials(
+        ssid,
+        password,
+        onStatus: _handleProvisioningStatus,
+      );
       final ip = result.ip;
       if (!mounted) return;
 
@@ -459,16 +468,21 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _provisionedIp = ip;
       });
 
-      final online = await _waitForServerHealth(ip);
+      final online = result.restartPending
+          ? await _waitForServerRestartAndHealth(ip)
+          : await _waitForServerHealth(ip);
       if (!mounted) return;
       if (!online) {
         AnalyticsService().logEvent('ble_provisioning_failed', {
-          'stage': 'health_timeout',
+          'stage': result.restartPending
+              ? 'post_update_health_timeout'
+              : 'health_timeout',
         });
         setState(() {
           _phase = _ProvisioningPhase.error;
-          _errorMessage =
-              'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
+          _errorMessage = result.restartPending
+              ? 'Your Rhythm Box installed an update but did not come back online in time. Make sure you\'re on the same network and try again.'
+              : 'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
         });
         return;
       }
@@ -477,6 +491,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ip,
         result.ownerToken,
       );
+      if (!mounted) return;
+
       await _persistServerHub(ip, ownerToken);
       if (!mounted) return;
 
@@ -524,12 +540,65 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     final deadline = DateTime.now().add(const Duration(seconds: 30));
 
     while (DateTime.now().isBefore(deadline)) {
-      if (await client.healthCheck()) {
+      if (await _serverIsHealthy(client)) {
         return true;
       }
       await Future<void>.delayed(const Duration(seconds: 1));
     }
     return false;
+  }
+
+  Future<bool> _serverIsHealthy(RhythmDiagnosticsApi client) async {
+    try {
+      return await client.healthCheck();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _waitForServerRestartAndHealth(String ip) async {
+    final client = RhythmDiagnosticsApi(host: ip, port: 54448);
+    final offlineDeadline = DateTime.now().add(const Duration(seconds: 90));
+    var sawOffline = false;
+
+    while (DateTime.now().isBefore(offlineDeadline)) {
+      if (!await _serverIsHealthy(client)) {
+        sawOffline = true;
+        break;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+
+    if (!sawOffline) return false;
+
+    final onlineDeadline = DateTime.now().add(const Duration(minutes: 5));
+    while (DateTime.now().isBefore(onlineDeadline)) {
+      if (await _serverIsHealthy(client)) {
+        return true;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    return false;
+  }
+
+  void _handleProvisioningStatus(ProvisioningStatusMessage status) {
+    if (!mounted) return;
+    if (status.ip != null && status.ip!.isNotEmpty) {
+      _provisionedIp = status.ip;
+    }
+    if (status.status == 'updating' || status.status == 'restarting') {
+      final message = status.message?.trim();
+      setState(() {
+        _phase = _ProvisioningPhase.updating;
+        _provisioningStatusMessage =
+            message == null || message.isEmpty ? null : message;
+      });
+    } else if (status.status == 'connecting') {
+      setState(() {
+        _phase = _ProvisioningPhase.provisioning;
+        _provisioningStatusMessage = null;
+      });
+    }
   }
 
   Future<String?> _resolveOwnerTokenAfterProvisioning(
@@ -706,6 +775,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
+      _provisioningStatusMessage = null;
       _hasAttemptedScan = false;
     });
   }
@@ -796,6 +866,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _ProvisioningPhase.credentials => 'Connect to Wi-Fi',
       _ProvisioningPhase.provisioning =>
         _provisionedIp == null ? 'Joining Wi-Fi' : 'Almost there',
+      _ProvisioningPhase.updating => 'Updating your Rhythm Box',
       _ProvisioningPhase.success => 'You\'re all set',
       _ProvisioningPhase.error => 'Something went wrong',
     };
@@ -815,6 +886,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _ProvisioningPhase.provisioning => _provisionedIp == null
           ? 'Your device may show a pairing prompt — go ahead and accept it.'
           : 'Your Rhythm Box joined Wi-Fi at $_provisionedIp. Waiting for it to come online.',
+      _ProvisioningPhase.updating =>
+        'Installing the latest stable update so your box is ready to go.',
       _ProvisioningPhase.success =>
         'Your Rhythm Box is online and ready to go.',
       _ProvisioningPhase.error => 'You can try again or go back.',
@@ -857,6 +930,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
           _provisionedIp == null
               ? 'Connecting to your Wi-Fi network...'
               : 'Joined at $_provisionedIp — finishing setup...',
+        ),
+      _ProvisioningPhase.updating => _buildProgressCard(
+          _provisioningStatusMessage ?? 'Updating to the latest version...',
         ),
       _ProvisioningPhase.success => _buildSuccessBody(),
       _ProvisioningPhase.error => _buildErrorBody(),

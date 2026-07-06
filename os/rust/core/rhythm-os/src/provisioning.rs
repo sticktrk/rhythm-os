@@ -79,6 +79,15 @@ pub fn provisioning_device_name(target: &str, id: &str) -> String {
 pub enum ProvisioningStatus {
     Waiting,
     Connecting,
+    Updating {
+        ip: String,
+        ota_stage: String,
+        message: String,
+    },
+    Restarting {
+        ip: String,
+        message: String,
+    },
     AuthToken {
         owner_token: String,
     },
@@ -100,6 +109,10 @@ struct ProvisioningStatusPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     ip: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ota_stage: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     owner_token: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
@@ -110,6 +123,8 @@ impl ProvisioningStatus {
         match self {
             Self::Waiting => "waiting",
             Self::Connecting => "connecting",
+            Self::Updating { .. } => "updating",
+            Self::Restarting { .. } => "restarting",
             Self::AuthToken { .. } => "auth_token",
             Self::Connected { .. } => "connected",
             Self::WifiFailed { .. } => "wifi_failed",
@@ -122,30 +137,60 @@ impl ProvisioningStatus {
             Self::Waiting => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                ota_stage: None,
+                message: None,
                 owner_token: None,
                 error: None,
             },
             Self::Connecting => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                ota_stage: None,
+                message: None,
+                owner_token: None,
+                error: None,
+            },
+            Self::Updating {
+                ip,
+                ota_stage,
+                message,
+            } => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: Some(ip),
+                ota_stage: Some(ota_stage),
+                message: Some(message),
+                owner_token: None,
+                error: None,
+            },
+            Self::Restarting { ip, message } => ProvisioningStatusPayload {
+                status: self.code(),
+                ip: Some(ip),
+                ota_stage: Some("restarting"),
+                message: Some(message),
                 owner_token: None,
                 error: None,
             },
             Self::AuthToken { owner_token } => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                ota_stage: None,
+                message: None,
                 owner_token: Some(owner_token),
                 error: None,
             },
             Self::Connected { ip, owner_token } => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: Some(ip),
+                ota_stage: None,
+                message: None,
                 owner_token: owner_token.as_deref(),
                 error: None,
             },
             Self::WifiFailed { error } | Self::Failed { error } => ProvisioningStatusPayload {
                 status: self.code(),
                 ip: None,
+                ota_stage: None,
+                message: None,
                 owner_token: None,
                 error: Some(error),
             },
@@ -166,6 +211,15 @@ pub enum ProvisioningEvent {
 /// Result of a hardware-specific network verification attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisioningConnectResult {
+    Updating {
+        ip: String,
+        ota_stage: String,
+        message: String,
+    },
+    Restarting {
+        ip: String,
+        message: String,
+    },
     Connected {
         ip: String,
         owner_token: Option<String>,
@@ -225,6 +279,7 @@ impl Default for ProvisioningSessionConfig {
 struct PendingConnect {
     creds: WifiCredentials,
     deadline: Instant,
+    awaiting_post_wifi_update: bool,
 }
 
 /// Run a full provisioning session using a target-specific frontend/backend pair.
@@ -265,6 +320,7 @@ where
                             pending = Some(PendingConnect {
                                 creds,
                                 deadline: Instant::now() + config.connect_timeout,
+                                awaiting_post_wifi_update: false,
                             });
                         }
                     }
@@ -289,9 +345,30 @@ where
             }
 
             let mut clear_pending = false;
-            if let Some(active) = pending.as_ref() {
+            if let Some(active) = pending.as_mut() {
                 if let Some(result) = backend.poll_result(Duration::from_millis(0))? {
                     match result {
+                        ProvisioningConnectResult::Updating {
+                            ip,
+                            ota_stage,
+                            message,
+                        } => {
+                            active.awaiting_post_wifi_update = true;
+                            active.deadline = session_deadline
+                                .unwrap_or_else(|| Instant::now() + Duration::from_secs(30 * 60));
+                            frontend.publish_status(&ProvisioningStatus::Updating {
+                                ip,
+                                ota_stage,
+                                message,
+                            })?;
+                        }
+                        ProvisioningConnectResult::Restarting { ip, message } => {
+                            frontend
+                                .publish_status(&ProvisioningStatus::Restarting { ip, message })?;
+                            std::thread::sleep(config.success_grace_period);
+                            frontend.stop()?;
+                            return Ok(active.creds.clone());
+                        }
                         ProvisioningConnectResult::Connected { ip, owner_token } => {
                             frontend.publish_status(&ProvisioningStatus::Connected {
                                 ip,
@@ -307,8 +384,13 @@ where
                         }
                     }
                 } else if Instant::now() >= active.deadline {
+                    let error = if active.awaiting_post_wifi_update {
+                        "Post-Wi-Fi update timed out"
+                    } else {
+                        "Connection timed out"
+                    };
                     frontend.publish_status(&ProvisioningStatus::WifiFailed {
-                        error: "Connection timed out".to_string(),
+                        error: error.to_string(),
                     })?;
                     clear_pending = true;
                 }
@@ -463,6 +545,53 @@ mod tests {
                 ProvisioningStatus::Connected {
                     ip: "192.168.1.10".to_string(),
                     owner_token: Some("owner-token".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_session_reports_update_progress_before_restart() {
+        let creds = WifiCredentials {
+            ssid: "wifi".to_string(),
+            password: "secret".to_string(),
+        };
+        let mut frontend = FakeFrontend::new(vec![ProvisioningEvent::Credentials(creds.clone())]);
+        let mut backend = FakeBackend::new(vec![
+            Some(ProvisioningConnectResult::Updating {
+                ip: "192.168.1.10".to_string(),
+                ota_stage: "downloading".to_string(),
+                message: "Downloading update".to_string(),
+            }),
+            Some(ProvisioningConnectResult::Restarting {
+                ip: "192.168.1.10".to_string(),
+                message: "Updated, restarting".to_string(),
+            }),
+        ]);
+
+        let config = ProvisioningSessionConfig {
+            success_grace_period: Duration::from_millis(0),
+            ..Default::default()
+        };
+
+        let result =
+            run_provisioning_session(&mut frontend, &mut backend, &device_info(), &config).unwrap();
+
+        assert_eq!(result, creds);
+        assert!(frontend.stopped);
+        assert_eq!(
+            frontend.statuses,
+            vec![
+                ProvisioningStatus::Waiting,
+                ProvisioningStatus::Connecting,
+                ProvisioningStatus::Updating {
+                    ip: "192.168.1.10".to_string(),
+                    ota_stage: "downloading".to_string(),
+                    message: "Downloading update".to_string(),
+                },
+                ProvisioningStatus::Restarting {
+                    ip: "192.168.1.10".to_string(),
+                    message: "Updated, restarting".to_string(),
                 },
             ]
         );

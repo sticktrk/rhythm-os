@@ -42,10 +42,12 @@ class BleDeviceInfo {
 class BleProvisioningResult {
   final String ip;
   final String? ownerToken;
+  final bool restartPending;
 
   const BleProvisioningResult({
     required this.ip,
     this.ownerToken,
+    this.restartPending = false,
   });
 }
 
@@ -58,26 +60,32 @@ class WifiFailedException implements Exception {
   String toString() => 'WifiFailedException: $message';
 }
 
-@visibleForTesting
 class ProvisioningStatusMessage {
   final String status;
   final String? ip;
+  final String? otaStage;
+  final String? message;
   final String? ownerToken;
   final String? error;
 
   const ProvisioningStatusMessage({
     required this.status,
     this.ip,
+    this.otaStage,
+    this.message,
     this.ownerToken,
     this.error,
   });
 
   bool get isTerminal =>
-      status == 'connected' || status == 'wifi_failed' || status == 'failed';
+      status == 'connected' ||
+      status == 'restarting' ||
+      status == 'wifi_failed' ||
+      status == 'failed';
 }
 
 class BleProvisioningService {
-  static const _provisioningTimeout = Duration(seconds: 30);
+  static const _provisioningTimeout = Duration(minutes: 35);
   static const _authTokenTimeout = Duration(seconds: 20);
   static const _statusPollInterval = Duration(milliseconds: 500);
 
@@ -360,8 +368,9 @@ class BleProvisioningService {
 
   Future<BleProvisioningResult> sendWifiCredentials(
     String ssid,
-    String password,
-  ) async {
+    String password, {
+    void Function(ProvisioningStatusMessage status)? onStatus,
+  }) async {
     final wifiCommandChar = _wifiCommandChar;
     final statusChar = _statusChar;
     if (wifiCommandChar == null || statusChar == null) {
@@ -383,6 +392,7 @@ class BleProvisioningService {
       ),
       statusUpdates: statusChar.onValueReceived.map(_parseStatus),
       readStatus: () => _readStatus(statusChar),
+      onStatus: onStatus,
       timeout: _provisioningTimeout,
       pollInterval: _statusPollInterval,
     );
@@ -399,6 +409,13 @@ class BleProvisioningService {
           ownerToken:
               ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
         );
+      case 'restarting':
+        final ip = status.ip;
+        if (ip == null || ip.isEmpty) {
+          throw StateError(
+              'Update restart status did not include an IP address');
+        }
+        return BleProvisioningResult(ip: ip, restartPending: true);
       case 'wifi_failed':
         throw WifiFailedException(status.error ?? 'Wi-Fi connection failed');
       case 'failed':
@@ -414,6 +431,7 @@ class BleProvisioningService {
     required Future<void> Function() writePayload,
     required Stream<ProvisioningStatusMessage> statusUpdates,
     required Future<ProvisioningStatusMessage> Function() readStatus,
+    void Function(ProvisioningStatusMessage status)? onStatus,
     Duration timeout = _provisioningTimeout,
     Duration pollInterval = _statusPollInterval,
   }) async {
@@ -424,6 +442,7 @@ class BleProvisioningService {
       readStatus: readStatus,
       isMatch: (update) => update.isTerminal,
       timeoutMessage: 'Timed out waiting for Wi-Fi connection',
+      onStatus: onStatus,
       timeout: timeout,
       pollInterval: pollInterval,
     );
@@ -437,6 +456,7 @@ class BleProvisioningService {
     required Future<ProvisioningStatusMessage> Function() readStatus,
     required bool Function(ProvisioningStatusMessage update) isMatch,
     required String timeoutMessage,
+    void Function(ProvisioningStatusMessage status)? onStatus,
     Duration timeout = _provisioningTimeout,
     Duration pollInterval = _statusPollInterval,
   }) async {
@@ -445,7 +465,14 @@ class BleProvisioningService {
 
     try {
       await enableNotifications();
-      notificationStatus = statusUpdates.where(isMatch).first.timeout(timeout);
+      notificationStatus = statusUpdates
+          .map((update) {
+            onStatus?.call(update);
+            return update;
+          })
+          .where(isMatch)
+          .first
+          .timeout(timeout);
     } catch (error) {
       debugPrint(
         '[BLE] status notifications unavailable; falling back to polling: '
@@ -458,6 +485,7 @@ class BleProvisioningService {
     final pollingStatus = _pollMatchingStatus(
       readStatus: readStatus,
       isMatch: isMatch,
+      onStatus: onStatus,
       deadline: deadline,
       pollInterval: pollInterval,
     );
@@ -481,11 +509,13 @@ class BleProvisioningService {
   static Future<ProvisioningStatusMessage> _pollMatchingStatus({
     required Future<ProvisioningStatusMessage> Function() readStatus,
     required bool Function(ProvisioningStatusMessage update) isMatch,
+    void Function(ProvisioningStatusMessage status)? onStatus,
     required DateTime deadline,
     required Duration pollInterval,
   }) async {
     while (DateTime.now().isBefore(deadline)) {
       final status = await readStatus();
+      onStatus?.call(status);
       if (isMatch(status)) {
         return status;
       }
@@ -561,6 +591,8 @@ class BleProvisioningService {
     return ProvisioningStatusMessage(
       status: status,
       ip: jsonMap['ip'] as String?,
+      otaStage: jsonMap['ota_stage'] as String?,
+      message: jsonMap['message'] as String?,
       ownerToken: jsonMap['owner_token'] as String?,
       error: jsonMap['error'] as String?,
     );

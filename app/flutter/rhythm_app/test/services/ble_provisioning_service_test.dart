@@ -73,6 +73,67 @@ void main() {
       expect(status.ip, '192.168.1.153');
     });
 
+    test('treats restart status as terminal after device-driven update',
+        () async {
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: Stream<ProvisioningStatusMessage>.value(
+          const ProvisioningStatusMessage(
+            status: 'restarting',
+            ip: '192.168.1.154',
+            otaStage: 'restarting',
+            message: 'Updated, restarting',
+          ),
+        ),
+        readStatus: () async =>
+            const ProvisioningStatusMessage(status: 'updating'),
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 50),
+      );
+
+      expect(status.status, 'restarting');
+      expect(status.ip, '192.168.1.154');
+      expect(status.message, 'Updated, restarting');
+    });
+
+    test('reports intermediate update statuses to caller', () async {
+      final seen = <String>[];
+
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: Stream<ProvisioningStatusMessage>.fromIterable(const [
+          ProvisioningStatusMessage(
+            status: 'updating',
+            ip: '192.168.1.155',
+            otaStage: 'downloading',
+            message: 'Downloading update',
+          ),
+          ProvisioningStatusMessage(
+            status: 'restarting',
+            ip: '192.168.1.155',
+            otaStage: 'restarting',
+            message: 'Updated, restarting',
+          ),
+        ]),
+        readStatus: () async =>
+            const ProvisioningStatusMessage(status: 'updating'),
+        onStatus: (update) {
+          final message = update.message;
+          if (message != null) seen.add(message);
+        },
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 50),
+      );
+
+      expect(status.status, 'restarting');
+      expect(seen, contains('Downloading update'));
+      expect(seen, contains('Updated, restarting'));
+    });
+
     test('can wait for auth token status', () async {
       var wrotePayload = false;
 

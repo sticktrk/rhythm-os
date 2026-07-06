@@ -20,12 +20,15 @@ use rhythm_os::provisioning::{
     PROVISIONING_AUTH_CMD_UUID, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
     PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
 };
+use rhythm_os::server_event::OtaUpdateStage;
 use rhythm_os::state::SharedState;
 
 use crate::time_sync;
 use crate::wifi;
 
 const FORCE_ENV: &str = "RHYTHM_BLE_PROVISION_ALWAYS";
+const FIRST_WIFI_OTA_CHANNEL: rhythm_server::self_update::UpdateChannel =
+    rhythm_server::self_update::UpdateChannel::Stable;
 
 #[derive(Clone)]
 pub struct ProvisioningManager {
@@ -227,7 +230,7 @@ fn persist_commissioning_wifi_credentials(state: &SharedState, creds: &WifiCrede
 fn run_service(version: &str, state: SharedState) -> Result<WifiCredentials> {
     let identity = build_identity(version);
     let mut frontend = BluezFrontend::new()?;
-    let mut backend = LinuxWifiBackend::new(Duration::from_secs(30), state);
+    let mut backend = LinuxWifiBackend::new(Duration::from_secs(30), state, version.to_string());
     let config = ProvisioningSessionConfig::default();
 
     run_provisioning_session(&mut frontend, &mut backend, &identity, &config)
@@ -239,6 +242,122 @@ fn issue_ble_owner_token(state: &SharedState, label: Option<String>) -> Result<S
         label.or_else(|| Some("BLE local".to_string())),
     )?;
     Ok(issued.token)
+}
+
+enum FirstWifiOtaOutcome {
+    ReadyToClaim,
+    RestartScheduled,
+}
+
+fn run_first_wifi_ota(
+    state: &SharedState,
+    current_version: &str,
+    ip: &str,
+    result_tx: &Sender<(u64, ProvisioningConnectResult)>,
+    attempt: u64,
+) -> Result<FirstWifiOtaOutcome> {
+    send_update_status(
+        result_tx,
+        attempt,
+        ip,
+        OtaUpdateStage::Checking,
+        "Checking for stable update",
+    );
+
+    let info = rhythm_server::self_update::check_blocking(current_version, FIRST_WIFI_OTA_CHANNEL)
+        .map_err(|error| anyhow!("stable update check failed: {error}"))?;
+
+    if !info.update_available {
+        send_update_status(
+            result_tx,
+            attempt,
+            ip,
+            OtaUpdateStage::UpToDate,
+            "Device is already on the latest stable update",
+        );
+        return Ok(FirstWifiOtaOutcome::ReadyToClaim);
+    }
+
+    send_update_status(
+        result_tx,
+        attempt,
+        ip,
+        OtaUpdateStage::UpdateAvailable,
+        format!("Stable update available: v{}", info.latest_version),
+    );
+
+    let previous = info.current_version.clone();
+    let latest = info.latest_version.clone();
+    let progress_tx = result_tx.clone();
+    let progress_ip = ip.to_string();
+    info.apply_blocking_with_progress(move |progress| {
+        send_update_status(
+            &progress_tx,
+            attempt,
+            &progress_ip,
+            progress.stage,
+            progress.message,
+        );
+    })
+    .map_err(|error| anyhow!("stable update apply failed: {error}"))?;
+
+    let message = if previous == latest {
+        format!("Updated OTA bundle for v{latest}; restarting")
+    } else {
+        format!("Updated from v{previous} to v{latest}; restarting")
+    };
+    let _ = result_tx.send((
+        attempt,
+        ProvisioningConnectResult::Restarting {
+            ip: ip.to_string(),
+            message,
+        },
+    ));
+
+    if let Err(error) =
+        rhythm_server::self_update::schedule_post_update_restart_with_best_effort_persist(
+            state.clone(),
+        )
+    {
+        warn!(
+            target: "sys",
+            "First-Wi-Fi OTA restart scheduled, but failed to spawn persistence worker: {error}"
+        );
+    }
+
+    Ok(FirstWifiOtaOutcome::RestartScheduled)
+}
+
+fn send_update_status(
+    result_tx: &Sender<(u64, ProvisioningConnectResult)>,
+    attempt: u64,
+    ip: &str,
+    stage: OtaUpdateStage,
+    message: impl Into<String>,
+) {
+    let _ = result_tx.send((
+        attempt,
+        ProvisioningConnectResult::Updating {
+            ip: ip.to_string(),
+            ota_stage: ota_stage_code(&stage).to_string(),
+            message: message.into(),
+        },
+    ));
+}
+
+fn ota_stage_code(stage: &OtaUpdateStage) -> &'static str {
+    match stage {
+        OtaUpdateStage::Checking => "checking",
+        OtaUpdateStage::UpdateAvailable => "update_available",
+        OtaUpdateStage::UpToDate => "up_to_date",
+        OtaUpdateStage::Downloading => "downloading",
+        OtaUpdateStage::Verifying => "verifying",
+        OtaUpdateStage::Staging => "staging",
+        OtaUpdateStage::Installing => "installing",
+        OtaUpdateStage::Finalizing => "finalizing",
+        OtaUpdateStage::Restarting => "restarting",
+        OtaUpdateStage::Failed => "failed",
+    }
 }
 
 fn build_identity(version: &str) -> ProvisioningDeviceInfo {
@@ -262,6 +381,7 @@ fn build_identity(version: &str) -> ProvisioningDeviceInfo {
 
 struct LinuxWifiBackend {
     state: SharedState,
+    current_version: String,
     result_tx: Sender<(u64, ProvisioningConnectResult)>,
     result_rx: Receiver<(u64, ProvisioningConnectResult)>,
     connect_timeout: Duration,
@@ -270,10 +390,11 @@ struct LinuxWifiBackend {
 }
 
 impl LinuxWifiBackend {
-    fn new(connect_timeout: Duration, state: SharedState) -> Self {
+    fn new(connect_timeout: Duration, state: SharedState, current_version: String) -> Self {
         let (result_tx, result_rx) = mpsc::channel();
         Self {
             state,
+            current_version,
             result_tx,
             result_rx,
             connect_timeout,
@@ -292,11 +413,29 @@ impl ProvisioningBackend for LinuxWifiBackend {
         let result_tx = self.result_tx.clone();
         let timeout = self.connect_timeout;
         let state = self.state.clone();
+        let current_version = self.current_version.clone();
         thread::Builder::new()
             .name(format!("wifi-prov-{}", attempt))
             .spawn(move || {
                 let result = match wifi::connect_with_credentials(&creds, timeout) {
                     Ok(ip) => {
+                        sync_clock_after_wifi_connect();
+
+                        match run_first_wifi_ota(&state, &current_version, &ip, &result_tx, attempt)
+                        {
+                            Ok(FirstWifiOtaOutcome::RestartScheduled) => return,
+                            Ok(FirstWifiOtaOutcome::ReadyToClaim) => {}
+                            Err(e) => {
+                                let _ = result_tx.send((
+                                    attempt,
+                                    ProvisioningConnectResult::Failed {
+                                        error: format!("post-Wi-Fi update failed: {e}"),
+                                    },
+                                ));
+                                return;
+                            }
+                        }
+
                         let owner_token =
                             match issue_ble_owner_token(&state, Some("BLE Wi-Fi".to_string())) {
                                 Ok(token) => Some(token),
@@ -314,7 +453,6 @@ impl ProvisioningBackend for LinuxWifiBackend {
                             attempt,
                             ProvisioningConnectResult::Connected { ip, owner_token },
                         ));
-                        sync_clock_after_wifi_connect();
                         return;
                     }
                     Err(e) => ProvisioningConnectResult::Failed {
@@ -996,7 +1134,7 @@ mod tests {
     #[test]
     fn linux_wifi_backend_poll_result_filters_stale_attempts_and_clears_active_attempt() {
         let state = state();
-        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state);
+        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state, "1.2.3".into());
 
         assert!(backend.poll_result(Duration::ZERO).unwrap().is_none());
 
@@ -1034,7 +1172,7 @@ mod tests {
 
     #[test]
     fn linux_wifi_backend_poll_result_times_out_when_active_attempt_has_no_result() {
-        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state());
+        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state(), "1.2.3".into());
         backend.active_attempt = Some(1);
 
         assert!(backend
@@ -1047,7 +1185,7 @@ mod tests {
     #[test]
     fn linux_wifi_backend_can_issue_local_owner_token() {
         let state = state();
-        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state);
+        let mut backend = LinuxWifiBackend::new(Duration::from_millis(1), state, "1.2.3".into());
 
         let token = backend
             .issue_local_owner_token(Some("BLE test".to_string()))
