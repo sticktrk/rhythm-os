@@ -209,6 +209,61 @@ void main() {
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 
+    test('keeps acknowledged on command through stale lock expiry', () {
+      fakeAsync((async) {
+        unawaited(provider.addRoom(
+          const RoomDto(
+            id: 'room-1',
+            name: 'Kitchen',
+            source: RoomSourceDto.matter,
+            deviceIds: ['light-1'],
+            rhythmEnabled: true,
+            disabled: false,
+            lightsOn: false,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+          ),
+        ));
+        async.flushMicrotasks();
+
+        unawaited(provider.applyServerNodeState(
+          'room-1',
+          rhythmEnabled: true,
+          timeOffset: 0,
+          brightnessOffset: 0,
+          state: RoomModeState.hardOff,
+          lightsOn: false,
+        ));
+        async.flushMicrotasks();
+        expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
+
+        unawaited(provider.setRoomLightsOnLocal('room-1', true));
+        provider.setRoomStateLocal('room-1', RoomModeState.active);
+        async.flushMicrotasks();
+        provider.acknowledgeOptimisticNodeState(
+          'room-1',
+          state: RoomModeState.active,
+          lightsOn: true,
+        );
+
+        unawaited(provider.applyServerNodeState(
+          'room-1',
+          rhythmEnabled: true,
+          timeOffset: 0,
+          brightnessOffset: 0,
+          state: RoomModeState.hardOff,
+          lightsOn: false,
+        ));
+        async.flushMicrotasks();
+        expect(provider.getRoomState('room-1'), RoomModeState.active);
+        expect(provider.getDisplayRoomState('room-1'), RoomModeState.active);
+
+        async.elapse(const Duration(seconds: 4));
+        expect(provider.getRoomState('room-1'), RoomModeState.active);
+        expect(provider.getDisplayRoomState('room-1'), RoomModeState.active);
+      });
+    });
+
     test('clears stale transitioning flag after defensive timeout', () {
       fakeAsync((async) {
         unawaited(provider.addRoom(
