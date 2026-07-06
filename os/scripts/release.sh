@@ -431,12 +431,8 @@ upload_rpiz_feed() {
     echo ""
     echo "=== Configuring SSH upload ==="
     setup_upload_ssh
-    manifest_spec="$(fetch_rpiz_manifest "$release_feed")"
-    if [ -n "$manifest_spec" ]; then
-        package_args+=(--previous-rpiz-manifest "$manifest_spec")
-    fi
-    if [ "$release_channel" = "beta" ]; then
-        manifest_spec="$(fetch_rpiz_manifest "rpiz-stable")"
+    if [ "$release_channel" = "stable" ]; then
+        manifest_spec="$(fetch_rpiz_manifest "$release_feed")"
         if [ -n "$manifest_spec" ]; then
             package_args+=(--previous-rpiz-manifest "$manifest_spec")
         fi

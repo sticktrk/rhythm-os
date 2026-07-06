@@ -9,9 +9,10 @@
 #   <output>/<target>[-stable]/latest/sdcard.img.gz         (optional latest alias)
 #   <output>/<target>[-stable]/latest/rootfs.ext2.gz        (optional latest alias)
 #
-# Binary-only rpiz releases reuse the newest rootfs image from supplied
-# previous manifests. Full image entries are published directly only when
-# --image-root is supplied.
+# Binary-only stable rpiz releases reuse the newest rootfs image from supplied
+# previous manifests. Binary-only beta releases stay package-only so current
+# appliances can update even when image OTA is unhealthy. Full image entries are
+# published directly only when --image-root is supplied.
 
 set -euo pipefail
 
@@ -212,7 +213,7 @@ Options:
   --image-root PATH     Optional rpiz image directory to publish alongside the OTA manifest
   --previous-rpiz-manifest PATH
                        Existing rpiz manifest whose images may be carried
-                       forward when this package has no --image-root. Can be
+                       forward for stable packages with no --image-root. Can be
                        repeated. Prefix with rpiz= or rpiz-stable= when PATH
                        does not live under a feed-named directory.
   --dry-run             Print planned outputs without writing files
@@ -426,7 +427,7 @@ for target in $TARGETS; do
             images_json="$images_json${image_entries[$i]}"
         done
         images_json="$images_json]"
-    elif [ "$target" = "rpiz" ] && [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
+    elif [ "$CHANNEL" = "stable" ] && [ "$target" = "rpiz" ] && [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
         carried_images_json="$(select_previous_rpiz_images_json "$feed_target")"
         if [ -n "$carried_images_json" ]; then
             images_json="$carried_images_json"
