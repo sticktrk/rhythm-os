@@ -20,6 +20,7 @@ class SupabaseAuthBackend implements AuthBackend {
 
   SupabaseClient? _client;
   GoogleSignIn get _googleSignIn => GoogleSignIn.instance;
+  static Future<void>? _googleSignInInitialization;
 
   StreamController<AuthUser?>? _authStateController;
   StreamController<AuthEvent>? _authEventController;
@@ -44,6 +45,7 @@ class SupabaseAuthBackend implements AuthBackend {
       anonKey: supabaseAnonKey,
     );
     _client = Supabase.instance.client;
+    await _initializeGoogleSignIn();
 
     // Set up auth state stream
     _authStateController = StreamController<AuthUser?>.broadcast();
@@ -141,15 +143,78 @@ class SupabaseAuthBackend implements AuthBackend {
     return _signInWithGoogleNative();
   }
 
-  // macOS/Web OAuth client credentials (Desktop-type client in Google Cloud Console)
-  static const _webClientId = String.fromEnvironment(
+  // Native mobile Google Sign-In requires a Web OAuth client ID as the
+  // serverClientId. Keep the older env name as a fallback for existing builds.
+  static const _googleSignInServerClientId = String.fromEnvironment(
+    'GOOGLE_SIGN_IN_SERVER_CLIENT_ID',
+    defaultValue: '',
+  );
+  static const _legacyGoogleSignInServerClientId = String.fromEnvironment(
     'GOOGLE_WEB_OAUTH_CLIENT_ID',
     defaultValue: '',
   );
+
+  // macOS manual OAuth uses an installed-app/Desktop OAuth client because it
+  // relies on loopback redirects with an ephemeral local port.
+  static const _googleDesktopOAuthClientId = String.fromEnvironment(
+    'GOOGLE_DESKTOP_OAUTH_CLIENT_ID',
+    defaultValue: _legacyGoogleSignInServerClientId,
+  );
   static const _webClientSecret = String.fromEnvironment(
+    'GOOGLE_DESKTOP_OAUTH_SECRET',
+    defaultValue: _legacyGoogleDesktopOAuthSecret,
+  );
+  static const _legacyGoogleDesktopOAuthSecret = String.fromEnvironment(
     'GOOGLE_WEB_OAUTH_SECRET',
     defaultValue: '',
   );
+
+  @visibleForTesting
+  static ({String? clientId, String? serverClientId})
+      googleSignInConfigurationForPlatform({
+    required bool isWeb,
+    required bool isAndroid,
+    required bool isIOS,
+    required bool isMacOS,
+    String googleSignInServerClientId = _googleSignInServerClientId,
+    String legacyGoogleSignInServerClientId = _legacyGoogleSignInServerClientId,
+  }) {
+    if (isWeb || isMacOS || (!isAndroid && !isIOS)) {
+      return (clientId: null, serverClientId: null);
+    }
+
+    final serverClientId = googleSignInServerClientId.trim().isNotEmpty
+        ? googleSignInServerClientId.trim()
+        : legacyGoogleSignInServerClientId.trim();
+    return (
+      clientId: null,
+      serverClientId: serverClientId.isEmpty ? null : serverClientId,
+    );
+  }
+
+  Future<void> _initializeGoogleSignIn() async {
+    final shouldInitializeNative =
+        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    if (!shouldInitializeNative) return;
+
+    final config = googleSignInConfigurationForPlatform(
+      isWeb: kIsWeb,
+      isAndroid: !kIsWeb && Platform.isAndroid,
+      isIOS: !kIsWeb && Platform.isIOS,
+      isMacOS: !kIsWeb && Platform.isMacOS,
+    );
+
+    try {
+      _googleSignInInitialization ??= _googleSignIn.initialize(
+        clientId: config.clientId,
+        serverClientId: config.serverClientId,
+      );
+      await _googleSignInInitialization;
+    } catch (_) {
+      _googleSignInInitialization = null;
+      rethrow;
+    }
+  }
 
   /// Manual OAuth flow for macOS using local HTTP server callback.
   /// This handles the token exchange with the Desktop client secret,
@@ -158,10 +223,10 @@ class SupabaseAuthBackend implements AuthBackend {
   /// Google Desktop OAuth clients automatically allow loopback redirects
   /// on any port, so we use an ephemeral port for security.
   Future<GoogleSignInResult> _signInWithGoogleOAuth() async {
-    if (_webClientId.isEmpty || _webClientSecret.isEmpty) {
+    if (_googleDesktopOAuthClientId.isEmpty || _webClientSecret.isEmpty) {
       throw Exception(
         'Google OAuth credentials not configured. '
-        'Set GOOGLE_WEB_OAUTH_CLIENT_ID and GOOGLE_WEB_OAUTH_SECRET in .env',
+        'Set GOOGLE_DESKTOP_OAUTH_CLIENT_ID and GOOGLE_DESKTOP_OAUTH_SECRET in .env',
       );
     }
 
@@ -182,7 +247,7 @@ class SupabaseAuthBackend implements AuthBackend {
     try {
       // Build Google OAuth URL
       final authUrl = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', {
-        'client_id': _webClientId,
+        'client_id': _googleDesktopOAuthClientId,
         'redirect_uri': redirectUri,
         'response_type': 'code',
         'scope': 'openid email profile',
@@ -239,7 +304,7 @@ class SupabaseAuthBackend implements AuthBackend {
         Uri.https('oauth2.googleapis.com', '/token'),
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: {
-          'client_id': _webClientId,
+          'client_id': _googleDesktopOAuthClientId,
           'client_secret': _webClientSecret,
           'code': authCode,
           'code_verifier': codeVerifier,
@@ -335,6 +400,14 @@ class SupabaseAuthBackend implements AuthBackend {
         if (e.code == GoogleSignInExceptionCode.canceled) {
           return const GoogleSignInResult();
         }
+        if (e.code == GoogleSignInExceptionCode.clientConfigurationError) {
+          throw AuthException(
+            'Google Sign-In is not configured for this app build. '
+            'Check GOOGLE_SIGN_IN_SERVER_CLIENT_ID, the Android package '
+            'name, and the signing SHA in Google Cloud.',
+            code: 'google_sign_in_configuration_error',
+          );
+        }
         rethrow;
       }
 
@@ -345,7 +418,12 @@ class SupabaseAuthBackend implements AuthBackend {
       final idToken = googleAuth.idToken;
 
       if (idToken == null) {
-        throw Exception('No ID token received from Google');
+        throw const AuthException(
+          'Google Sign-In did not return an ID token. '
+          'Configure GOOGLE_SIGN_IN_SERVER_CLIENT_ID as the Google web OAuth '
+          'server client ID for this build.',
+          code: 'google_sign_in_missing_id_token',
+        );
       }
 
       // Sign in with Supabase using ID token

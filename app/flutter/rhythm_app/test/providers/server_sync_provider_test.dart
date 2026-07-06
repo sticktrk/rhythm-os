@@ -4144,6 +4144,60 @@ void main() {
     expect(provider.standbyEnabledForNode('room-1'), isTrue);
   });
 
+  testWidgets('room standby preference ignores stale hello after local change',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    RhythmHello helloWithStandby(bool standbyEnabled) => RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'room-1',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'hub_types': ['matter'],
+              'device_ids': ['light-1'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'standby_enabled': standbyEnabled,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+            },
+          ],
+          'location': const <String, dynamic>{},
+        });
+
+    connection.emitHello(helloWithStandby(false));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(provider.standbyEnabledForNode('room-1'), isFalse);
+
+    provider.setNodeStandbyEnabledLocal('room-1', true);
+    expect(provider.standbyEnabledForNode('room-1'), isTrue);
+
+    connection.emitHello(helloWithStandby(false));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(provider.standbyEnabledForNode('room-1'), isTrue);
+
+    connection.emitHello(helloWithStandby(true));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(provider.standbyEnabledForNode('room-1'), isTrue);
+
+    connection.emitHello(helloWithStandby(false));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(provider.standbyEnabledForNode('room-1'), isFalse);
+  });
+
   testWidgets('room settings hides motion timeout rows without motion behavior',
       (tester) async {
     _registerWidgetCleanup(tester);

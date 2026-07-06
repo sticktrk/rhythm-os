@@ -399,6 +399,13 @@ class AuthProvider extends ChangeNotifier {
         lowerMessage.contains('too many requests')) {
       return 'Too many attempts. Please try again later.';
     }
+    if (lowerMessage.contains('google sign-in is not configured') ||
+        lowerMessage.contains('google sign-in did not return an id token') ||
+        lowerMessage.contains('google_sign_in_configuration_error') ||
+        lowerMessage.contains('google_sign_in_missing_id_token') ||
+        lowerMessage.contains('serverclientid')) {
+      return 'Google Sign-In is not configured for this app build. Please update the app or contact support.';
+    }
 
     return 'An error occurred. Please try again.';
   }

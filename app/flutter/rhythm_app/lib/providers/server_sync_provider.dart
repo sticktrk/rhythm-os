@@ -160,6 +160,17 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Cached room summaries derived from hello/topology for room-centric UI.
   List<RhythmRoom> _helloRooms = [];
 
+  /// Per-node optimistic locks for the Off/Dim behavior preference.
+  ///
+  /// The server can emit one stale hello immediately after the preference write,
+  /// which otherwise makes the room detail switch jump back before the confirmed
+  /// value arrives.
+  final Map<String, DateTime> _standbyEnabledLockedUntil = {};
+  final Map<String, bool> _optimisticStandbyEnabled = {};
+  final Map<String, bool> _suppressedStandbyEnabled = {};
+  final Map<String, Timer> _standbyEnabledLockTimers = {};
+  static const Duration _standbyEnabledLockDuration = Duration(seconds: 3);
+
   /// Raw topology graph from `/api/topology/nodes`.
   List<RhythmTopologyNode> _topologyNodes = [];
 
@@ -834,11 +845,25 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void setNodeStandbyEnabledLocal(String nodeId, bool enabled) {
+    final lockedUntil = DateTime.now().add(_standbyEnabledLockDuration);
+    _standbyEnabledLockedUntil[nodeId] = lockedUntil;
+    _optimisticStandbyEnabled[nodeId] = enabled;
+    _suppressedStandbyEnabled.remove(nodeId);
+
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 || _helloNodes[index].standbyEnabled == enabled) return;
 
-    final previous = _helloNodes[index];
-    _helloNodes[index] = RhythmRoom(
+    _helloNodes[index] =
+        _copyNodeWithStandbyEnabled(_helloNodes[index], enabled);
+    _helloRooms = _buildRoomSummaries();
+    notifyListeners();
+  }
+
+  RhythmRoom _copyNodeWithStandbyEnabled(
+    RhythmRoom previous,
+    bool enabled,
+  ) {
+    return RhythmRoom(
       id: previous.id,
       name: previous.name,
       kind: previous.kind,
@@ -872,8 +897,99 @@ class ServerSyncProvider extends ChangeNotifier {
       timeoutSecs: previous.timeoutSecs,
       warningActive: previous.warningActive,
     );
-    _helloRooms = _buildRoomSummaries();
-    notifyListeners();
+  }
+
+  bool _standbyEnabledFromIncoming(String nodeId, bool incoming) {
+    final optimistic = _optimisticStandbyEnabled[nodeId];
+    final lockedUntil = _standbyEnabledLockedUntil[nodeId];
+    if (optimistic == null || lockedUntil == null) {
+      _suppressedStandbyEnabled.remove(nodeId);
+      return incoming;
+    }
+
+    final now = DateTime.now();
+    if (!now.isBefore(lockedUntil)) {
+      _standbyEnabledLockedUntil.remove(nodeId);
+      _optimisticStandbyEnabled.remove(nodeId);
+      _suppressedStandbyEnabled.remove(nodeId);
+      _standbyEnabledLockTimers.remove(nodeId)?.cancel();
+      return incoming;
+    }
+
+    if (incoming == optimistic) {
+      _clearStandbyEnabledOptimisticState(nodeId);
+      return incoming;
+    }
+
+    _suppressedStandbyEnabled[nodeId] = incoming;
+    _armStandbyEnabledLockExpiry(nodeId, lockedUntil);
+    return optimistic;
+  }
+
+  List<RhythmRoom> _mergeOptimisticStandbyEnabled(
+    List<RhythmRoom> incomingNodes,
+  ) {
+    var changed = false;
+    final merged = <RhythmRoom>[];
+    for (final node in incomingNodes) {
+      final standbyEnabled =
+          _standbyEnabledFromIncoming(node.id, node.standbyEnabled);
+      if (standbyEnabled == node.standbyEnabled) {
+        merged.add(node);
+      } else {
+        changed = true;
+        merged.add(_copyNodeWithStandbyEnabled(node, standbyEnabled));
+      }
+    }
+    return changed ? merged : incomingNodes;
+  }
+
+  void _armStandbyEnabledLockExpiry(String nodeId, DateTime lockedUntil) {
+    final delay = lockedUntil.difference(DateTime.now()) +
+        const Duration(milliseconds: 50);
+    _standbyEnabledLockTimers[nodeId]?.cancel();
+    _standbyEnabledLockTimers[nodeId] =
+        Timer(delay.isNegative ? Duration.zero : delay, () {
+      _standbyEnabledLockTimers.remove(nodeId);
+
+      final currentLock = _standbyEnabledLockedUntil[nodeId];
+      if (currentLock != null && DateTime.now().isBefore(currentLock)) {
+        _armStandbyEnabledLockExpiry(nodeId, currentLock);
+        return;
+      }
+
+      _standbyEnabledLockedUntil.remove(nodeId);
+      _optimisticStandbyEnabled.remove(nodeId);
+      final suppressed = _suppressedStandbyEnabled.remove(nodeId);
+      if (suppressed == null) return;
+
+      final index = _helloNodes.indexWhere((node) => node.id == nodeId);
+      if (index == -1 || _helloNodes[index].standbyEnabled == suppressed) {
+        return;
+      }
+
+      _helloNodes[index] =
+          _copyNodeWithStandbyEnabled(_helloNodes[index], suppressed);
+      _helloRooms = _buildRoomSummaries();
+      notifyListeners();
+    });
+  }
+
+  void _clearStandbyEnabledOptimisticState(String nodeId) {
+    _standbyEnabledLockedUntil.remove(nodeId);
+    _optimisticStandbyEnabled.remove(nodeId);
+    _suppressedStandbyEnabled.remove(nodeId);
+    _standbyEnabledLockTimers.remove(nodeId)?.cancel();
+  }
+
+  void _clearStandbyEnabledOptimisticStates() {
+    for (final timer in _standbyEnabledLockTimers.values) {
+      timer.cancel();
+    }
+    _standbyEnabledLockTimers.clear();
+    _standbyEnabledLockedUntil.clear();
+    _optimisticStandbyEnabled.clear();
+    _suppressedStandbyEnabled.clear();
   }
 
   RhythmTopologyNode? topologyNodeById(String nodeId) =>
@@ -1798,11 +1914,12 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
+    final helloNodes = _mergeOptimisticStandbyEnabled(hello.nodes);
     debugPrint(
-        'ServerSync: Hello received with ${hello.nodes.length} nodes, version=${hello.version}');
+        'ServerSync: Hello received with ${helloNodes.length} nodes, version=${hello.version}');
     debugPrint('ServerSync: Server active profile: ${hello.activeProfile}');
     debugPrint('ServerSync: Server location: ${hello.location}');
-    for (final r in hello.nodes) {
+    for (final r in helloNodes) {
       debugPrint(
           'ServerSync: Server node "${r.name}" kind=${r.kind.name} rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue} transitioning=${r.transitioning}');
     }
@@ -1844,7 +1961,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _effectiveMotionTimeoutSecs = activeProfileConfig?.motionTimeoutSecs ??
         hello.effectiveMotionTimeoutSecs;
     _review = hello.review;
-    _helloNodes = hello.nodes;
+    _helloNodes = helloNodes;
     _helloRooms = _buildRoomSummaries();
     _lastHubInfos = hello.hubs;
     _capabilities = hello.capabilities;
@@ -1856,7 +1973,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (hello.lastTickEpochMs != null) {
       final lastTick =
           DateTime.fromMillisecondsSinceEpoch(hello.lastTickEpochMs!);
-      for (final room in hello.nodes) {
+      for (final room in helloNodes) {
         if (room.id.isNotEmpty && room.rhythmEnabled) {
           _roomProvider.setLastTickTime(room.id, lastTick);
         }
@@ -1868,15 +1985,15 @@ class ServerSyncProvider extends ChangeNotifier {
     // add rooms (which triggers addRoomsFromSource → onSourceRoomsChanged).
     // If the server has 0 rooms, no event fires, and a stale suppress flag
     // would eat the next real event (e.g. Hue pairing).
-    _suppressNextSourceSync = hello.nodes.isNotEmpty;
+    _suppressNextSourceSync = helloNodes.isNotEmpty;
     try {
       // 1. Accept server nodes as authoritative.
-      _acceptServerNodes(hello.nodes);
+      _acceptServerNodes(helloNodes);
 
       // 2. Reconcile motion sensors — mark rooms that have sensors,
       //    unmark rooms that lost their sensors since last hello
       _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
-      _syncHelloMotionState(hello.nodes);
+      _syncHelloMotionState(helloNodes);
 
       // 3. Accept server config as authoritative, then reconcile location.
       _acceptServerConfig(hello.activeProfile);
@@ -2354,6 +2471,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _activeProfileId = null;
     _helloNodes = [];
     _helloRooms = [];
+    _clearStandbyEnabledOptimisticStates();
     _topologyNodes = [];
     _lastHubInfos = [];
     _capabilities = null;
@@ -3611,6 +3729,10 @@ class ServerSyncProvider extends ChangeNotifier {
     if (index == -1) return false;
 
     final previous = _helloNodes[index];
+    final incomingStandbyEnabled =
+        state.standbyEnabled ?? previous.standbyEnabled;
+    final standbyEnabled =
+        _standbyEnabledFromIncoming(state.nodeId, incomingStandbyEnabled);
     final updated = RhythmRoom(
       id: previous.id,
       name: state.name ?? previous.name,
@@ -3633,7 +3755,7 @@ class ServerSyncProvider extends ChangeNotifier {
       profileSettings: state.profileSettings ?? previous.profileSettings,
       moodEnabled: state.moodEnabled ?? previous.moodEnabled,
       moodActive: state.moodActive ?? previous.moodActive,
-      standbyEnabled: state.standbyEnabled ?? previous.standbyEnabled,
+      standbyEnabled: standbyEnabled,
       standbyActive: state.standbyActive ?? previous.standbyActive,
       lightsOn: state.lightsOn ?? previous.lightsOn,
       brightness: state.brightness ?? previous.brightness,
@@ -3944,6 +4066,7 @@ class ServerSyncProvider extends ChangeNotifier {
       timer.cancel();
     }
     _dispatchFailureExpiryTimers.clear();
+    _clearStandbyEnabledOptimisticStates();
     _hubEventSub?.cancel();
     _sourceChangedSub?.cancel();
     _motionTimerSub?.cancel();
