@@ -2083,7 +2083,8 @@ class ServerSyncProvider extends ChangeNotifier {
   /// (`pending_dispatch=true`), and the SSE clear can beat the HTTP response —
   /// so a response may keep or lower the pending flag but never raise it, or
   /// a stale snapshot re-lights the spinner with nothing left to clear it.
-  void _onRhythmState(RhythmRoomState state, {bool fromActionResponse = false}) {
+  void _onRhythmState(RhythmRoomState state,
+      {bool fromActionResponse = false}) {
     _receivingFromServer = true;
     var helloChanged = false;
     var moodSceneOverrideCleared = false;
@@ -2137,8 +2138,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// signal that a command never physically reached its target — the node's
   /// pending flag still clears and the UI would otherwise read as success.
   void _onDispatchFailure(RhythmDispatchFailure failure) {
-    debugPrint(
-        'ServerSync: dispatch failure node=${failure.nodeId} $failure');
+    debugPrint('ServerSync: dispatch failure node=${failure.nodeId} $failure');
     _recentDispatchFailures[failure.nodeId] = (
       failure: failure,
       receivedAt: DateTime.now(),
@@ -2549,6 +2549,20 @@ class ServerSyncProvider extends ChangeNotifier {
   bool dispatchBrightness(String roomId, int brightness) =>
       dispatchNodeCurveBrightness(roomId, brightness);
 
+  bool? _expectedLightsOnForState(RoomModeState? state) {
+    return switch (state) {
+      null => null,
+      RoomModeState.hardOff => false,
+      RoomModeState.active ||
+      RoomModeState.mood ||
+      RoomModeState.standby ||
+      RoomModeState.idle ||
+      RoomModeState.wake ||
+      RoomModeState.warning =>
+        true,
+    };
+  }
+
   /// Move a node along its active curve to a requested color temperature.
   ///
   /// This deliberately uses the curve-modifier endpoint rather than a one-shot
@@ -2676,6 +2690,11 @@ class ServerSyncProvider extends ChangeNotifier {
       state: state,
       profileSettings: profileSettings,
     );
+    _roomProvider.acknowledgeOptimisticNodeState(
+      nodeId,
+      state: state,
+      lightsOn: _expectedLightsOnForState(state),
+    );
   }
 
   /// Patch per-profile overrides for one node.
@@ -2751,6 +2770,11 @@ class ServerSyncProvider extends ChangeNotifier {
       if (serverState != null) {
         _onRhythmState(serverState, fromActionResponse: true);
       }
+      _roomProvider.acknowledgeOptimisticNodeState(
+        nodeId,
+        state: RoomModeState.active,
+        lightsOn: true,
+      );
       _roomProvider.bumpResetGeneration();
     });
   }

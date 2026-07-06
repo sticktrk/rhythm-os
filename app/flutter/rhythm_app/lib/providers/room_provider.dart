@@ -170,6 +170,8 @@ class RoomProvider extends ChangeNotifier {
   final Map<String, RoomModeState> _suppressedRoomStates = {};
   final Map<String, bool> _suppressedLightsOn = {};
   final Map<String, Timer> _lockExpiryTimers = {};
+  final Map<String, RoomModeState> _acknowledgedRoomStates = {};
+  final Map<String, bool> _acknowledgedLightsOn = {};
 
   /// Per-room mode state from the server, tracked separately from RoomDto.
   final Map<String, RoomModeState> _roomStates = {};
@@ -359,8 +361,39 @@ class RoomProvider extends ChangeNotifier {
     // A fresh optimistic action supersedes whatever the previous lock
     // suppressed — re-applying it now would fight this toggle.
     _suppressedRoomStates.remove(roomId);
+    _acknowledgedRoomStates.remove(roomId);
     _roomStates[roomId] = state;
     notifyListeners();
+  }
+
+  /// Mark an optimistic local command as accepted by the server.
+  ///
+  /// Server responses can still carry stale observed-power snapshots while the
+  /// physical hub command is queued. Once the write is acknowledged, those
+  /// suppressed stale values should not be replayed when the short UI lock
+  /// expires; a later unlocked server observation can still correct the UI.
+  void acknowledgeOptimisticNodeState(
+    String nodeId, {
+    RoomModeState? state,
+    bool? lightsOn,
+  }) {
+    if (state != null) {
+      _acknowledgedRoomStates[nodeId] = state;
+      if (_roomStates[nodeId] == state &&
+          _suppressedRoomStates[nodeId] != state) {
+        _suppressedRoomStates.remove(nodeId);
+      }
+    }
+
+    if (lightsOn != null) {
+      _acknowledgedLightsOn[nodeId] = lightsOn;
+      final room = getRoom(nodeId);
+      if (room != null &&
+          room.lightsOn == lightsOn &&
+          _suppressedLightsOn[nodeId] != lightsOn) {
+        _suppressedLightsOn.remove(nodeId);
+      }
+    }
   }
 
   /// Re-apply server values a lock suppressed once that lock expires.
@@ -368,8 +401,8 @@ class RoomProvider extends ChangeNotifier {
   /// Fires slightly after the latest known expiry; each value re-checks its
   /// own lock so a re-lock in the meantime wins.
   void _armLockExpiryTimer(String roomId, DateTime lockedUntil) {
-    final delay =
-        lockedUntil.difference(DateTime.now()) + const Duration(milliseconds: 50);
+    final delay = lockedUntil.difference(DateTime.now()) +
+        const Duration(milliseconds: 50);
     _lockExpiryTimers[roomId]?.cancel();
     _lockExpiryTimers[roomId] =
         Timer(delay.isNegative ? Duration.zero : delay, () {
@@ -380,7 +413,12 @@ class RoomProvider extends ChangeNotifier {
       final suppressedState = _suppressedRoomStates.remove(roomId);
       if (suppressedState != null) {
         final lock = _roomStateLockedUntil[roomId];
-        if ((lock == null || DateTime.now().isAfter(lock)) &&
+        final acknowledgedState = _acknowledgedRoomStates[roomId];
+        final shouldKeepAcknowledgedState = acknowledgedState != null &&
+            _roomStates[roomId] == acknowledgedState &&
+            suppressedState != acknowledgedState;
+        if (!shouldKeepAcknowledgedState &&
+            (lock == null || DateTime.now().isAfter(lock)) &&
             _roomStates[roomId] != suppressedState) {
           _roomStates[roomId] = suppressedState;
           changed = true;
@@ -391,7 +429,13 @@ class RoomProvider extends ChangeNotifier {
       if (suppressedLights != null) {
         final lock = _lightsOnLockedUntil[roomId];
         final room = getRoom(roomId);
-        if ((lock == null || DateTime.now().isAfter(lock)) &&
+        final acknowledgedLightsOn = _acknowledgedLightsOn[roomId];
+        final shouldKeepAcknowledgedLights = acknowledgedLightsOn != null &&
+            room != null &&
+            room.lightsOn == acknowledgedLightsOn &&
+            suppressedLights != acknowledgedLightsOn;
+        if (!shouldKeepAcknowledgedLights &&
+            (lock == null || DateTime.now().isAfter(lock)) &&
             room != null &&
             room.lightsOn != suppressedLights) {
           _state = room_state.setRoomLightsOn(
@@ -413,6 +457,8 @@ class RoomProvider extends ChangeNotifier {
     _lockExpiryTimers.clear();
     _suppressedRoomStates.clear();
     _suppressedLightsOn.clear();
+    _acknowledgedRoomStates.clear();
+    _acknowledgedLightsOn.clear();
   }
 
   // Display value getters (from server)
@@ -817,6 +863,7 @@ class RoomProvider extends ChangeNotifier {
         roomStateLocked == null || DateTime.now().isAfter(roomStateLocked);
     if (roomStateUnlocked) {
       _suppressedRoomStates.remove(roomId);
+      _acknowledgedRoomStates.remove(roomId);
       if (_roomStates[roomId] != state) {
         _roomStates[roomId] = state;
         changed = true;
@@ -843,6 +890,7 @@ class RoomProvider extends ChangeNotifier {
       final lockedUntil = _lightsOnLockedUntil[roomId];
       if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
         _suppressedLightsOn.remove(roomId);
+        _acknowledgedLightsOn.remove(roomId);
         if (room.lightsOn != lightsOn) {
           _state = room_state.setRoomLightsOn(
               state: _state, roomId: roomId, lightsOn: lightsOn);
@@ -978,6 +1026,7 @@ class RoomProvider extends ChangeNotifier {
     // A fresh optimistic toggle supersedes whatever the previous lock
     // suppressed — re-applying it now would fight this toggle.
     _suppressedLightsOn.remove(roomId);
+    _acknowledgedLightsOn.remove(roomId);
     _state = room_state.setRoomLightsOn(
         state: _state, roomId: roomId, lightsOn: lightsOn);
     await _save();
