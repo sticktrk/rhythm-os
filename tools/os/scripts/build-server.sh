@@ -109,7 +109,10 @@ case "$BUILD_MODE" in
         ;;
 esac
 
-BUILD_VERSION="$("$SCRIPT_DIR/resolve-version.sh" server)"
+# CI sets RHYTHM_BUILD_VERSION explicitly: a release commit can carry both
+# its -beta and -stable tags, making the git-describe-based resolve-version.sh
+# ambiguous. Local builds fall back to the checkout-derived version.
+BUILD_VERSION="${RHYTHM_BUILD_VERSION:-$("$SCRIPT_DIR/resolve-version.sh" server)}"
 
 server_args_include_log_level() {
     local arg

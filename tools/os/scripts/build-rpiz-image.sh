@@ -241,6 +241,9 @@ run_in_docker() {
     if [ -n "${RHYTHM_IMAGE_VERSION:-}" ]; then
         docker_args+=(-e "RHYTHM_IMAGE_VERSION=$RHYTHM_IMAGE_VERSION")
     fi
+    if [ -n "${RHYTHM_BUILD_VERSION:-}" ]; then
+        docker_args+=(-e "RHYTHM_BUILD_VERSION=$RHYTHM_BUILD_VERSION")
+    fi
     if [ -n "${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-}" ]; then
         docker_args+=(-e "RHYTHM_PROD_PAA_TRUST_STORE_PATH=$RHYTHM_PROD_PAA_TRUST_STORE_PATH")
     fi
@@ -344,6 +347,15 @@ if [ -d /opt/rpiz-out ] && [ ! -d "$OUTPUT_DIR/host" ]; then
     else
         echo "Warning: /opt/rpiz-out is present but rsync is missing; Buildroot will rebuild from scratch."
     fi
+fi
+
+# Pin the binaries' self-reported version to the image version when the
+# caller supplied one (CI passes it from the tag name): a release commit can
+# carry both its -beta and -stable tags, so the git-describe fallback inside
+# build-server.sh is ambiguous.
+if [ -n "${RHYTHM_IMAGE_VERSION:-}" ]; then
+    RHYTHM_BUILD_VERSION="${RHYTHM_BUILD_VERSION:-$RHYTHM_IMAGE_VERSION}"
+    export RHYTHM_BUILD_VERSION
 fi
 
 if [ "$SKIP_SERVER_BUILD" = false ]; then
