@@ -17,6 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../os" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# shellcheck source=lib/version.sh
+source "$SCRIPT_DIR/lib/version.sh"
+
 REMOTE="origin"
 VERSION=""
 BUMP_KIND="patch"
@@ -53,10 +56,12 @@ Options:
   --promote-stable [VERSION]
                     Create and push vX.Y.Z-stable from the matching
                     vX.Y.Z-beta tag so CI builds/publishes the stable feed
-  --with-image      After pushing the release tag, dispatch rpiz-sd-image.yml
-                    with publish_full_image_ota=true
-  --image-mode MODE Image security posture for rpiz-sd-image.yml: auto, dev,
-                    or prod (default: auto)
+  --with-image      Force a full rootfs image build for this release by
+                    marking the tag. Normally unnecessary: CI auto-builds the
+                    image whenever the rootfs fingerprint changed.
+  --image-mode MODE Image posture for a forced image build: auto, dev, or
+                    prod (default: auto = dev posture for beta, prod for
+                    stable)
   --message TEXT    Annotated tag message (default: "Release vX.Y.Z-beta")
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
@@ -67,12 +72,10 @@ Options:
                     when you know the lock file is already correct.
   -h, --help        Show this help
 
-Full SD-card image builds (sdcard.img + rootfs.ext2.gz) run through the
-rpiz-sd-image.yml workflow. Pass --with-image for CHIP, Buildroot, or defconfig
-changes that need a full rootfs image in the OTA feed.
-
-  $0 --version 0.5.0 --with-image
-  $0 --promote-stable 0.5.0 --with-image
+Full rootfs image builds (sdcard.img.gz + rootfs.ext2.gz) are auto-detected:
+CI compares the release's rootfs fingerprint against the published feed and
+chains the Buildroot image build only when the rootfs inputs changed. Use
+--with-image only to force an image rebuild despite an unchanged fingerprint.
 
 Examples:
   $0
@@ -227,14 +230,6 @@ ensure_upload_env() {
     fi
 }
 
-read_workspace_version() {
-    awk -F'"' '
-        /^\[workspace\.package\]/ { in_workspace = 1; next }
-        /^\[/ && in_workspace { exit }
-        in_workspace && $0 ~ /^version[[:space:]]*=/ { print $2; exit }
-    ' "$REPO_ROOT/Cargo.toml"
-}
-
 normalize_release_version() {
     local value="$1"
     value="${value#v}"
@@ -242,64 +237,7 @@ normalize_release_version() {
         echo "Error: Version must be semver X.Y.Z, X.Y.Z-beta, vX.Y.Z, or vX.Y.Z-beta" >&2
         exit 1
     fi
-    "$SCRIPT_DIR/resolve-version.sh" release "$value"
-}
-
-split_version() {
-    local version="$1"
-    local major minor patch
-
-    version="$("$SCRIPT_DIR/resolve-version.sh" core "$version")"
-
-    IFS=. read -r major minor patch <<EOF
-$version
-EOF
-
-    echo "${major:-0} ${minor:-0} ${patch:-0}"
-}
-
-bump_version() {
-    local version="$1"
-    local kind="$2"
-    local major minor patch
-
-    read -r major minor patch <<<"$(split_version "$version")"
-
-    case "$kind" in
-        major)
-            echo "$((major + 1)).0.0"
-            ;;
-        minor)
-            echo "${major}.$((minor + 1)).0"
-            ;;
-        patch)
-            echo "${major}.${minor}.$((patch + 1))"
-            ;;
-        *)
-            echo "Error: Unknown bump kind: $kind" >&2
-            exit 1
-            ;;
-    esac
-}
-
-semver_gt() {
-    local left="$1" right="$2"
-    local l_major l_minor l_patch r_major r_minor r_patch
-
-    read -r l_major l_minor l_patch <<<"$(split_version "$left")"
-    read -r r_major r_minor r_patch <<<"$(split_version "$right")"
-
-    if [ "$l_major" -ne "$r_major" ]; then
-        [ "$l_major" -gt "$r_major" ]
-        return
-    fi
-
-    if [ "$l_minor" -ne "$r_minor" ]; then
-        [ "$l_minor" -gt "$r_minor" ]
-        return
-    fi
-
-    [ "$l_patch" -gt "$r_patch" ]
+    release_version "$value"
 }
 
 tracked_worktree_dirty() {
@@ -328,18 +266,15 @@ github_repo_url() {
     echo ""
 }
 
-dispatch_image_workflow() {
-    local tag="$1"
-
-    echo "Dispatching rpiz-sd-image.yml for $tag ..."
-    (
-        cd "$REPO_ROOT"
-        gh workflow run rpiz-sd-image.yml \
-            -f "tag=$tag" \
-            -f "publish_full_image_ota=true" \
-            -f "image_mode=$IMAGE_MODE"
-    )
-    echo "Dispatched rpiz-sd-image.yml for $tag with full-image OTA publish enabled."
+# Tag-message marker consumed by the CI release gate. Normally CI decides
+# binary-only vs full-image from the rootfs fingerprint; the marker forces an
+# image build for this release.
+with_image_marker() {
+    if [ "$IMAGE_MODE" = "auto" ]; then
+        echo "[with-image]"
+    else
+        echo "[with-image image_mode=$IMAGE_MODE]"
+    fi
 }
 
 TEMP_RELEASE_DIR=""
@@ -366,17 +301,17 @@ setup_upload_ssh() {
     ssh-keyscan -H "$RHYTHM_UPDATES_SSH_HOST" > "$known_hosts_path"
 }
 
+# Fetch the currently published manifest for a feed from the public CDN URL —
+# the same URL appliances poll, so no publish credentials are needed.
 fetch_rpiz_manifest() {
     local feed="$1"
-    local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
-    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
+    local base_url="${RHYTHM_UPDATES_PUBLIC_BASE_URL:-https://dl.rhythm.lighting/server}"
     local previous_manifest="$TEMP_RELEASE_DIR/$feed-manifest.json"
 
-    scp -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" \
-        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR/$feed/manifest.json" \
-        "$previous_manifest" >/dev/null 2>&1 || true
+    curl -fsSL --max-time 30 "$base_url/$feed/manifest.json" \
+        -o "$previous_manifest" 2>/dev/null || true
 
-    if [ -f "$previous_manifest" ]; then
+    if [ -s "$previous_manifest" ]; then
         echo "$feed=$previous_manifest"
     fi
 }
@@ -403,16 +338,11 @@ upload_rpiz_feed() {
     local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
     local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
     local package_args=()
-    local release_channel="beta"
-    local release_feed="rpiz"
+    local release_channel release_feed
     local manifest_spec=""
 
-    case "$version" in
-        *-stable*)
-            release_channel="stable"
-            release_feed="rpiz-stable"
-            ;;
-    esac
+    release_channel="$(channel_for_version "$version")"
+    release_feed="$(feed_for_channel "$release_channel")"
 
     echo ""
     echo "=== Building rpiz release artifacts locally ==="
@@ -431,17 +361,21 @@ upload_rpiz_feed() {
     echo ""
     echo "=== Configuring SSH upload ==="
     setup_upload_ssh
-    if [ "$release_channel" = "stable" ]; then
-        manifest_spec="$(fetch_rpiz_manifest "$release_feed")"
-        if [ -n "$manifest_spec" ]; then
-            package_args+=(--previous-rpiz-manifest "$manifest_spec")
-        fi
+    # Both channels carry the current base image forward in their manifests,
+    # so always offer the previous manifest to the packager.
+    manifest_spec="$(fetch_rpiz_manifest "$release_feed")"
+    if [ -n "$manifest_spec" ]; then
+        package_args+=(--previous-rpiz-manifest "$manifest_spec")
     fi
 
     echo ""
     echo "=== Packaging rpiz OTA feed ==="
     if [ -n "${RHYTHM_RELEASE_RPIZ_IMAGE_ROOT:-}" ]; then
-        package_args+=(--image-root "$RHYTHM_RELEASE_RPIZ_IMAGE_ROOT")
+        local image_mode image_fingerprint
+        image_mode="dev"
+        [ "$release_channel" = "stable" ] && image_mode="prod"
+        image_fingerprint="${RHYTHM_RELEASE_RPIZ_IMAGE_FINGERPRINT:-$("$SCRIPT_DIR/compute-rootfs-fingerprint.sh" --image-mode "$image_mode")}"
+        package_args+=(--image-root "$RHYTHM_RELEASE_RPIZ_IMAGE_ROOT" --image-fingerprint "$image_fingerprint")
     fi
     bash "$SCRIPT_DIR/package-server-updates.sh" \
         --artifact-root "$artifact_root" \
@@ -563,13 +497,10 @@ if [ "$PROMOTE_STABLE" = true ]; then
     exec "$SCRIPT_DIR/promote-stable.sh" "${promote_args[@]}"
 fi
 
-if [ "$WITH_IMAGE" = true ] && [ "$PUSH" = false ]; then
-    echo "Error: --with-image requires pushing the release tag; do not combine it with --no-push or --upload" >&2
+if [ "$WITH_IMAGE" = true ] && [ "$UPLOAD" = true ]; then
+    echo "Error: --with-image marks the release tag for the CI image build; it has no effect in --upload mode." >&2
+    echo "For a local image publish, set RHYTHM_RELEASE_RPIZ_IMAGE_ROOT to a built image directory instead." >&2
     exit 1
-fi
-
-if [ "$WITH_IMAGE" = true ] && [ "$DRY_RUN" = false ]; then
-    require_command gh
 fi
 
 if [ "$UPLOAD" = true ]; then
@@ -648,6 +579,10 @@ if [ -z "$MESSAGE" ]; then
     MESSAGE="Release $TAG"
 fi
 
+if [ "$WITH_IMAGE" = true ]; then
+    MESSAGE="$MESSAGE $(with_image_marker)"
+fi
+
 REPO_URL="$(github_repo_url)"
 
 echo "Release plan"
@@ -674,9 +609,9 @@ else
     echo "  Builder image: will refresh dtconcepts/rhythm-rpiz-builder if inputs changed"
 fi
 if [ "$WITH_IMAGE" = true ]; then
-    echo "  rpiz sd image: dispatch rpiz-sd-image.yml after tag push (mode: $IMAGE_MODE, full-image OTA: true)"
+    echo "  rpiz sd image: forced via tag marker $(with_image_marker) (CI builds the full image for this release)"
 else
-    echo "  rpiz sd image: binary-only (run with --with-image for a full SD-card rebuild)"
+    echo "  rpiz sd image: auto — CI builds a full image only when the rootfs fingerprint changed"
 fi
 if [ "$UPLOAD" = true ]; then
     echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
@@ -702,9 +637,6 @@ if [ "$DRY_RUN" = true ]; then
     elif [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
         echo "[dry-run] Would push tag:    git push $REMOTE refs/tags/$TAG"
-        if [ "$WITH_IMAGE" = true ]; then
-            echo "[dry-run] Would dispatch image workflow: gh workflow run rpiz-sd-image.yml -f tag=$TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE"
-        fi
     fi
     exit 0
 fi
@@ -733,9 +665,6 @@ if [ "$UPLOAD" = true ]; then
 elif [ "$PUSH" = true ]; then
     git -C "$REPO_ROOT" push "$REMOTE" "HEAD:refs/heads/$CURRENT_BRANCH"
     git -C "$REPO_ROOT" push "$REMOTE" "refs/tags/$TAG"
-    if [ "$WITH_IMAGE" = true ]; then
-        dispatch_image_workflow "$TAG"
-    fi
 fi
 
 echo ""

@@ -9,41 +9,30 @@
 #   <output>/<target>[-stable]/latest/sdcard.img.gz         (optional latest alias)
 #   <output>/<target>[-stable]/latest/rootfs.ext2.gz        (optional latest alias)
 #
-# Binary-only stable rpiz releases reuse the newest rootfs image from supplied
-# previous manifests. Binary-only beta releases stay package-only so current
-# appliances can update even when image OTA is unhealthy. Full image entries are
-# published directly only when --image-root is supplied.
+# Binary-only releases on BOTH channels carry forward the newest rootfs image
+# from supplied previous manifests, so devices behind on the image base still
+# pull rootfs + package from a binary-only release. Fresh image entries are
+# published only when --image-root is supplied, and carry the rootfs
+# fingerprint (--image-fingerprint) the CI release gate compares against.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../os" && pwd)"
 
+# shellcheck source=lib/version.sh
+source "$SCRIPT_DIR/lib/version.sh"
+# shellcheck source=lib/artifact.sh
+source "$SCRIPT_DIR/lib/artifact.sh"
+
 ARTIFACT_ROOT="$PROJECT_ROOT/dist/bin"
 OUTPUT_DIR="$PROJECT_ROOT/out/server-updates"
 VERSION=""
 IMAGE_ROOT=""
+IMAGE_FINGERPRINT=""
 PREVIOUS_RPIZ_MANIFESTS=()
 CHANNEL=""
 DRY_RUN=false
-
-sha256_file() {
-    local file="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" | awk '{print $1}'
-    else
-        shasum -a 256 "$file" | awk '{print $1}'
-    fi
-}
-
-file_size() {
-    local file="$1"
-    stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null
-}
-
-json_escape() {
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-}
 
 parse_rpiz_manifest_spec() {
     local spec="$1"
@@ -66,74 +55,6 @@ parse_rpiz_manifest_spec() {
     fi
 
     printf '%s|%s\n' "$source_feed" "$manifest_path"
-}
-
-parse_release_version_parts() {
-    local value="${1#v}"
-    local core pre major minor patch extra
-
-    value="${value%%+*}"
-    core="${value%%-*}"
-    pre=""
-    if [[ "$value" == *-* ]]; then
-        pre="${value#*-}"
-    fi
-
-    IFS=. read -r major minor patch extra <<EOF
-$core
-EOF
-
-    if [ -n "${extra:-}" ] \
-        || ! [[ "${major:-}" =~ ^[0-9]+$ ]] \
-        || ! [[ "${minor:-}" =~ ^[0-9]+$ ]] \
-        || ! [[ "${patch:-}" =~ ^[0-9]+$ ]]; then
-        return 1
-    fi
-
-    printf '%s %s %s %s\n' "$major" "$minor" "$patch" "$pre"
-}
-
-release_version_gt() {
-    local left="$1"
-    local right="$2"
-    local left_parts right_parts
-    local l_major l_minor l_patch l_pre
-    local r_major r_minor r_patch r_pre
-
-    [ -n "$left" ] || return 1
-    if [ -z "$right" ]; then
-        return 0
-    fi
-
-    left_parts="$(parse_release_version_parts "$left")" || return 1
-    right_parts="$(parse_release_version_parts "$right")" || return 0
-    read -r l_major l_minor l_patch l_pre <<EOF
-$left_parts
-EOF
-    read -r r_major r_minor r_patch r_pre <<EOF
-$right_parts
-EOF
-
-    if (( 10#$l_major != 10#$r_major )); then
-        (( 10#$l_major > 10#$r_major ))
-        return
-    fi
-    if (( 10#$l_minor != 10#$r_minor )); then
-        (( 10#$l_minor > 10#$r_minor ))
-        return
-    fi
-    if (( 10#$l_patch != 10#$r_patch )); then
-        (( 10#$l_patch > 10#$r_patch ))
-        return
-    fi
-
-    if [ -z "$l_pre" ] && [ -n "$r_pre" ]; then
-        return 0
-    fi
-    if [ -n "$l_pre" ] && [ -z "$r_pre" ]; then
-        return 1
-    fi
-    [[ "$l_pre" > "$r_pre" ]]
 }
 
 manifest_latest_rootfs_version() {
@@ -211,11 +132,16 @@ Options:
   --version VERSION     Version to package (default: resolve workspace/server version)
   --channel CHANNEL     OTA channel to package: beta or stable (default: infer from VERSION)
   --image-root PATH     Optional rpiz image directory to publish alongside the OTA manifest
-  --previous-rpiz-manifest PATH
-                       Existing rpiz manifest whose images may be carried
-                       forward for stable packages with no --image-root. Can be
+  --image-fingerprint FP
+                       Rootfs fingerprint of the images under --image-root
+                       (from compute-rootfs-fingerprint.sh). Required with
+                       --image-root; recorded on each fresh image entry.
+  --previous-manifest PATH
+                       Existing rpiz manifest whose images are carried forward
+                       when no --image-root is supplied (both channels). Can be
                        repeated. Prefix with rpiz= or rpiz-stable= when PATH
                        does not live under a feed-named directory.
+                       (--previous-rpiz-manifest is a deprecated alias.)
   --dry-run             Print planned outputs without writing files
   -h, --help            Show this help
 EOF
@@ -243,7 +169,11 @@ while [[ $# -gt 0 ]]; do
             IMAGE_ROOT="$2"
             shift 2
             ;;
-        --previous-rpiz-manifest)
+        --image-fingerprint)
+            IMAGE_FINGERPRINT="$2"
+            shift 2
+            ;;
+        --previous-manifest|--previous-rpiz-manifest)
             PREVIOUS_RPIZ_MANIFESTS+=("$(parse_rpiz_manifest_spec "$2")")
             shift 2
             ;;
@@ -273,14 +203,7 @@ fi
 VERSION="${VERSION#v}"
 
 if [ -z "$CHANNEL" ]; then
-    case "$VERSION" in
-        *-stable*)
-            CHANNEL="stable"
-            ;;
-        *)
-            CHANNEL="beta"
-            ;;
-    esac
+    CHANNEL="$(channel_for_version "$VERSION")"
 fi
 
 case "$CHANNEL" in
@@ -294,6 +217,14 @@ esac
 
 if [ -n "$IMAGE_ROOT" ] && [ ! -d "$IMAGE_ROOT" ]; then
     echo "Error: --image-root does not exist: $IMAGE_ROOT"
+    exit 1
+fi
+if [ -n "$IMAGE_ROOT" ] && [ -z "$IMAGE_FINGERPRINT" ]; then
+    echo "Error: --image-root requires --image-fingerprint (from compute-rootfs-fingerprint.sh)" >&2
+    exit 1
+fi
+if [ -n "$IMAGE_FINGERPRINT" ] && [ -z "$IMAGE_ROOT" ]; then
+    echo "Error: --image-fingerprint requires --image-root" >&2
     exit 1
 fi
 if [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
@@ -310,7 +241,7 @@ if [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
     done
 fi
 
-TARGETS="macos-arm64 macos-x86_64 linux-amd64 linux-aarch64 rpiz"
+TARGETS="rpiz"
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 PACKAGED=0
 
@@ -408,7 +339,7 @@ for target in $TARGETS; do
                     image_kind="rootfs_image"
                     ;;
             esac
-            image_json="{\"name\":\"$(json_escape "$image_name")\",\"kind\":\"$image_kind\",\"url\":\"v$VERSION/$(json_escape "$image_name")\",\"version\":\"$VERSION\",\"sha256\":\"$image_sha\",\"size\":$image_size"
+            image_json="{\"name\":\"$(json_escape "$image_name")\",\"kind\":\"$image_kind\",\"url\":\"v$VERSION/$(json_escape "$image_name")\",\"version\":\"$VERSION\",\"sha256\":\"$image_sha\",\"size\":$image_size,\"fingerprint\":\"$(json_escape "$IMAGE_FINGERPRINT")\""
             case "$image_name" in
                 *.gz)
                     image_json="$image_json,\"compression\":\"gzip\""
@@ -427,7 +358,9 @@ for target in $TARGETS; do
             images_json="$images_json${image_entries[$i]}"
         done
         images_json="$images_json]"
-    elif [ "$CHANNEL" = "stable" ] && [ "$target" = "rpiz" ] && [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
+    elif [ "$target" = "rpiz" ] && [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
+        # Binary-only release: carry the current base image forward (both
+        # channels) so devices behind on the image still pull rootfs+package.
         carried_images_json="$(select_previous_rpiz_images_json "$feed_target")"
         if [ -n "$carried_images_json" ]; then
             images_json="$carried_images_json"

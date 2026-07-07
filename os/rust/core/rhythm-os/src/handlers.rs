@@ -1177,6 +1177,18 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         return ApiResponse::bad_request("power_save has been removed; off is hard_off only");
     }
     let auto_update = body.get("auto_update").and_then(|v| v.as_bool());
+    let update_channel = match body.get("update_channel") {
+        Some(Value::String(value)) => match crate::state::UpdateChannel::parse(value) {
+            Some(channel) => Some(channel),
+            None => {
+                return ApiResponse::bad_request("update_channel must be \"beta\" or \"stable\"")
+            }
+        },
+        Some(_) => {
+            return ApiResponse::bad_request("update_channel must be \"beta\" or \"stable\"")
+        }
+        None => None,
+    };
     let light_runtime = match body.get("light_runtime") {
         Some(Value::String(value)) => {
             match crate::light_runtime::parse_light_runtime_id(state, value) {
@@ -1188,8 +1200,10 @@ pub fn handle_put_settings(state: &SharedState, body: &Value) -> ApiResponse {
         None => None,
     };
 
-    if auto_update.is_some() {
-        if let Err(e) = commands::do_settings_set(state, None, None, None, None, auto_update) {
+    if auto_update.is_some() || update_channel.is_some() {
+        if let Err(e) =
+            commands::do_settings_set(state, None, None, None, None, auto_update, update_channel)
+        {
             return ApiResponse::server_error(e);
         }
     }
@@ -5486,6 +5500,33 @@ mod tests {
         assert_eq!(parsed["light_runtime"], "rhythm-adaptive");
         assert!(parsed.get("mode").is_none());
         assert!(parsed.get("status").is_none());
+    }
+
+    #[test]
+    fn put_settings_updates_update_channel() {
+        let state = handler_state_with_runtime();
+        let r = handle_put_settings(&state, &json!({"update_channel": "stable"}));
+        assert_eq!(r.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(parsed["update_channel"], "stable");
+        assert_eq!(
+            state.lock().unwrap().update_channel,
+            Some(crate::state::UpdateChannel::Stable)
+        );
+    }
+
+    #[test]
+    fn put_settings_rejects_invalid_update_channel() {
+        let state = handler_state_with_runtime();
+        for body in [
+            json!({"update_channel": "nightly"}),
+            json!({"update_channel": 7}),
+        ] {
+            let r = handle_put_settings(&state, &body);
+            assert_eq!(r.status, 400);
+            assert!(r.body.contains("update_channel"), "body: {}", r.body);
+        }
+        assert!(state.lock().unwrap().update_channel.is_none());
     }
 
     #[test]

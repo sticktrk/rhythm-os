@@ -237,18 +237,21 @@ run_in_docker() {
         )
     fi
     docker_args+=(-e "RHYTHM_DEV_MODE=$DEV_MODE")
+    docker_args+=(-e "RHYTHM_IMAGE_FINGERPRINT=$RHYTHM_IMAGE_FINGERPRINT")
+    if [ -n "${RHYTHM_IMAGE_VERSION:-}" ]; then
+        docker_args+=(-e "RHYTHM_IMAGE_VERSION=$RHYTHM_IMAGE_VERSION")
+    fi
     if [ -n "${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-}" ]; then
         docker_args+=(-e "RHYTHM_PROD_PAA_TRUST_STORE_PATH=$RHYTHM_PROD_PAA_TRUST_STORE_PATH")
     fi
 
     # Forward the baked output prefix so the inner seed step can rewrite
     # Buildroot's hardcoded paths (fakeroot wrapper, *.pc, *.la, libtool) to
-    # $OUTPUT_DIR. Source of truth: RHYTHM_BAKED_OUTPUT_PREFIX env override,
-    # else the lock file's baked_prefix field, else nothing (old images with
-    # a sidecar file baked in will still work via .rhythm-baked-prefix).
-    baked_prefix_value="${RHYTHM_BAKED_OUTPUT_PREFIX:-$(read_lock_field baked_prefix)}"
-    if [ -n "$baked_prefix_value" ]; then
-        docker_args+=(-e "RHYTHM_BAKED_OUTPUT_PREFIX=$baked_prefix_value")
+    # $OUTPUT_DIR. Normally unset: the builder image bakes the prefix into the
+    # /opt/rpiz-out/.rhythm-baked-prefix sidecar, which the inner run reads.
+    # RHYTHM_BAKED_OUTPUT_PREFIX remains a manual override.
+    if [ -n "${RHYTHM_BAKED_OUTPUT_PREFIX:-}" ]; then
+        docker_args+=(-e "RHYTHM_BAKED_OUTPUT_PREFIX=$RHYTHM_BAKED_OUTPUT_PREFIX")
     fi
 
     # The builder image bakes Buildroot at /opt/buildroot. Chip prebuilts and
@@ -268,6 +271,18 @@ run_in_docker() {
     docker "${docker_args[@]}" "$DOCKER_IMAGE" bash -c \
         "../tools/os/scripts/build-rpiz-image.sh ${inner_args[*]}"
 }
+
+# Rootfs fingerprint: stamped into the image (/etc/rhythm-image-fingerprint)
+# and into OTA manifests so the CI release gate can decide binary-only vs
+# full-image releases. Computed host-side so --docker runs stamp exactly the
+# fingerprint the release gate compared against the published feed.
+if is_truthy "$DEV_MODE"; then
+    FINGERPRINT_MODE=dev
+else
+    FINGERPRINT_MODE=prod
+fi
+RHYTHM_IMAGE_FINGERPRINT="${RHYTHM_IMAGE_FINGERPRINT:-$("$SCRIPT_DIR/compute-rootfs-fingerprint.sh" --image-mode "$FINGERPRINT_MODE")}"
+export RHYTHM_IMAGE_FINGERPRINT
 
 if [ "$DOCKER_BUILD" = true ]; then
     run_in_docker

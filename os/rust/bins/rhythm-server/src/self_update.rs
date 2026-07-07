@@ -49,46 +49,26 @@ enum RestartStrategy {
     ApplianceReboot,
 }
 
-/// Which OTA feed to read from.
-///
-/// `Beta` is the rolling feed populated by beta tags on CI. `Stable` is a
-/// dedicated stable-tag build published by `scripts/release.sh --promote-stable`
-/// and is what auto-updating appliances follow during the daily update window.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UpdateChannel {
-    Beta,
-    Stable,
-}
+pub use rhythm_os::state::UpdateChannel;
 
-impl UpdateChannel {
-    fn feed_suffix(self) -> Option<&'static str> {
-        match self {
-            UpdateChannel::Beta => None,
-            UpdateChannel::Stable => Some("-stable"),
-        }
-    }
-}
-
-/// Read the user's preferred OTA channel from shared state.
+/// Read the effective OTA channel from shared state.
 ///
-/// `auto_update == true` (the factory default) → stable; the user has opted
-/// into curated automatic updates. `false` → beta; the user wants the rolling
-/// CI feed and manual control over when updates apply. Non-appliance runtimes
-/// stay on beta because stable promotion is only defined for the rpiz feed.
+/// An explicit `update_channel` setting wins; otherwise appliances default to
+/// the curated stable feed and desktop runtimes to the rolling beta feed (see
+/// `AppState::resolved_update_channel`). Independent of `auto_update`, which
+/// only controls whether updates apply automatically.
 pub fn channel_from_state(state: &rhythm_os::state::SharedState) -> UpdateChannel {
-    let (platform_type, auto_update) = state
-        .lock()
-        .map(|s| (s.platform_type, s.auto_update))
-        .unwrap_or(("desktop", true));
-
-    if !is_appliance_runtime_default() && platform_type != "appliance" {
-        return UpdateChannel::Beta;
-    }
-
-    if auto_update {
-        UpdateChannel::Stable
-    } else {
-        UpdateChannel::Beta
+    match state.lock() {
+        Ok(s) => s.resolved_update_channel(),
+        // Lock poisoning must not silently move an appliance onto the rolling
+        // beta feed; fall back to the platform default.
+        Err(_) => {
+            if is_appliance_runtime_default() {
+                UpdateChannel::Stable
+            } else {
+                UpdateChannel::Beta
+            }
+        }
     }
 }
 
@@ -5900,41 +5880,42 @@ mod tests {
     }
 
     #[test]
-    fn channel_from_state_uses_stable_only_for_auto_updating_appliance() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("RHYTHM_PLATFORM_TYPE", "appliance");
-
-        let state: rhythm_os::state::SharedState =
-            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
-        assert_eq!(channel_from_state(&state), UpdateChannel::Stable);
-
-        state.lock().unwrap().auto_update = false;
-        assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
-
-        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
-    }
-
-    #[test]
-    fn channel_from_state_keeps_desktop_on_beta_feed() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("RHYTHM_PLATFORM_TYPE", "desktop");
-
-        let state: rhythm_os::state::SharedState =
-            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
-
-        assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
-
-        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
-    }
-
-    #[test]
-    fn channel_from_state_treats_appliance_state_as_stable_even_without_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("RHYTHM_PLATFORM_TYPE");
-
+    fn channel_from_state_appliance_defaults_to_stable_regardless_of_auto_update() {
         let state: rhythm_os::state::SharedState =
             Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
         state.lock().unwrap().platform_type = "appliance";
+        assert_eq!(channel_from_state(&state), UpdateChannel::Stable);
+
+        state.lock().unwrap().auto_update = false;
+        assert_eq!(channel_from_state(&state), UpdateChannel::Stable);
+    }
+
+    #[test]
+    fn channel_from_state_honors_explicit_beta_on_appliance() {
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.platform_type = "appliance";
+            s.update_channel = Some(UpdateChannel::Beta);
+        }
+
+        assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
+    }
+
+    #[test]
+    fn channel_from_state_keeps_desktop_default_on_beta_feed() {
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+
+        assert_eq!(channel_from_state(&state), UpdateChannel::Beta);
+    }
+
+    #[test]
+    fn channel_from_state_honors_explicit_stable_on_desktop() {
+        let state: rhythm_os::state::SharedState =
+            Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        state.lock().unwrap().update_channel = Some(UpdateChannel::Stable);
 
         assert_eq!(channel_from_state(&state), UpdateChannel::Stable);
     }

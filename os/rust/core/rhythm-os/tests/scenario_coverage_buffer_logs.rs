@@ -391,6 +391,7 @@ fn persisted_mode_change_survives_restart_and_sync() {
         None,
         None,
         Some(false),
+        None,
     )
     .unwrap();
     {

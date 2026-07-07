@@ -380,6 +380,7 @@ mod tests {
         let event = ServerEvent::SettingsChanged {
             settings: SettingsDto {
                 auto_update: true,
+                update_channel: crate::state::UpdateChannel::Stable,
                 light_runtime: LightRuntimeKind::default(),
             },
         };
@@ -614,6 +615,7 @@ mod tests {
             let _ = tx.send(ServerEvent::SettingsChanged {
                 settings: SettingsDto {
                     auto_update: true,
+                    update_channel: crate::state::UpdateChannel::Stable,
                     light_runtime: LightRuntimeKind::default(),
                 },
             });
@@ -663,6 +665,7 @@ mod tests {
         let result = tx.send(ServerEvent::SettingsChanged {
             settings: SettingsDto {
                 auto_update: true,
+                update_channel: crate::state::UpdateChannel::Stable,
                 light_runtime: LightRuntimeKind::default(),
             },
         });

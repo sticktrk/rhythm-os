@@ -372,12 +372,16 @@ pub struct StoredSettings {
     pub modes: Vec<ModeConfig>,
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
-    /// When true, the appliance silently polls the curated "stable" OTA feed
-    /// and applies updates during the daily update window. When false, it
-    /// polls the "beta" feed and only updates on an explicit
+    /// When true, the appliance applies OTA updates automatically during the
+    /// daily update window. When false, updates only happen on an explicit
     /// `POST /api/ota/update`.
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    /// Explicit OTA release channel. Deliberately not seeded from
+    /// `auto_update`: absent stays `None`, which resolves to stable on
+    /// appliances even for legacy `auto_update=false` devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<crate::state::UpdateChannel>,
 }
 
 fn default_auto_update() -> bool {
@@ -1292,6 +1296,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                 s.light_breaker_enabled = settings.light_breaker_enabled;
                 crate::light_runtime::reset_light_runtime_for_kind(s, settings.light_runtime);
                 s.auto_update = settings.auto_update;
+                s.update_channel = settings.update_channel;
                 s.active_mode = settings.active_mode;
                 s.last_active_mode_cause = settings.last_active_mode_cause;
                 s.last_active_mode_transition_id = settings.last_active_mode_transition_id.clone();
@@ -1321,6 +1326,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                             modes: normalized_modes.clone(),
                             mode_transitions: normalized_transitions,
                             auto_update: s.auto_update,
+                            update_channel: s.update_channel,
                         }) {
                             warn!(
                                 target: "sys",
@@ -1715,6 +1721,7 @@ mod tests {
                 modes: Vec::new(),
                 mode_transitions: Vec::new(),
                 auto_update: true,
+                update_channel: None,
             })
         }
 
@@ -2021,6 +2028,7 @@ mod tests {
                 modes: vec![],
                 mode_transitions: vec![],
                 auto_update: true,
+                update_channel: None,
             }),
             ..Default::default()
         };
@@ -2061,6 +2069,7 @@ mod tests {
                 }],
                 mode_transitions: vec![],
                 auto_update: true,
+                update_channel: None,
             }),
             ..Default::default()
         };
@@ -2100,6 +2109,7 @@ mod tests {
                 }],
                 mode_transitions: vec![],
                 auto_update: true,
+                update_channel: None,
             }),
             ..Default::default()
         };
@@ -2141,6 +2151,7 @@ mod tests {
                 modes: vec![],
                 mode_transitions: vec![],
                 auto_update: true,
+                update_channel: None,
             }),
             ..Default::default()
         };
@@ -2380,6 +2391,7 @@ mod tests {
                 modes: vec![],
                 mode_transitions: vec![],
                 auto_update: true,
+                update_channel: None,
             }),
             ..Default::default()
         };
@@ -2606,6 +2618,7 @@ mod tests {
                 modes: rhythm_core::default_mode_configs(),
                 mode_transitions: rhythm_core::default_mode_transition_configs(),
                 auto_update: false,
+                update_channel: None,
             };
             storage.save_settings(&settings).unwrap();
             let loaded = storage.load_settings().unwrap();
@@ -2629,6 +2642,53 @@ mod tests {
                 loaded.mode_transitions[1].trigger,
                 rhythm_core::ModeTransitionTrigger::NauticalTwilight
             );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn settings_update_channel_roundtrips_absent_beta_and_stable() {
+            let (storage, path) = temp_storage();
+
+            let mut settings = StoredSettings {
+                power_save: false,
+                light_breaker_enabled: true,
+                light_runtime: crate::light_runtime::LightRuntimeKind::default(),
+                active_mode: RhythmMode::Day,
+                last_active_mode_cause: ModeChangeCause::default(),
+                last_active_mode_transition_id: None,
+                last_active_mode_change_utc_ms: None,
+                modes: Vec::new(),
+                mode_transitions: Vec::new(),
+                auto_update: true,
+                update_channel: None,
+            };
+            storage.save_settings(&settings).unwrap();
+            assert!(storage.load_settings().unwrap().update_channel.is_none());
+            let raw = std::fs::read_to_string(path.join("settings.json")).unwrap();
+            assert!(
+                !raw.contains("update_channel"),
+                "absent channel must not be serialized: {raw}"
+            );
+
+            settings.update_channel = Some(crate::state::UpdateChannel::Beta);
+            storage.save_settings(&settings).unwrap();
+            assert_eq!(
+                storage.load_settings().unwrap().update_channel,
+                Some(crate::state::UpdateChannel::Beta)
+            );
+
+            settings.update_channel = Some(crate::state::UpdateChannel::Stable);
+            storage.save_settings(&settings).unwrap();
+            assert_eq!(
+                storage.load_settings().unwrap().update_channel,
+                Some(crate::state::UpdateChannel::Stable)
+            );
+            let raw = std::fs::read_to_string(path.join("settings.json")).unwrap();
+            assert!(
+                raw.contains("\"update_channel\": \"stable\""),
+                "channel must serialize lowercase: {raw}"
+            );
+
             cleanup(&path);
         }
 
@@ -2948,6 +3008,7 @@ mod tests {
                     modes: rhythm_core::default_mode_configs(),
                     mode_transitions: rhythm_core::default_mode_transition_configs(),
                     auto_update: true,
+                    update_channel: None,
                 })
                 .unwrap();
             storage
@@ -3426,6 +3487,7 @@ mod tests {
                 modes: Vec::new(),
                 mode_transitions: Vec::new(),
                 auto_update: true,
+                update_channel: None,
             }
         }
 

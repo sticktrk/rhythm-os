@@ -12,6 +12,7 @@ use rhythm_core::{
     RuntimeHandle,
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
+use serde::{Deserialize, Serialize};
 
 use crate::activity::LightActivityEvent;
 use crate::auth::StoredApiAuth;
@@ -49,6 +50,44 @@ pub struct HubStartupRetryState {
     pub last_error: String,
     /// Whether automatic retries have stopped and the app must request another attempt.
     pub manual_retry_required: bool,
+}
+
+/// OTA release channel.
+///
+/// `Beta` is the rolling feed populated by beta tags on CI. `Stable` is a
+/// dedicated stable-tag build published by `scripts/release.sh
+/// --promote-stable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Beta,
+    Stable,
+}
+
+impl UpdateChannel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateChannel::Beta => "beta",
+            UpdateChannel::Stable => "stable",
+        }
+    }
+
+    /// Suffix appended to the platform feed name (`rpiz` vs `rpiz-stable`).
+    pub fn feed_suffix(&self) -> Option<&'static str> {
+        match self {
+            UpdateChannel::Beta => None,
+            UpdateChannel::Stable => Some("-stable"),
+        }
+    }
+
+    /// Parse a channel name as accepted by `PUT /api/settings`.
+    pub fn parse(value: &str) -> Option<UpdateChannel> {
+        match value {
+            "beta" => Some(UpdateChannel::Beta),
+            "stable" => Some(UpdateChannel::Stable),
+            _ => None,
+        }
+    }
 }
 
 /// Work items for background processing.
@@ -449,10 +488,13 @@ pub struct AppState {
     /// When false, Rhythm keeps hub/status/API plumbing alive but drops
     /// control events from hub streams and does not run periodic light ticks.
     pub light_breaker_enabled: bool,
-    /// When true, the appliance polls the curated "stable" OTA feed and
-    /// auto-applies updates during the daily update window. When false, it
-    /// polls "beta" and only updates on an explicit `POST /api/ota/update`.
+    /// When true, the appliance applies OTA updates automatically during the
+    /// daily update window. When false, updates only happen on an explicit
+    /// `POST /api/ota/update`.
     pub auto_update: bool,
+    /// Explicitly selected OTA release channel. `None` means the user never
+    /// chose one; see [`AppState::resolved_update_channel`] for the fallback.
+    pub update_channel: Option<UpdateChannel>,
 
     /// Recent user-intent light interactions for app-less history and graphs.
     pub light_activity: Vec<LightActivityEvent>,
@@ -760,6 +802,7 @@ impl Default for AppState {
             power_save: factory_default_power_save(),
             light_breaker_enabled: true,
             auto_update: factory_default_auto_update(),
+            update_channel: None,
             light_activity: Vec::new(),
             api_auth: StoredApiAuth::default(),
             require_api_auth: false,
@@ -1188,6 +1231,19 @@ impl AppState {
     pub fn solar_midnight_hour(&self) -> f32 {
         self.runtime_config.solar_midnight_hour()
     }
+
+    /// The OTA release channel this device follows.
+    ///
+    /// An explicit user choice wins; otherwise appliances default to the
+    /// curated stable feed and desktop builds to the rolling beta feed.
+    pub fn resolved_update_channel(&self) -> UpdateChannel {
+        self.update_channel
+            .unwrap_or(if self.platform_type == "appliance" {
+                UpdateChannel::Stable
+            } else {
+                UpdateChannel::Beta
+            })
+    }
 }
 
 impl AppState {
@@ -1280,6 +1336,22 @@ mod tests {
         assert!(state.server_instance_id.starts_with("srv-"));
         assert_eq!(state.platform_type, "desktop");
         assert_eq!(state.platform_context, "server");
+    }
+
+    #[test]
+    fn resolved_update_channel_defaults_by_platform_and_honors_explicit_choice() {
+        let mut state = AppState::default();
+        assert_eq!(state.resolved_update_channel(), UpdateChannel::Beta);
+
+        state.platform_type = "appliance";
+        assert_eq!(state.resolved_update_channel(), UpdateChannel::Stable);
+
+        state.update_channel = Some(UpdateChannel::Beta);
+        assert_eq!(state.resolved_update_channel(), UpdateChannel::Beta);
+
+        state.platform_type = "desktop";
+        state.update_channel = Some(UpdateChannel::Stable);
+        assert_eq!(state.resolved_update_channel(), UpdateChannel::Stable);
     }
 
     #[test]

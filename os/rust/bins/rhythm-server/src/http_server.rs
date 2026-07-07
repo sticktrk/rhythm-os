@@ -588,8 +588,13 @@ async fn ota_status_snapshot(
 ) -> Response {
     match serde_json::to_value(ota_status.snapshot()) {
         Ok(mut value) => {
-            if let Some(auto_update_status) = crate::auto_update::load_status_json(&state) {
-                if let Some(object) = value.as_object_mut() {
+            if let Some(object) = value.as_object_mut() {
+                let channel = crate::self_update::channel_from_state(&state);
+                object.insert(
+                    "channel".to_string(),
+                    serde_json::Value::String(channel.as_str().to_string()),
+                );
+                if let Some(auto_update_status) = crate::auto_update::load_status_json(&state) {
                     object.insert("auto_update_status".to_string(), auto_update_status);
                 }
             }
@@ -1244,6 +1249,8 @@ mod tests {
         assert_eq!(status["state"], "checking");
         assert_eq!(status["current_version"], "0.4.192-beta");
         assert_eq!(status["message"], "Checking for updates...");
+        // Default desktop state resolves to the beta channel.
+        assert_eq!(status["channel"], "beta");
         assert_eq!(status["auto_update_status"]["schema_version"], 1);
         assert_eq!(
             status["auto_update_status"]["last_check"]["decision"],

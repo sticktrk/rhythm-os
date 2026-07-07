@@ -10,7 +10,7 @@
 #   ./tools/os/scripts/promote-stable.sh --version 0.4.261     # v0.4.261-beta -> v0.4.261-stable
 #   ./tools/os/scripts/promote-stable.sh --version v0.4.261-beta
 #   ./tools/os/scripts/promote-stable.sh --version v0.4.261-stable
-#   ./tools/os/scripts/promote-stable.sh --version 0.4.261 --with-image
+#   ./tools/os/scripts/promote-stable.sh --version 0.4.261 --with-image   # force a full image build
 #   ./tools/os/scripts/promote-stable.sh --dry-run
 #   ./tools/os/scripts/promote-stable.sh --no-push             # create the stable tag locally only
 
@@ -19,6 +19,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../os" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# shellcheck source=lib/version.sh
+source "$SCRIPT_DIR/lib/version.sh"
 
 REMOTE="origin"
 VERSION=""
@@ -42,10 +45,11 @@ Options:
                       vX.Y.Z-beta tag.
   --message TEXT      Annotated stable tag message (default: "Release vX.Y.Z-stable")
   --remote NAME       Remote to push the stable tag to (default: origin)
-  --with-image        After pushing the stable tag, dispatch rpiz-sd-image.yml
-                      with publish_full_image_ota=true
-  --image-mode MODE   Image security posture for rpiz-sd-image.yml: auto, dev,
-                      or prod (default: auto)
+  --with-image        Force a full rootfs image build for this stable release
+                      by marking the tag. Normally unnecessary: CI auto-builds
+                      the image whenever the rootfs fingerprint changed.
+  --image-mode MODE   Image posture for a forced image build: auto, dev, or
+                      prod (default: auto = prod posture for stable)
   --no-push           Create the stable tag locally but do not push it
   --dry-run           Print the planned tag action without changing git state
   -h, --help          Show this help
@@ -118,19 +122,6 @@ require_command() {
     fi
 }
 
-semver_core() {
-    local value="${1#v}"
-    value="${value%%+*}"
-    value="${value%%-*}"
-
-    if ! printf '%s' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "Error: Version must be semver X.Y.Z, optionally prefixed with v and suffixed with -beta or -stable (got '$1')" >&2
-        exit 1
-    fi
-
-    echo "$value"
-}
-
 latest_beta_tag() {
     git -C "$REPO_ROOT" tag --list 'v[0-9]*-beta' --sort=-version:refname | head -n 1
 }
@@ -153,18 +144,15 @@ tag_commit() {
     git -C "$REPO_ROOT" rev-list -n 1 "$tag"
 }
 
-dispatch_image_workflow() {
-    local tag="$1"
-
-    echo "Dispatching rpiz-sd-image.yml for $tag ..."
-    (
-        cd "$REPO_ROOT"
-        gh workflow run rpiz-sd-image.yml \
-            -f "tag=$tag" \
-            -f "publish_full_image_ota=true" \
-            -f "image_mode=$IMAGE_MODE"
-    )
-    echo "Dispatched rpiz-sd-image.yml for $tag with full-image OTA publish enabled."
+# Tag-message marker consumed by the CI release gate. Normally CI decides
+# binary-only vs full-image from the rootfs fingerprint; the marker forces an
+# image build for this release.
+with_image_marker() {
+    if [ "$IMAGE_MODE" = "auto" ]; then
+        echo "[with-image]"
+    else
+        echo "[with-image image_mode=$IMAGE_MODE]"
+    fi
 }
 
 require_command git
@@ -186,15 +174,6 @@ esac
 if [ "$IMAGE_MODE_EXPLICIT" = true ] && [ "$WITH_IMAGE" = false ]; then
     echo "Error: --image-mode requires --with-image" >&2
     exit 1
-fi
-
-if [ "$WITH_IMAGE" = true ] && [ "$PUSH" = false ]; then
-    echo "Error: --with-image requires pushing the stable tag; remove --no-push" >&2
-    exit 1
-fi
-
-if [ "$WITH_IMAGE" = true ] && [ "$DRY_RUN" = false ]; then
-    require_command gh
 fi
 
 if [ -z "$VERSION" ]; then
@@ -220,6 +199,10 @@ fi
 
 if [ -z "$MESSAGE" ]; then
     MESSAGE="Release $STABLE_TAG"
+fi
+
+if [ "$WITH_IMAGE" = true ]; then
+    MESSAGE="$MESSAGE $(with_image_marker)"
 fi
 
 LOCAL_STABLE_COMMIT=""
@@ -250,9 +233,17 @@ else
     echo "  Remote:  (disabled by --no-push)"
 fi
 if [ "$WITH_IMAGE" = true ]; then
-    echo "  Image:   dispatch rpiz-sd-image.yml after tag push (mode: $IMAGE_MODE, full-image OTA: true)"
+    echo "  Image:   forced via tag marker $(with_image_marker) (CI builds the full image for this release)"
+else
+    echo "  Image:   auto — CI builds a full image only when the rootfs fingerprint changed"
 fi
 echo ""
+
+if [ "$WITH_IMAGE" = true ] && [ -n "$LOCAL_STABLE_COMMIT" ]; then
+    echo "Warning: $STABLE_TAG already exists, so its message cannot gain the $(with_image_marker) marker." >&2
+    echo "To force an image for this release, run the rpiz-sd-image.yml workflow manually:" >&2
+    echo "  gh workflow run rpiz-sd-image.yml -f tag=$STABLE_TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE" >&2
+fi
 
 if [ "$DRY_RUN" = true ]; then
     if [ -z "$LOCAL_STABLE_COMMIT" ]; then
@@ -266,9 +257,6 @@ if [ "$DRY_RUN" = true ]; then
         else
             echo "[dry-run] Remote stable tag already exists at the source commit."
         fi
-    fi
-    if [ "$WITH_IMAGE" = true ]; then
-        echo "[dry-run] Would dispatch image workflow: gh workflow run rpiz-sd-image.yml -f tag=$STABLE_TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE"
     fi
     exit 0
 fi
@@ -291,8 +279,4 @@ if [ "$PUSH" = true ]; then
 else
     echo "Tag created locally only. Push it when ready:"
     echo "  git push $REMOTE refs/tags/$STABLE_TAG"
-fi
-
-if [ "$WITH_IMAGE" = true ]; then
-    dispatch_image_workflow "$STABLE_TAG"
 fi
