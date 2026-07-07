@@ -157,3 +157,9 @@ curl -X PUT http://<hub>/api/settings -d '{"update_channel":"beta"}'
   `image_base_drift` (rootfs older than the manifest's image entry → image +
   package applied together), `component_drift` (sibling binary version skew →
   repair bundle).
+- Firmware older than 0.6.223 **cannot apply image updates at all**: it
+  mounted the freshly written inactive slot with `-t ext2`, but the images
+  have always been ext4, so the mount fails (`EINVAL`) and the whole update
+  aborts — including the package half. Such devices can only consume
+  manifests whose image entries are no newer than their image base; get them
+  past 0.6.223 via a package-only manifest or `push-rpiz-dev.sh` first.

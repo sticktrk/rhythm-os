@@ -1161,38 +1161,42 @@ fn mountpoint_is_active(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn ensure_mount(path: &str, device: &str, fs_type: &str) -> Result<(), String> {
+fn ensure_mount(path: &str, device: &str, fs_types: &[&str]) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("Failed to create {}: {}", path, e))?;
     if mountpoint_is_active(path) {
         return Ok(());
     }
 
-    let status = Command::new("/bin/mount")
-        .arg("-t")
-        .arg(fs_type)
-        .arg(device)
-        .arg(path)
-        .status()
-        .or_else(|_| {
-            Command::new("mount")
-                .arg("-t")
-                .arg(fs_type)
-                .arg(device)
-                .arg(path)
-                .status()
-        })
-        .map_err(|e| format!("Failed to mount {} on {}: {}", device, path, e))?;
+    let mut failures = Vec::new();
+    for fs_type in fs_types {
+        let status = Command::new("/bin/mount")
+            .arg("-t")
+            .arg(fs_type)
+            .arg(device)
+            .arg(path)
+            .status()
+            .or_else(|_| {
+                Command::new("mount")
+                    .arg("-t")
+                    .arg(fs_type)
+                    .arg(device)
+                    .arg(path)
+                    .status()
+            })
+            .map_err(|e| format!("Failed to mount {} on {}: {}", device, path, e))?;
 
-    if !status.success() {
-        return Err(format!(
-            "Mounting {} on {} failed with status {:?}",
-            device,
-            path,
-            status.code()
-        ));
+        if status.success() {
+            return Ok(());
+        }
+        failures.push(format!("{} (status {:?})", fs_type, status.code()));
     }
 
-    Ok(())
+    Err(format!(
+        "Mounting {} on {} failed as {}",
+        device,
+        path,
+        failures.join(", ")
+    ))
 }
 
 fn unmount_mountpoint(path: &Path) -> Result<(), String> {
@@ -1225,7 +1229,14 @@ fn mount_appliance_rootfs_slot(slot: ApplianceSlot) -> Result<PathBuf, String> {
     if mountpoint_is_active(APPLIANCE_INACTIVE_ROOT_MOUNT) {
         unmount_mountpoint(&mount_path)?;
     }
-    ensure_mount(APPLIANCE_INACTIVE_ROOT_MOUNT, slot.root_device(), "ext2")?;
+    // Buildroot generates the rootfs as ext4 (BR2_TARGET_ROOTFS_EXT2_4); the
+    // kernel refuses to mount an extents-enabled filesystem as plain ext2, so
+    // ext4 must be tried first. ext2 remains as a fallback for older images.
+    ensure_mount(
+        APPLIANCE_INACTIVE_ROOT_MOUNT,
+        slot.root_device(),
+        &["ext4", "ext2"],
+    )?;
     Ok(mount_path)
 }
 
@@ -1326,7 +1337,7 @@ where
 }
 
 fn update_appliance_cmdline_for_slot(slot: ApplianceSlot) -> Result<(), String> {
-    ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, "vfat")?;
+    ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, &["vfat"])?;
     rewrite_cmdline_file(
         Path::new(APPLIANCE_CMDLINE_PATH),
         Path::new(APPLIANCE_CMDLINE_BACKUP_PATH),
@@ -1436,7 +1447,7 @@ fn apply_appliance_image_blocking(
     let current_slot = current_appliance_slot()?;
     let target_slot = current_slot.inactive();
 
-    ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, "vfat")?;
+    ensure_mount(APPLIANCE_BOOT_MOUNT, APPLIANCE_BOOT_DEVICE, &["vfat"])?;
     fs::create_dir_all(APPLIANCE_OTA_STAGING_DIR)
         .map_err(|e| format!("Failed to create {}: {}", APPLIANCE_OTA_STAGING_DIR, e))?;
 
