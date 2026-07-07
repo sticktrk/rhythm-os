@@ -213,27 +213,42 @@ class RemoteAccessService {
     }
 
     final api = _apiForEndpoint(serverHub.endpoint, serverHub.token);
-    final initialStatus = await api.putConfig(
-      hostname: hostname,
-      connectorToken: connectorToken,
-      tunnelId: tunnelId,
-      tunnelName: tunnelName,
-    );
-    final status = await _waitForActivation(
-      api: api,
-      initialStatus: initialStatus,
-    );
+    var deviceConfigMayExist = false;
+    late final RhythmRemoteAccessStatus status;
+    String? stableServerInstanceId;
+    try {
+      final initialStatus = await api.putConfig(
+        hostname: hostname,
+        connectorToken: connectorToken,
+        tunnelId: tunnelId,
+        tunnelName: tunnelName,
+      );
+      deviceConfigMayExist = true;
+      status = await _waitForActivation(
+        api: api,
+        initialStatus: initialStatus,
+      );
 
-    var stableServerInstanceId =
-        serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
-    final remoteHello = await _waitForRemoteRoute(
-      endpoint: remoteEndpoint,
-      authToken: serverHub.token,
-      expectedServerInstanceId: stableServerInstanceId,
-    );
-    stableServerInstanceId ??= remoteHello.serverInstanceId?.trim();
-    if (stableServerInstanceId?.isEmpty ?? false) {
-      stableServerInstanceId = null;
+      stableServerInstanceId =
+          serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+      final remoteHello = await _waitForRemoteRoute(
+        endpoint: remoteEndpoint,
+        authToken: serverHub.token,
+        expectedServerInstanceId: stableServerInstanceId,
+      );
+      stableServerInstanceId ??= remoteHello.serverInstanceId?.trim();
+      if (stableServerInstanceId?.isEmpty ?? false) {
+        stableServerInstanceId = null;
+      }
+    } catch (error, stackTrace) {
+      await _rollBackFailedEnable(
+        serverHub,
+        home: home,
+        api: api,
+        serverInstanceId: serverInstanceId,
+        clearDeviceConfig: deviceConfigMayExist,
+      );
+      Error.throwWithStackTrace(error, stackTrace);
     }
 
     final updatedHub = serverHub.copyWith(
@@ -572,6 +587,38 @@ class RemoteAccessService {
         serverInstanceId: serverInstanceId,
       ),
     );
+  }
+
+  Future<void> _rollBackFailedEnable(
+    Hub serverHub, {
+    required RhythmRemoteAccessApi api,
+    required String serverInstanceId,
+    Home? home,
+    required bool clearDeviceConfig,
+  }) async {
+    if (clearDeviceConfig) {
+      try {
+        await api.clearConfig();
+      } catch (error) {
+        debugPrint(
+          'RemoteAccessService: failed to clear device config after '
+          'remote access enable failure for hub=${serverHub.id}: $error',
+        );
+      }
+    }
+
+    try {
+      await _tearDownCloudRemoteAccess(
+        serverHub,
+        home: home,
+        serverInstanceId: serverInstanceId,
+      );
+    } catch (error) {
+      debugPrint(
+        'RemoteAccessService: failed to roll back cloud remote access after '
+        'enable failure for hub=${serverHub.id}: $error',
+      );
+    }
   }
 
   RhythmRemoteAccessApi _apiForEndpoint(

@@ -263,6 +263,7 @@ void main() {
     });
 
     test('enable fails when the public remote hostname never routes', () async {
+      late _FakeRemoteAccessApi remoteApi;
       final supabase = _FakeSupabaseClient(
         responseData: {
           'remote_endpoint': {
@@ -278,7 +279,8 @@ void main() {
       );
       final service = RemoteAccessService.testing(
         apiFactory: ({required String baseUrl, String? authToken}) {
-          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+          remoteApi = _FakeRemoteAccessApi(baseUrl: baseUrl);
+          return remoteApi;
         },
         supabaseClientFactory: () => supabase,
         stateLoader: ({required endpoint, String? authToken}) async {
@@ -298,6 +300,120 @@ void main() {
         service.enableForHub(_serverHub()),
         throwsA(isA<RemoteAccessRouteException>()),
       );
+      expect(remoteApi.clearConfigCalls, 1);
+      expect(supabase.functions.invocations, hasLength(2));
+      expect(supabase.functions.invocations.last.body, {
+        'hub_id': 'hub-1',
+        'server_instance_id': 'srv-test-instance',
+        'action': 'disable',
+      });
+    });
+
+    test('enable tears down cloud mapping when device config write fails',
+        () async {
+      late _FakeRemoteAccessApi remoteApi;
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          remoteApi = _FakeRemoteAccessApi(
+            baseUrl: baseUrl,
+            onPut: () async {
+              throw const RhythmApiException('device config unavailable');
+            },
+          );
+          return remoteApi;
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await expectLater(
+        service.enableForHub(_serverHub()),
+        throwsA(isA<RhythmApiException>()),
+      );
+
+      expect(remoteApi.putConfigCalls, 1);
+      expect(remoteApi.clearConfigCalls, 0);
+      expect(supabase.functions.invocations, hasLength(2));
+      expect(supabase.functions.invocations.first.body, {
+        'hub_id': 'hub-1',
+        'server_instance_id': 'srv-test-instance',
+      });
+      expect(supabase.functions.invocations.last.body, {
+        'hub_id': 'hub-1',
+        'server_instance_id': 'srv-test-instance',
+        'action': 'disable',
+      });
+    });
+
+    test('enable clears device config and cloud mapping on activation failure',
+        () async {
+      late _FakeRemoteAccessApi remoteApi;
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        activationPollAttempts: 1,
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          remoteApi = _FakeRemoteAccessApi(
+            baseUrl: baseUrl,
+            putStatus: _remoteStatus(
+              serviceRunning: false,
+              registeredConnections: null,
+            ),
+          );
+          return remoteApi;
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await expectLater(
+        service.enableForHub(_serverHub()),
+        throwsA(isA<RemoteAccessActivationException>()),
+      );
+
+      expect(remoteApi.clearConfigCalls, 1);
+      expect(supabase.functions.invocations, hasLength(2));
+      expect(supabase.functions.invocations.last.body, {
+        'hub_id': 'hub-1',
+        'server_instance_id': 'srv-test-instance',
+        'action': 'disable',
+      });
     });
 
     test('required support grant failure surfaces during enable', () async {
@@ -761,15 +877,20 @@ RhythmRemoteAccessStatus _remoteStatus({
 class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
   _FakeRemoteAccessApi({
     required this.baseUrl,
+    this.onPut,
     this.onClear,
+    this.putStatus,
     this.statuses = const [],
   }) : super(baseUrl: 'http://127.0.0.1');
 
   final String baseUrl;
+  final Future<void> Function()? onPut;
   final Future<void> Function()? onClear;
+  final RhythmRemoteAccessStatus? putStatus;
   final List<RhythmRemoteAccessStatus> statuses;
   int statusCalls = 0;
   int putConfigCalls = 0;
+  int clearConfigCalls = 0;
   String? lastHostname;
   String? lastConnectorToken;
   String? lastTunnelId;
@@ -798,11 +919,13 @@ class _FakeRemoteAccessApi extends RhythmRemoteAccessApi {
     lastConnectorToken = connectorToken;
     lastTunnelId = tunnelId;
     lastTunnelName = tunnelName;
-    return _remoteStatus(registeredConnections: 1);
+    await onPut?.call();
+    return putStatus ?? _remoteStatus(registeredConnections: 1);
   }
 
   @override
   Future<RhythmRemoteAccessStatus> clearConfig() async {
+    clearConfigCalls += 1;
     await onClear?.call();
     return const RhythmRemoteAccessStatus(
       enabled: false,
