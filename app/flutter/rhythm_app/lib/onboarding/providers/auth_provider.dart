@@ -39,10 +39,16 @@ class AuthProvider extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   AuthUser? get user => _user;
   EmailAuthResult? get lastEmailAuthResult => _lastEmailAuthResult;
-  bool get isAuthenticated => _user != null;
+  bool get isAuthenticated => _user != null && !_user!.isAnonymous;
   bool get isAnonymous => _user?.isAnonymous ?? false;
 
   AuthProvider() {
+    final currentUser = _authService.currentUser;
+    if (currentUser != null && !currentUser.isAnonymous) {
+      _user = currentUser;
+      _email = currentUser.email;
+      _state = AuthState.authenticated;
+    }
     _authSubscription =
         _authService.authStateChanges.listen(_onAuthStateChanged);
   }
@@ -55,8 +61,10 @@ class AuthProvider extends ChangeNotifier {
 
   void _onAuthStateChanged(AuthUser? user) {
     _user = user;
-    if (user != null) {
+    if (user != null && !user.isAnonymous) {
       _state = AuthState.authenticated;
+    } else if (_state == AuthState.authenticated) {
+      _state = AuthState.initial;
     }
     notifyListeners();
   }
@@ -68,12 +76,13 @@ class AuthProvider extends ChangeNotifier {
       operationName: 'Google Sign In',
       operation: () async {
         final result = await _authService.signInWithGoogle();
-        if (result.user == null) {
+        final user = _completedSocialUser(result.user, 'Google Sign-In');
+        if (user == null) {
           // User cancelled - return null to indicate cancellation
           return null;
         }
-        _email = result.email;
-        return result.user;
+        _email = result.email ?? user.email;
+        return user;
       },
       onCancel: () {
         _state = AuthState.initial;
@@ -89,18 +98,31 @@ class AuthProvider extends ChangeNotifier {
       operationName: 'Apple Sign In',
       operation: () async {
         final result = await _authService.signInWithApple();
-        if (result.user == null) {
+        final user = _completedSocialUser(result.user, 'Apple Sign-In');
+        if (user == null) {
           // User cancelled - return null to indicate cancellation
           return null;
         }
-        _email = result.email;
-        return result.user;
+        _email = result.email ?? user.email;
+        return user;
       },
       onCancel: () {
         _state = AuthState.initial;
         notifyListeners();
       },
     );
+  }
+
+  AuthUser? _completedSocialUser(AuthUser? resultUser, String providerName) {
+    final user = resultUser ?? _authService.currentUser;
+    if (user == null) return null;
+    if (user.isAnonymous) {
+      throw AuthException(
+        '$providerName did not finish creating an account.',
+        code: 'social_sign_in_anonymous_user',
+      );
+    }
+    return user;
   }
 
   /// Continue with email/password, creating a new account when the email does
@@ -405,6 +427,10 @@ class AuthProvider extends ChangeNotifier {
         lowerMessage.contains('google_sign_in_missing_id_token') ||
         lowerMessage.contains('serverclientid')) {
       return 'Google Sign-In is not configured for this app build. Please update the app or contact support.';
+    }
+    if (lowerMessage.contains('did not finish creating an account') ||
+        lowerMessage.contains('social_sign_in_anonymous_user')) {
+      return 'Sign-in did not finish. Please try again.';
     }
 
     return 'An error occurred. Please try again.';

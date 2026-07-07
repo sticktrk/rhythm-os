@@ -504,17 +504,6 @@ class _AuthGateState extends State<AuthGate> {
         'user_id': authService.currentUserId ?? 'unknown',
         'is_anonymous': authService.isAnonymous ? 1 : 0,
       });
-    } else {
-      try {
-        await authService.signInAnonymously();
-        debugPrint('Created anonymous user: ${authService.currentUserId}');
-        if (authService.currentUserId != null) {
-          AnalyticsService().identifyUser(authService.currentUserId!);
-        }
-      } catch (e, stackTrace) {
-        debugPrint('Anonymous auth failed: $e');
-        debugPrint('  stackTrace: $stackTrace');
-      }
     }
 
     await SettingsService.instance.setOnboardingComplete(true);
@@ -528,10 +517,10 @@ class _AuthGateState extends State<AuthGate> {
 
   /// Whether the account gate must be shown before entering the app.
   ///
-  /// Accounts are required wherever the cloud backend runs. The anonymous
-  /// bootstrap session doesn't count — it only exists so sign-in can link it
-  /// to a permanent identity. Web and no-backend (HA add-on) builds have no
-  /// account infrastructure and are exempt.
+  /// Accounts are required wherever the cloud backend runs. A missing session
+  /// or a legacy anonymous session must stop at the account gate. Web and
+  /// no-backend (HA add-on) builds have no account infrastructure and are
+  /// exempt.
   bool _computeRequiresAccount() {
     if (kIsWeb || !BackendProvider.isInitialized) return false;
     final authService = AuthService();
@@ -589,23 +578,7 @@ class _AuthGateState extends State<AuthGate> {
   /// Reset to the clean pre-home hardware gate (called from settings).
   Future<void> _resetToOnboarding() async {
     debugPrint('_resetToOnboarding: resetting to clean hardware gate');
-    try {
-      if (BackendProvider.isInitialized) {
-        final authService = AuthService();
-        if (authService.currentUser == null) {
-          final user = await authService.signInAnonymously();
-          debugPrint('Created anonymous user after reset: ${user?.id}');
-          final userId = user?.id;
-          if (userId != null) {
-            AnalyticsService().identifyUser(userId);
-          }
-        }
-      }
-      await SettingsService.instance.setOnboardingComplete(true);
-    } catch (error, stackTrace) {
-      debugPrint('AuthGate reset failed: $error');
-      debugPrint('$stackTrace');
-    }
+    await SettingsService.instance.setOnboardingComplete(true);
 
     if (!mounted) return;
     setState(() {
