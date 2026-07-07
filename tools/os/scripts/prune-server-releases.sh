@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Prune old versioned release directories from the dl.rhythm.lighting server repo.
 #
-# This intentionally leaves non-versioned pointers such as install/latest,
-# install/latest.txt, <target>/latest, and <target>/manifest.json alone.
+# This intentionally leaves non-versioned pointers such as <feed>/latest and
+# <feed>/manifest.json alone.
+#
+# NOTE: this script is piped to the CDN host over `ssh ... "bash -s"`, so it
+# must stay fully self-contained (no sourcing of repo-local helper libs).
 
 set -euo pipefail
 
@@ -10,15 +13,6 @@ BASE_DIR="${RHYTHM_UPDATES_BASE_DIR:-}"
 KEEP=5
 DRY_RUN=false
 RELEASE_ROOTS=(
-    install
-    macos-arm64
-    macos-arm64-stable
-    macos-x86_64
-    macos-x86_64-stable
-    linux-amd64
-    linux-amd64-stable
-    linux-aarch64
-    linux-aarch64-stable
     rpiz
     rpiz-stable
 )
@@ -86,6 +80,55 @@ if [ ! -d "$BASE_DIR" ]; then
     exit 0
 fi
 
+# Version directories still referenced by any feed manifest must survive
+# pruning: binary-only releases carry the base image forward by URL, so the
+# newest manifests can point at an older release's v* directory (same feed via
+# "vX.Y.Z/..." or a sibling feed via "../rpiz/vX.Y.Z/..."). Collected as
+# newline-separated "root/vX.Y.Z" entries. Parsed with grep/sed so the CDN
+# host needs no jq.
+collect_protected_dirs() {
+    local root manifest url rel other_root rest ver_dir
+
+    for root in "${RELEASE_ROOTS[@]}"; do
+        manifest="$BASE_DIR/$root/manifest.json"
+        [ -f "$manifest" ] || continue
+        while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            case "$url" in
+                ../*)
+                    rel="${url#../}"
+                    other_root="${rel%%/*}"
+                    rest="${rel#*/}"
+                    ver_dir="${rest%%/*}"
+                    printf '%s/%s\n' "$other_root" "$ver_dir"
+                    ;;
+                v[0-9]*/*)
+                    ver_dir="${url%%/*}"
+                    printf '%s/%s\n' "$root" "$ver_dir"
+                    ;;
+            esac
+        done < <(grep -o '"url"[[:space:]]*:[[:space:]]*"[^"]*"' "$manifest" \
+            | sed 's/.*"url"[[:space:]]*:[[:space:]]*"//; s/"$//')
+    done
+}
+
+PROTECTED_DIRS="$(collect_protected_dirs || true)"
+
+is_protected() {
+    local candidate="$1"
+    local entry
+
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        if [ "$entry" = "$candidate" ]; then
+            return 0
+        fi
+    done <<EOF
+$PROTECTED_DIRS
+EOF
+    return 1
+}
+
 prune_release_root() {
     local relative_root="$1"
     local root="$BASE_DIR/$relative_root"
@@ -130,6 +173,10 @@ prune_release_root() {
     for ((i = 0; i < stale_count; i++)); do
         release="${releases[$i]}"
         path="$root/$release"
+        if is_protected "$relative_root/$release"; then
+            echo "Keeping $path (referenced by a feed manifest)"
+            continue
+        fi
         if [ "$DRY_RUN" = true ]; then
             echo "[dry-run] Would remove $path"
         else

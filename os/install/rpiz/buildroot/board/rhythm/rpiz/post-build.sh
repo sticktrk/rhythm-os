@@ -149,6 +149,7 @@ fi
 
 mkdir -p "$RHYTHM_DEFAULTS_DIR"
 printf '%s\n' "$RHYTHM_IMAGE_VERSION" > "${TARGET_DIR}/etc/rhythm-image-version"
+printf '%s\n' "${RHYTHM_IMAGE_FINGERPRINT:-unknown}" > "${TARGET_DIR}/etc/rhythm-image-fingerprint"
 rm -f "$RHYTHM_DEFAULTS" "$RHYTHM_DEV_DEFAULTS"
 if is_truthy "${RHYTHM_DEV_MODE:-}"; then
     cat > "$RHYTHM_DEV_DEFAULTS" <<'EOF'

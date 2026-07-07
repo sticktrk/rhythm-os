@@ -11,6 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../os" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
+# shellcheck source=lib/version.sh
+source "$SCRIPT_DIR/lib/version.sh"
+
 usage() {
     cat <<EOF
 Usage: $0 [workspace|server|addon|core|release] [version]
@@ -20,35 +23,8 @@ Targets:
   server     Alias for workspace (workspace crates inherit this version)
   addon      Read version from install/addon/config.yaml
   core       Strip prerelease/build metadata from a semver-like version
-  release    Normalize a version onto the current release channel
+  release    Normalize a version onto the beta release channel
 EOF
-}
-
-semver_core() {
-    local value="${1#v}"
-    value="${value%%+*}"
-    value="${value%%-*}"
-
-    if ! printf '%s' "$value" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "Error: Version core must be semver X.Y.Z (got '$1')" >&2
-        exit 1
-    fi
-
-    echo "$value"
-}
-
-release_version() {
-    local core
-    core="$(semver_core "$1")"
-    echo "${core}-beta"
-}
-
-read_workspace_version() {
-    awk -F'"' '
-        /^\[workspace\.package\]/ { in_workspace = 1; next }
-        /^\[/ && in_workspace { exit }
-        in_workspace && $0 ~ /^version[[:space:]]*=/ { print $2; exit }
-    ' "$REPO_ROOT/Cargo.toml"
 }
 
 resolve_workspace_version() {
@@ -86,52 +62,6 @@ resolve_workspace_version() {
     VERSION="${VERSION}${dirty_suffix}"
 
     echo "$VERSION"
-}
-
-semver_gte() {
-    local left="$1" right="$2"
-    local left_major left_minor left_patch right_major right_minor right_patch
-
-    IFS=. read -r left_major left_minor left_patch <<EOF
-$left
-EOF
-    IFS=. read -r right_major right_minor right_patch <<EOF
-$right
-EOF
-
-    left_major="${left_major:-0}"
-    left_minor="${left_minor:-0}"
-    left_patch="${left_patch:-0}"
-    right_major="${right_major:-0}"
-    right_minor="${right_minor:-0}"
-    right_patch="${right_patch:-0}"
-
-    if [ "$left_major" -ne "$right_major" ]; then
-        [ "$left_major" -gt "$right_major" ]
-        return
-    fi
-
-    if [ "$left_minor" -ne "$right_minor" ]; then
-        [ "$left_minor" -gt "$right_minor" ]
-        return
-    fi
-
-    [ "$left_patch" -ge "$right_patch" ]
-}
-
-bump_patch() {
-    local version="$1"
-    local major minor patch
-
-    IFS=. read -r major minor patch <<EOF
-$version
-EOF
-
-    major="${major:-0}"
-    minor="${minor:-0}"
-    patch="${patch:-0}"
-
-    echo "${major}.${minor}.$((patch + 1))"
 }
 
 resolve_addon_version() {

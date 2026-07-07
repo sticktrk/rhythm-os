@@ -52,7 +52,7 @@ use crate::scenes::{
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
-    SharedState, WorkItem,
+    SharedState, UpdateChannel, WorkItem,
 };
 use crate::storage::StoredLocation;
 use crate::topology::{
@@ -426,6 +426,7 @@ fn apply_mode_action(
         None,
         Some(mode_change),
         force_reapply_outputs,
+        None,
         None,
     )
     .map(|_| ())
@@ -2179,6 +2180,7 @@ fn persist_settings_locked(s: &AppState) {
             modes: s.mode_configs(),
             mode_transitions: s.mode_transition_configs(),
             auto_update: s.auto_update,
+            update_channel: s.update_channel,
         }) {
             warn!(target: "cmd", "Failed to save settings: {}", e);
         }
@@ -3485,6 +3487,7 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
 fn build_settings_dto_inner(s: &AppState) -> SettingsDto {
     SettingsDto {
         auto_update: s.auto_update,
+        update_channel: s.resolved_update_channel(),
         light_runtime: s.light_runtime_kind.clone(),
     }
 }
@@ -6920,6 +6923,7 @@ fn do_settings_set_internal(
     mode_change: Option<ModeChangeContext>,
     force_reapply_outputs: bool,
     auto_update: Option<bool>,
+    update_channel: Option<UpdateChannel>,
 ) -> Result<String> {
     if let Some(configs) = mode_configs.as_ref() {
         validate_mode_configs(configs)?;
@@ -6963,6 +6967,11 @@ fn do_settings_set_internal(
         if let Some(au) = auto_update {
             s.auto_update = au;
             info!(target: "cmd", "settings: auto_update={}", au);
+        }
+
+        if let Some(channel) = update_channel {
+            s.update_channel = Some(channel);
+            info!(target: "cmd", "settings: update_channel={}", channel.as_str());
         }
 
         let mut modes_updated = false;
@@ -7460,6 +7469,7 @@ pub fn do_settings_set(
     mode_configs: Option<Vec<ModeConfig>>,
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
     auto_update: Option<bool>,
+    update_channel: Option<UpdateChannel>,
 ) -> Result<String> {
     do_settings_set_internal(
         state,
@@ -7476,6 +7486,7 @@ pub fn do_settings_set(
         }),
         false,
         auto_update,
+        update_channel,
     )
 }
 
@@ -7501,6 +7512,7 @@ pub fn do_mode_set(
         mode_change,
         false,
         None,
+        None,
     )?;
     build_mode(state)
 }
@@ -7510,7 +7522,17 @@ pub fn do_transitions_set(
     state: &SharedState,
     mode_transitions: Option<Vec<rhythm_core::ModeTransitionConfig>>,
 ) -> Result<String> {
-    do_settings_set_internal(state, None, None, None, mode_transitions, None, false, None)?;
+    do_settings_set_internal(
+        state,
+        None,
+        None,
+        None,
+        mode_transitions,
+        None,
+        false,
+        None,
+        None,
+    )?;
     build_transitions(state)
 }
 
@@ -7783,6 +7805,7 @@ pub fn do_profile_bundle_import(
         None,
         false,
         None,
+        None,
     )?;
 
     info!(
@@ -7858,6 +7881,7 @@ fn apply_backup_configuration(
         Some(imported_mode_transitions),
         Some(ModeChangeContext::new(ModeChangeCause::Manual, None)),
         true,
+        None,
         None,
     )?;
 
@@ -7951,6 +7975,7 @@ pub fn do_set_active_mode_with_trigger(
         Some(mode_change),
         false,
         None,
+        None,
     )
     .map(|_| ())
 }
@@ -7973,6 +7998,7 @@ pub fn do_trigger_transition(state: &SharedState, transition_id: &str) -> Result
         None,
         Some(mode_change),
         true,
+        None,
         None,
     )?;
     build_mode(state)
@@ -16931,7 +16957,7 @@ mod tests {
     #[test]
     fn settings_partial_update() {
         let (state, _runtime) = setup_state(vec![]);
-        do_settings_set(&state, Some(true), None, None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, None, None).unwrap();
         let s = state.lock().unwrap();
         assert!(s.power_save);
     }
@@ -16945,7 +16971,7 @@ mod tests {
             s.runtime_config.update_interval_secs
         };
 
-        do_settings_set(&state, Some(true), None, None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, None, None).unwrap();
 
         let s = state.lock().unwrap();
         assert_eq!(s.runtime_config.update_interval_secs, original_interval);
@@ -17329,7 +17355,7 @@ mod tests {
     #[test]
     fn settings_response_is_valid_settings_json() {
         let (state, _rt) = setup_state(vec![]);
-        let result = do_settings_set(&state, None, None, None, None, Some(false)).unwrap();
+        let result = do_settings_set(&state, None, None, None, None, Some(false), None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(parsed.get("power_save").is_none());
         assert!(parsed["auto_update"].is_boolean());
@@ -17351,6 +17377,12 @@ mod tests {
         }
         let dto = build_settings_dto(&state).unwrap();
         assert!(!dto.auto_update);
+        // No explicit channel on a desktop state resolves to beta.
+        assert_eq!(dto.update_channel, UpdateChannel::Beta);
+
+        state.lock().unwrap().update_channel = Some(UpdateChannel::Stable);
+        let dto = build_settings_dto(&state).unwrap();
+        assert_eq!(dto.update_channel, UpdateChannel::Stable);
     }
 
     #[test]
@@ -20616,9 +20648,9 @@ mod tests {
     #[test]
     fn settings_power_save() {
         let (state, _rt) = setup_state(vec![]);
-        do_settings_set(&state, Some(true), None, None, None, None).unwrap();
+        do_settings_set(&state, Some(true), None, None, None, None, None).unwrap();
         assert!(state.lock().unwrap().power_save);
-        do_settings_set(&state, Some(false), None, None, None, None).unwrap();
+        do_settings_set(&state, Some(false), None, None, None, None, None).unwrap();
         assert!(!state.lock().unwrap().power_save);
     }
 
@@ -20627,11 +20659,42 @@ mod tests {
         let (state, _rt) = setup_state(vec![]);
         assert!(state.lock().unwrap().auto_update);
 
-        let result = do_settings_set(&state, None, None, None, None, Some(false)).unwrap();
+        let result = do_settings_set(&state, None, None, None, None, Some(false), None).unwrap();
 
         assert!(!state.lock().unwrap().auto_update);
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["auto_update"], false);
+        assert!(parsed.get("power_save").is_none());
+    }
+
+    #[test]
+    fn settings_update_channel_partial_update_persists_and_appears_in_dto() {
+        let (state, _rt) = setup_state(vec![]);
+        let storage = TestStorage::default();
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
+        assert!(state.lock().unwrap().update_channel.is_none());
+
+        let result = do_settings_set(
+            &state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(UpdateChannel::Beta),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.lock().unwrap().update_channel,
+            Some(UpdateChannel::Beta)
+        );
+        assert_eq!(
+            storage.load_settings().unwrap().update_channel,
+            Some(UpdateChannel::Beta)
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["update_channel"], "beta");
         assert!(parsed.get("power_save").is_none());
     }
 
@@ -20642,7 +20705,7 @@ mod tests {
             tokio::sync::broadcast::channel::<crate::server_event::ServerEvent>(16);
         state.lock().unwrap().event_tx = Some(event_tx);
 
-        do_settings_set(&state, None, None, None, None, Some(false)).unwrap();
+        do_settings_set(&state, None, None, None, None, Some(false), None).unwrap();
 
         let mut auto_update = None;
         while let Ok(event) = event_rx.try_recv() {
@@ -21374,6 +21437,7 @@ mod tests {
             }]),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -21407,6 +21471,7 @@ mod tests {
                 warning_profile_id: None,
                 room_defaults: vec![],
             }]),
+            None,
             None,
             None,
         )
@@ -21618,6 +21683,7 @@ mod tests {
                     state: RoomModeState::HardOff,
                 }],
             }]),
+            None,
             None,
             None,
         )

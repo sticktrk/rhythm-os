@@ -103,36 +103,23 @@ if [ "$need_build" = true ]; then
     "$SCRIPT_DIR/build-rpiz-builder-image.sh" --image-tag "$image_ref" --push
 fi
 
-# The baked output prefix (absolute path the baked Buildroot output was built
-# against) is recorded in the lock file so tools/os/scripts/build-rpiz-image.sh --docker
-# can forward it as RHYTHM_BAKED_OUTPUT_PREFIX without the user having to set
-# anything. Value comes from the same env overrides the packager honors.
-baked_prefix_src="${RHYTHM_RPIZ_OUT_DIR:-$PROJECT_ROOT/out/rpiz}"
-if [ -d "$baked_prefix_src" ]; then
-    baked_prefix="$(cd "$baked_prefix_src" && pwd)"
-else
-    baked_prefix=""
-fi
-
-# Write / update the lock file so callers pin to the exact tag + know the
-# absolute prefix the baked Buildroot output was built against.
+# Write / update the lock file so callers pin to the exact tag. The baked
+# output prefix is NOT recorded here (it is a machine-specific absolute path);
+# in-container consumers read the /opt/rpiz-out/.rhythm-baked-prefix sidecar
+# baked by build-rpiz-builder-image.sh, and RHYTHM_BAKED_OUTPUT_PREFIX remains
+# a manual override.
 current_ref=""
-current_baked_prefix=""
 if [ -f "$LOCK_FILE" ]; then
     current_ref="$(awk -F= '/^image=/ {print $2}' "$LOCK_FILE" 2>/dev/null || true)"
-    current_baked_prefix="$(awk -F= '/^baked_prefix=/ {print $2}' "$LOCK_FILE" 2>/dev/null || true)"
 fi
 
-if [ "$current_ref" != "$image_ref" ] || [ "$current_baked_prefix" != "$baked_prefix" ]; then
+if [ "$current_ref" != "$image_ref" ]; then
     mkdir -p "$(dirname "$LOCK_FILE")"
     {
         echo "# Managed by tools/os/scripts/build/refresh-builder-image.sh — do not edit by hand."
         echo "# Bump by rerunning the refresh script after changing any baked input."
         echo "image=$image_ref"
         echo "hash=$hash"
-        if [ -n "$baked_prefix" ]; then
-            echo "baked_prefix=$baked_prefix"
-        fi
     } > "$LOCK_FILE"
     echo "Updated $LOCK_FILE -> $image_ref"
 else

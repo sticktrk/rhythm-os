@@ -73,6 +73,15 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { auto_update: true }
   },
   {
+    id: 'settings-update-channel',
+    category: 'Global Settings',
+    label: 'Set update channel',
+    description: 'Switch the OTA release channel (beta or stable).',
+    method: 'PUT',
+    path: 'api/settings',
+    body: { update_channel: 'stable' }
+  },
+  {
     id: 'light-breaker-get',
     category: 'Global Settings',
     label: 'Read light breaker',
@@ -956,14 +965,6 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     description: 'Fetch OTA state from the device.',
     method: 'GET',
     path: 'api/ota/status'
-  },
-  {
-    id: 'ota-version',
-    category: 'Diagnostics & Appliance',
-    label: 'Read OTA version',
-    description: 'Fetch OTA firmware version.',
-    method: 'GET',
-    path: 'api/ota/version'
   },
   {
     id: 'ota-check',

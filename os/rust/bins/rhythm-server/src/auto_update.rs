@@ -1,15 +1,16 @@
-//! Background loop that auto-applies stable OTA updates.
+//! Background loop that auto-applies OTA updates.
 //!
 //! Runs on the rpiz appliance only. Wakes every 30 minutes, checks whether the
 //! local clock is inside the configured update window (default 14:00-16:00
-//! local), and — at most once per 20 hours — pulls the stable manifest,
-//! downloads any newer release, persists runtime state, and triggers the rpiz
-//! A/B reboot path. The
-//! 30-min wake / 20h dedupe combination means at most one update attempt per
-//! day even if the device clock skews mid-window.
+//! local), and — at most once per 20 hours — pulls the manifest for the
+//! device's resolved release channel (stable by default, beta when explicitly
+//! selected), downloads any newer release, persists runtime state, and
+//! triggers the rpiz A/B reboot path. The 30-min wake / 20h dedupe combination
+//! means at most one update attempt per day even if the device clock skews
+//! mid-window.
 //!
 //! The loop is a no-op when `auto_update == false` in `StoredSettings` (the
-//! user opted into beta + manual updates) and on non-appliance builds.
+//! user wants manual updates) and on non-appliance builds.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,6 +111,7 @@ fn maybe_attempt_update(state: &SharedState, last_attempt: &mut Option<RecentAtt
 #[derive(Clone, Debug)]
 struct LoopSettings {
     auto_update: bool,
+    channel: UpdateChannel,
     utc_offset_hours: f32,
     data_dir: String,
 }
@@ -118,6 +120,7 @@ fn snapshot_settings(state: &SharedState) -> Option<LoopSettings> {
     match state.lock() {
         Ok(s) => Some(LoopSettings {
             auto_update: s.auto_update,
+            channel: s.resolved_update_channel(),
             utc_offset_hours: s.utc_offset_hours,
             data_dir: s.data_dir.clone(),
         }),
@@ -289,17 +292,27 @@ impl AutoUpdateDecision {
 
 fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDecision {
     let version = crate::BUILD_VERSION;
-    let channel = UpdateChannel::Stable;
+    let channel = settings.channel;
     let state_path = auto_update_state_path(settings);
     let checked_at = Utc::now();
-    info!(target: "sys", "auto-update: checking stable feed (v{} -> ?)", version);
+    info!(
+        target: "sys",
+        "auto-update: checking {} feed (v{} -> ?)",
+        channel.as_str(),
+        version
+    );
 
     let info = match self_update::check_blocking(version, channel) {
         Ok(info) => info,
         Err(e) => {
             // Network blips should not dominate the journal. A missing stable
             // manifest is treated as "no update" in self_update.
-            info!(target: "sys", "auto-update: stable check failed: {}", e);
+            info!(
+                target: "sys",
+                "auto-update: {} check failed: {}",
+                channel.as_str(),
+                e
+            );
             persist_last_check(
                 state_path.as_deref(),
                 check_snapshot_error(
@@ -605,7 +618,7 @@ fn check_snapshot_error(
         checked_at: checked_at.to_rfc3339(),
         decision_at_epoch_ms: decision_at.timestamp_millis(),
         decision_at: decision_at.to_rfc3339(),
-        channel: channel_name(channel).to_string(),
+        channel: channel.as_str().to_string(),
         current_version: current_version.to_string(),
         latest_version: None,
         current_package_version: None,
@@ -641,7 +654,7 @@ fn check_snapshot_from_info(
         checked_at: checked_at.to_rfc3339(),
         decision_at_epoch_ms: decision_at.timestamp_millis(),
         decision_at: decision_at.to_rfc3339(),
-        channel: channel_name(channel).to_string(),
+        channel: channel.as_str().to_string(),
         current_version: info.current_version.clone(),
         latest_version: Some(info.latest_version.clone()),
         current_package_version: Some(info.current_package_version.clone()),
@@ -678,7 +691,7 @@ fn update_result_started(
         started_at: started_at.to_rfc3339(),
         completed_at_epoch_ms: None,
         completed_at: None,
-        channel: channel_name(channel).to_string(),
+        channel: channel.as_str().to_string(),
         current_version: info.current_version.clone(),
         latest_version: info.latest_version.clone(),
         current_package_version: info.current_package_version.clone(),
@@ -713,7 +726,7 @@ fn update_result_completed(
         started_at: started_at.to_rfc3339(),
         completed_at_epoch_ms: Some(completed_at.timestamp_millis()),
         completed_at: Some(completed_at.to_rfc3339()),
-        channel: channel_name(channel).to_string(),
+        channel: channel.as_str().to_string(),
         current_version: info.current_version.clone(),
         latest_version: info.latest_version.clone(),
         current_package_version: info.current_package_version.clone(),
@@ -726,13 +739,6 @@ fn update_result_completed(
         installed_targets,
         error,
         restart_persist_error,
-    }
-}
-
-fn channel_name(channel: UpdateChannel) -> &'static str {
-    match channel {
-        UpdateChannel::Beta => "beta",
-        UpdateChannel::Stable => "stable",
     }
 }
 
@@ -803,11 +809,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_settings_captures_auto_update_and_utc_offset() {
+    fn snapshot_settings_captures_auto_update_channel_and_utc_offset() {
         let state = Arc::new(Mutex::new(AppState::default()));
         {
             let mut guard = state.lock().unwrap();
             guard.auto_update = false;
+            guard.platform_type = "appliance";
             guard.utc_offset_hours = -4.5;
             guard.data_dir = "/tmp/rhythm-test".to_string();
         }
@@ -815,8 +822,74 @@ mod tests {
         let snapshot = snapshot_settings(&state).unwrap();
 
         assert!(!snapshot.auto_update);
+        assert_eq!(snapshot.channel, UpdateChannel::Stable);
         assert_eq!(snapshot.utc_offset_hours, -4.5);
         assert_eq!(snapshot.data_dir, "/tmp/rhythm-test");
+
+        state.lock().unwrap().update_channel = Some(UpdateChannel::Beta);
+        let snapshot = snapshot_settings(&state).unwrap();
+        assert_eq!(snapshot.channel, UpdateChannel::Beta);
+    }
+
+    #[test]
+    fn beta_channel_device_with_auto_update_polls_beta_feed() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let _guard = crate::self_update::ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RHYTHM_UPDATE_MANIFEST_URL");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let captured_path = Arc::new(Mutex::new(None::<String>));
+        let capture = captured_path.clone();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let read = stream.read(&mut request).unwrap_or(0);
+            *capture.lock().unwrap() = String::from_utf8_lossy(&request[..read])
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .map(str::to_string);
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        });
+        std::env::set_var(
+            "RHYTHM_UPDATE_BASE_URL",
+            format!("http://127.0.0.1:{}", port),
+        );
+
+        let dir = unique_test_dir("beta-feed");
+        let state = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut guard = state.lock().unwrap();
+            guard.platform_type = "appliance";
+            guard.update_channel = Some(UpdateChannel::Beta);
+            guard.data_dir = dir.display().to_string();
+        }
+        let settings = snapshot_settings(&state).unwrap();
+        assert!(settings.auto_update);
+        assert_eq!(settings.channel, UpdateChannel::Beta);
+
+        let decision = attempt_update(&state, &settings);
+
+        std::env::remove_var("RHYTHM_UPDATE_BASE_URL");
+
+        assert_eq!(decision, AutoUpdateDecision::CheckFailed);
+        let requested = captured_path.lock().unwrap().clone().expect("feed request");
+        assert!(
+            requested.ends_with("/manifest.json") && !requested.contains("-stable"),
+            "beta channel must poll the un-suffixed feed, got {requested}"
+        );
+        let persisted = load_auto_update_state(&dir.join(AUTO_UPDATE_STATE_RELATIVE_PATH));
+        assert_eq!(persisted.last_check.as_ref().unwrap().channel, "beta");
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -839,6 +912,7 @@ mod tests {
     fn status_path_uses_data_dir_ota_subdirectory() {
         let settings = LoopSettings {
             auto_update: true,
+            channel: UpdateChannel::Stable,
             utc_offset_hours: 0.0,
             data_dir: "/tmp/rhythm-data".to_string(),
         };
@@ -939,6 +1013,7 @@ mod tests {
         let dir = unique_test_dir("dedupe");
         let settings = LoopSettings {
             auto_update: true,
+            channel: UpdateChannel::Stable,
             utc_offset_hours: 0.0,
             data_dir: dir.display().to_string(),
         };
@@ -973,6 +1048,7 @@ mod tests {
         let dir = unique_test_dir("failure-retry");
         let settings = LoopSettings {
             auto_update: true,
+            channel: UpdateChannel::Stable,
             utc_offset_hours: 0.0,
             data_dir: dir.display().to_string(),
         };

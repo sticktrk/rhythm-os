@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use crate::canonical::triage::{TriageKind, TriageStatus};
 use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::SceneDefinition;
+use crate::state::UpdateChannel;
 use crate::topology::{DevicePlacement, HubRoomBinding, InputBinding, NodeControlKind};
 
 // ---------------------------------------------------------------------------
@@ -312,6 +313,8 @@ pub struct LocationDto {
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsDto {
     pub auto_update: bool,
+    /// Resolved OTA release channel (explicit choice or platform default).
+    pub update_channel: UpdateChannel,
     #[serde(rename = "light_runtime")]
     pub light_runtime: LightRuntimeKind,
 }
@@ -929,11 +932,13 @@ mod tests {
     fn settings_dto_serializes() {
         let dto = SettingsDto {
             auto_update: true,
+            update_channel: UpdateChannel::Stable,
             light_runtime: LightRuntimeKind::default(),
         };
         let json: Value = serde_json::to_value(&dto).unwrap();
         assert!(json.get("power_save").is_none());
         assert_eq!(json["auto_update"], true);
+        assert_eq!(json["update_channel"], "stable");
         assert_eq!(json["light_runtime"], "rhythm-adaptive");
         assert!(json.get("light_breaker_enabled").is_none());
         assert!(json.get("mode").is_none());
@@ -1214,6 +1219,7 @@ mod tests {
             },
             settings: SettingsDto {
                 auto_update: true,
+                update_channel: UpdateChannel::Stable,
                 light_runtime: LightRuntimeKind::default(),
             },
             light_breaker: LightBreakerDto { enabled: true },
@@ -1326,6 +1332,7 @@ mod tests {
             },
             settings: SettingsDto {
                 auto_update: true,
+                update_channel: UpdateChannel::Stable,
                 light_runtime: LightRuntimeKind::default(),
             },
             light_breaker: LightBreakerDto { enabled: true },

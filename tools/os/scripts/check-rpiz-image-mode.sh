@@ -49,6 +49,14 @@ require_line "$CONFIG_FILE" 'BR2_PACKAGE_RHYTHM_CLOUDFLARED=y'
 [ -x "$TARGET_DIR/etc/init.d/rhythm-cloudflared" ] || fail "missing executable /etc/init.d/rhythm-cloudflared"
 [ -s "$IMAGE_VERSION_FILE" ] || fail "missing $IMAGE_VERSION_FILE"
 
+IMAGE_FINGERPRINT_FILE="$TARGET_DIR/etc/rhythm-image-fingerprint"
+[ -s "$IMAGE_FINGERPRINT_FILE" ] || fail "missing $IMAGE_FINGERPRINT_FILE"
+if [ -n "${RHYTHM_IMAGE_FINGERPRINT:-}" ]; then
+    baked_fingerprint="$(tr -d '[:space:]' < "$IMAGE_FINGERPRINT_FILE")"
+    [ "$baked_fingerprint" = "$RHYTHM_IMAGE_FINGERPRINT" ] \
+        || fail "image fingerprint mismatch: baked '$baked_fingerprint' != expected '$RHYTHM_IMAGE_FINGERPRINT'"
+fi
+
 case "$IMAGE_MODE" in
     dev)
         require_line "$CONFIG_FILE" 'BR2_TARGET_GENERIC_ROOT_PASSWD="rhythm"'

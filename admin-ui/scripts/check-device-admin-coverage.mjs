@@ -15,6 +15,8 @@ const explicitExemptions = new Set([
   'POST api/ota/upload',
   // Same-origin app discovery is not a remote-device setting surface.
   'GET api/discover',
+  // Legacy ESP32-only endpoint; rhythm-server 404s it.
+  'GET api/ota/version',
 ]);
 
 const catalog = readFileSync(catalogPath, 'utf8');

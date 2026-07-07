@@ -16,6 +16,7 @@ import {
   fetchHubLogTail
 } from '../../api';
 import { JsonEditor } from '../../components/controls/JsonEditor';
+import { SegmentedControl } from '../../components/controls/SegmentedControl';
 import { ToggleSwitch } from '../../components/controls/ToggleSwitch';
 import {
   LogPanel,
@@ -74,6 +75,16 @@ export default function SystemPage() {
     useCallback(
       async (next: boolean) => {
         await setSettings(client, { auto_update: next });
+        await settingsRefresh();
+      },
+      [client, settingsRefresh]
+    )
+  );
+  const updateChannel = asString(settings.update_channel) ?? 'stable';
+  const updateChannelCall = useDeviceCall(
+    useCallback(
+      async (next: string) => {
+        await setSettings(client, { update_channel: next });
         await settingsRefresh();
       },
       [client, settingsRefresh]
@@ -218,17 +229,68 @@ export default function SystemPage() {
       <div className="cardGrid two">
         <SectionCard
           title="Settings"
-          busy={settingsQuery.refreshing || autoUpdateCall.busy}
-          error={settingsQuery.error ?? autoUpdateCall.error}
+          busy={
+            settingsQuery.refreshing ||
+            autoUpdateCall.busy ||
+            updateChannelCall.busy
+          }
+          error={
+            settingsQuery.error ??
+            autoUpdateCall.error ??
+            updateChannelCall.error
+          }
           rawPayload={settingsQuery.data ?? undefined}
         >
-          <ToggleSwitch
-            checked={asBoolean(settings.auto_update) ?? false}
-            disabled={settingsQuery.data === null}
-            busy={autoUpdateCall.busy}
-            label="Automatic updates"
-            onChange={(next) => void autoUpdateCall.run(next)}
-          />
+          <div className="formRow">
+            <div className="formRowLabel">
+              <span>Update channel</span>
+              <small>
+                Beta receives every tagged release. Stable is the curated
+                feed.
+              </small>
+            </div>
+            <div className="formRowControl">
+              <SegmentedControl
+                value={updateChannel}
+                disabled={settingsQuery.data === null || updateChannelCall.busy}
+                onChange={(next) => {
+                  if (next === updateChannel) return;
+                  void (async () => {
+                    if (next === 'beta') {
+                      const confirmed = await confirm({
+                        title: 'Switch to beta channel',
+                        message: `Put ${hub.name} on the beta channel? It receives every tagged release ahead of the curated stable feed.`,
+                        confirmLabel: 'Switch to beta'
+                      });
+                      if (!confirmed) return;
+                    }
+                    await updateChannelCall.run(next);
+                  })();
+                }}
+                options={[
+                  { value: 'stable', label: 'Stable' },
+                  { value: 'beta', label: 'Beta' }
+                ]}
+              />
+            </div>
+          </div>
+          <div className="formRow">
+            <div className="formRowLabel">
+              <span>Automatic updates</span>
+              <small>
+                Apply updates from the selected channel automatically during
+                the daily window.
+              </small>
+            </div>
+            <div className="formRowControl">
+              <ToggleSwitch
+                checked={asBoolean(settings.auto_update) ?? false}
+                disabled={settingsQuery.data === null}
+                busy={autoUpdateCall.busy}
+                onChange={(next) => void autoUpdateCall.run(next)}
+              />
+            </div>
+          </div>
         </SectionCard>
 
         <SectionCard
@@ -241,6 +303,7 @@ export default function SystemPage() {
           <KeyValueGrid
             rows={[
               ['State', asString(ota.state)],
+              ['Channel', asString(ota.channel)],
               ['Current', asString(ota.current_version)],
               ['Latest', asString(ota.latest_version)],
               ['Update available', asBoolean(ota.update_available)],
