@@ -31,6 +31,25 @@ class BackendProvider {
   /// Check if the backend has been initialized.
   static bool get isInitialized => _instance != null;
 
+  @visibleForTesting
+  static void setInstanceForTesting({
+    required AuthBackend auth,
+    AnalyticsBackend? analytics,
+  }) {
+    _instance?.dispose();
+    _instance = BackendProvider._(
+      config: BackendConfig.offline(),
+      auth: auth,
+      analytics: analytics ?? ConsoleAnalyticsBackend(enabled: false),
+    );
+  }
+
+  @visibleForTesting
+  static void resetForTesting() {
+    _instance?.dispose();
+    _instance = null;
+  }
+
   final BackendConfig _config;
   final AuthBackend _auth;
   final AnalyticsBackend _analytics;
@@ -48,7 +67,8 @@ class BackendProvider {
   /// Must be called once before accessing [instance].
   static Future<void> initialize(BackendConfig config) async {
     if (_instance != null) {
-      debugPrint('BackendProvider: Already initialized, disposing old instance');
+      debugPrint(
+          'BackendProvider: Already initialized, disposing old instance');
       _instance!.dispose();
     }
 

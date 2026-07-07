@@ -329,38 +329,13 @@ class SupabaseAuthBackend implements AuthBackend {
 
       debugPrint('SupabaseAuthBackend: Got ID token, signing in with Supabase');
 
-      // Sign in with Supabase using ID token (same as iOS native flow)
-      final currentUser = client.auth.currentUser;
-      AuthResponse response;
-
-      if (currentUser != null && currentUser.isAnonymous) {
-        debugPrint(
-            'SupabaseAuthBackend: Linking Google to anonymous user: ${currentUser.id}');
-        try {
-          response = await client.auth.signInWithIdToken(
-            provider: OAuthProvider.google,
-            idToken: idToken,
-          );
-        } on AuthException catch (e) {
-          if (e.message.contains('already registered') ||
-              e.message.contains('already exists')) {
-            debugPrint(
-                'SupabaseAuthBackend: Google account exists, signing in to existing');
-            await client.auth.signOut();
-            response = await client.auth.signInWithIdToken(
-              provider: OAuthProvider.google,
-              idToken: idToken,
-            );
-          } else {
-            rethrow;
-          }
-        }
-      } else {
-        response = await client.auth.signInWithIdToken(
-          provider: OAuthProvider.google,
-          idToken: idToken,
-        );
-      }
+      final accessToken = tokenData['access_token'] as String?;
+      final response = await _signInOrLinkWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+        accessToken: accessToken,
+        providerName: 'Google',
+      );
 
       // Extract email from ID token
       final parts = idToken.split('.');
@@ -372,8 +347,7 @@ class SupabaseAuthBackend implements AuthBackend {
         email = payload['email'] as String?;
       }
 
-      final resultUser =
-          response.user != null ? _mapUser(response.user!) : null;
+      final resultUser = _mapAuthResponseUser(response);
       debugPrint(
           'SupabaseAuthBackend: macOS Google sign-in successful: $email');
       return GoogleSignInResult(user: resultUser, email: email);
@@ -426,43 +400,15 @@ class SupabaseAuthBackend implements AuthBackend {
         );
       }
 
-      // Sign in with Supabase using ID token
       // NOTE: "Skip nonce checks" must be enabled in Supabase Dashboard:
       // Authentication → Providers → Google → Skip nonce checks
-      final currentUser = client.auth.currentUser;
-      AuthResponse response;
+      final response = await _signInOrLinkWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+        providerName: 'Google',
+      );
 
-      if (currentUser != null && currentUser.isAnonymous) {
-        debugPrint(
-            'SupabaseAuthBackend: Linking Google to anonymous user: ${currentUser.id}');
-        try {
-          response = await client.auth.signInWithIdToken(
-            provider: OAuthProvider.google,
-            idToken: idToken,
-          );
-        } on AuthException catch (e) {
-          if (e.message.contains('already registered') ||
-              e.message.contains('already exists')) {
-            debugPrint(
-                'SupabaseAuthBackend: Google account exists, signing in to existing');
-            await client.auth.signOut();
-            response = await client.auth.signInWithIdToken(
-              provider: OAuthProvider.google,
-              idToken: idToken,
-            );
-          } else {
-            rethrow;
-          }
-        }
-      } else {
-        response = await client.auth.signInWithIdToken(
-          provider: OAuthProvider.google,
-          idToken: idToken,
-        );
-      }
-
-      final resultUser =
-          response.user != null ? _mapUser(response.user!) : null;
+      final resultUser = _mapAuthResponseUser(response);
       return GoogleSignInResult(user: resultUser, email: googleUser.email);
     } catch (e) {
       debugPrint('SupabaseAuthBackend: Google sign-in failed: $e');
@@ -502,44 +448,14 @@ class SupabaseAuthBackend implements AuthBackend {
       debugPrint(
           'SupabaseAuthBackend: Apple credential received, email: ${credential.email}');
 
-      // Sign in with Supabase using ID token
-      final currentUser = client.auth.currentUser;
-      AuthResponse response;
+      final response = await _signInOrLinkWithIdToken(
+        provider: OAuthProvider.apple,
+        idToken: idToken,
+        nonce: rawNonce,
+        providerName: 'Apple',
+      );
 
-      if (currentUser != null && currentUser.isAnonymous) {
-        debugPrint(
-            'SupabaseAuthBackend: Linking Apple to anonymous user: ${currentUser.id}');
-        try {
-          response = await client.auth.signInWithIdToken(
-            provider: OAuthProvider.apple,
-            idToken: idToken,
-            nonce: rawNonce,
-          );
-        } on AuthException catch (e) {
-          if (e.message.contains('already registered') ||
-              e.message.contains('already exists')) {
-            debugPrint(
-                'SupabaseAuthBackend: Apple account exists, signing in to existing');
-            await client.auth.signOut();
-            response = await client.auth.signInWithIdToken(
-              provider: OAuthProvider.apple,
-              idToken: idToken,
-              nonce: rawNonce,
-            );
-          } else {
-            rethrow;
-          }
-        }
-      } else {
-        response = await client.auth.signInWithIdToken(
-          provider: OAuthProvider.apple,
-          idToken: idToken,
-          nonce: rawNonce,
-        );
-      }
-
-      final resultUser =
-          response.user != null ? _mapUser(response.user!) : null;
+      final resultUser = _mapAuthResponseUser(response);
       // Note: Apple only provides email on first sign-in, may be null on subsequent
       return AppleSignInResult(user: resultUser, email: credential.email);
     } catch (e) {
@@ -555,6 +471,68 @@ class SupabaseAuthBackend implements AuthBackend {
     final random = Random.secure();
     return List.generate(length, (_) => charset[random.nextInt(charset.length)])
         .join();
+  }
+
+  Future<AuthResponse> _signInOrLinkWithIdToken({
+    required OAuthProvider provider,
+    required String idToken,
+    required String providerName,
+    String? accessToken,
+    String? nonce,
+  }) async {
+    final currentUser = client.auth.currentUser;
+
+    if (currentUser != null && currentUser.isAnonymous) {
+      debugPrint(
+          'SupabaseAuthBackend: Linking $providerName to anonymous user: ${currentUser.id}');
+      try {
+        return await client.auth.linkIdentityWithIdToken(
+          provider: provider,
+          idToken: idToken,
+          accessToken: accessToken,
+          nonce: nonce,
+        );
+      } on AuthException catch (e) {
+        if (!_isExistingProviderAccountError(e)) rethrow;
+
+        debugPrint(
+            'SupabaseAuthBackend: $providerName account exists, signing in to existing account');
+        await client.auth.signOut();
+        return await client.auth.signInWithIdToken(
+          provider: provider,
+          idToken: idToken,
+          accessToken: accessToken,
+          nonce: nonce,
+        );
+      }
+    }
+
+    return await client.auth.signInWithIdToken(
+      provider: provider,
+      idToken: idToken,
+      accessToken: accessToken,
+      nonce: nonce,
+    );
+  }
+
+  bool _isExistingProviderAccountError(AuthException error) {
+    final code = error.code;
+    if (code == 'identity_already_exists' ||
+        code == 'email_exists' ||
+        code == 'user_already_exists') {
+      return true;
+    }
+
+    final message = error.message.toLowerCase();
+    return message.contains('already registered') ||
+        message.contains('already exists') ||
+        message.contains('identity already') ||
+        message.contains('email exists');
+  }
+
+  AuthUser? _mapAuthResponseUser(AuthResponse response) {
+    final user = response.user ?? client.auth.currentUser;
+    return user != null ? _mapUser(user) : null;
   }
 
   @override
