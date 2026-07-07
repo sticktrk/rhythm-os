@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use rhythm_os::provisioning::WifiCredentials;
+use serde::Serialize;
 
 const WPA_CONF: &str = "/etc/wpa_supplicant.conf";
 const WIFI_INIT_SCRIPT: &str = "/etc/init.d/S42wifi";
@@ -20,6 +21,9 @@ const DEFAULT_COUNTRY: &str = "US";
 const WIFI_SCRIPT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound on a `wpa_cli status` query (runs on every Wi-Fi status poll).
 const WPA_CLI_TIMEOUT: Duration = Duration::from_secs(5);
+/// Short settle window for scan results after `wpa_cli scan` returns `OK`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const WPA_SCAN_SETTLE_DELAY: Duration = Duration::from_secs(2);
 
 /// Wait for a spawned child with a deadline, killing it on timeout.
 pub(crate) fn wait_child_with_timeout(
@@ -108,6 +112,44 @@ pub fn load_configured_credentials() -> Result<Option<WifiCredentials>> {
         .as_deref()
         .and_then(|iface| wpa_status_field(iface, "ssid"));
     Ok(parse_wpa_credentials(&content, preferred_ssid.as_deref()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WifiScanNetwork {
+    pub ssid: String,
+    pub rssi: i32,
+    pub security: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency: Option<u32>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn scan_networks() -> Result<Vec<WifiScanNetwork>> {
+    let iface = find_wifi_iface().ok_or_else(|| anyhow::anyhow!("No Wi-Fi interface found"))?;
+    let scan_error = run_wpa_cli(&iface, &["scan"], "wpa_cli scan").err();
+
+    std::thread::sleep(WPA_SCAN_SETTLE_DELAY);
+
+    let scan_results = match run_wpa_cli(&iface, &["scan_results"], "wpa_cli scan_results") {
+        Ok(output) => output,
+        Err(results_error) => {
+            if let Some(scan_error) = scan_error {
+                return Err(scan_error).with_context(|| {
+                    format!("Wi-Fi scan results were unavailable: {results_error}")
+                });
+            }
+            return Err(results_error);
+        }
+    };
+
+    let networks = parse_wpa_scan_results(&scan_results);
+    if networks.is_empty() {
+        if let Some(scan_error) = scan_error {
+            return Err(scan_error
+                .context("Wi-Fi scan request failed and no cached scan results were available"));
+        }
+    }
+    Ok(networks)
 }
 
 pub fn connect_with_credentials(creds: &WifiCredentials, timeout: Duration) -> Result<String> {
@@ -348,24 +390,90 @@ fn find_wifi_iface() -> Option<String> {
 }
 
 fn wpa_status_field(iface: &str, field: &str) -> Option<String> {
-    let child = Command::new(WPA_CLI)
-        .args(["-i", iface, "status"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let output = wait_child_with_timeout(child, WPA_CLI_TIMEOUT, "wpa_cli status").ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_wpa_cli(iface, &["status"], "wpa_cli status").ok()?;
     stdout.lines().find_map(|line| {
         line.strip_prefix(&format!("{field}="))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     })
+}
+
+fn run_wpa_cli(iface: &str, args: &[&str], label: &str) -> Result<String> {
+    let child = Command::new(WPA_CLI)
+        .args(["-i", iface])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("running {label}"))?;
+    let output = wait_child_with_timeout(child, WPA_CLI_TIMEOUT, label)?;
+    if !output.status.success() {
+        bail!("{label} failed with status {}", output.status);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if stdout.lines().any(|line| line.trim() == "FAIL") {
+        bail!("{label} returned FAIL");
+    }
+    Ok(stdout)
+}
+
+fn parse_wpa_scan_results(output: &str) -> Vec<WifiScanNetwork> {
+    let mut networks: Vec<WifiScanNetwork> = Vec::new();
+
+    for line in output.lines().skip(1) {
+        let mut parts = line.splitn(5, '\t');
+        let _bssid = parts.next();
+        let frequency = parts.next().and_then(|value| value.parse::<u32>().ok());
+        let Some(rssi) = parts.next().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        let flags = parts.next().unwrap_or_default();
+        let ssid = parts.next().unwrap_or_default();
+        if ssid.trim().is_empty() || ssid.chars().any(char::is_control) {
+            continue;
+        }
+
+        let candidate = WifiScanNetwork {
+            ssid: ssid.to_string(),
+            rssi,
+            security: scan_security_label(flags).to_string(),
+            frequency,
+        };
+
+        match networks
+            .iter_mut()
+            .find(|network| network.ssid == candidate.ssid)
+        {
+            Some(existing) if candidate.rssi > existing.rssi => *existing = candidate,
+            Some(_) => {}
+            None => networks.push(candidate),
+        }
+    }
+
+    networks.sort_by(|left, right| {
+        right
+            .rssi
+            .cmp(&left.rssi)
+            .then_with(|| left.ssid.to_lowercase().cmp(&right.ssid.to_lowercase()))
+    });
+    networks
+}
+
+fn scan_security_label(flags: &str) -> &'static str {
+    let normalized = flags.to_ascii_uppercase();
+    if normalized.contains("SAE") || normalized.contains("WPA3") {
+        "wpa3"
+    } else if normalized.contains("WPA2") || normalized.contains("RSN") {
+        "wpa2"
+    } else if normalized.contains("WPA") {
+        "wpa"
+    } else if normalized.contains("WEP") {
+        "wep"
+    } else {
+        "open"
+    }
 }
 
 fn escape_wpa_value(value: &str) -> String {
@@ -586,6 +694,49 @@ network={
                 ssid: "robnet".into(),
                 password: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             })
+        );
+    }
+
+    #[test]
+    fn parse_wpa_scan_results_filters_dedupes_and_sorts_networks() {
+        let output = "bssid / frequency / signal level / flags / ssid\n\
+11:22:33:44:55:66\t2412\t-66\t[WPA2-PSK-CCMP][ESS]\tKitchen\n\
+22:33:44:55:66:77\t2412\t-42\t[WPA2-PSK-CCMP][ESS]\tKitchen\n\
+33:44:55:66:77:88\t5180\t-52\t[WPA2-PSK+SAE-CCMP][ESS]\tStudio\n\
+44:55:66:77:88:99\t2462\t-50\t[ESS]\tGuest\n\
+55:66:77:88:99:aa\t2462\t-45\t[WEP][ESS]\tLegacy\n\
+66:77:88:99:aa:bb\t2462\t-30\t[WPA2-PSK-CCMP][ESS]\t\n";
+
+        let networks = parse_wpa_scan_results(output);
+
+        assert_eq!(
+            networks,
+            vec![
+                WifiScanNetwork {
+                    ssid: "Kitchen".into(),
+                    rssi: -42,
+                    security: "wpa2".into(),
+                    frequency: Some(2412),
+                },
+                WifiScanNetwork {
+                    ssid: "Legacy".into(),
+                    rssi: -45,
+                    security: "wep".into(),
+                    frequency: Some(2462),
+                },
+                WifiScanNetwork {
+                    ssid: "Guest".into(),
+                    rssi: -50,
+                    security: "open".into(),
+                    frequency: Some(2462),
+                },
+                WifiScanNetwork {
+                    ssid: "Studio".into(),
+                    rssi: -52,
+                    security: "wpa3".into(),
+                    frequency: Some(5180),
+                },
+            ]
         );
     }
 

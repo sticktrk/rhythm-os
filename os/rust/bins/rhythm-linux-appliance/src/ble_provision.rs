@@ -18,7 +18,8 @@ use rhythm_os::provisioning::{
 #[cfg(target_os = "linux")]
 use rhythm_os::provisioning::{
     PROVISIONING_AUTH_CMD_UUID, PROVISIONING_DEVICE_INFO_UUID, PROVISIONING_SERVICE_UUID,
-    PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
+    PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID, PROVISIONING_WIFI_SCAN_REQUEST_UUID,
+    PROVISIONING_WIFI_SCAN_RESULT_UUID,
 };
 use rhythm_os::server_event::OtaUpdateStage;
 use rhythm_os::state::SharedState;
@@ -533,6 +534,7 @@ fn sync_clock_after_wifi_connect() {
 #[cfg(target_os = "linux")]
 mod bluez {
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use anyhow::{Context, Result};
@@ -546,13 +548,14 @@ mod bluez {
     use futures::FutureExt;
     use log::{info, warn};
     use tokio::runtime::Runtime;
-    use tokio::sync::watch;
+    use tokio::sync::{broadcast, watch};
     use uuid::Uuid;
 
     use super::{
         ProvisioningDeviceInfo, ProvisioningEvent, ProvisioningFrontend, ProvisioningStatus,
         Sender as StdSender, PROVISIONING_AUTH_CMD_UUID, PROVISIONING_DEVICE_INFO_UUID,
         PROVISIONING_SERVICE_UUID, PROVISIONING_STATUS_UUID, PROVISIONING_WIFI_CMD_UUID,
+        PROVISIONING_WIFI_SCAN_REQUEST_UUID, PROVISIONING_WIFI_SCAN_RESULT_UUID,
     };
     /// How often an idle status-notify task probes its subscriber. Bounds the
     /// lifetime of tasks whose BLE client disconnected between status changes.
@@ -563,6 +566,8 @@ mod bluez {
         event_tx: StdSender<ProvisioningEvent>,
         event_rx: Receiver<ProvisioningEvent>,
         status_tx: watch::Sender<Vec<u8>>,
+        wifi_scan_read_tx: watch::Sender<Vec<u8>>,
+        wifi_scan_notify_tx: broadcast::Sender<Vec<u8>>,
         handles: Option<BluezHandles>,
     }
 
@@ -585,12 +590,16 @@ mod bluez {
             let (event_tx, event_rx) = std::sync::mpsc::channel();
             let initial = ProvisioningStatus::Waiting.json_bytes()?;
             let (status_tx, _status_rx) = watch::channel(initial);
+            let (wifi_scan_read_tx, _wifi_scan_read_rx) = watch::channel(wifi_scan_idle_payload());
+            let (wifi_scan_notify_tx, _wifi_scan_notify_rx) = broadcast::channel(128);
 
             Ok(Self {
                 runtime,
                 event_tx,
                 event_rx,
                 status_tx,
+                wifi_scan_read_tx,
+                wifi_scan_notify_tx,
                 handles: None,
             })
         }
@@ -602,6 +611,8 @@ mod bluez {
                 info.clone(),
                 self.event_tx.clone(),
                 self.status_tx.clone(),
+                self.wifi_scan_read_tx.clone(),
+                self.wifi_scan_notify_tx.clone(),
             ))?;
             self.handles = Some(handles);
             info!("BLE provisioning active — waiting for Wi-Fi credentials...");
@@ -638,6 +649,8 @@ mod bluez {
         mut info: ProvisioningDeviceInfo,
         event_tx: StdSender<ProvisioningEvent>,
         status_tx: watch::Sender<Vec<u8>>,
+        wifi_scan_read_tx: watch::Sender<Vec<u8>>,
+        wifi_scan_notify_tx: broadcast::Sender<Vec<u8>>,
     ) -> Result<BluezHandles> {
         let session = Session::new().await.context("opening BlueZ session")?;
         let adapter = session
@@ -671,12 +684,20 @@ mod bluez {
         let auth_cmd_uuid = Uuid::from_u128(PROVISIONING_AUTH_CMD_UUID);
         let status_uuid = Uuid::from_u128(PROVISIONING_STATUS_UUID);
         let device_info_uuid = Uuid::from_u128(PROVISIONING_DEVICE_INFO_UUID);
+        let wifi_scan_request_uuid = Uuid::from_u128(PROVISIONING_WIFI_SCAN_REQUEST_UUID);
+        let wifi_scan_result_uuid = Uuid::from_u128(PROVISIONING_WIFI_SCAN_RESULT_UUID);
 
         let status_read_rx = status_tx.subscribe();
         let status_notify_tx = status_tx.clone();
+        let wifi_scan_read_rx = wifi_scan_read_tx.subscribe();
+        let wifi_scan_read_tx_for_write = wifi_scan_read_tx.clone();
+        let wifi_scan_notify_tx_for_write = wifi_scan_notify_tx.clone();
+        let wifi_scan_notify_tx_for_notify = wifi_scan_notify_tx.clone();
+        let wifi_scan_lock = Arc::new(Mutex::new(()));
         let device_info_bytes = info.json_bytes()?;
         let write_event_tx = event_tx.clone();
         let auth_event_tx = event_tx.clone();
+        let wifi_scan_lock_for_write = wifi_scan_lock.clone();
 
         let app = Application {
             services: vec![Service {
@@ -752,6 +773,97 @@ mod bluez {
                         ..Default::default()
                     },
                     Characteristic {
+                        uuid: wifi_scan_request_uuid,
+                        write: Some(CharacteristicWrite {
+                            write: true,
+                            write_without_response: true,
+                            method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
+                                let read_tx = wifi_scan_read_tx_for_write.clone();
+                                let notify_tx = wifi_scan_notify_tx_for_write.clone();
+                                let scan_lock = wifi_scan_lock_for_write.clone();
+                                async move {
+                                    info!(
+                                        "BLE Wi-Fi scan request from {} (mtu={}, len={})",
+                                        req.device_address,
+                                        req.mtu,
+                                        value.len()
+                                    );
+                                    let request_id = match parse_wifi_scan_request(&value) {
+                                        Ok(request_id) => request_id,
+                                        Err(e) => {
+                                            publish_wifi_scan_payload(
+                                                &read_tx,
+                                                &notify_tx,
+                                                wifi_scan_failed_payload("unknown", e.to_string()),
+                                            );
+                                            return Err(ReqError::Failed);
+                                        }
+                                    };
+
+                                    publish_wifi_scan_payload(
+                                        &read_tx,
+                                        &notify_tx,
+                                        wifi_scan_status_payload("scanning", &request_id),
+                                    );
+
+                                    tokio::task::spawn_blocking(move || {
+                                        let _guard = match scan_lock.lock() {
+                                            Ok(guard) => guard,
+                                            Err(_) => {
+                                                publish_wifi_scan_payload(
+                                                    &read_tx,
+                                                    &notify_tx,
+                                                    wifi_scan_failed_payload(
+                                                        &request_id,
+                                                        "Wi-Fi scan lock poisoned",
+                                                    ),
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        match crate::wifi::scan_networks() {
+                                            Ok(networks) => {
+                                                let count = networks.len();
+                                                for network in &networks {
+                                                    publish_wifi_scan_payload(
+                                                        &read_tx,
+                                                        &notify_tx,
+                                                        wifi_scan_network_payload(
+                                                            &request_id,
+                                                            network,
+                                                        ),
+                                                    );
+                                                    std::thread::sleep(Duration::from_millis(20));
+                                                }
+                                                publish_wifi_scan_payload(
+                                                    &read_tx,
+                                                    &notify_tx,
+                                                    wifi_scan_complete_payload(&request_id, count),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                publish_wifi_scan_payload(
+                                                    &read_tx,
+                                                    &notify_tx,
+                                                    wifi_scan_failed_payload(
+                                                        &request_id,
+                                                        e.to_string(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    });
+
+                                    Ok(())
+                                }
+                                .boxed()
+                            })),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Characteristic {
                         uuid: status_uuid,
                         read: Some(CharacteristicRead {
                             read: true,
@@ -794,6 +906,53 @@ mod bluez {
                                                 if let Err(e) = notifier.notify(payload).await {
                                                     warn!("BLE status notify session ended: {}", e);
                                                     break;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    .boxed()
+                                },
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Characteristic {
+                        uuid: wifi_scan_result_uuid,
+                        read: Some(CharacteristicRead {
+                            read: true,
+                            fun: Box::new(move |_req| {
+                                let bytes = wifi_scan_read_rx.borrow().clone();
+                                async move { Ok(bytes) }.boxed()
+                            }),
+                            ..Default::default()
+                        }),
+                        notify: Some(CharacteristicNotify {
+                            notify: true,
+                            method: CharacteristicNotifyMethod::Fun(Box::new(
+                                move |mut notifier| {
+                                    let mut scan_rx = wifi_scan_notify_tx_for_notify.subscribe();
+                                    async move {
+                                        tokio::spawn(async move {
+                                            loop {
+                                                match scan_rx.recv().await {
+                                                    Ok(payload) => {
+                                                        if let Err(e) =
+                                                            notifier.notify(payload).await
+                                                        {
+                                                            warn!(
+                                                                "BLE Wi-Fi scan notify session ended: {}",
+                                                                e
+                                                            );
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                                                        continue;
+                                                    }
+                                                    Err(broadcast::error::RecvError::Closed) => {
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         });
@@ -905,6 +1064,82 @@ mod bluez {
             .filter(|label| !label.is_empty())
             .map(str::to_string);
         Ok(label)
+    }
+
+    fn parse_wifi_scan_request(bytes: &[u8]) -> Result<String> {
+        if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+            return Ok("default".to_string());
+        }
+
+        let body: serde_json::Value =
+            serde_json::from_slice(bytes).context("parsing BLE Wi-Fi scan request JSON")?;
+        let request_id = body
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("default");
+        if request_id.len() > 64 || request_id.chars().any(char::is_control) {
+            anyhow::bail!("Invalid Wi-Fi scan request_id");
+        }
+        Ok(request_id.to_string())
+    }
+
+    fn publish_wifi_scan_payload(
+        read_tx: &watch::Sender<Vec<u8>>,
+        notify_tx: &broadcast::Sender<Vec<u8>>,
+        payload: Vec<u8>,
+    ) {
+        read_tx.send_replace(payload.clone());
+        let _ = notify_tx.send(payload);
+    }
+
+    fn wifi_scan_idle_payload() -> Vec<u8> {
+        serde_json::json!({ "status": "idle" })
+            .to_string()
+            .into_bytes()
+    }
+
+    fn wifi_scan_status_payload(status: &str, request_id: &str) -> Vec<u8> {
+        serde_json::json!({
+            "status": status,
+            "request_id": request_id,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn wifi_scan_network_payload(
+        request_id: &str,
+        network: &crate::wifi::WifiScanNetwork,
+    ) -> Vec<u8> {
+        serde_json::json!({
+            "status": "result",
+            "request_id": request_id,
+            "network": network,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn wifi_scan_complete_payload(request_id: &str, count: usize) -> Vec<u8> {
+        serde_json::json!({
+            "status": "complete",
+            "request_id": request_id,
+            "count": count,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn wifi_scan_failed_payload(request_id: &str, error: impl AsRef<str>) -> Vec<u8> {
+        serde_json::json!({
+            "status": "failed",
+            "request_id": request_id,
+            "error": error.as_ref(),
+        })
+        .to_string()
+        .into_bytes()
     }
 }
 

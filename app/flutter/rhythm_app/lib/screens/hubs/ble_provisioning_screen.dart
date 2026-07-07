@@ -275,12 +275,18 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   String? _provisioningStatusMessage;
   String? _errorMessage;
   String? _wifiErrorMessage;
+  String? _wifiScanErrorMessage;
+  final List<WifiNetwork> _wifiNetworks = <WifiNetwork>[];
   bool _obscurePassword = true;
   bool _hasAttemptedScan = false;
+  bool _wifiScanInProgress = false;
+  bool _manualSsidEntry = false;
+  bool _wifiScanUnsupported = false;
 
   bool get _supportsBleProvisioning {
     if (kIsWeb) return false;
-    return defaultTargetPlatform == TargetPlatform.iOS ||
+    return defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.macOS;
   }
 
@@ -324,12 +330,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _phase = _ProvisioningPhase.devices;
         _errorMessage = null;
         _wifiErrorMessage = null;
+        _wifiScanErrorMessage = null;
+        _wifiNetworks.clear();
         _devices.clear();
         _selectedDevice = null;
         _deviceInfo = null;
         _provisionedIp = null;
         _provisioningStatusMessage = null;
         _hasAttemptedScan = false;
+        _wifiScanInProgress = false;
+        _manualSsidEntry = false;
+        _wifiScanUnsupported = false;
       });
       final initialDevice = widget.initialDevice;
       if (initialDevice != null) {
@@ -453,10 +464,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               Navigator.of(context).pop();
               openAppSettings();
             },
-            child: const Text(
-              'Open Settings',
-              style: TextStyle(color: _teal),
-            ),
+            child: const Text('Open Settings', style: TextStyle(color: _teal)),
           ),
         ],
       ),
@@ -487,12 +495,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _phase = _ProvisioningPhase.scanning;
       _errorMessage = null;
       _wifiErrorMessage = null;
+      _wifiScanErrorMessage = null;
+      _wifiNetworks.clear();
       _devices.clear();
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
       _provisioningStatusMessage = null;
       _hasAttemptedScan = true;
+      _wifiScanInProgress = false;
+      _manualSsidEntry = false;
+      _wifiScanUnsupported = false;
     });
 
     _scanSubscription = _bleService.scanForDevices().listen(
@@ -625,7 +638,15 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       if (!mounted) return;
       setState(() {
         _phase = _ProvisioningPhase.credentials;
+        _wifiScanErrorMessage = null;
+        _wifiNetworks.clear();
+        _wifiScanInProgress = false;
+        _manualSsidEntry = false;
+        _wifiScanUnsupported = !_bleService.supportsWifiScan;
       });
+      if (_bleService.supportsWifiScan) {
+        unawaited(_scanWifiNetworks());
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -633,6 +654,75 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _errorMessage = 'Couldn\'t connect to ${device.name}. $error';
       });
     }
+  }
+
+  Future<void> _scanWifiNetworks() async {
+    if (!_bleService.supportsWifiScan) {
+      if (!mounted) return;
+      setState(() {
+        _wifiScanUnsupported = true;
+        _wifiScanInProgress = false;
+        _manualSsidEntry = true;
+      });
+      return;
+    }
+
+    setState(() {
+      _wifiScanInProgress = true;
+      _wifiScanErrorMessage = null;
+      _wifiNetworks.clear();
+      _manualSsidEntry = false;
+    });
+
+    try {
+      AnalyticsService().logEvent('ble_wifi_scan_started');
+      final networks = await _bleService.scanWifiNetworks();
+      if (!mounted) return;
+      setState(() {
+        _wifiNetworks
+          ..clear()
+          ..addAll(networks);
+        _wifiScanInProgress = false;
+        _manualSsidEntry = networks.isEmpty;
+        _wifiScanErrorMessage =
+            networks.isEmpty ? 'No Wi-Fi networks found.' : null;
+      });
+    } on UnsupportedError {
+      if (!mounted) return;
+      setState(() {
+        _wifiScanUnsupported = true;
+        _wifiScanInProgress = false;
+        _manualSsidEntry = true;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      AnalyticsService().logEvent('ble_wifi_scan_failed');
+      setState(() {
+        _wifiScanInProgress = false;
+        _manualSsidEntry = true;
+        _wifiScanErrorMessage =
+            'Wi-Fi scan failed. Enter the network manually.';
+      });
+    }
+  }
+
+  void _selectWifiNetwork(String? ssid) {
+    final selected = ssid?.trim();
+    if (selected == null || selected.isEmpty) return;
+    HapticFeedback.selectionClick();
+    _ssidController.text = selected;
+    setState(() {
+      _manualSsidEntry = false;
+      _wifiErrorMessage = null;
+    });
+  }
+
+  void _showManualSsidEntry() {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _manualSsidEntry = true;
+      _wifiScanErrorMessage = null;
+    });
   }
 
   Future<void> _submitCredentials() async {
@@ -982,7 +1072,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
           : null;
     } catch (error) {
       debugPrint(
-          '[BLE] server identity unavailable after provisioning: $error');
+        '[BLE] server identity unavailable after provisioning: $error',
+      );
       return null;
     }
   }
@@ -1061,12 +1152,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _phase = _ProvisioningPhase.devices;
       _errorMessage = null;
       _wifiErrorMessage = null;
+      _wifiScanErrorMessage = null;
+      _wifiNetworks.clear();
       _devices.clear();
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
       _provisioningStatusMessage = null;
       _hasAttemptedScan = false;
+      _wifiScanInProgress = false;
+      _manualSsidEntry = false;
+      _wifiScanUnsupported = false;
     });
   }
 
@@ -1124,9 +1220,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               _tealDeep.withValues(alpha: 0.12 + glow * 0.08),
             ],
           ),
-          border: Border.all(
-            color: _teal.withValues(alpha: 0.28 + glow * 0.1),
-          ),
+          border: Border.all(color: _teal.withValues(alpha: 0.28 + glow * 0.1)),
           boxShadow: [
             BoxShadow(
               color: _teal.withValues(alpha: 0.16 + glow * 0.16),
@@ -1307,13 +1401,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
           ),
           const SizedBox(height: 16),
         ],
-        _buildTextField(
-          controller: _ssidController,
-          label: 'Wi-Fi network',
-          hint: 'MyWifi',
-          icon: Icons.wifi_rounded,
-          obscureText: false,
-        ),
+        _buildWifiNetworkField(),
         const SizedBox(height: 12),
         _buildTextField(
           controller: _passwordController,
@@ -1456,9 +1544,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.05),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: _teal.withValues(alpha: 0.18),
-            ),
+            border: Border.all(color: _teal.withValues(alpha: 0.18)),
           ),
           child: Row(
             children: [
@@ -1469,10 +1555,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
                   shape: BoxShape.circle,
                   color: _teal.withValues(alpha: 0.16),
                 ),
-                child: const Icon(
-                  Icons.developer_board_rounded,
-                  color: _teal,
-                ),
+                child: const Icon(Icons.developer_board_rounded, color: _teal),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -1523,6 +1606,125 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     return 'weak';
   }
 
+  Widget _buildWifiNetworkField() {
+    final selectedSsid = _ssidController.text.trim();
+    final selectedValue =
+        _wifiNetworks.any((network) => network.ssid == selectedSsid)
+            ? selectedSsid
+            : null;
+
+    if (_wifiScanUnsupported || _manualSsidEntry || _wifiNetworks.isEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_wifiScanInProgress) ...[
+            _buildInfoCard(
+              icon: Icons.wifi_find_rounded,
+              title: 'Scanning Wi-Fi',
+              description: 'Looking for nearby networks.',
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (_wifiScanErrorMessage != null) ...[
+            _buildBanner(
+              color: Colors.orange.shade400,
+              icon: Icons.warning_amber_rounded,
+              message: _wifiScanErrorMessage!,
+            ),
+            const SizedBox(height: 12),
+          ],
+          _buildTextField(
+            controller: _ssidController,
+            label: 'Wi-Fi network',
+            hint: 'MyWifi',
+            icon: Icons.wifi_rounded,
+            obscureText: false,
+          ),
+          if (!_wifiScanUnsupported && !_wifiScanInProgress) ...[
+            const SizedBox(height: 10),
+            _buildInlineAction(
+              icon: Icons.refresh_rounded,
+              label: 'Scan networks',
+              onTap: _scanWifiNetworks,
+            ),
+          ],
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.45),
+            ),
+          ),
+          child: DropdownButtonFormField<String>(
+            initialValue: selectedValue,
+            isExpanded: true,
+            dropdownColor: CelestialColors.backgroundCard,
+            iconEnabledColor: CelestialColors.textSecondary.withValues(
+              alpha: 0.7,
+            ),
+            style: const TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 15,
+            ),
+            decoration: InputDecoration(
+              labelText: 'Wi-Fi network',
+              labelStyle: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.75),
+              ),
+              prefixIcon: Icon(
+                Icons.wifi_rounded,
+                color: _teal.withValues(alpha: 0.8),
+              ),
+              border: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 14,
+              ),
+            ),
+            items: [
+              for (final network in _wifiNetworks)
+                DropdownMenuItem<String>(
+                  value: network.ssid,
+                  child: _WifiNetworkMenuItem(network: network),
+                ),
+            ],
+            onChanged: _selectWifiNetwork,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: _buildInlineAction(
+                icon: _wifiScanInProgress
+                    ? Icons.hourglass_top_rounded
+                    : Icons.refresh_rounded,
+                label: _wifiScanInProgress ? 'Scanning' : 'Refresh',
+                onTap: _wifiScanInProgress ? null : _scanWifiNetworks,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _buildInlineAction(
+                icon: Icons.edit_rounded,
+                label: 'Manual',
+                onTap: _showManualSsidEntry,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildTextField({
     required TextEditingController controller,
     required String label,
@@ -1555,10 +1757,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
           labelStyle: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.75),
           ),
-          prefixIcon: Icon(
-            icon,
-            color: _teal.withValues(alpha: 0.8),
-          ),
+          prefixIcon: Icon(icon, color: _teal.withValues(alpha: 0.8)),
           suffixIcon: trailing,
           border: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(
@@ -1594,11 +1793,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               shape: BoxShape.circle,
               color: _teal.withValues(alpha: 0.14),
             ),
-            child: Icon(
-              icon,
-              color: _teal,
-              size: 18,
-            ),
+            child: Icon(icon, color: _teal, size: 18),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -1617,8 +1812,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
                 Text(
                   description,
                   style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.82),
+                    color: CelestialColors.textSecondary.withValues(
+                      alpha: 0.82,
+                    ),
                     fontSize: 13,
                     height: 1.45,
                   ),
@@ -1641,9 +1837,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: color.withValues(alpha: 0.32),
-        ),
+        border: Border.all(color: color.withValues(alpha: 0.32)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1662,6 +1856,57 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildInlineAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onTap,
+  }) {
+    final enabled = onTap != null;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: enabled
+              ? Colors.white.withValues(alpha: 0.05)
+              : Colors.white.withValues(alpha: 0.025),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.38),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: enabled
+                  ? _teal.withValues(alpha: 0.82)
+                  : CelestialColors.textSecondary.withValues(alpha: 0.45),
+              size: 17,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: enabled
+                      ? CelestialColors.textPrimary.withValues(alpha: 0.86)
+                      : CelestialColors.textSecondary.withValues(alpha: 0.5),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1714,8 +1959,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               icon,
               color: isPrimary
                   ? Colors.white.withValues(alpha: enabled ? 1 : 0.5)
-                  : CelestialColors.textPrimary
-                      .withValues(alpha: enabled ? 1 : 0.5),
+                  : CelestialColors.textPrimary.withValues(
+                      alpha: enabled ? 1 : 0.5,
+                    ),
             ),
             const SizedBox(width: 10),
             Text(
@@ -1723,8 +1969,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               style: TextStyle(
                 color: isPrimary
                     ? Colors.white.withValues(alpha: enabled ? 1 : 0.5)
-                    : CelestialColors.textPrimary
-                        .withValues(alpha: enabled ? 1 : 0.5),
+                    : CelestialColors.textPrimary.withValues(
+                        alpha: enabled ? 1 : 0.5,
+                      ),
                 fontSize: 15,
                 fontWeight: FontWeight.w600,
               ),
@@ -1733,5 +1980,78 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ),
       ),
     );
+  }
+}
+
+class _WifiNetworkMenuItem extends StatelessWidget {
+  const _WifiNetworkMenuItem({required this.network});
+
+  final WifiNetwork network;
+
+  @override
+  Widget build(BuildContext context) {
+    final details = [
+      if (network.rssi != null) _signalLabel(network.rssi!),
+      if (network.security?.isNotEmpty == true) network.security!.toUpperCase(),
+      if (network.band.isNotEmpty) network.band,
+    ].join(' • ');
+
+    return Row(
+      children: [
+        Icon(
+          _signalIcon(network.rssi),
+          color: const Color(0xFF00BCD4).withValues(alpha: 0.82),
+          size: 18,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                network.ssid,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (details.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  details,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(
+                      alpha: 0.72,
+                    ),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _signalLabel(int rssi) {
+    if (rssi >= -55) return 'strong';
+    if (rssi >= -70) return 'good';
+    if (rssi >= -82) return 'fair';
+    return 'weak';
+  }
+
+  static IconData _signalIcon(int? rssi) {
+    if (rssi == null) return Icons.wifi_rounded;
+    if (rssi >= -55) return Icons.signal_wifi_4_bar_rounded;
+    if (rssi >= -70) return Icons.network_wifi_3_bar_rounded;
+    if (rssi >= -82) return Icons.network_wifi_2_bar_rounded;
+    return Icons.network_wifi_1_bar_rounded;
   }
 }

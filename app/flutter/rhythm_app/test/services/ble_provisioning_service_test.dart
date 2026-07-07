@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,30 +74,32 @@ void main() {
       expect(status.ip, '192.168.1.153');
     });
 
-    test('treats restart status as terminal after device-driven update',
-        () async {
-      final status =
-          await BleProvisioningService.waitForTerminalProvisioningStatus(
-        enableNotifications: () async {},
-        writePayload: () async {},
-        statusUpdates: Stream<ProvisioningStatusMessage>.value(
-          const ProvisioningStatusMessage(
-            status: 'restarting',
-            ip: '192.168.1.154',
-            otaStage: 'restarting',
-            message: 'Updated, restarting',
+    test(
+      'treats restart status as terminal after device-driven update',
+      () async {
+        final status =
+            await BleProvisioningService.waitForTerminalProvisioningStatus(
+          enableNotifications: () async {},
+          writePayload: () async {},
+          statusUpdates: Stream<ProvisioningStatusMessage>.value(
+            const ProvisioningStatusMessage(
+              status: 'restarting',
+              ip: '192.168.1.154',
+              otaStage: 'restarting',
+              message: 'Updated, restarting',
+            ),
           ),
-        ),
-        readStatus: () async =>
-            const ProvisioningStatusMessage(status: 'updating'),
-        timeout: const Duration(seconds: 1),
-        pollInterval: const Duration(milliseconds: 50),
-      );
+          readStatus: () async =>
+              const ProvisioningStatusMessage(status: 'updating'),
+          timeout: const Duration(seconds: 1),
+          pollInterval: const Duration(milliseconds: 50),
+        );
 
-      expect(status.status, 'restarting');
-      expect(status.ip, '192.168.1.154');
-      expect(status.message, 'Updated, restarting');
-    });
+        expect(status.status, 'restarting');
+        expect(status.ip, '192.168.1.154');
+        expect(status.message, 'Updated, restarting');
+      },
+    );
 
     test('hands off to LAN when update progress includes an IP', () async {
       final seen = <String>[];
@@ -323,6 +326,46 @@ void main() {
       expect(wrotePayload, isTrue);
       expect(status.status, 'auth_token');
       expect(status.ownerToken, 'rhythm_owner_test');
+    });
+
+    test('parses Wi-Fi scan result payload', () {
+      final message = BleProvisioningService.parseWifiScanMessage(
+        utf8.encode(
+          json.encode({
+            'status': 'result',
+            'request_id': 'scan-1',
+            'network': {
+              'ssid': 'Kitchen',
+              'rssi': -47,
+              'security': 'wpa2',
+              'frequency': 2412,
+            },
+          }),
+        ),
+      );
+
+      expect(message.status, 'result');
+      expect(message.requestId, 'scan-1');
+      expect(message.network?.ssid, 'Kitchen');
+      expect(message.network?.rssi, -47);
+      expect(message.network?.security, 'wpa2');
+      expect(message.network?.band, '2.4 GHz');
+    });
+
+    test('parses Wi-Fi scan complete payload', () {
+      final message = BleProvisioningService.parseWifiScanMessage(
+        utf8.encode(
+          json.encode({
+            'status': 'complete',
+            'request_id': 'scan-2',
+            'count': 3,
+          }),
+        ),
+      );
+
+      expect(message.isTerminal, isTrue);
+      expect(message.status, 'complete');
+      expect(message.count, 3);
     });
   });
 }
