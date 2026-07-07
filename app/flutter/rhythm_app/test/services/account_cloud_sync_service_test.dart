@@ -176,6 +176,22 @@ void main() {
       expect(payload, isNot(contains('server_instance_id')));
     });
 
+    test('server hub payload normalizes server identity for conflict checks',
+        () {
+      final hub = Hub.server(
+        id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
+        homeId: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Kitchen Server',
+        host: '192.168.5.123',
+        token: 'owner-token',
+        serverInstanceId: ' SRV-KITCHEN ',
+      );
+
+      final payload = AccountCloudSyncService.serverHubSnapshotPayload(hub);
+
+      expect(payload['server_instance_id'], 'srv-kitchen');
+    });
+
     test('server hub payload preserves cloud tunnel when local has none', () {
       final hub = Hub.server(
         id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',

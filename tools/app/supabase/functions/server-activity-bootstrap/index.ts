@@ -17,6 +17,11 @@ type HubRow = {
   id: string
   home_id: string
   type: string
+  server_instance_id?: string | null
+  remote_endpoint?: unknown
+  last_connected?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 Deno.serve((req) =>
@@ -30,22 +35,28 @@ Deno.serve((req) =>
       const hubId = readString(body, 'hub_id')
       if (!hubId) return jsonResponse({ error: 'Missing hub_id' }, 400)
 
-      const ensured = await ensureServerHubRows(adminClient, userId, hubId, body)
+      const serverInstanceId = readServerInstanceId(body)
+      const ensured = await ensureServerHubRows(
+        adminClient,
+        userId,
+        hubId,
+        body,
+        serverInstanceId,
+      )
       if (ensured instanceof Response) return ensured
 
-      const serverInstanceId = readServerInstanceId(body)
       const token = randomToken()
       const tokenHash = await sha256Hex(token)
       const tokenPrefix = token.slice(0, 12)
       const now = new Date().toISOString()
 
-      await revokeActiveTokens(adminClient, hubId, now)
+      await revokeActiveTokens(adminClient, ensured.hub.id, now)
       const { data, error } = await adminClient
         .from('server_light_activity_device_tokens')
         .insert({
           user_id: userId,
           home_id: ensured.hub.home_id,
-          hub_id: hubId,
+          hub_id: ensured.hub.id,
           server_instance_id: serverInstanceId,
           token_hash: tokenHash,
           token_prefix: tokenPrefix,
@@ -60,7 +71,8 @@ Deno.serve((req) =>
       const supabaseUrl = requireEnv('SUPABASE_URL').replace(/\/+$/, '')
       return jsonResponse({
         status: 'ok',
-        hub_id: hubId,
+        hub_id: ensured.hub.id,
+        requested_hub_id: hubId,
         home_id: ensured.hub.home_id,
         server_instance_id: serverInstanceId,
         token_id: tokenId,
@@ -78,12 +90,18 @@ async function ensureServerHubRows(
   userId: string,
   hubId: string,
   body: JsonObject,
+  serverInstanceId: string | null,
 ): Promise<{ hub: HubRow; home: HomeRow } | Response> {
   const homeSnapshot = readJsonObject(body, 'home')
   const hubSnapshot = readJsonObject(body, 'server_hub')
 
   if (!homeSnapshot && !hubSnapshot) {
-    return await readAuthorizedExistingRows(adminClient, userId, hubId)
+    return await readAuthorizedExistingRows(
+      adminClient,
+      userId,
+      hubId,
+      serverInstanceId,
+    )
   }
   if (!homeSnapshot || !hubSnapshot) {
     return jsonResponse({
@@ -103,6 +121,36 @@ async function ensureServerHubRows(
   const requestedHubHomeId = readString(hubSnapshot, 'home_id')
   if (requestedHubHomeId && requestedHubHomeId !== requestedHomeId) {
     return jsonResponse({ error: 'server_hub.home_id must match home.id' }, 400)
+  }
+
+  const existingByServerInstanceId = await readAuthorizedServerHubByInstanceId(
+    adminClient,
+    userId,
+    serverInstanceId,
+    true,
+  )
+  if (existingByServerInstanceId instanceof Response) {
+    return existingByServerInstanceId
+  }
+  if (
+    existingByServerInstanceId &&
+    (existingByServerInstanceId.hub.id !== requestedHubId ||
+      existingByServerInstanceId.home.id !== requestedHomeId)
+  ) {
+    const { hub, home } = existingByServerInstanceId
+    const { error: hubUpdateError } = await adminClient
+      .from('hubs')
+      .upsert(
+        normalizeServerHubSnapshot(
+          hubSnapshot,
+          hub.id,
+          home.id,
+          serverInstanceId,
+        ),
+        { onConflict: 'id' },
+      )
+    if (hubUpdateError) throw new Error(hubUpdateError.message)
+    return { hub, home }
   }
 
   const existingHub = await fetchHub(adminClient, requestedHubId)
@@ -134,7 +182,12 @@ async function ensureServerHubRows(
   const { error: hubError } = await adminClient
     .from('hubs')
     .upsert(
-      normalizeServerHubSnapshot(hubSnapshot, requestedHubId, requestedHomeId),
+      normalizeServerHubSnapshot(
+        hubSnapshot,
+        requestedHubId,
+        requestedHomeId,
+        serverInstanceId,
+      ),
       { onConflict: 'id' },
     )
   if (hubError) throw new Error(hubError.message)
@@ -149,9 +202,17 @@ async function readAuthorizedExistingRows(
   adminClient: any,
   userId: string,
   hubId: string,
+  serverInstanceId: string | null,
 ): Promise<{ hub: HubRow; home: HomeRow } | Response> {
   const hub = await fetchHub(adminClient, hubId)
   if (!hub || hub.type !== 'server') {
+    const existingByServerInstanceId = await readAuthorizedServerHubByInstanceId(
+      adminClient,
+      userId,
+      serverInstanceId,
+      false,
+    )
+    if (existingByServerInstanceId) return existingByServerInstanceId
     return jsonResponse({ error: 'Server hub not found' }, 404)
   }
 
@@ -166,11 +227,90 @@ async function readAuthorizedExistingRows(
 async function fetchHub(adminClient: any, hubId: string): Promise<HubRow | null> {
   const { data, error } = await adminClient
     .from('hubs')
-    .select('id, home_id, type')
+    .select(
+      'id, home_id, type, server_instance_id, remote_endpoint, last_connected, created_at, updated_at',
+    )
     .eq('id', hubId)
     .maybeSingle()
   if (error) throw new Error(error.message)
   return data ?? null
+}
+
+async function readAuthorizedServerHubByInstanceId(
+  adminClient: any,
+  userId: string,
+  serverInstanceId: string | null,
+  allowAutoJoin: boolean,
+): Promise<{ hub: HubRow; home: HomeRow } | Response | null> {
+  if (!serverInstanceId) return null
+
+  const { data, error } = await adminClient
+    .from('hubs')
+    .select(
+      'id, home_id, type, server_instance_id, remote_endpoint, last_connected, created_at, updated_at',
+    )
+    .eq('type', 'server')
+    .eq('server_instance_id', serverInstanceId)
+    .limit(20)
+
+  if (error) throw new Error(error.message)
+  const rows = ((data as HubRow[] | null) ?? []).filter(
+    (hub) => hub.type === 'server',
+  )
+  if (rows.length === 0) return null
+
+  const authorized: Array<{ hub: HubRow; home: HomeRow }> = []
+  for (const hub of rows) {
+    const home = await fetchHome(adminClient, hub.home_id)
+    if (home && isHomeMember(home, userId)) {
+      authorized.push({ hub, home })
+    }
+  }
+
+  if (authorized.length === 0 && allowAutoJoin) {
+    const joined = await addUserToCanonicalHomeForServerHubs(
+      adminClient,
+      userId,
+      rows,
+    )
+    if (joined) return joined
+  }
+  if (authorized.length === 0) {
+    return jsonResponse({ error: 'Not authorized for this home' }, 403)
+  }
+
+  authorized.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
+  return authorized[0]
+}
+
+async function addUserToCanonicalHomeForServerHubs(
+  adminClient: any,
+  userId: string,
+  hubs: HubRow[],
+): Promise<{ hub: HubRow; home: HomeRow } | null> {
+  const candidates: Array<{ hub: HubRow; home: HomeRow }> = []
+  for (const hub of hubs) {
+    const home = await fetchHome(adminClient, hub.home_id)
+    if (home) candidates.push({ hub, home })
+  }
+  if (candidates.length === 0) return null
+
+  candidates.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
+  const canonical = candidates[0]
+  const memberIds = memberIdsForUpsert(canonical.home, userId)
+  const { error } = await adminClient
+    .from('homes')
+    .update({ member_ids: memberIds, updated_at: new Date().toISOString() })
+    .eq('id', canonical.home.id)
+  if (error) throw new Error(error.message)
+
+  return {
+    hub: canonical.hub,
+    home: {
+      ...canonical.home,
+      member_ids: memberIds,
+    },
+  }
 }
 
 async function fetchHome(
@@ -233,6 +373,7 @@ function normalizeServerHubSnapshot(
   hub: JsonObject,
   hubId: string,
   homeId: string,
+  serverInstanceIdFallback: string | null = null,
 ): Record<string, unknown> {
   const now = new Date().toISOString()
   const payload: Record<string, unknown> = {
@@ -242,12 +383,15 @@ function normalizeServerHubSnapshot(
     name: readString(hub, 'name') ?? 'Rhythm Server',
     endpoint: normalizeEndpoint(hub, 'endpoint'),
     enabled: readBool(hub, 'enabled') ?? true,
-    remote_endpoint: normalizeOptionalEndpoint(hub, 'remote_endpoint'),
     created_at: readString(hub, 'created_at') ?? now,
     updated_at: readString(hub, 'updated_at') ?? now,
   }
 
-  const serverInstanceId = readString(hub, 'server_instance_id')
+  if ('remote_endpoint' in hub) {
+    payload.remote_endpoint = normalizeOptionalEndpoint(hub, 'remote_endpoint')
+  }
+  const serverInstanceId =
+    readServerInstanceId(hub) ?? serverInstanceIdFallback
   if (serverInstanceId) payload.server_instance_id = serverInstanceId
   const lastConnected = readString(hub, 'last_connected')
   if (lastConnected) payload.last_connected = lastConnected
@@ -315,6 +459,32 @@ function isHomeMember(home: HomeRow, userId: string): boolean {
 function memberIdsForUpsert(home: HomeRow | null, userId: string): string[] {
   const members = Array.isArray(home?.member_ids) ? home!.member_ids : []
   return Array.from(new Set([...members, userId]))
+}
+
+function compareCanonicalServerHubs(left: HubRow, right: HubRow): number {
+  const leftHasRemote = left.remote_endpoint == null ? 0 : 1
+  const rightHasRemote = right.remote_endpoint == null ? 0 : 1
+  if (leftHasRemote !== rightHasRemote) return rightHasRemote - leftHasRemote
+
+  return compareNullableIsoDesc(left.last_connected, right.last_connected) ||
+    compareNullableIsoDesc(left.updated_at, right.updated_at) ||
+    compareNullableIsoDesc(left.created_at, right.created_at) ||
+    right.id.localeCompare(left.id)
+}
+
+function compareNullableIsoDesc(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): number {
+  const leftTime = left ? Date.parse(left) : Number.NaN
+  const rightTime = right ? Date.parse(right) : Number.NaN
+  const leftValid = Number.isFinite(leftTime)
+  const rightValid = Number.isFinite(rightTime)
+  if (leftValid && rightValid && leftTime !== rightTime) {
+    return rightTime - leftTime
+  }
+  if (leftValid !== rightValid) return leftValid ? -1 : 1
+  return 0
 }
 
 function randomToken(): string {

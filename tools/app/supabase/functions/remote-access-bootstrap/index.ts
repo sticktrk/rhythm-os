@@ -46,6 +46,11 @@ type HubRow = {
   id: string
   home_id: string
   type: string
+  server_instance_id?: string | null
+  remote_endpoint?: unknown
+  last_connected?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 type RemoteAccessAction = 'enable' | 'disable'
@@ -63,6 +68,8 @@ type RemoteAccessMapping = {
   tunnel_id: string
   tunnel_name: string
   server_instance_id?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 Deno.serve((req) =>
@@ -80,17 +87,24 @@ Deno.serve((req) =>
     if (actionResult instanceof Response) return actionResult
     const action = actionResult
 
-    const ensured = await ensureServerHubRows(adminClient, userId, hubId, body)
-    if (ensured instanceof Response) return ensured
-    const { hub } = ensured
     const serverInstanceId = readServerInstanceId(body)
     const serverEndpoint = readServerEndpoint(body)
+    const ensured = await ensureServerHubRows(
+      adminClient,
+      userId,
+      hubId,
+      body,
+      serverInstanceId,
+    )
+    if (ensured instanceof Response) return ensured
+    const { hub } = ensured
 
     try {
       if (action === 'disable') {
         return await disableRemoteAccess({
           adminClient,
-          hubId,
+          userId,
+          hubId: hub.id,
           homeId: hub.home_id,
           serverInstanceId,
           serverEndpoint,
@@ -105,13 +119,14 @@ Deno.serve((req) =>
         readEnv('RHYTHM_REMOTE_ACCESS_ORIGIN', DEFAULT_ORIGIN_SERVICE)
 
       const existing = await readExistingMapping(adminClient, {
-        hubId,
+        userId,
+        hubId: hub.id,
         homeId: hub.home_id,
         serverInstanceId,
         serverEndpoint,
       })
-      const tunnelName = existing?.tunnel_name ?? `rhythm-${hubId}`
-      const desiredHostname = `${hubId}.${domain}`.toLowerCase()
+      const tunnelName = existing?.tunnel_name ?? `rhythm-${hub.id}`
+      const desiredHostname = `${hub.id}.${domain}`.toLowerCase()
       const hostname = hostnameForDomain(
         existing?.hostname,
         desiredHostname,
@@ -138,7 +153,7 @@ Deno.serve((req) =>
 
       const remoteEndpoint = endpointForHostname(hostname)
       await saveRemoteAccessMapping(adminClient, {
-        hubId,
+        hubId: hub.id,
         existingHubId: existing?.hub_id,
         homeId: hub.home_id,
         hostname,
@@ -149,11 +164,15 @@ Deno.serve((req) =>
       await adminClient
         .from('hubs')
         .update({ remote_endpoint: remoteEndpoint })
-        .eq('id', hubId)
+        .eq('id', hub.id)
+      if (existing && existing.hub_id !== hub.id) {
+        await clearHubRemoteEndpoint(adminClient, existing.hub_id)
+      }
 
       return jsonResponse({
         status: 'ok',
-        hub_id: hubId,
+        hub_id: hub.id,
+        requested_hub_id: hubId,
         hostname,
         remote_url: `https://${hostname}`,
         remote_endpoint: remoteEndpoint,
@@ -196,18 +215,21 @@ function readServerEndpoint(body: JsonObject): RemoteAccessEndpoint | null {
 
 async function disableRemoteAccess({
   adminClient,
+  userId,
   hubId,
   homeId,
   serverInstanceId,
   serverEndpoint,
 }: {
   adminClient: any
+  userId: string
   hubId: string
   homeId: string
   serverInstanceId: string | null
   serverEndpoint: RemoteAccessEndpoint | null
 }): Promise<Response> {
   const existing = await readExistingMapping(adminClient, {
+    userId,
     hubId,
     homeId,
     serverInstanceId,
@@ -256,13 +278,19 @@ async function ensureServerHubRows(
   userId: string,
   hubId: string,
   body: JsonObject,
+  serverInstanceId: string | null,
 ): Promise<{ hub: HubRow; home: HomeRow } | Response> {
   try {
     const homeSnapshot = readJsonObject(body, 'home')
     const hubSnapshot = readJsonObject(body, 'server_hub')
 
     if (!homeSnapshot && !hubSnapshot) {
-      return await readAuthorizedExistingRows(adminClient, userId, hubId)
+      return await readAuthorizedExistingRows(
+        adminClient,
+        userId,
+        hubId,
+        serverInstanceId,
+      )
     }
     if (!homeSnapshot || !hubSnapshot) {
       throw new RequestError(
@@ -285,6 +313,34 @@ async function ensureServerHubRows(
     const requestedHubType = readString(hubSnapshot, 'type')
     if (requestedHubType !== 'server') {
       throw new RequestError(400, 'server_hub.type must be server')
+    }
+
+    const existingByServerInstanceId = await readAuthorizedServerHubByInstanceId(
+      adminClient,
+      userId,
+      serverInstanceId,
+      true,
+    )
+    if (existingByServerInstanceId instanceof Response) {
+      return existingByServerInstanceId
+    }
+    if (
+      existingByServerInstanceId &&
+      (existingByServerInstanceId.hub.id !== requestedHubId ||
+        existingByServerInstanceId.home.id !== requestedHomeId)
+    ) {
+      const { hub, home } = existingByServerInstanceId
+      const hubPayload = normalizeServerHubSnapshot(
+        hubSnapshot,
+        hub.id,
+        home.id,
+        serverInstanceId,
+      )
+      const { error: hubUpdateError } = await adminClient
+        .from('hubs')
+        .upsert(hubPayload, { onConflict: 'id' })
+      if (hubUpdateError) throw new Error(hubUpdateError.message)
+      return { hub, home }
     }
 
     const existingHub = await fetchHub(adminClient, requestedHubId)
@@ -317,6 +373,7 @@ async function ensureServerHubRows(
       hubSnapshot,
       requestedHubId,
       requestedHomeId,
+      serverInstanceId,
     )
 
     const { error: homeUpsertError } = await adminClient
@@ -349,9 +406,17 @@ async function readAuthorizedExistingRows(
   adminClient: any,
   userId: string,
   hubId: string,
+  serverInstanceId: string | null,
 ): Promise<{ hub: HubRow; home: HomeRow } | Response> {
   const hub = await fetchHub(adminClient, hubId)
   if (!hub || hub.type !== 'server') {
+    const existingByServerInstanceId = await readAuthorizedServerHubByInstanceId(
+      adminClient,
+      userId,
+      serverInstanceId,
+      false,
+    )
+    if (existingByServerInstanceId) return existingByServerInstanceId
     return jsonResponse({ error: 'Server hub not found' }, 404)
   }
 
@@ -366,12 +431,91 @@ async function readAuthorizedExistingRows(
 async function fetchHub(adminClient: any, hubId: string): Promise<HubRow | null> {
   const { data, error } = await adminClient
     .from('hubs')
-    .select('id, home_id, type')
+    .select(
+      'id, home_id, type, server_instance_id, remote_endpoint, last_connected, created_at, updated_at',
+    )
     .eq('id', hubId)
     .maybeSingle()
 
   if (error) throw new Error(error.message)
   return data ?? null
+}
+
+async function readAuthorizedServerHubByInstanceId(
+  adminClient: any,
+  userId: string,
+  serverInstanceId: string | null,
+  allowAutoJoin: boolean,
+): Promise<{ hub: HubRow; home: HomeRow } | Response | null> {
+  if (!serverInstanceId) return null
+
+  const { data, error } = await adminClient
+    .from('hubs')
+    .select(
+      'id, home_id, type, server_instance_id, remote_endpoint, last_connected, created_at, updated_at',
+    )
+    .eq('type', 'server')
+    .eq('server_instance_id', serverInstanceId)
+    .limit(20)
+
+  if (error) throw new Error(error.message)
+  const rows = ((data as HubRow[] | null) ?? []).filter(
+    (hub) => hub.type === 'server',
+  )
+  if (rows.length === 0) return null
+
+  const authorized: Array<{ hub: HubRow; home: HomeRow }> = []
+  for (const hub of rows) {
+    const home = await fetchHome(adminClient, hub.home_id)
+    if (home && isHomeMember(home, userId)) {
+      authorized.push({ hub, home })
+    }
+  }
+
+  if (authorized.length === 0 && allowAutoJoin) {
+    const joined = await addUserToCanonicalHomeForServerHubs(
+      adminClient,
+      userId,
+      rows,
+    )
+    if (joined) return joined
+  }
+  if (authorized.length === 0) {
+    return jsonResponse({ error: 'Not authorized for this home' }, 403)
+  }
+
+  authorized.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
+  return authorized[0]
+}
+
+async function addUserToCanonicalHomeForServerHubs(
+  adminClient: any,
+  userId: string,
+  hubs: HubRow[],
+): Promise<{ hub: HubRow; home: HomeRow } | null> {
+  const candidates: Array<{ hub: HubRow; home: HomeRow }> = []
+  for (const hub of hubs) {
+    const home = await fetchHome(adminClient, hub.home_id)
+    if (home) candidates.push({ hub, home })
+  }
+  if (candidates.length === 0) return null
+
+  candidates.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
+  const canonical = candidates[0]
+  const memberIds = memberIdsForUpsert(canonical.home, userId)
+  const { error } = await adminClient
+    .from('homes')
+    .update({ member_ids: memberIds, updated_at: new Date().toISOString() })
+    .eq('id', canonical.home.id)
+  if (error) throw new Error(error.message)
+
+  return {
+    hub: canonical.hub,
+    home: {
+      ...canonical.home,
+      member_ids: memberIds,
+    },
+  }
 }
 
 async function fetchHome(
@@ -423,6 +567,7 @@ function normalizeServerHubSnapshot(
   hub: JsonObject,
   hubId: string,
   homeId: string,
+  serverInstanceIdFallback: string | null = null,
 ): Record<string, unknown> {
   const now = new Date().toISOString()
   const payload: Record<string, unknown> = {
@@ -432,14 +577,17 @@ function normalizeServerHubSnapshot(
     name: readString(hub, 'name') ?? 'Rhythm Server',
     endpoint: normalizeEndpoint(hub, 'endpoint'),
     enabled: readBool(hub, 'enabled') ?? true,
-    remote_endpoint: normalizeOptionalEndpoint(hub, 'remote_endpoint'),
     created_at: readString(hub, 'created_at') ?? now,
     updated_at: readString(hub, 'updated_at') ?? now,
   }
 
+  if ('remote_endpoint' in hub) {
+    payload.remote_endpoint = normalizeOptionalEndpoint(hub, 'remote_endpoint')
+  }
   const lastConnected = readString(hub, 'last_connected')
   if (lastConnected) payload.last_connected = lastConnected
-  const serverInstanceId = readString(hub, 'server_instance_id')
+  const serverInstanceId =
+    readServerInstanceId(hub) ?? serverInstanceIdFallback
   if (serverInstanceId) payload.server_instance_id = serverInstanceId
   return payload
 }
@@ -540,6 +688,41 @@ function memberIdsForUpsert(home: HomeRow | null, userId: string): string[] {
   return Array.from(new Set([...members, userId]))
 }
 
+function compareCanonicalServerHubs(left: HubRow, right: HubRow): number {
+  const leftHasRemote = left.remote_endpoint == null ? 0 : 1
+  const rightHasRemote = right.remote_endpoint == null ? 0 : 1
+  if (leftHasRemote !== rightHasRemote) return rightHasRemote - leftHasRemote
+
+  return compareNullableIsoDesc(left.last_connected, right.last_connected) ||
+    compareNullableIsoDesc(left.updated_at, right.updated_at) ||
+    compareNullableIsoDesc(left.created_at, right.created_at) ||
+    right.id.localeCompare(left.id)
+}
+
+function compareRemoteAccessMappings(
+  left: RemoteAccessMapping,
+  right: RemoteAccessMapping,
+): number {
+  return compareNullableIsoDesc(left.updated_at, right.updated_at) ||
+    compareNullableIsoDesc(left.created_at, right.created_at) ||
+    right.hub_id.localeCompare(left.hub_id)
+}
+
+function compareNullableIsoDesc(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): number {
+  const leftTime = left ? Date.parse(left) : Number.NaN
+  const rightTime = right ? Date.parse(right) : Number.NaN
+  const leftValid = Number.isFinite(leftTime)
+  const rightValid = Number.isFinite(rightTime)
+  if (leftValid && rightValid && leftTime !== rightTime) {
+    return rightTime - leftTime
+  }
+  if (leftValid !== rightValid) return leftValid ? -1 : 1
+  return 0
+}
+
 class RequestError extends Error {
   constructor(
     readonly status: number,
@@ -550,11 +733,12 @@ class RequestError extends Error {
 }
 
 const REMOTE_ACCESS_MAPPING_SELECT =
-  'hub_id, home_id, hostname, tunnel_id, tunnel_name, server_instance_id'
+  'hub_id, home_id, hostname, tunnel_id, tunnel_name, server_instance_id, created_at, updated_at'
 
 async function readExistingMapping(
   adminClient: any,
   params: {
+    userId: string
     hubId: string
     homeId: string
     serverInstanceId: string | null
@@ -565,15 +749,12 @@ async function readExistingMapping(
   if (byHub) return byHub
 
   if (params.serverInstanceId) {
-    const { data, error } = await adminClient
-      .from('hub_remote_access')
-      .select(REMOTE_ACCESS_MAPPING_SELECT)
-      .eq('home_id', params.homeId)
-      .eq('server_instance_id', params.serverInstanceId)
-      .maybeSingle()
-
-    if (error) throw new Error(error.message)
-    if (data) return data as RemoteAccessMapping
+    const byServerInstanceId = await readExistingMappingByServerInstanceId(
+      adminClient,
+      params.userId,
+      params.serverInstanceId,
+    )
+    if (byServerInstanceId) return byServerInstanceId
   }
 
   if (params.serverEndpoint) {
@@ -582,6 +763,29 @@ async function readExistingMapping(
       params.homeId,
       params.serverEndpoint,
     )
+  }
+
+  return null
+}
+
+async function readExistingMappingByServerInstanceId(
+  adminClient: any,
+  userId: string,
+  serverInstanceId: string,
+): Promise<RemoteAccessMapping | null> {
+  const { data, error } = await adminClient
+    .from('hub_remote_access')
+    .select(REMOTE_ACCESS_MAPPING_SELECT)
+    .eq('server_instance_id', serverInstanceId)
+    .limit(20)
+
+  if (error) throw new Error(error.message)
+  const mappings = (data as RemoteAccessMapping[] | null) ?? []
+  mappings.sort(compareRemoteAccessMappings)
+
+  for (const mapping of mappings) {
+    const home = await fetchHome(adminClient, mapping.home_id)
+    if (home && isHomeMember(home, userId)) return mapping
   }
 
   return null

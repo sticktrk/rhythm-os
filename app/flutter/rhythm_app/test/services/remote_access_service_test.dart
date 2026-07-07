@@ -58,6 +58,24 @@ void main() {
       });
     });
 
+    test('bootstrap repair snapshot includes probed server identity', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+
+      final body = RemoteAccessService.buildBootstrapBody(
+        serverHub: _serverHub(),
+        home: home,
+        serverInstanceId: 'srv-test-instance',
+      );
+      final hubPayload = Map<String, dynamic>.from(body['server_hub'] as Map);
+
+      expect(body['server_instance_id'], 'srv-test-instance');
+      expect(hubPayload['server_instance_id'], 'srv-test-instance');
+    });
+
     test('teardown body marks the bootstrap function for disable', () {
       final home = Home.create(
         id: 'home-1',

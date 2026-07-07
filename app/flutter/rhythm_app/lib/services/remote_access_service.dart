@@ -741,6 +741,10 @@ class RemoteAccessService {
     bool clearRemoteEndpoint = false,
   }) {
     final normalizedServerInstanceId = serverInstanceId?.trim();
+    final snapshotHub = normalizedServerInstanceId != null &&
+            normalizedServerInstanceId.isNotEmpty
+        ? serverHub.copyWith(serverInstanceId: normalizedServerInstanceId)
+        : serverHub;
     return {
       'hub_id': serverHub.id,
       if (normalizedServerInstanceId != null &&
@@ -749,7 +753,7 @@ class RemoteAccessService {
       if (home != null) ...{
         'home': AccountCloudSyncService.homeSnapshotPayload(home),
         'server_hub': AccountCloudSyncService.serverHubSnapshotPayload(
-          serverHub,
+          snapshotHub,
           clearRemoteEndpoint: clearRemoteEndpoint,
         ),
       },

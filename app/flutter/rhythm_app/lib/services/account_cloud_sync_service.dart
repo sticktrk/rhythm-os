@@ -160,6 +160,22 @@ class AccountCloudSyncService {
     }
 
     try {
+      final identityConflict = await _findServerHubIdentityConflict(
+        client,
+        homeId: home.id,
+        serverHubs: serverHubs,
+      );
+      if (identityConflict != null) {
+        debugPrint(
+          'AccountCloudSyncService: sync skipped for home=${home.id} '
+          'reason=$reason server_instance_id='
+          '${identityConflict.serverInstanceId} already exists as '
+          'hub=${identityConflict.existingHubId}; local_hub='
+          '${identityConflict.localHubId}',
+        );
+        return;
+      }
+
       await client.from('homes').upsert(
             homeSnapshotPayload(home, userId: userId),
             onConflict: 'id',
@@ -267,6 +283,7 @@ class AccountCloudSyncService {
           'Only Rhythm Server hubs can be synced as server hubs.');
     }
 
+    final serverInstanceId = _cleanServerInstanceId(hub.serverInstanceId);
     return {
       'id': hub.id,
       'home_id': hub.homeId,
@@ -274,8 +291,8 @@ class AccountCloudSyncService {
       'name': hub.name,
       'endpoint': hub.endpoint.toJson(),
       'enabled': hub.enabled,
-      if (includeServerInstanceId && hub.serverInstanceId != null)
-        'server_instance_id': hub.serverInstanceId,
+      if (includeServerInstanceId && serverInstanceId != null)
+        'server_instance_id': serverInstanceId,
       if (hub.remoteEndpoint != null || clearRemoteEndpoint)
         'remote_endpoint':
             clearRemoteEndpoint ? null : hub.remoteEndpoint?.toJson(),
@@ -431,6 +448,73 @@ class AccountCloudSyncService {
     }
     throw lastMissingColumnError ??
         StateError('No compatible account hub upsert payload available');
+  }
+
+  Future<
+      ({
+        String serverInstanceId,
+        String existingHubId,
+        String localHubId,
+      })?> _findServerHubIdentityConflict(
+    SupabaseClient client, {
+    required String homeId,
+    required Iterable<Hub> serverHubs,
+  }) async {
+    final localHubsByIdentity = <String, Hub>{};
+    for (final hub in serverHubs) {
+      final serverInstanceId = _cleanServerInstanceId(hub.serverInstanceId);
+      if (serverInstanceId == null) continue;
+      final existingLocal = localHubsByIdentity[serverInstanceId];
+      if (existingLocal != null && existingLocal.id != hub.id) {
+        return (
+          serverInstanceId: serverInstanceId,
+          existingHubId: existingLocal.id,
+          localHubId: hub.id,
+        );
+      }
+      localHubsByIdentity[serverInstanceId] = hub;
+    }
+    if (localHubsByIdentity.isEmpty) return null;
+
+    try {
+      final rows = await client
+          .from('hubs')
+          .select('id,home_id,server_instance_id')
+          .eq('type', HubType.server.name)
+          .inFilter(
+            'server_instance_id',
+            localHubsByIdentity.keys.toList(growable: false),
+          )
+          .limit(50);
+
+      for (final row in rows.whereType<Map>()) {
+        final existingHubId = row['id']?.toString();
+        final existingHomeId = row['home_id']?.toString();
+        final serverInstanceId =
+            _cleanServerInstanceId(row['server_instance_id']?.toString());
+        if (existingHubId == null ||
+            existingHomeId == null ||
+            serverInstanceId == null) {
+          continue;
+        }
+        final localHub = localHubsByIdentity[serverInstanceId];
+        if (localHub == null) continue;
+        if (existingHubId != localHub.id || existingHomeId != homeId) {
+          return (
+            serverInstanceId: serverInstanceId,
+            existingHubId: existingHubId,
+            localHubId: localHub.id,
+          );
+        }
+      }
+    } catch (error) {
+      if (_isMissingColumnError(error, 'server_instance_id')) {
+        return null;
+      }
+      rethrow;
+    }
+
+    return null;
   }
 
   Map<String, dynamic>? _encryptedEnvelopeFromLegacyToken(Object? token) {
@@ -593,23 +677,21 @@ bool _sameNonEmptyToken(String? left, String? right) {
 }
 
 bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
-  final leftId = left.serverInstanceId?.trim();
-  final rightId = right.serverInstanceId?.trim();
-  return leftId != null &&
-      leftId.isNotEmpty &&
-      rightId != null &&
-      rightId.isNotEmpty &&
-      leftId == rightId;
+  final leftId = _cleanServerInstanceId(left.serverInstanceId);
+  final rightId = _cleanServerInstanceId(right.serverInstanceId);
+  return leftId != null && rightId != null && leftId == rightId;
 }
 
 bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
-  final leftId = left.serverInstanceId?.trim();
-  final rightId = right.serverInstanceId?.trim();
-  return leftId != null &&
-      leftId.isNotEmpty &&
-      rightId != null &&
-      rightId.isNotEmpty &&
-      leftId != rightId;
+  final leftId = _cleanServerInstanceId(left.serverInstanceId);
+  final rightId = _cleanServerInstanceId(right.serverInstanceId);
+  return leftId != null && rightId != null && leftId != rightId;
+}
+
+String? _cleanServerInstanceId(String? value) {
+  final clean = value?.trim().toLowerCase();
+  if (clean == null || clean.isEmpty) return null;
+  return clean;
 }
 
 DateTime _latestDate(DateTime left, DateTime right) {
