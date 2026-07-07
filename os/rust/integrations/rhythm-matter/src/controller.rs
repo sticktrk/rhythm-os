@@ -289,7 +289,7 @@ impl MatterLightController {
                     error
                 );
                 (
-                    LightCapabilities::defaults_for(LightType::ExtendedColor),
+                    crate::commissioning::fallback_device_capabilities(),
                     Vec::new(),
                 )
             }
@@ -2639,6 +2639,39 @@ mod tests {
             .expect("expected probed caps to be cached");
         assert!(caps.supports_color_temp());
         assert!(!caps.supports_xy_color());
+    }
+
+    #[test]
+    fn turn_on_direct_color_uses_hue_saturation_when_probe_falls_back() {
+        let (controller, spy, _) = make_controller();
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::from_color(
+                50,
+                rhythm_core::Rgb::new(255, 0, 0),
+                rhythm_core::XyColor { x: 0.64, y: 0.33 },
+                Some(400),
+            ),
+        ))
+        .unwrap();
+
+        assert!(spy.operations().iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetHueSaturation {
+                node_id: 42,
+                endpoint: 1,
+                hue: 0,
+                saturation: 254,
+                transition_ms: Some(400),
+            }
+        )));
+        assert!(!spy
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
     }
 
     #[test]
