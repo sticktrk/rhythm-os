@@ -5,7 +5,8 @@
 #   1. image release          -> fresh image entries carry the fingerprint
 #   2. binary-only follow-up  -> previous image entries carried forward
 #      (asserted for BOTH channels — the carry-forward is channel-symmetric)
-#   3. --dry-run              -> writes nothing
+#   3. [no-image] release     -> neither image flag -> manifest ships images: []
+#   4. --dry-run              -> writes nothing
 #
 # Usage: ./tools/os/scripts/tests/package-feed-sim.sh
 
@@ -88,6 +89,23 @@ for channel in beta stable; do
     assert_eq "$channel carried rootfs url" "v$image_version/rootfs.ext2.gz" \
         "$(jq -r '.images[] | select(.kind == "rootfs_image") | .url' "$manifest2")"
     assert_eq "$channel package version" "$binary_version" "$(jq -r '.package.version' "$manifest2")"
+
+    # --- 3. [no-image] release: no image flags at all -> images: [] ----------
+    # (This is what CI runs for a tag carrying the [no-image] marker: the
+    # previous manifest is deliberately withheld so nothing carries forward.)
+    out_noimage="$WORK_DIR/out-noimage-$channel"
+    noimage_version="1.0.2"
+    [ "$channel" = "stable" ] && noimage_version="1.0.2-stable"
+    bash "$PACKAGER" \
+        --artifact-root "$ARTIFACT_ROOT" \
+        --output-dir "$out_noimage" \
+        --version "$noimage_version" \
+        --channel "$channel" >/dev/null
+
+    manifest3="$out_noimage/$feed/manifest.json"
+    assert_eq "$channel no-image manifest version" "$noimage_version" "$(jq -r '.version' "$manifest3")"
+    assert_eq "$channel no-image image count" "0" "$(jq -r '.images | length' "$manifest3")"
+    assert_eq "$channel no-image package version" "$noimage_version" "$(jq -r '.package.version' "$manifest3")"
 done
 
 # --- 3. --dry-run writes nothing ---------------------------------------------

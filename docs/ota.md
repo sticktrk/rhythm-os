@@ -74,6 +74,13 @@ published `rootfs_image` entry in the target feed:
 `release.sh --with-image` just embeds the `[with-image image_mode=…]` marker
 in the tag message — it forces the image leg, nothing else.
 
+`release.sh --no-image` embeds the `[no-image]` marker instead: no image
+build **and no carry-forward** — the manifest ships with `images: []`, so
+devices take the package-only path. Escape hatch for firmware whose image
+path is broken (see fleet notes). Because the resulting manifest has no
+fingerprinted image, the *next* normal release auto-builds a fresh image and
+re-seeds the entries — restoration is automatic.
+
 > First release after introducing fingerprints: the published feeds have no
 > fingerprint, so the gate force-builds one image per channel to seed them.
 > Expect Buildroot time once; binary-only is the steady state afterwards.
@@ -131,6 +138,11 @@ references.
 # Force a full image rebuild despite an unchanged fingerprint (rare).
 ./tools/os/scripts/release.sh --with-image [--image-mode dev|prod]
 
+# Binary-only rescue release: manifest ships with NO image entries, so old
+# updaters take the package-only path. Next normal release re-seeds the image.
+./tools/os/scripts/release.sh --no-image
+./tools/os/scripts/release.sh --promote-stable --no-image
+
 # Escape hatch: build + publish the feed locally when GitHub Actions is down.
 ./tools/os/scripts/release.sh --upload            # uses .env RHYTHM_UPDATES_* creds
 
@@ -162,4 +174,4 @@ curl -X PUT http://<hub>/api/settings -d '{"update_channel":"beta"}'
   have always been ext4, so the mount fails (`EINVAL`) and the whole update
   aborts — including the package half. Such devices can only consume
   manifests whose image entries are no newer than their image base; get them
-  past 0.6.223 via a package-only manifest or `push-rpiz-dev.sh` first.
+  past 0.6.223 via a `--no-image` release or `push-rpiz-dev.sh` first.

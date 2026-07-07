@@ -31,6 +31,7 @@ PROMOTE_STABLE_VERSION=""
 SKIP_BUILDER_REFRESH=false
 MESSAGE=""
 WITH_IMAGE=false
+NO_IMAGE=false
 IMAGE_MODE="auto"
 IMAGE_MODE_EXPLICIT=false
 WORKSPACE_LOCK_FILES=("Cargo.lock")
@@ -59,6 +60,12 @@ Options:
   --with-image      Force a full rootfs image build for this release by
                     marking the tag. Normally unnecessary: CI auto-builds the
                     image whenever the rootfs fingerprint changed.
+  --no-image        Publish a binary-only manifest with NO image entries
+                    (suppresses both the image build and the image
+                    carry-forward). Escape hatch for firmware whose image
+                    path is broken: devices then take the package-only
+                    update. The next normal release re-seeds the image
+                    automatically.
   --image-mode MODE Image posture for a forced image build: auto, dev, or
                     prod (default: auto = dev posture for beta, prod for
                     stable)
@@ -122,6 +129,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --with-image)
             WITH_IMAGE=true
+            shift
+            ;;
+        --no-image)
+            NO_IMAGE=true
             shift
             ;;
         --image-mode)
@@ -362,14 +373,21 @@ upload_rpiz_feed() {
     echo "=== Configuring SSH upload ==="
     setup_upload_ssh
     # Both channels carry the current base image forward in their manifests,
-    # so always offer the previous manifest to the packager.
-    manifest_spec="$(fetch_rpiz_manifest "$release_feed")"
-    if [ -n "$manifest_spec" ]; then
-        package_args+=(--previous-rpiz-manifest "$manifest_spec")
+    # so always offer the previous manifest to the packager — unless this is
+    # a --no-image release, whose manifest must ship without image entries.
+    if [ "$NO_IMAGE" = false ]; then
+        manifest_spec="$(fetch_rpiz_manifest "$release_feed")"
+        if [ -n "$manifest_spec" ]; then
+            package_args+=(--previous-rpiz-manifest "$manifest_spec")
+        fi
     fi
 
     echo ""
     echo "=== Packaging rpiz OTA feed ==="
+    if [ "$NO_IMAGE" = true ] && [ -n "${RHYTHM_RELEASE_RPIZ_IMAGE_ROOT:-}" ]; then
+        echo "Error: --no-image conflicts with RHYTHM_RELEASE_RPIZ_IMAGE_ROOT" >&2
+        exit 1
+    fi
     if [ -n "${RHYTHM_RELEASE_RPIZ_IMAGE_ROOT:-}" ]; then
         local image_mode image_fingerprint
         image_mode="dev"
@@ -459,6 +477,11 @@ case "$IMAGE_MODE" in
         ;;
 esac
 
+if [ "$WITH_IMAGE" = true ] && [ "$NO_IMAGE" = true ]; then
+    echo "Error: --with-image and --no-image are mutually exclusive" >&2
+    exit 1
+fi
+
 if [ "$IMAGE_MODE_EXPLICIT" = true ] && [ "$WITH_IMAGE" = false ]; then
     echo "Error: --image-mode requires --with-image" >&2
     exit 1
@@ -486,6 +509,9 @@ if [ "$PROMOTE_STABLE" = true ]; then
     fi
     if [ "$WITH_IMAGE" = true ]; then
         promote_args+=(--with-image)
+    fi
+    if [ "$NO_IMAGE" = true ]; then
+        promote_args+=(--no-image)
     fi
     if [ "$IMAGE_MODE" != "auto" ]; then
         promote_args+=(--image-mode "$IMAGE_MODE")
@@ -585,6 +611,10 @@ if [ "$WITH_IMAGE" = true ]; then
     MESSAGE="$MESSAGE $(with_image_marker)"
 fi
 
+if [ "$NO_IMAGE" = true ]; then
+    MESSAGE="$MESSAGE [no-image]"
+fi
+
 REPO_URL="$(github_repo_url)"
 
 echo "Release plan"
@@ -612,6 +642,8 @@ else
 fi
 if [ "$WITH_IMAGE" = true ]; then
     echo "  rpiz sd image: forced via tag marker $(with_image_marker) (CI builds the full image for this release)"
+elif [ "$NO_IMAGE" = true ]; then
+    echo "  rpiz sd image: suppressed via tag marker [no-image] (binary-only manifest, no image entries)"
 else
     echo "  rpiz sd image: auto — CI builds a full image only when the rootfs fingerprint changed"
 fi

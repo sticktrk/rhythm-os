@@ -29,6 +29,7 @@ PUSH=true
 DRY_RUN=false
 MESSAGE=""
 WITH_IMAGE=false
+NO_IMAGE=false
 IMAGE_MODE="auto"
 IMAGE_MODE_EXPLICIT=false
 
@@ -48,6 +49,11 @@ Options:
   --with-image        Force a full rootfs image build for this stable release
                       by marking the tag. Normally unnecessary: CI auto-builds
                       the image whenever the rootfs fingerprint changed.
+  --no-image          Publish a binary-only stable manifest with NO image
+                      entries (suppresses the image build and the image
+                      carry-forward). Escape hatch for firmware whose image
+                      path is broken. The next normal release re-seeds the
+                      image automatically.
   --image-mode MODE   Image posture for a forced image build: auto, dev, or
                       prod (default: auto = prod posture for stable)
   --no-push           Create the stable tag locally but do not push it
@@ -84,6 +90,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --with-image)
             WITH_IMAGE=true
+            shift
+            ;;
+        --no-image)
+            NO_IMAGE=true
             shift
             ;;
         --image-mode)
@@ -176,6 +186,11 @@ if [ "$IMAGE_MODE_EXPLICIT" = true ] && [ "$WITH_IMAGE" = false ]; then
     exit 1
 fi
 
+if [ "$WITH_IMAGE" = true ] && [ "$NO_IMAGE" = true ]; then
+    echo "Error: --with-image and --no-image are mutually exclusive" >&2
+    exit 1
+fi
+
 if [ -z "$VERSION" ]; then
     SOURCE_TAG="$(latest_beta_tag)"
     if [ -z "$SOURCE_TAG" ]; then
@@ -203,6 +218,10 @@ fi
 
 if [ "$WITH_IMAGE" = true ]; then
     MESSAGE="$MESSAGE $(with_image_marker)"
+fi
+
+if [ "$NO_IMAGE" = true ]; then
+    MESSAGE="$MESSAGE [no-image]"
 fi
 
 LOCAL_STABLE_COMMIT=""
@@ -234,6 +253,8 @@ else
 fi
 if [ "$WITH_IMAGE" = true ]; then
     echo "  Image:   forced via tag marker $(with_image_marker) (CI builds the full image for this release)"
+elif [ "$NO_IMAGE" = true ]; then
+    echo "  Image:   suppressed via tag marker [no-image] (binary-only manifest, no image entries)"
 else
     echo "  Image:   auto — CI builds a full image only when the rootfs fingerprint changed"
 fi
@@ -243,6 +264,10 @@ if [ "$WITH_IMAGE" = true ] && [ -n "$LOCAL_STABLE_COMMIT" ]; then
     echo "Warning: $STABLE_TAG already exists, so its message cannot gain the $(with_image_marker) marker." >&2
     echo "To force an image for this release, run the rpiz-sd-image.yml workflow manually:" >&2
     echo "  gh workflow run rpiz-sd-image.yml -f tag=$STABLE_TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE" >&2
+fi
+
+if [ "$NO_IMAGE" = true ] && [ -n "$LOCAL_STABLE_COMMIT" ]; then
+    echo "Warning: $STABLE_TAG already exists, so its message cannot gain the [no-image] marker." >&2
 fi
 
 if [ "$DRY_RUN" = true ]; then
