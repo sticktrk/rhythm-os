@@ -494,7 +494,9 @@ if [ "$PROMOTE_STABLE" = true ]; then
         promote_args+=(--version "$promote_version")
     fi
 
-    exec "$SCRIPT_DIR/promote-stable.sh" "${promote_args[@]}"
+    # ${arr[@]+...} expansion: bash 3.2 (macOS) errors on "${arr[@]}" when the
+    # array is empty under set -u.
+    exec "$SCRIPT_DIR/promote-stable.sh" ${promote_args[@]+"${promote_args[@]}"}
 fi
 
 if [ "$WITH_IMAGE" = true ] && [ "$UPLOAD" = true ]; then
