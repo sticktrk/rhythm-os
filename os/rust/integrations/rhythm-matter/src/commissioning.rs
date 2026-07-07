@@ -412,7 +412,13 @@ pub(crate) fn store_device_metadata(
 }
 
 pub(crate) fn fallback_device_capabilities() -> rhythm_devices::LightCapabilities {
-    rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
+    rhythm_devices::LightCapabilities {
+        color_modes: vec![
+            rhythm_devices::ColorMode::HueSaturation,
+            rhythm_devices::ColorMode::ColorTemperature,
+        ],
+        ..rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
+    }
 }
 
 pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, device_id: &str) {

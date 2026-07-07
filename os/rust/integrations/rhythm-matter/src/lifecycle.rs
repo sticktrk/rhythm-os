@@ -880,6 +880,9 @@ mod tests {
         assert!(metadata.device_caps.contains_key("matter-10-2"));
         assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(!metadata.device_caps.contains_key("matter-12-2"));
+        let fallback_caps = metadata.device_caps.get("matter-12").unwrap();
+        assert!(fallback_caps.supports_hue_saturation());
+        assert!(!fallback_caps.supports_xy_color());
         assert!(metadata.unreachable_nodes.contains(&12));
         assert!(!metadata
             .subscription_targets
