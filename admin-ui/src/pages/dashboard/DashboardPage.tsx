@@ -9,6 +9,7 @@ import {
   KeyRound,
   Loader2,
   LogOut,
+  Mail,
   MapPin,
   RefreshCw,
   Search,
@@ -391,22 +392,28 @@ export default function DashboardPage() {
             ) : filteredHomes.length === 0 ? (
               <div className="listState">No homes match this search.</div>
             ) : (
-              filteredHomes.map((item) => (
-                <button
-                  type="button"
-                  className={`homeListItem ${
-                    item.home.id === selectedHome?.home.id ? 'selected' : ''
-                  }`}
-                  key={item.home.id}
-                  onClick={() => setSelectedHomeId(item.home.id)}
-                >
-                  <span className="itemTitle">{item.home.name}</span>
-                  <span className="itemMeta">{item.customer.customerLabel}</span>
-                  <span className="itemMeta">
-                    {item.hubs.length} Light Box{item.hubs.length === 1 ? '' : 'es'}
-                  </span>
-                </button>
-              ))
+              filteredHomes.map((item) => {
+                const customerEmail = visibleCustomerEmail(item.customer);
+                return (
+                  <button
+                    type="button"
+                    className={`homeListItem ${
+                      item.home.id === selectedHome?.home.id ? 'selected' : ''
+                    }`}
+                    key={item.home.id}
+                    onClick={() => setSelectedHomeId(item.home.id)}
+                  >
+                    <span className="itemTitle">{item.home.name}</span>
+                    <span className="itemMeta">{item.customer.customerLabel}</span>
+                    {customerEmail ? (
+                      <span className="itemEmail">{customerEmail}</span>
+                    ) : null}
+                    <span className="itemMeta">
+                      {item.hubs.length} Light Box{item.hubs.length === 1 ? '' : 'es'}
+                    </span>
+                  </button>
+                );
+              })
             )}
           </div>
         </aside>
@@ -523,6 +530,7 @@ function HomeDetail({
   onApplyUpdate: (hub: SupportHub) => void;
   onLoadLogs: (hub: SupportHub, sourceId?: string) => void;
 }) {
+  const customerEmail = visibleCustomerEmail(item.customer);
   return (
     <div className="homeDetail">
       <div className="homeHeader">
@@ -537,8 +545,11 @@ function HomeDetail({
               </span>
             ) : null}
             {item.home.timezone ? <span>{item.home.timezone}</span> : null}
-            {item.customer.secondaryLabel ? (
-              <span>{item.customer.secondaryLabel}</span>
+            {customerEmail ? (
+              <span className="homeEmail">
+                <Mail size={15} />
+                {customerEmail}
+              </span>
             ) : null}
           </div>
         </div>
@@ -812,6 +823,14 @@ function otaActionMessage(action: DeviceOtaAction): string {
   }
 
   return latest ? `Update requested: v${latest}` : 'Update requested';
+}
+
+function visibleCustomerEmail(customer: HomeListItem['customer']): string | null {
+  const email = customer.customerEmail?.trim();
+  if (!email) return null;
+
+  const label = customer.customerLabel.trim();
+  return email.toLowerCase() === label.toLowerCase() ? null : email;
 }
 
 function flattenHomes(snapshot: SupportSnapshot | null): HomeListItem[] {

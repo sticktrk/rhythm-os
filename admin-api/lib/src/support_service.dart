@@ -42,6 +42,10 @@ class SupportService {
       );
     }
 
+    final customerIdentities = await _loadCustomerIdentities(
+      session,
+      homes.map((home) => home.ownerId),
+    );
     final hubsByHomeId = <String, List<SupportHubDto>>{};
     for (final hub in hubs) {
       hubsByHomeId.putIfAbsent(hub.homeId, () => []).add(hub);
@@ -55,10 +59,13 @@ class SupportService {
     final customers = <SupportCustomerDto>[];
     for (final entry in homesByOwner.entries) {
       final ownerId = entry.key;
+      final identity = customerIdentities[ownerId];
       customers.add(
         SupportCustomerDto(
           ownerId: ownerId,
-          customerLabel: _customerLabel(ownerId),
+          customerLabel: _customerLabel(ownerId, identity),
+          customerEmail: identity?.email,
+          customerName: identity?.name,
           homes: entry.value
               .map(
                 (home) => SupportCustomerHomeDto(
@@ -101,7 +108,37 @@ class SupportService {
     );
   }
 
-  String _customerLabel(String ownerId) {
+  Future<Map<String, SupportCustomerIdentity>> _loadCustomerIdentities(
+    AdminSession session,
+    Iterable<String> ownerIds,
+  ) async {
+    final ids = ownerIds.where((id) => id.trim().isNotEmpty).toSet();
+    if (ids.isEmpty) return const {};
+
+    final rows = await _supabase.select(
+      table: 'rhythm_support_customers',
+      select: 'user_id,email,name',
+      accessToken: session.accessToken,
+      filters: {
+        'user_id': postgrestInFilter(ids),
+      },
+    );
+    return {
+      for (final identity in rows.map(SupportCustomerIdentity.fromSupabase))
+        if (identity.userId.isNotEmpty) identity.userId: identity,
+    };
+  }
+
+  String _customerLabel(
+    String ownerId, [
+    SupportCustomerIdentity? identity,
+  ]) {
+    final name = identity?.name?.trim();
+    if (name != null && name.isNotEmpty) return name;
+
+    final email = identity?.email?.trim();
+    if (email != null && email.isNotEmpty) return email;
+
     return ownerId.length <= 8 ? ownerId : '${ownerId.substring(0, 8)}...';
   }
 }

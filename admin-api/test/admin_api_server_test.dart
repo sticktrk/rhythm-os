@@ -12,6 +12,73 @@ import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('support snapshot associates customer emails with homes', () async {
+    final client = _HandlerClient((request) async {
+      if (request.url.host == 'supabase.test') {
+        return _supabaseResponse(request);
+      }
+
+      return http.Response('not found', 404);
+    });
+
+    final config = AdminApiConfig(
+      supabaseUrl: Uri.parse('https://supabase.test'),
+      supabaseAnonKey: 'anon-key',
+      supabaseServiceRoleKey: 'service-role-key',
+      supportAccessEncryptionKey: 'support-key',
+      supportAccessKeyId: 'default',
+      host: '127.0.0.1',
+      port: 8787,
+      allowedOrigins: {'http://127.0.0.1:5173'},
+    );
+    final supabase = SupabaseRestClient(config: config, httpClient: client);
+    final supportAccess = SupportAccessService(
+      config: config,
+      supabase: supabase,
+      httpClient: client,
+    );
+    final server = AdminApiServer(
+      config: config,
+      supabase: supabase,
+      support: SupportService(supabase: supabase),
+      probes: DeviceProbeService(
+        supabase: supabase,
+        supportAccess: supportAccess,
+        httpClient: client,
+      ),
+    );
+
+    final response = await server.handler(
+      Request(
+        'GET',
+        Uri.parse('http://admin.test/api/support/snapshot'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+        },
+      ),
+    );
+
+    expect(response.statusCode, 200);
+    final body = jsonDecode(await response.readAsString()) as Map;
+    expect(body['totals'], {
+      'customers': 1,
+      'homes': 1,
+      'hubs': 1,
+    });
+
+    final customer = (body['customers'] as List).single as Map;
+    expect(customer['ownerId'], 'owner-1');
+    expect(customer['customerLabel'], 'Ada Homeowner');
+    expect(customer['customerEmail'], 'ada@example.com');
+    expect(customer['customerName'], 'Ada Homeowner');
+    expect(customer['secondaryLabel'], 'ada@example.com');
+
+    final homeEntry = (customer['homes'] as List).single as Map;
+    expect(homeEntry['home']['name'], 'Ada Home');
+    expect((homeEntry['hubs'] as List).single['name'], 'Kitchen Light Box');
+  });
+
   test('diagnostic routes proxy remote device requests server-side', () async {
     final deviceRequests = <http.BaseRequest>[];
     final client = _HandlerClient((request) async {
@@ -537,6 +604,35 @@ http.Response _supabaseResponse(http.BaseRequest request) {
         'token': 'legacy-token',
         'encrypted_token': null,
         'server_instance_id': 'srv-test',
+      },
+    ]);
+  }
+
+  if (request.url.path == '/rest/v1/homes') {
+    expect(request.headers['apikey'], 'anon-key');
+    expect(request.headers['Authorization'], 'Bearer staff-session');
+    return _jsonResponse([
+      {
+        'id': 'home-1',
+        'name': 'Ada Home',
+        'owner_id': 'owner-1',
+        'member_ids': ['owner-1'],
+        'location': {'cityName': 'Raleigh'},
+        'timezone': 'America/New_York',
+        'created_at': '2026-06-01T12:00:00Z',
+        'updated_at': '2026-07-01T12:00:00Z',
+      },
+    ]);
+  }
+
+  if (request.url.path == '/rest/v1/rhythm_support_customers') {
+    expect(request.headers['apikey'], 'anon-key');
+    expect(request.headers['Authorization'], 'Bearer staff-session');
+    return _jsonResponse([
+      {
+        'user_id': 'owner-1',
+        'email': 'ada@example.com',
+        'name': 'Ada Homeowner',
       },
     ]);
   }
