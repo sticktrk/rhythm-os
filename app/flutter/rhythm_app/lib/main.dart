@@ -272,6 +272,11 @@ class _AuthGateState extends State<AuthGate> {
   bool _isLoading = true;
   bool _requiresAccount = false;
 
+  /// Bumped on sign-out/reset so the [AppShell] subtree is rebuilt from
+  /// scratch — landing the user at the start of the hardware onboarding
+  /// funnel instead of whatever tab or funnel step was showing before.
+  int _shellGeneration = 0;
+
   /// The device had an anonymous session from before accounts became
   /// mandatory — the gate shows migration copy instead of first-run copy.
   bool _existingAnonymousUser = false;
@@ -517,14 +522,17 @@ class _AuthGateState extends State<AuthGate> {
 
   /// Whether the account gate must be shown before entering the app.
   ///
-  /// Accounts are required wherever the cloud backend runs. A missing session
-  /// or a legacy anonymous session must stop at the account gate. Web and
+  /// The launch gate exists to migrate legacy anonymous sessions to a real
+  /// account, so it fires only when such a session was recovered. Fresh
+  /// installs (no session) go through the hardware onboarding funnel first;
+  /// [HardwareOnboardingGate] enforces sign-in before the connect step, so
+  /// there is still no path into a paired app without an account. Web and
   /// no-backend (HA add-on) builds have no account infrastructure and are
   /// exempt.
   bool _computeRequiresAccount() {
     if (kIsWeb || !BackendProvider.isInitialized) return false;
     final authService = AuthService();
-    return authService.currentUser == null || authService.isAnonymous;
+    return authService.currentUser != null && authService.isAnonymous;
   }
 
   Future<void> _onAccountGateSignedIn() async {
@@ -588,6 +596,7 @@ class _AuthGateState extends State<AuthGate> {
       // Post-logout/reset local state is wiped — the gate shows first-run
       // copy, not the migration prompt.
       _existingAnonymousUser = false;
+      _shellGeneration++;
     });
     _refreshAppStateInBackground();
   }
@@ -616,7 +625,7 @@ class _AuthGateState extends State<AuthGate> {
       );
     }
 
-    return const AppShell();
+    return AppShell(key: ValueKey('shell_$_shellGeneration'));
   }
 }
 

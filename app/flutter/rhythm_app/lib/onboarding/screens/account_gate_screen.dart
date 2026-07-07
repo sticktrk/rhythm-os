@@ -12,8 +12,11 @@ import 'account_screen.dart';
 /// Full-screen gate shown at launch until the user signs in with a real
 /// (non-anonymous) account.
 ///
-/// The app requires an account. A missing session or legacy anonymous session
-/// cannot pass this screen, and there is no local-only path around it.
+/// Shown only for legacy anonymous sessions from before accounts became
+/// mandatory — the session must be linked to a real account and there is no
+/// local-only path around it. Fresh installs never see this gate: they run
+/// the hardware onboarding funnel, which requires sign-in at the connect
+/// step instead.
 class AccountGateScreen extends StatefulWidget {
   final FutureOr<void> Function() onSignedIn;
 

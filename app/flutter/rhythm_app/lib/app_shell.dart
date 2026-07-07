@@ -294,6 +294,41 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     SignInModal.show(context);
   }
 
+  /// Leave the Virtual Experience: clear the seeded demo state and land back
+  /// at the start of the hardware onboarding funnel. Runs the same local
+  /// reset as logout — [AccountSessionService.resetLocalSessionState] also
+  /// exits [VirtualExperienceService] — but never touches a real session
+  /// (the Virtual Experience is only reachable signed out).
+  Future<void> _exitVirtualExperience() async {
+    if (_accountActionInProgress) return;
+    setState(() => _accountActionInProgress = true);
+
+    AnalyticsService().logEvent('virtual_experience_exited');
+    try {
+      await AccountSessionService.instance.resetLocalSessionState(
+        serverSyncProvider: context.read<ServerSyncProvider>(),
+        homeProvider: context.read<HomeProvider>(),
+        hubProvider: context.read<HubConnectionProvider>(),
+        roomProvider: context.read<RoomProvider>(),
+        debugLabel: 'Exit Virtual Experience',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Exit Virtual Experience: Failed: $error');
+      debugPrint('$stackTrace');
+    } finally {
+      if (mounted) {
+        setState(() => _accountActionInProgress = false);
+      }
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true)
+        .popUntil((route) => route.isFirst);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      AuthGate.resetToOnboarding();
+    });
+  }
+
   Future<void> _logOutFromPreHome() async {
     if (_accountActionInProgress) return;
 
@@ -622,7 +657,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         children: [
                           if (isVirtual)
                             VirtualExperienceBanner(
-                              onExit: VirtualExperienceService.instance.exit,
+                              onExit: () =>
+                                  unawaited(_exitVirtualExperience()),
                             ),
                           if (showDisabledBanner)
                             DisabledModeBanner(

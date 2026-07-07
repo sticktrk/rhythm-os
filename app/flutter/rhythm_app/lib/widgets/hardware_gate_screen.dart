@@ -1,11 +1,22 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../backend/backend_provider.dart';
+import '../onboarding/providers/auth_provider.dart';
+import '../onboarding/providers/onboarding_provider.dart';
+import '../onboarding/screens/account_screen.dart';
+import '../onboarding/widgets/onboarding_orbit.dart';
 import '../services/analytics_service.dart';
+import '../services/app_state_refresh.dart';
+import '../services/auth_service.dart';
+import '../services/hue/hue_service_locator.dart';
 import '../services/virtual_experience_service.dart';
 import 'connect_hub_screen.dart';
 import 'solar_orbit.dart';
@@ -15,7 +26,13 @@ import 'solar_orbit.dart';
 ///
 /// Step 1 — `_GateStep.gate`     The Yes/No question.
 /// Step 2 — `_GateStep.upsell`   Sales-style explainer for users without one.
-/// Step 3 — `_GateStep.connect`  The existing [ConnectHubScreen].
+/// Step 3 — `_GateStep.account`  Sign-in, shown only when the cloud backend
+///                               runs and no real account is signed in yet.
+/// Step 4 — `_GateStep.connect`  The existing [ConnectHubScreen].
+///
+/// The account step is where the app's account requirement is enforced for
+/// fresh installs: browsing the funnel and the Virtual Experience demo need
+/// no account, but connecting real hardware does.
 ///
 /// Replaces the direct `ConnectHubScreen` previously rendered by
 /// `_buildNoRoomsLayout` in `app_shell.dart`.
@@ -25,31 +42,86 @@ class HardwareOnboardingGate extends StatefulWidget {
   /// Optional account (Sign in / Log out) control, anchored into the gate's
   /// own header so it sits inside this screen's composition instead of
   /// floating over it from the app shell. Shown only on the gate/upsell
-  /// steps — the connect step has its own header and sign-in affordance.
+  /// steps — the account step is itself a sign-in screen and the connect
+  /// step has its own header and sign-in affordance.
   final Widget? accountControl;
+
+  /// Whether the connect step must be preceded by account sign-in.
+  /// Overridable for tests; defaults to the app's cloud-account requirement.
+  final bool Function()? requiresAccountForConnect;
 
   const HardwareOnboardingGate({
     super.key,
     this.mode = ConnectHubMode.rhythmServer,
     this.accountControl,
+    this.requiresAccountForConnect,
   });
 
   @override
   State<HardwareOnboardingGate> createState() => _HardwareOnboardingGateState();
 }
 
-enum _GateStep { gate, upsell, connect }
+enum _GateStep { gate, upsell, account, connect }
 
 class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
   _GateStep _step = _GateStep.gate;
+
+  /// Step to return to when backing out of the account step.
+  _GateStep _accountReturnStep = _GateStep.gate;
+
+  /// Accounts are required wherever the cloud backend runs; web and
+  /// no-backend (HA add-on) builds have no account infrastructure. Mirrors
+  /// the exemptions used by the launch-time account gate in `main.dart`.
+  static bool _defaultRequiresAccountForConnect() {
+    if (kIsWeb || !BackendProvider.isInitialized) return false;
+    final auth = AuthService();
+    return auth.currentUser == null || auth.isAnonymous;
+  }
+
+  bool get _requiresAccountForConnect =>
+      (widget.requiresAccountForConnect ?? _defaultRequiresAccountForConnect)
+          .call();
 
   void _toConnect() {
     HapticFeedback.mediumImpact();
     AnalyticsService().logEvent('onboarding_hardware_choice', {
       'choice': 'has_hardware',
     });
+    if (_requiresAccountForConnect) {
+      AnalyticsService().logScreenView('onboarding_account');
+      setState(() {
+        _accountReturnStep = _step == _GateStep.upsell
+            ? _GateStep.upsell
+            : _GateStep.gate;
+        _step = _GateStep.account;
+      });
+      return;
+    }
+    _enterConnect();
+  }
+
+  void _enterConnect() {
     AnalyticsService().logScreenView('connect_hub');
     setState(() => _step = _GateStep.connect);
+  }
+
+  Future<void> _onAccountStepSignedIn() async {
+    if (!mounted || _step != _GateStep.account) return;
+    // Mirrors SignInModal._finishSignIn: seeds the demo rooms when the demo
+    // account signed in and restores a real account's cloud homes. When rooms
+    // arrive the shell replaces this gate entirely, so only advance to the
+    // connect step if the account step is still showing afterwards.
+    await AppStateRefresh.sync(context);
+    if (!mounted || _step != _GateStep.account) return;
+    // Demo sign-in just seeded fake rooms — the shell is about to swap this
+    // gate for the populated room grid, so don't flash the connect step.
+    if (HueServiceLocator.isDemoMode) return;
+    _enterConnect();
+  }
+
+  void _backFromAccount() {
+    HapticFeedback.selectionClick();
+    setState(() => _step = _accountReturnStep);
   }
 
   void _toUpsell() {
@@ -111,6 +183,10 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
                     onBack: _backToGate,
                     onIHaveOne: _toConnect,
                   ),
+                _GateStep.account => _AccountStepScreen(
+                    key: const ValueKey('account'),
+                    onSignedIn: _onAccountStepSignedIn,
+                  ),
                 _GateStep.connect => const SizedBox.shrink(),
               },
             ),
@@ -121,10 +197,19 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
             left: 8,
             child: _BackChevron(onTap: _backToGate),
           ),
+        if (_step == _GateStep.account)
+          Positioned(
+            top: 8,
+            left: 8,
+            child: _BackChevron(onTap: _backFromAccount),
+          ),
         // Account control lives inside the gate's own SafeArea header so it
         // can never overlap a sub-screen's title. Hidden on the connect step,
-        // which carries its own header and "Sign in for saved Homes" entry.
-        if (widget.accountControl != null && _step != _GateStep.connect)
+        // which carries its own header and "Sign in for saved Homes" entry,
+        // and on the account step, which is itself a sign-in screen.
+        if (widget.accountControl != null &&
+            _step != _GateStep.connect &&
+            _step != _GateStep.account)
           Positioned(
             top: 0,
             right: 0,
@@ -136,6 +221,33 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Sign-in step of the funnel: [AccountScreen] with the providers it needs,
+/// mirroring the wrapping used by the launch-time `AccountGateScreen`. Uses
+/// the first-run copy — legacy anonymous users never reach this step because
+/// the launch gate migrates them first.
+class _AccountStepScreen extends StatelessWidget {
+  final FutureOr<void> Function() onSignedIn;
+
+  const _AccountStepScreen({super.key, required this.onSignedIn});
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => OnboardingProvider()),
+        ChangeNotifierProvider(create: (_) => AuthProvider()),
+      ],
+      child: ColoredBox(
+        color: OnboardingColors.backgroundDark,
+        child: AccountScreen(
+          onComplete: onSignedIn,
+          onSignedInComplete: onSignedIn,
+        ),
+      ),
     );
   }
 }
