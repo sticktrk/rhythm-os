@@ -186,9 +186,8 @@ impl Scheduler for ThreadScheduler {
                     // Execute the callback; survive panics so one bad tick
                     // (bad config, poisoned downstream lock) doesn't
                     // permanently stop the periodic light updates.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        (callback.0)()
-                    }));
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (callback.0)()));
                     if let Err(panic) = result {
                         let msg = panic
                             .downcast_ref::<&str>()

@@ -102,7 +102,6 @@ fn make_composite_pipeline() -> (
     (Arc::new(runtime), hue_spy, ha_spy, composite)
 }
 
-
 /// Dispatch is asynchronous (commands are queued per hub and delivered by
 /// dispatch workers), so tests wait for transport calls to land.
 fn wait_until(timeout: std::time::Duration, predicate: impl Fn() -> bool) -> bool {
@@ -195,7 +194,9 @@ fn composite_turn_off_fans_out() {
     // Turn on first
     let input = InputEvent::new("kitchen", rhythm_core::ButtonAction::OnPress);
     runtime.handle_event(&input).unwrap();
-    assert!(wait_until(DISPATCH_WAIT, || hue_spy.set_grouped_light_count() > 0));
+    assert!(wait_until(DISPATCH_WAIT, || hue_spy
+        .set_grouped_light_count()
+        > 0));
     settle();
     hue_spy.reset();
     ha_spy.reset();
@@ -207,7 +208,8 @@ fn composite_turn_off_fans_out() {
     // Hue: set_grouped_light(on=false).
     assert!(
         wait_until(DISPATCH_WAIT, || {
-            hue_spy.set_grouped_light_count() == 1 && ha_spy.calls_for_service("turn_off").len() == 1
+            hue_spy.set_grouped_light_count() == 1
+                && ha_spy.calls_for_service("turn_off").len() == 1
         }),
         "both hubs should receive the off dispatch"
     );
@@ -248,7 +250,8 @@ fn composite_partial_failure_succeeds() {
 
     // HA should have received the call
     assert!(
-        wait_until(DISPATCH_WAIT, || ha_spy.calls_for_service("turn_on").len() == 1),
+        wait_until(DISPATCH_WAIT, || ha_spy.calls_for_service("turn_on").len()
+            == 1),
         "HA should still receive the call"
     );
 }
@@ -324,7 +327,9 @@ fn composite_rhythm_off_no_transport_calls() {
     // Turn on first
     let input = InputEvent::new("kitchen", rhythm_core::ButtonAction::OnPress);
     runtime.handle_event(&input).unwrap();
-    assert!(wait_until(DISPATCH_WAIT, || hue_spy.set_grouped_light_count() > 0));
+    assert!(wait_until(DISPATCH_WAIT, || hue_spy
+        .set_grouped_light_count()
+        > 0));
     settle();
     hue_spy.reset();
     ha_spy.reset();
@@ -353,7 +358,9 @@ fn composite_off_press_partial_failure_still_turns_off_working_hub() {
     // Establish baseline-on across both hubs, then drop Hue.
     let on = InputEvent::new("kitchen", rhythm_core::ButtonAction::OnPress);
     runtime.handle_event(&on).unwrap();
-    assert!(wait_until(DISPATCH_WAIT, || hue_spy.set_grouped_light_count() > 0));
+    assert!(wait_until(DISPATCH_WAIT, || hue_spy
+        .set_grouped_light_count()
+        > 0));
     settle();
     hue_spy.reset();
     ha_spy.reset();
@@ -365,7 +372,8 @@ fn composite_off_press_partial_failure_still_turns_off_working_hub() {
 
     // HA must still receive turn_off even though Hue failed.
     assert!(
-        wait_until(DISPATCH_WAIT, || ha_spy.calls_for_service("turn_off").len() == 1),
+        wait_until(DISPATCH_WAIT, || ha_spy.calls_for_service("turn_off").len()
+            == 1),
         "HA should receive hard-off"
     );
     let ha_calls = ha_spy.calls_for_service("turn_off");

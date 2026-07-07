@@ -1096,8 +1096,9 @@ mod tests {
     fn save_commissioning_wifi_credentials_persists_when_storage_is_configured() {
         let root = unique_test_dir("wifi-save");
         let state = test_state();
-        state.lock().unwrap().storage =
-            Some(std::sync::Arc::new(FileStorage::new(root.to_str().unwrap()).unwrap()));
+        state.lock().unwrap().storage = Some(std::sync::Arc::new(
+            FileStorage::new(root.to_str().unwrap()).unwrap(),
+        ));
         let creds = WifiCredentials {
             ssid: "Kitchen AP".to_string(),
             password: "correct horse battery staple".to_string(),

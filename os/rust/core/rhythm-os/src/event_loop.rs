@@ -2184,9 +2184,11 @@ pub fn run_event_loop(
                     // A panic on one malformed hub event must not kill the
                     // only event-loop thread (buttons/motion dead until
                     // restart) — log and keep draining.
-                    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || handle_hub_event(&state, event, &mut motion_state),
-                    )) {
+                    if let Err(panic) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handle_hub_event(&state, event, &mut motion_state)
+                        }))
+                    {
                         let msg = panic
                             .downcast_ref::<&str>()
                             .map(|s| s.to_string())

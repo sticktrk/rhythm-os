@@ -224,12 +224,7 @@ impl ChipFfiController {
         }
     }
 
-    pub fn identify_light(
-        &self,
-        node_id: u64,
-        endpoint: u16,
-        duration_secs: u16,
-    ) -> Result<()> {
+    pub fn identify_light(&self, node_id: u64, endpoint: u16, duration_secs: u16) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
             ffi_probe::identify_light(node_id, endpoint, duration_secs)

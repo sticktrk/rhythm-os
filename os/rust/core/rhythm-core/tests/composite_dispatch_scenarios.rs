@@ -261,10 +261,8 @@ async fn dispatch_timeout_cools_down_then_recovers_after_slow_command_finishes()
 
     // After the cooldown expires the target accepts and dispatches again.
     assert!(wait_until(Duration::from_secs(5), || {
-        futures::executor::block_on(
-            composite.turn_on("kitchen", LightingCommand::new(60, 3200)),
-        )
-        .is_ok()
+        futures::executor::block_on(composite.turn_on("kitchen", LightingCommand::new(60, 3200)))
+            .is_ok()
     }));
     assert!(wait_until(Duration::from_secs(5), || {
         controller.turn_on_count() == 2

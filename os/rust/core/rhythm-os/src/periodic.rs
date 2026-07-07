@@ -635,7 +635,9 @@ pub fn run_periodic_loop<F: Fn()>(state: SharedState, on_tick: Option<F>) {
     // in another thread during boot would otherwise permanently and silently
     // kill all periodic light updates before "started" is even logged.
     let initial_interval = {
-        let s = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let s = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Duration::from_secs(s.runtime_config.update_interval_secs)
     };
 
@@ -1101,8 +1103,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                 PeriodicTimeCheckResult::Continuous { last_hour } => {
                     check_mode_transitions(&state, last_hour, current_hour);
                 }
-                PeriodicTimeCheckResult::Seeded
-                | PeriodicTimeCheckResult::Discontinuous { .. } => {
+                PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
                     replay_missed_mode_transitions(&state);
                 }
             }

@@ -80,8 +80,7 @@ fn run_direct_sntp() -> Result<ExitStatus> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .with_context(|| format!("running direct {}", SNTP_BIN))?;
-    crate::wifi::wait_child_with_timeout(child, SNTP_TIMEOUT, SNTP_BIN)
-        .map(|output| output.status)
+    crate::wifi::wait_child_with_timeout(child, SNTP_TIMEOUT, SNTP_BIN).map(|output| output.status)
 }
 
 /// Attempt a one-shot wall-clock sync using the image's Buildroot NTP wiring.

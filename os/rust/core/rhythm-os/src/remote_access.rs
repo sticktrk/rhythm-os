@@ -556,7 +556,11 @@ fn probe_cloudflared_version(bin: &Path) -> Option<String> {
                 let mut stdout = String::new();
                 child.stdout.take()?.read_to_string(&mut stdout).ok()?;
                 let stdout = stdout.trim().to_string();
-                return if stdout.is_empty() { None } else { Some(stdout) };
+                return if stdout.is_empty() {
+                    None
+                } else {
+                    Some(stdout)
+                };
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
@@ -1190,11 +1194,17 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             Ok(child) => {
                 let child_pid = child.id();
                 {
-                    let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut child_slot = inner
+                        .child
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     *child_slot = Some(child);
                 }
                 {
-                    let mut shared = inner.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut shared = inner
+                        .shared
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     shared.status.state = "running".to_string();
                     shared.status.child_pid = Some(child_pid);
                     shared.status.last_started_epoch_secs = Some(current_epoch_secs());
@@ -1204,7 +1214,10 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
                 backoff = inner.backoff_initial;
             }
             Err(e) => {
-                let mut shared = inner.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut shared = inner
+                    .shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 shared.status.state = "backoff".to_string();
                 shared.status.last_exit_epoch_secs = Some(current_epoch_secs());
                 shared.status.last_exit_code = None;
@@ -1228,7 +1241,10 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             }
 
             let exit_status = {
-                let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut child_slot = inner
+                    .child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 child_slot
                     .as_mut()
                     .and_then(|child| child.try_wait().ok().flatten())
@@ -1237,7 +1253,10 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             if let Some(exit_status) = exit_status {
                 clear_child_slot(&inner);
                 let should_restart = {
-                    let mut shared = inner.shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut shared = inner
+                        .shared
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     shared.status.state = "exited".to_string();
                     shared.status.child_pid = None;
                     shared.status.last_exit_epoch_secs = Some(current_epoch_secs());
@@ -1312,7 +1331,10 @@ fn sleep_backoff_or_change(inner: &ChildProcessInner, generation: u64, backoff: 
 }
 
 fn kill_child(inner: &ChildProcessInner) {
-    let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child_slot = inner
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(child) = child_slot.as_mut() {
         let _ = child.kill();
         let _ = child.wait();
@@ -1321,7 +1343,10 @@ fn kill_child(inner: &ChildProcessInner) {
 }
 
 fn clear_child_slot(inner: &ChildProcessInner) {
-    let mut child_slot = inner.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child_slot = inner
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *child_slot = None;
 }
 

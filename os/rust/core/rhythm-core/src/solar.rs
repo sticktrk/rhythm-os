@@ -194,8 +194,16 @@ pub fn calculate_sun_times(
     // user-supplied, persisted location data, and this runs on every periodic
     // tick — a panic would kill the scheduler thread and permanently stop
     // adaptive lighting. Clamp junk into range instead.
-    let lat = if latitude.is_finite() { (latitude as f64).clamp(-90.0, 90.0) } else { 0.0 };
-    let lon = if longitude.is_finite() { (longitude as f64).clamp(-180.0, 180.0) } else { 0.0 };
+    let lat = if latitude.is_finite() {
+        (latitude as f64).clamp(-90.0, 90.0)
+    } else {
+        0.0
+    };
+    let lon = if longitude.is_finite() {
+        (longitude as f64).clamp(-180.0, 180.0)
+    } else {
+        0.0
+    };
     let coords = Coordinates::new(lat, lon)
         .or_else(|| Coordinates::new(0.0, 0.0))
         .expect("Coordinates::new(0,0) is always valid");
@@ -350,8 +358,16 @@ pub fn calculate_twilight_times(
     // user-supplied, persisted location data, and this runs on every periodic
     // tick — a panic would kill the scheduler thread and permanently stop
     // adaptive lighting. Clamp junk into range instead.
-    let lat = if latitude.is_finite() { (latitude as f64).clamp(-90.0, 90.0) } else { 0.0 };
-    let lon = if longitude.is_finite() { (longitude as f64).clamp(-180.0, 180.0) } else { 0.0 };
+    let lat = if latitude.is_finite() {
+        (latitude as f64).clamp(-90.0, 90.0)
+    } else {
+        0.0
+    };
+    let lon = if longitude.is_finite() {
+        (longitude as f64).clamp(-180.0, 180.0)
+    } else {
+        0.0
+    };
     let coords = Coordinates::new(lat, lon)
         .or_else(|| Coordinates::new(0.0, 0.0))
         .expect("Coordinates::new(0,0) is always valid");

@@ -202,9 +202,11 @@ async fn run_ws_loop(
             }
         };
 
-        let connect =
-            tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request))
-                .await;
+        let connect = tokio::time::timeout(
+            WS_CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(request),
+        )
+        .await;
         let ws_stream = match connect {
             Ok(Ok((stream, _))) => stream,
             Ok(Err(e)) => {

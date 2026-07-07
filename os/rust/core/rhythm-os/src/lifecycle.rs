@@ -1398,7 +1398,9 @@ mod tests {
             guard.utc_offset_hours = 0.0;
             guard.timezone_name = Some("America/New_York".to_string());
             guard.power_save = false;
-            guard.storage = Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms(persisted)));
+            guard.storage = Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms(
+                persisted,
+            )));
             guard.topology.insert_room(topology_room_with_binding(
                 "top-kitchen",
                 "Kitchen",
@@ -1450,7 +1452,9 @@ mod tests {
     #[test]
     fn ensure_hub_runtime_defaults_missing_or_corrupted_rooms_to_rhythm_enabled() {
         for storage in [
-            Some(std::sync::Arc::new(LifecycleTestStorage::default()) as std::sync::Arc<dyn Storage>),
+            Some(
+                std::sync::Arc::new(LifecycleTestStorage::default()) as std::sync::Arc<dyn Storage>
+            ),
             Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms({
                 let mut rooms = RoomManager::new();
                 rooms.add_room(Room::new("hub-kitchen", "Kitchen"));
@@ -1513,7 +1517,9 @@ mod tests {
             guard.longitude = Some(-80.84);
             guard.utc_offset_hours = -5.0;
             guard.power_save = false;
-            guard.storage = Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms(persisted)));
+            guard.storage = Some(std::sync::Arc::new(LifecycleTestStorage::with_rooms(
+                persisted,
+            )));
             guard.topology.insert_room(topology_room_with_binding(
                 "top-kitchen",
                 "Kitchen",

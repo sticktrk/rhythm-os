@@ -29,7 +29,10 @@ pub(crate) fn wait_child_with_timeout(
 ) -> Result<std::process::Output> {
     let deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait().with_context(|| format!("waiting for {label}"))? {
+        match child
+            .try_wait()
+            .with_context(|| format!("waiting for {label}"))?
+        {
             Some(_) => {
                 return child
                     .wait_with_output()

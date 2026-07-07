@@ -138,9 +138,11 @@ where
 async fn await_supervised<T>(
     handle: tokio::task::JoinHandle<LightControlResult<T>>,
 ) -> LightControlResult<T> {
-    handle
-        .await
-        .unwrap_or_else(|e| Err(LightControlError::Internal(format!("query task failed: {e}"))))
+    handle.await.unwrap_or_else(|e| {
+        Err(LightControlError::Internal(format!(
+            "query task failed: {e}"
+        )))
+    })
 }
 
 /// Scope of the cooldown applied after a physical dispatch timeout.
@@ -390,10 +392,9 @@ impl HubDispatchAction {
     fn elements(&self) -> Vec<String> {
         match self.target() {
             HubDispatchTarget::Group { control_id, .. } => vec![format!("group:{control_id}")],
-            HubDispatchTarget::Devices { native_ids } => native_ids
-                .iter()
-                .map(|id| format!("dev:{id}"))
-                .collect(),
+            HubDispatchTarget::Devices { native_ids } => {
+                native_ids.iter().map(|id| format!("dev:{id}")).collect()
+            }
         }
     }
 
@@ -463,8 +464,8 @@ impl DispatchQueue {
 
     fn refill_tokens(&mut self, limit: &HubRateLimit, now: Instant) {
         let elapsed = now.saturating_duration_since(self.last_refill);
-        self.tokens = (self.tokens + elapsed.as_secs_f64() * limit.refill_per_sec)
-            .min(limit.capacity);
+        self.tokens =
+            (self.tokens + elapsed.as_secs_f64() * limit.refill_per_sec).min(limit.capacity);
         self.last_refill = now;
     }
 
@@ -785,7 +786,9 @@ impl DispatcherShared {
             let cooldown_until = Instant::now() + self.policy.timeout_cooldown;
             match self.policy.timeout_scope {
                 HubDispatchTimeoutScope::Target => {
-                    queue.target_cooldowns.insert(key.to_string(), cooldown_until);
+                    queue
+                        .target_cooldowns
+                        .insert(key.to_string(), cooldown_until);
                 }
                 HubDispatchTimeoutScope::Hub => {
                     queue.hub_cooldown_until = Some(cooldown_until);
@@ -886,7 +889,12 @@ async fn supervise_dispatch(shared: Arc<DispatcherShared>, ready: ReadyJob) {
                 },
             };
             shared.emit(shared.outcome_for(
-                &node_id, &action, status, queued_ms, dispatch_ms, coalesced,
+                &node_id,
+                &action,
+                status,
+                queued_ms,
+                dispatch_ms,
+                coalesced,
             ));
             shared.finish_dispatch(&action);
         }
@@ -965,11 +973,7 @@ impl HubDispatcher {
 
     /// Enqueue a command, splitting device-list targets when the policy
     /// isolates devices from each other (Matter).
-    fn enqueue_action(
-        &self,
-        node_id: &str,
-        action: HubDispatchAction,
-    ) -> LightControlResult<()> {
+    fn enqueue_action(&self, node_id: &str, action: HubDispatchAction) -> LightControlResult<()> {
         let split_ids = match (&self.shared.policy.split_device_targets, action.target()) {
             (true, HubDispatchTarget::Devices { native_ids }) if native_ids.len() > 1 => {
                 Some(native_ids.clone())
@@ -2246,11 +2250,7 @@ mod tests {
         let blocking = Arc::new(BlockingController::new());
         let composite = Arc::new(CompositeController::new());
         let outcomes = OutcomeCollector::install(&composite);
-        composite.register_controller_with_policy(
-            "hub_a",
-            blocking.clone(),
-            fast_timeout_policy(),
-        );
+        composite.register_controller_with_policy("hub_a", blocking.clone(), fast_timeout_policy());
         composite.update_routing(route(&[("room1", "hub_a", group_target("room1"))]));
 
         block_on(composite.turn_on("room1", LightingCommand::new(80, 4000))).unwrap();
@@ -2511,11 +2511,7 @@ mod tests {
     fn any_lights_on_query_is_bounded_by_query_timeout() {
         let blocking = Arc::new(BlockingController::blocking_queries());
         let composite = CompositeController::new();
-        composite.register_controller_with_policy(
-            "hub_a",
-            blocking.clone(),
-            fast_timeout_policy(),
-        );
+        composite.register_controller_with_policy("hub_a", blocking.clone(), fast_timeout_policy());
         composite.update_routing(route(&[("room1", "hub_a", group_target("room1"))]));
 
         let started = Instant::now();

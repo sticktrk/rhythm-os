@@ -181,8 +181,12 @@ impl ChipControllerService {
                 transition_ms,
             } => {
                 self.require_initialized()?;
-                self.backend()
-                    .set_group_hue_saturation(group_id, hue, saturation, transition_ms)?;
+                self.backend().set_group_hue_saturation(
+                    group_id,
+                    hue,
+                    saturation,
+                    transition_ms,
+                )?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::IdentifyLight {

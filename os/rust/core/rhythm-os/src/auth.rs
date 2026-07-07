@@ -212,7 +212,10 @@ fn issue_local_token(
 
     // Save outside the lock — the write is fsync'd, and holding the global
     // state lock through a slow SD-card flush stalls light control.
-    let persist = s.storage.as_ref().map(|st| (st.clone(), s.api_auth.clone()));
+    let persist = s
+        .storage
+        .as_ref()
+        .map(|st| (st.clone(), s.api_auth.clone()));
     drop(s);
     if let Some((storage, api_auth)) = persist {
         storage.save_api_auth(&api_auth)?;
@@ -255,7 +258,10 @@ pub fn revoke_support_session_token(state: &SharedState, token_id: &str) -> anyh
     prune_expired_tokens(&mut s.api_auth.tokens, current_epoch_ms());
 
     if revoked {
-        let persist = s.storage.as_ref().map(|st| (st.clone(), s.api_auth.clone()));
+        let persist = s
+            .storage
+            .as_ref()
+            .map(|st| (st.clone(), s.api_auth.clone()));
         drop(s);
         if let Some((storage, api_auth)) = persist {
             storage.save_api_auth(&api_auth)?;
@@ -305,7 +311,10 @@ pub fn issue_owner_token(
         expires_at_epoch_ms: None,
     });
 
-    let persist = s.storage.as_ref().map(|st| (st.clone(), s.api_auth.clone()));
+    let persist = s
+        .storage
+        .as_ref()
+        .map(|st| (st.clone(), s.api_auth.clone()));
     drop(s);
     if let Some((storage, api_auth)) = persist {
         storage.save_api_auth(&api_auth)?;
@@ -351,7 +360,10 @@ pub fn set_api_auth_required(
         token_count: s.api_auth.tokens.len(),
         issued_owner_token,
     };
-    let persist = s.storage.as_ref().map(|st| (st.clone(), s.api_auth.clone()));
+    let persist = s
+        .storage
+        .as_ref()
+        .map(|st| (st.clone(), s.api_auth.clone()));
     drop(s);
     if let Some((storage, api_auth)) = persist {
         storage.save_api_auth(&api_auth)?;
@@ -363,7 +375,10 @@ pub fn set_api_auth_required(
 pub fn clear_api_auth(state: &SharedState) -> anyhow::Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     s.api_auth = StoredApiAuth::default();
-    let persist = s.storage.as_ref().map(|st| (st.clone(), s.api_auth.clone()));
+    let persist = s
+        .storage
+        .as_ref()
+        .map(|st| (st.clone(), s.api_auth.clone()));
     drop(s);
     if let Some((storage, api_auth)) = persist {
         storage.save_api_auth(&api_auth)?;
