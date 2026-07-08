@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -77,6 +77,8 @@ type OtaState = {
   result?: DeviceOtaAction;
 };
 
+const HUB_PROBE_STAGGER_MS = 350;
+
 export default function DashboardPage() {
   const { accessToken, signOut } = useSession();
   const {
@@ -96,6 +98,8 @@ export default function DashboardPage() {
   const [logStates, setLogStates] = useState<Record<string, LogState>>({});
   const [statusStates, setStatusStates] = useState<Record<string, StatusState>>({});
   const [otaStates, setOtaStates] = useState<Record<string, OtaState>>({});
+  const probeStatesRef = useRef(probeStates);
+  const autoProbeHubIdsRef = useRef<Set<string>>(new Set());
 
   const homes = useMemo(() => flattenHomes(snapshot), [snapshot]);
   const filteredHomes = useMemo(() => {
@@ -116,28 +120,96 @@ export default function DashboardPage() {
     setSelectedHomeId(filteredHomes[0]?.home.id ?? null);
   }, [filteredHomes, selectedHome, selectedHomeId]);
 
-  async function handleProbe(hub: SupportHub) {
-    setProbeStates((current) => ({
-      ...current,
-      [hub.id]: { ...current[hub.id], loading: true, error: undefined }
-    }));
-    try {
-      const result = await probeHub(accessToken, hub.id);
-      setProbeStates((current) => ({
+  useEffect(() => {
+    probeStatesRef.current = probeStates;
+  }, [probeStates]);
+
+  const updateProbeState = useCallback(
+    (hubId: string, updater: (current?: ProbeState) => ProbeState) => {
+      const next = {
+        ...probeStatesRef.current,
+        [hubId]: updater(probeStatesRef.current[hubId])
+      };
+      probeStatesRef.current = next;
+      setProbeStates(next);
+    },
+    []
+  );
+
+  const runHubProbe = useCallback(
+    async (hubId: string) => {
+      if (probeStatesRef.current[hubId]?.loading) return;
+
+      updateProbeState(hubId, (current) => ({
         ...current,
-        [hub.id]: { loading: false, result }
+        loading: true,
+        error: undefined
       }));
-    } catch (error) {
-      setProbeStates((current) => ({
-        ...current,
-        [hub.id]: {
-          ...current[hub.id],
+
+      try {
+        const result = await probeHub(accessToken, hubId);
+        updateProbeState(hubId, () => ({
+          loading: false,
+          result
+        }));
+      } catch (error) {
+        updateProbeState(hubId, (current) => ({
+          ...current,
           loading: false,
           error: errorMessage(error)
+        }));
+      }
+    },
+    [accessToken, updateProbeState]
+  );
+
+  useEffect(() => {
+    const hubIds = homes.flatMap((item) => item.hubs.map((hub) => hub.id));
+    if (hubIds.length === 0) return;
+
+    const scheduled: Array<{
+      hubId: string;
+      timeoutId: number;
+      fired: boolean;
+    }> = [];
+    let delayMs = 0;
+
+    for (const hubId of hubIds) {
+      if (autoProbeHubIdsRef.current.has(hubId)) continue;
+      autoProbeHubIdsRef.current.add(hubId);
+
+      const entry = {
+        hubId,
+        timeoutId: 0,
+        fired: false
+      };
+      entry.timeoutId = window.setTimeout(() => {
+        entry.fired = true;
+        const state = probeStatesRef.current[hubId];
+        if (!state?.loading && !state?.result) {
+          void runHubProbe(hubId);
         }
-      }));
+      }, delayMs);
+      scheduled.push(entry);
+      delayMs += HUB_PROBE_STAGGER_MS;
     }
-  }
+
+    return () => {
+      for (const entry of scheduled) {
+        if (!entry.fired) {
+          window.clearTimeout(entry.timeoutId);
+          autoProbeHubIdsRef.current.delete(entry.hubId);
+        }
+      }
+    };
+  }, [homes, runHubProbe]);
+
+  const handleProbe = useCallback(
+    async (hub: SupportHub) => {
+      await runHubProbe(hub.id);
+    },
+    [runHubProbe]
+  );
 
   async function handleDownloadBundle(hub: SupportHub) {
     setBundleStates((current) => ({
@@ -411,6 +483,10 @@ export default function DashboardPage() {
                     <span className="itemMeta">
                       {item.hubs.length} Light Box{item.hubs.length === 1 ? '' : 'es'}
                     </span>
+                    <HomeListProbeSummary
+                      hubs={item.hubs}
+                      probeStates={probeStates}
+                    />
                   </button>
                 );
               })
@@ -481,6 +557,57 @@ function ApiCapabilityNotice({
       </span>
     </div>
   );
+}
+
+function HomeListProbeSummary({
+  hubs,
+  probeStates
+}: {
+  hubs: SupportHub[];
+  probeStates: Record<string, ProbeState>;
+}) {
+  if (hubs.length === 0) return null;
+
+  return (
+    <span className="homeProbeList">
+      {hubs.map((hub) => {
+        const summary = homeProbeSummary(probeStates[hub.id]);
+        return (
+          <span className={`homeProbeLine ${summary.status}`} key={hub.id}>
+            <span className="homeProbeHub">{hub.name}</span>
+            <span className="homeProbeStatus">{summary.label}</span>
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+function homeProbeSummary(state?: ProbeState): {
+  status: 'idle' | 'checking' | 'online' | 'auth' | 'offline' | 'error';
+  label: string;
+} {
+  if (state?.loading) return { status: 'checking', label: 'Checking' };
+  if (state?.error) return { status: 'error', label: 'Probe error' };
+
+  const result = state?.result;
+  if (!result) return { status: 'idle', label: 'Queued' };
+  if (result.status === 'online') {
+    const version = nonEmptyString(result.serverVersion);
+    const versionLabel = version
+      ? version.startsWith('v')
+        ? version
+        : `v${version}`
+      : null;
+    return {
+      status: 'online',
+      label: versionLabel ? `${versionLabel} · Success` : 'Success'
+    };
+  }
+  if (result.status === 'auth_required') {
+    return { status: 'auth', label: 'Auth required' };
+  }
+  return { status: 'offline', label: 'Offline' };
 }
 
 function Metric({
