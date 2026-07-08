@@ -1390,21 +1390,11 @@ class _NavFanButtonState extends State<_NavFanButton>
     final tabs =
         widget.tabs.where((t) => t != MainNavTab.home).toList(growable: false);
     final itemCount = tabs.length + 1;
-    final fanItems = <Widget>[];
-    var index = 0;
-    var reportBugAdded = false;
-    for (final tab in tabs) {
-      if (tab == MainNavTab.settings) {
-        fanItems.add(_buildReportBugFanItem(itemCount - 1 - index));
-        index += 1;
-        reportBugAdded = true;
-      }
-      fanItems.add(_buildFanItem(tab, itemCount - 1 - index));
-      index += 1;
-    }
-    if (!reportBugAdded) {
-      fanItems.add(_buildReportBugFanItem(itemCount - 1 - index));
-    }
+    final fanItems = <Widget>[
+      _buildReportBugFanItem(itemCount - 1),
+      for (var i = 0; i < tabs.length; i++)
+        _buildFanItem(tabs[i], itemCount - 2 - i),
+    ];
 
     return Stack(
       children: [

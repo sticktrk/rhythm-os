@@ -939,6 +939,12 @@ void main() {
 
     await _openNavigationFan(tester);
     expect(find.text('Report Bug'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 300));
+    final reportBugTop = tester.getTopLeft(find.text('Report Bug')).dy;
+    final presetsTop = tester.getTopLeft(find.text('Presets')).dy;
+    final settingsTop = tester.getTopLeft(find.text('Settings')).dy;
+    expect(reportBugTop, lessThan(presetsTop));
+    expect(presetsTop, lessThan(settingsTop));
 
     await tester.tap(find.text('Report Bug'));
     await tester.pump();
