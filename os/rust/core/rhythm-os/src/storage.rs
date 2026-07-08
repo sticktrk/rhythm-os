@@ -77,6 +77,12 @@ pub trait Storage: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+    fn load_pairing_history(&self) -> Result<Option<crate::pairing::PairingHistory>> {
+        Ok(None)
+    }
+    fn save_pairing_history(&self, _history: &crate::pairing::PairingHistory) -> Result<()> {
+        Ok(())
+    }
     fn clear_activity_cloud_config(&self) -> Result<()> {
         Ok(())
     }
@@ -858,6 +864,29 @@ impl Storage for FileStorage {
     ) -> Result<()> {
         let data = serde_json::to_string_pretty(history)?;
         self.write_atomic("activity_history.json", data.as_bytes())
+    }
+
+    fn load_pairing_history(&self) -> Result<Option<crate::pairing::PairingHistory>> {
+        let path = self.file_path("pairing_history.json");
+        match self.read_json::<crate::pairing::PairingHistory>("pairing_history.json") {
+            Ok(history) => Ok(Some(history.normalized())),
+            Err(e) => {
+                if path.exists() {
+                    warn!(
+                        target: "sys",
+                        "Failed to load pairing history {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_pairing_history(&self, history: &crate::pairing::PairingHistory) -> Result<()> {
+        let data = serde_json::to_string_pretty(history)?;
+        self.write_atomic("pairing_history.json", data.as_bytes())
     }
 
     fn load_activity_cloud_config(

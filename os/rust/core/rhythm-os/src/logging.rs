@@ -30,6 +30,33 @@ pub fn next_command_id(kind: &str) -> String {
     )
 }
 
+/// Param keys whose values are safe to print in pairing logs. Everything
+/// else is shown as `<redacted>` — notably `setup_payload`, which contains
+/// the Matter pairing code. Key-only summaries hid the one fact that
+/// mattered in issue #123 triage (`force=true` vs a graceful attempt).
+const SAFE_PAIRING_PARAM_KEYS: &[&str] = &["device_id", "force", "network", "rendezvous"];
+
+/// Summarize pairing/unpairing params showing values for known-safe keys.
+pub fn summarize_pairing_params_for_log(value: &Value) -> String {
+    let Value::Object(map) = value else {
+        return summarize_json_for_log(value);
+    };
+    let mut keys: Vec<_> = map.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let rendered = keys
+        .iter()
+        .map(|key| {
+            if SAFE_PAIRING_PARAM_KEYS.contains(key) {
+                format!("{}={}", key, map[*key])
+            } else {
+                format!("{key}=<redacted>")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{rendered}}}")
+}
+
 /// Summarize JSON payloads for logs without printing secrets.
 pub fn summarize_json_for_log(value: &Value) -> String {
     match value {
@@ -162,22 +189,129 @@ pub fn init_native_logging(default_level: &str) -> anyhow::Result<()> {
             .json()
             .flatten_event(true)
             .with_current_span(true)
-            .try_init(),
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e)),
         "compact" => tracing_subscriber::fmt()
             .with_timer(LocalTimer)
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
             .with_target(true)
             .with_thread_names(true)
             .compact()
-            .try_init(),
-        _ => tracing_subscriber::fmt()
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e)),
+        _ => init_full_format(filter),
+    }
+}
+
+/// Chatty targets that get their own log files when splitting is active.
+/// Each pair is (tracing target, file name under `RHYTHM_LOG_DIR`).
+const SPLIT_LOG_TARGETS: &[(&str, &str)] = &[
+    ("http", "rhythm-http.log"),
+    ("periodic", "rhythm-periodic.log"),
+    ("sse", "rhythm-sse.log"),
+];
+
+fn is_split_log_target(target: &str) -> bool {
+    SPLIT_LOG_TARGETS
+        .iter()
+        .any(|(split_target, _)| *split_target == target)
+}
+
+/// Chatter splitting is active when `RHYTHM_LOG_DIR` names a directory (the
+/// appliance launcher exports it) and `RHYTHM_LOG_SPLIT` isn't disabled.
+/// HTTP request, periodic-cycle, and SSE chatter historically consumed the
+/// whole main-log rotation budget within hours, leaving multi-hour holes in
+/// debug bundles.
+fn split_log_dir() -> Option<std::path::PathBuf> {
+    if matches!(
+        std::env::var("RHYTHM_LOG_SPLIT").ok().as_deref(),
+        Some("0") | Some("false") | Some("off")
+    ) {
+        return None;
+    }
+    let dir = std::env::var("RHYTHM_LOG_DIR").ok()?;
+    if dir.trim().is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(dir))
+}
+
+fn init_full_format(filter: String) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
+
+    // Append mode keeps the files compatible with rhythm-log-prune's
+    // truncate-in-place rotation. If any sink fails to open, keep the
+    // proven single-stream path — losing chatter routing beats losing logs.
+    let split_files = split_log_dir().and_then(|dir| {
+        let mut files = Vec::new();
+        for (target, name) in SPLIT_LOG_TARGETS {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(name))
+            {
+                Ok(file) => files.push((*target, std::sync::Arc::new(file))),
+                Err(error) => {
+                    eprintln!(
+                        "rhythm: chatter log {name} unavailable ({error}); using single-stream logging"
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(files)
+    });
+
+    let ansi = std::io::stdout().is_terminal();
+
+    let Some(split_files) = split_files else {
+        return tracing_subscriber::fmt()
             .with_timer(LocalTimer)
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
             .with_target(true)
             .with_thread_names(true)
-            .try_init(),
+            .with_ansi(ansi)
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e));
+    };
+
+    let mut layers: Vec<
+        Box<dyn Layer<tracing_subscriber::registry::Registry> + Send + Sync>,
+    > = Vec::new();
+    layers.push(
+        tracing_subscriber::fmt::layer()
+            .with_timer(LocalTimer)
+            .with_target(true)
+            .with_thread_names(true)
+            .with_ansi(ansi)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                !is_split_log_target(metadata.target())
+            }))
+            .boxed(),
+    );
+    for (target, file) in split_files {
+        layers.push(
+            tracing_subscriber::fmt::layer()
+                .with_timer(LocalTimer)
+                .with_target(true)
+                .with_thread_names(true)
+                .with_ansi(false)
+                .with_writer(file)
+                .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
+                    metadata.target() == target
+                }))
+                .boxed(),
+        );
     }
-    .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e))
+
+    tracing_subscriber::registry()
+        .with(layers)
+        .with(tracing_subscriber::EnvFilter::new(filter))
+        .try_init()
+        .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e))
 }
 
 /// Apply request IDs and HTTP latency logging to a shared-state router.
@@ -264,6 +398,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_targets_cover_the_chatter_families() {
+        assert!(is_split_log_target("http"));
+        assert!(is_split_log_target("periodic"));
+        assert!(is_split_log_target("sse"));
+        assert!(!is_split_log_target("sys"));
+        assert!(!is_split_log_target("pair"));
+        assert!(!is_split_log_target("evt"));
+    }
+
+    #[test]
+    fn pairing_param_summary_shows_safe_values_and_redacts_the_rest() {
+        let summary = summarize_pairing_params_for_log(&serde_json::json!({
+            "setup_payload": "MT:SECRET",
+            "device_id": "matter-102",
+            "force": true,
+        }));
+        assert_eq!(
+            summary,
+            "{device_id=\"matter-102\", force=true, setup_payload=<redacted>}"
+        );
+        assert!(!summary.contains("SECRET"));
+    }
 
     #[test]
     fn summarize_json_object_uses_sorted_keys() {

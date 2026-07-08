@@ -571,8 +571,30 @@ impl ChipTransport {
             let _ = fs::remove_file(&self.socket_path);
         }
 
-        let (stdout, stderr) = sidecar_stdio(config.log_path.as_deref())?;
-        let child = Command::new(&config.command)
+        // Route chipd output through pump threads that timestamp each line,
+        // strip ANSI color, and divert [EM]/[DMG] subscription chatter to a
+        // sibling verbose log — the raw stream has no wall clock and the
+        // chatter used to fill the whole rotation budget within minutes. If
+        // the sinks can't be opened, fall back to the legacy direct-file
+        // redirect rather than losing the daemon's output.
+        let sinks = config.log_path.as_deref().and_then(|path| {
+            match SidecarLogSinks::open(path) {
+                Ok(sinks) => Some(std::sync::Arc::new(sinks)),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "sys",
+                        "Matter sidecar log pump unavailable ({error:#}); falling back to direct redirect"
+                    );
+                    None
+                }
+            }
+        });
+        let (stdout, stderr) = if sinks.is_some() {
+            (Stdio::piped(), Stdio::piped())
+        } else {
+            sidecar_stdio(config.log_path.as_deref())?
+        };
+        let mut child = Command::new(&config.command)
             .arg("--socket")
             .arg(&self.socket_path)
             .current_dir(&config.working_dir)
@@ -589,6 +611,15 @@ impl ChipTransport {
             .inspect_err(|_error| {
                 self.set_sidecar_health(SidecarHealth::Unavailable);
             })?;
+
+        if let Some(sinks) = sinks {
+            if let Some(out) = child.stdout.take() {
+                spawn_sidecar_log_pump("chipd-log-out", out, sinks.clone());
+            }
+            if let Some(err) = child.stderr.take() {
+                spawn_sidecar_log_pump("chipd-log-err", err, sinks);
+            }
+        }
 
         *guard = Some(child);
         drop(guard);
@@ -775,6 +806,114 @@ fn open_sidecar_log_file(path: &Path) -> Result<std::fs::File> {
         .append(true)
         .open(path)
         .with_context(|| format!("opening Matter sidecar log file {}", path.display()))
+}
+
+/// Append-mode sinks for the sidecar log pump: the main log plus a
+/// `-verbose` sibling for subscription chatter. Append mode keeps both
+/// compatible with rhythm-log-prune's truncate-in-place rotation.
+struct SidecarLogSinks {
+    main: Mutex<std::fs::File>,
+    verbose: Mutex<std::fs::File>,
+}
+
+impl SidecarLogSinks {
+    fn open(log_path: &Path) -> Result<Self> {
+        Ok(Self {
+            main: Mutex::new(open_sidecar_log_file(log_path)?),
+            verbose: Mutex::new(open_sidecar_log_file(&verbose_sidecar_log_path(
+                log_path,
+            ))?),
+        })
+    }
+
+    fn write_line(&self, line: &str) {
+        let stamped = format!(
+            "{} {}\n",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            line
+        );
+        let sink = if is_verbose_chip_line(line) {
+            &self.verbose
+        } else {
+            &self.main
+        };
+        if let Ok(mut file) = sink.lock() {
+            use std::io::Write as _;
+            let _ = file.write_all(stamped.as_bytes());
+        }
+    }
+}
+
+/// rhythm-matter.log -> rhythm-matter-verbose.log
+fn verbose_sidecar_log_path(log_path: &Path) -> PathBuf {
+    let stem = log_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("rhythm-matter");
+    let extension = log_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("log");
+    log_path.with_file_name(format!("{stem}-verbose.{extension}"))
+}
+
+/// Message-exchange and interaction-model report chatter: per-subscription
+/// [EM] retransmit/ack traffic and [DMG] attribute dumps make up ~95% of
+/// chipd's output and drown the commissioning story in the rotation budget.
+fn is_verbose_chip_line(line: &str) -> bool {
+    line.starts_with("[EM]") || line.starts_with("[DMG]")
+}
+
+/// Strip ANSI CSI escape sequences from a chipd output line.
+fn strip_chip_ansi_codes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn spawn_sidecar_log_pump<R: std::io::Read + Send + 'static>(
+    name: &str,
+    reader: R,
+    sinks: std::sync::Arc<SidecarLogSinks>,
+) {
+    let spawn_result = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || pump_sidecar_log(reader, &sinks));
+    if let Err(error) = spawn_result {
+        tracing::warn!(target: "sys", "Failed to spawn Matter sidecar log pump: {error}");
+    }
+}
+
+fn pump_sidecar_log<R: std::io::Read>(reader: R, sinks: &SidecarLogSinks) {
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::<u8>::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let raw = String::from_utf8_lossy(&buf);
+        let clean = strip_chip_ansi_codes(raw.trim_end_matches(['\n', '\r']));
+        if clean.is_empty() {
+            continue;
+        }
+        sinks.write_line(&clean);
+    }
 }
 
 /// Returns true when an RPC error indicates the chipd controller has lost its
@@ -1282,6 +1421,47 @@ mod tests {
         std::env::var_os("CARGO_TARGET_TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn sidecar_log_pump_timestamps_strips_ansi_and_splits_chatter() {
+        let dir = test_temp_root().join(format!(
+            "chipd-log-pump-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("rhythm-matter.log");
+        let sinks = SidecarLogSinks::open(&log_path).unwrap();
+
+        let input = concat!(
+            "\x1b[0;32m[CTL] Commission called for node ID 0x69\x1b[0m\n",
+            "\x1b[0;34m[EM] Rxd Ack; Removing MessageCounter:1 from Retrans Table\x1b[0m\n",
+            "\x1b[0;34m[DMG] AttributeReportIBs =\x1b[0m\n",
+            "\n",
+        );
+        pump_sidecar_log(std::io::Cursor::new(input.as_bytes()), &sinks);
+        drop(sinks);
+
+        let main = fs::read_to_string(&log_path).unwrap();
+        let verbose = fs::read_to_string(verbose_sidecar_log_path(&log_path)).unwrap();
+
+        assert!(main.contains("[CTL] Commission called"));
+        assert!(!main.contains("[EM]"), "chatter must not hit the main log");
+        assert!(!main.contains('\u{1b}'), "ANSI must be stripped: {main:?}");
+        assert!(
+            main.starts_with("20"),
+            "lines must carry a wall-clock prefix: {main:?}"
+        );
+        assert!(verbose.contains("[EM] Rxd Ack"));
+        assert!(verbose.contains("[DMG] AttributeReportIBs"));
+
+        assert_eq!(
+            verbose_sidecar_log_path(Path::new("/data/log/rhythm-matter.log")),
+            PathBuf::from("/data/log/rhythm-matter-verbose.log")
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn temp_socket_path(name: &str) -> PathBuf {

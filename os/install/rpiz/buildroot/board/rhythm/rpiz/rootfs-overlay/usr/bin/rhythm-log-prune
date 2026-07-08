@@ -19,6 +19,18 @@ fi
 : "${RHYTHM_WIFI_LOG_KEEP:=2}"
 : "${RHYTHM_BLUETOOTH_LOG_MAX_BYTES:=131072}"
 : "${RHYTHM_BLUETOOTH_LOG_KEEP:=2}"
+# Chatter families split out of the main streams: HTTP request logging,
+# periodic-cycle ticks, SSE reconnect chatter, and chipd's [EM]/[DMG]
+# subscription traffic. Smaller budgets — they exist so the main logs'
+# budget covers real wall-clock history.
+: "${RHYTHM_HTTP_LOG_MAX_BYTES:=1048576}"
+: "${RHYTHM_HTTP_LOG_KEEP:=1}"
+: "${RHYTHM_PERIODIC_LOG_MAX_BYTES:=1048576}"
+: "${RHYTHM_PERIODIC_LOG_KEEP:=1}"
+: "${RHYTHM_SSE_LOG_MAX_BYTES:=1048576}"
+: "${RHYTHM_SSE_LOG_KEEP:=1}"
+: "${RHYTHM_MATTER_VERBOSE_LOG_MAX_BYTES:=1048576}"
+: "${RHYTHM_MATTER_VERBOSE_LOG_KEEP:=1}"
 
 resolve_log_dir() {
     if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
@@ -72,6 +84,10 @@ prune_logs() {
     rotate_file "$log_dir/rhythm-matter.log" "$RHYTHM_MATTER_LOG_MAX_BYTES" "$RHYTHM_MATTER_LOG_KEEP"
     rotate_file "$log_dir/wifi.log" "$RHYTHM_WIFI_LOG_MAX_BYTES" "$RHYTHM_WIFI_LOG_KEEP"
     rotate_file "$log_dir/bluetooth.log" "$RHYTHM_BLUETOOTH_LOG_MAX_BYTES" "$RHYTHM_BLUETOOTH_LOG_KEEP"
+    rotate_file "$log_dir/rhythm-http.log" "$RHYTHM_HTTP_LOG_MAX_BYTES" "$RHYTHM_HTTP_LOG_KEEP"
+    rotate_file "$log_dir/rhythm-periodic.log" "$RHYTHM_PERIODIC_LOG_MAX_BYTES" "$RHYTHM_PERIODIC_LOG_KEEP"
+    rotate_file "$log_dir/rhythm-sse.log" "$RHYTHM_SSE_LOG_MAX_BYTES" "$RHYTHM_SSE_LOG_KEEP"
+    rotate_file "$log_dir/rhythm-matter-verbose.log" "$RHYTHM_MATTER_VERBOSE_LOG_MAX_BYTES" "$RHYTHM_MATTER_VERBOSE_LOG_KEEP"
 }
 
 case "${1:-run}" in

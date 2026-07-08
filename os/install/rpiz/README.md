@@ -258,6 +258,8 @@ Default limits:
 - `rhythm-matter.log`: 2 MiB, keep 3 rotations
 - `wifi.log`: 128 KiB, keep 2 rotations
 - `bluetooth.log`: 128 KiB, keep 2 rotations
+- `rhythm-http.log` / `rhythm-periodic.log` / `rhythm-sse.log` /
+  `rhythm-matter-verbose.log`: 1 MiB each, keep 1 rotation
 
 Override the log directory, prune interval, or size limits in
 `/etc/default/rhythm-dev` with:
@@ -273,13 +275,34 @@ RHYTHM_WIFI_LOG_MAX_BYTES=131072
 RHYTHM_WIFI_LOG_KEEP=2
 RHYTHM_BLUETOOTH_LOG_MAX_BYTES=131072
 RHYTHM_BLUETOOTH_LOG_KEEP=2
+RHYTHM_HTTP_LOG_MAX_BYTES=1048576
+RHYTHM_HTTP_LOG_KEEP=1
+RHYTHM_PERIODIC_LOG_MAX_BYTES=1048576
+RHYTHM_PERIODIC_LOG_KEEP=1
+RHYTHM_SSE_LOG_MAX_BYTES=1048576
+RHYTHM_SSE_LOG_KEEP=1
+RHYTHM_MATTER_VERBOSE_LOG_MAX_BYTES=1048576
+RHYTHM_MATTER_VERBOSE_LOG_KEEP=1
 ```
 
+## Chatter log splitting
+
+The launcher exports `RHYTHM_LOG_DIR`, which switches `rhythm-server` into
+split logging: HTTP request logs (target `http`), periodic-cycle ticks
+(target `periodic`), and SSE chatter (target `sse`) each go to their own
+file above instead of `rhythm-server.log`, so the main log's rotation budget
+covers hours of real history instead of minutes of chatter. Set
+`RHYTHM_LOG_SPLIT=0` in `/etc/default/rhythm-dev` to restore the single
+stream. File output is ANSI-free; interactive terminals still get color.
+
 `rpiz` sets `RHYTHM_MATTER_LOGFILE=/data/log/rhythm-matter.log` by default so
-raw CHIP/Matter daemon output (`[DMG]`, `[EM]`, `[CSM]`, `[DIS]`, etc.) stays
-out of `/data/log/rhythm-server.log`. Override that variable, or set it to an
-empty string in `/etc/default/rhythm-dev`, if you want `rhythm-chipd` to use a
-different file or inherit the main appliance log sink again.
+raw CHIP/Matter daemon output stays out of `/data/log/rhythm-server.log`.
+The server timestamps and de-colors each chipd line, and diverts `[EM]`/
+`[DMG]` subscription chatter to `rhythm-matter-verbose.log` so commissioning
+flows survive in `rhythm-matter.log` far longer. Override that variable, or
+set it to an empty string in `/etc/default/rhythm-dev`, if you want
+`rhythm-chipd` to use a different file or inherit the main appliance log
+sink again.
 
 ## Debug bundle
 

@@ -55,6 +55,10 @@ LOG_DIR="$(resolve_log_dir)"
 LOGFILE="${LOG_DIR}/rhythm-server.log"
 MATTER_LOGFILE_DEFAULT="${LOG_DIR}/rhythm-matter.log"
 
+# The server splits chatty targets (http/periodic/sse) into their own files
+# under this directory when it's exported; disable with RHYTHM_LOG_SPLIT=0.
+export RHYTHM_LOG_DIR="$LOG_DIR"
+
 mkdir -p "$(dirname "$LOGFILE")" "$DATA_DIR"
 
 "$LOG_PRUNE_BIN" run >/dev/null 2>&1 || true

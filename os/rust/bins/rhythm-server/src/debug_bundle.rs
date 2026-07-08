@@ -28,14 +28,29 @@ const DEBUG_BUNDLE_SCHEMA_VERSION: u32 = 2;
 const LOG_BASENAMES: &[&str] = &[
     "rhythm-server.log",
     "rhythm-server.err.log",
+    "rhythm-http.log",
+    "rhythm-periodic.log",
+    "rhythm-sse.log",
     "rhythm-matter.log",
+    "rhythm-matter-verbose.log",
     "wifi.log",
     "bluetooth.log",
     "cloudflared.log",
 ];
 const DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT: u64 = 1024 * 1024;
 const DEBUG_BUNDLE_LOG_CAPTURE_ROTATION_LIMIT: u32 = 1;
+/// Env override for the per-log-file capture cap. Oversized bundles have
+/// timed out the app-side download in the field, so support can dial this
+/// down (or up, when investigating with a fast link) without a firmware
+/// change.
+const LOG_CAPTURE_BYTES_ENV: &str = "RHYTHM_DEBUG_BUNDLE_LOG_CAP_BYTES";
+/// Env override for how many rotated files per log family get captured
+/// (0 = active file only).
+const LOG_CAPTURE_ROTATIONS_ENV: &str = "RHYTHM_DEBUG_BUNDLE_LOG_ROTATIONS";
 const EXACT_PERSISTED_FILES: &[&str] = &["topology.json", "canonical_registry.json", "rooms.json"];
+/// Included when present, but legitimately absent on devices that have never
+/// paired a device or applied an OTA — so never reported as missing.
+const OPTIONAL_PERSISTED_FILES: &[&str] = &["pairing_history.json", "ota_history.json"];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const OTA_DEBUG_FILES: &[&str] = &[crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
@@ -490,6 +505,14 @@ struct MatterControllerDebugSnapshot {
     chip_controller_storage: DebugFileMetadata,
     chip_controller_storage_files: Vec<DebugFileMetadata>,
     chip_device_store: DebugFileMetadata,
+    /// Parsed contents of the commissioned-device cache (devices.json): node
+    /// ids, vendor/product names, endpoints. No credentials live in that file
+    /// — fabric secrets stay in the controller storage, which is only
+    /// reported as metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chip_device_store_devices: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chip_device_store_parse_error: Option<String>,
     storage_without_identity: bool,
 }
 
@@ -650,7 +673,23 @@ struct TriageQueueSnapshot {
     entries: Vec<TriageEntry>,
 }
 
+/// App-side log attachment for a device-uploaded bundle. When the device
+/// streams the bundle straight to storage (bypassing the app's memory and
+/// receive timeout), the app can no longer append its own log afterwards —
+/// so it sends the log along with the request and the device embeds it.
+pub struct AppLogAttachment {
+    pub log_text: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
 pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
+    build_debug_bundle_with_app_log(state, None)
+}
+
+pub fn build_debug_bundle_with_app_log(
+    state: &SharedState,
+    app_log: Option<AppLogAttachment>,
+) -> Result<DebugBundle> {
     let created_at = Utc::now();
     let runtime = snapshot_runtime(state)?;
     let debug_state = snapshot_debug_state(state)?;
@@ -763,6 +802,25 @@ pub fn build_debug_bundle(state: &SharedState) -> Result<DebugBundle> {
             append_bytes(&mut builder, &artifact.archive_path, &bytes, 0o644)?;
             captured_persisted_files.push(captured);
         }
+    }
+
+    if let Some(app_log) = app_log {
+        append_bytes(&mut builder, "app/app.log", app_log.log_text.as_bytes(), 0o644)?;
+        let metadata = app_log.metadata.unwrap_or_else(|| {
+            serde_json::json!({
+                "kind": "rhythm_app_log",
+                "generated_at": created_at.to_rfc3339(),
+                "path": "app/app.log",
+            })
+        });
+        let metadata_json =
+            serde_json::to_string_pretty(&metadata).context("serializing app log metadata")?;
+        append_bytes(
+            &mut builder,
+            "app/metadata.json",
+            metadata_json.as_bytes(),
+            0o644,
+        )?;
     }
 
     let completed_at = Utc::now();
@@ -1218,7 +1276,7 @@ fn discover_persisted_artifacts(
         }
     }
 
-    for file_name in REMOTE_ACCESS_DEBUG_FILES {
+    for file_name in OPTIONAL_PERSISTED_FILES.iter().chain(REMOTE_ACCESS_DEBUG_FILES) {
         let source_path = data_dir.join(file_name);
         if source_path.is_file() {
             discovered.push(FileArtifact {
@@ -1333,6 +1391,8 @@ fn build_matter_controller_debug_json(
         .or_else(|| chip_controller_storage_files.first().cloned())
         .unwrap_or_else(|| debug_file_metadata(&matter_dir.join("chip"), diagnostics));
     let chip_device_store = debug_file_metadata(&device_store_path, diagnostics);
+    let (chip_device_store_devices, chip_device_store_parse_error) =
+        read_chip_device_store_contents(&device_store_path, &chip_device_store, diagnostics);
     let storage_without_identity = chip_controller_storage_files
         .iter()
         .any(|metadata| metadata.present)
@@ -1354,9 +1414,47 @@ fn build_matter_controller_debug_json(
         chip_controller_storage,
         chip_controller_storage_files,
         chip_device_store,
+        chip_device_store_devices,
+        chip_device_store_parse_error,
         storage_without_identity,
     };
     serde_json::to_string_pretty(&snapshot).context("serializing Matter controller debug snapshot")
+}
+
+/// The devices.json cache is small (a few hundred bytes per commissioned
+/// node) and credential-free, so surface its parsed contents directly in the
+/// bundle instead of just path + byte count — fabric membership questions
+/// otherwise require log archaeology.
+fn read_chip_device_store_contents(
+    path: &Path,
+    metadata: &DebugFileMetadata,
+    diagnostics: &mut BundleDiagnostics,
+) -> (Option<serde_json::Value>, Option<String>) {
+    const DEVICE_STORE_EMBED_BYTES_LIMIT: u64 = 256 * 1024;
+
+    if !metadata.present {
+        return (None, None);
+    }
+    if metadata.bytes.unwrap_or(0) > DEVICE_STORE_EMBED_BYTES_LIMIT {
+        return (
+            None,
+            Some(format!(
+                "device store larger than {DEVICE_STORE_EMBED_BYTES_LIMIT} bytes; skipped"
+            )),
+        );
+    }
+
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(err) => {
+            diagnostics.record_file_error("read", path.display().to_string(), &err);
+            return (None, Some(err.to_string()));
+        }
+    };
+    match serde_json::from_str::<serde_json::Value>(&json) {
+        Ok(value) => (Some(value), None),
+        Err(err) => (None, Some(err.to_string())),
+    }
 }
 
 fn matter_controller_storage_paths(matter_dir: &Path) -> Vec<PathBuf> {
@@ -1500,7 +1598,23 @@ fn should_capture_log_artifact(artifact: &FileArtifact) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(log_rotation_index)
-        .is_some_and(|rotation| rotation <= DEBUG_BUNDLE_LOG_CAPTURE_ROTATION_LIMIT)
+        .is_some_and(|rotation| rotation <= log_capture_rotation_limit())
+}
+
+fn log_capture_bytes_limit() -> u64 {
+    env_u64(LOG_CAPTURE_BYTES_ENV)
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT)
+}
+
+fn log_capture_rotation_limit() -> u32 {
+    env_u64(LOG_CAPTURE_ROTATIONS_ENV)
+        .and_then(|limit| u32::try_from(limit).ok())
+        .unwrap_or(DEBUG_BUNDLE_LOG_CAPTURE_ROTATION_LIMIT)
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.trim().parse::<u64>().ok()
 }
 
 fn log_rotation_index(file_name: &str) -> Option<u32> {
@@ -1554,7 +1668,7 @@ fn capture_log_artifact(
         }
     };
 
-    let read_start = source_bytes.saturating_sub(DEBUG_BUNDLE_LOG_CAPTURE_BYTES_LIMIT);
+    let read_start = source_bytes.saturating_sub(log_capture_bytes_limit());
     if read_start > 0 {
         if let Err(err) = file.seek(SeekFrom::Start(read_start)) {
             diagnostics.record_file_error("seek", artifact.source_path.display().to_string(), &err);
@@ -2428,7 +2542,14 @@ fn build_log_summary_json(
             summary.lines_scanned += 1;
             total_lines_scanned += 1;
 
-            let text = truncate_log_line(&line);
+            // The tracing subscriber historically wrote ANSI color codes into
+            // the log files, wrapping the level token as `\x1b[33m WARN\x1b[0m`
+            // — which ` WARN ` never matches. Classify (and store) the
+            // escape-stripped text so colored logs summarize correctly.
+            let line = strip_ansi_codes(&line);
+            let line = line.as_ref();
+
+            let text = truncate_log_line(line);
             let entry = LogLineEntry {
                 archive_path: artifact.archive_path.clone(),
                 line_number: summary.lines_scanned,
@@ -2511,6 +2632,30 @@ fn build_log_summary_json(
     };
 
     serde_json::to_string_pretty(&snapshot).context("serializing log summary snapshot")
+}
+
+/// Strip ANSI CSI escape sequences (`ESC [ ... final-byte`) from a log line.
+fn strip_ansi_codes(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 fn push_limited<T>(items: &mut VecDeque<T>, limit: usize, item: T) {
@@ -3358,6 +3503,52 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("...<truncated>"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Regression for issue #123 triage: the tracing subscriber wrote ANSI
+    /// color codes into the log files (`\x1b[33m WARN\x1b[0m`), so the plain
+    /// ` WARN ` / ` ERROR ` matchers counted 0/0 for every real bundle and
+    /// the synthesis card steered triage away from the logs.
+    #[test]
+    fn log_summary_counts_ansi_colored_levels_and_stores_stripped_text() {
+        let root = unique_test_dir("log-summary-ansi");
+        let log = root.join("rhythm-server.log");
+        fs::write(
+            &log,
+            concat!(
+                "\x1b[2m2026-07-08T17:39:57-04:00\x1b[0m \x1b[31mERROR\x1b[0m pair: commissioning failed\n",
+                "\x1b[2m2026-07-08T17:38:25-04:00\x1b[0m \x1b[33m WARN\x1b[0m pair: force-removed node 102\n",
+                "\x1b[2m2026-07-08T17:38:26-04:00\x1b[0m \x1b[32m INFO\x1b[0m sys: all good\n",
+            ),
+        )
+        .unwrap();
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 7, 8, 21, 41, 0)
+            .single()
+            .unwrap();
+        let mut diagnostics =
+            BundleDiagnostics::new(generated_at, root.display().to_string(), Vec::new());
+        let summary = build_log_summary_json(
+            &[FileArtifact {
+                source_path: log,
+                archive_path: "logs/rhythm-server.log".to_string(),
+            }],
+            generated_at,
+            &mut diagnostics,
+        )
+        .unwrap();
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+
+        assert_eq!(summary["warning_count"], 1);
+        assert_eq!(summary["error_count"], 1);
+        let error_text = summary["recent_errors"][0]["text"].as_str().unwrap();
+        assert!(
+            !error_text.contains('\u{1b}'),
+            "summary entries should store escape-stripped text, got {error_text:?}"
+        );
+        assert!(error_text.contains("ERROR pair: commissioning failed"));
 
         let _ = fs::remove_dir_all(root);
     }

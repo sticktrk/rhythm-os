@@ -679,15 +679,40 @@ fn perform_unpair_device(
         target: "pair",
         "Unpairing request: hub_type={}, params={}",
         request.hub_type,
-        logging::summarize_json_for_log(&request.params)
+        logging::summarize_pairing_params_for_log(&request.params)
     );
 
-    let result = start_fn(state, &request.hub_type, &request.params)?;
+    let result = match start_fn(state, &request.hub_type, &request.params) {
+        Ok(result) => result,
+        Err(e) => {
+            crate::pairing::record_pairing_history(
+                state,
+                crate::pairing::pairing_history_entry_for_unpair(
+                    &request.hub_type,
+                    &request.params,
+                    &crate::pairing::PairingStatus::Failed,
+                    None,
+                    Some(&format!("{e:#}")),
+                ),
+            );
+            return Err(e);
+        }
+    };
     log::info!(
         target: "pair",
         "Unpairing result: status={:?} error={:?}",
         result.status,
         result.error
+    );
+    crate::pairing::record_pairing_history(
+        state,
+        crate::pairing::pairing_history_entry_for_unpair(
+            &request.hub_type,
+            &request.params,
+            &result.status,
+            result.device_id.as_deref(),
+            result.error.as_deref(),
+        ),
     );
 
     if result.status == crate::pairing::PairingStatus::Complete {
@@ -2674,7 +2699,7 @@ pub fn handle_pair_device(
         target: "pair",
         "Pairing request: hub_type={}, params={}",
         request.hub_type,
-        logging::summarize_json_for_log(&request.params)
+        logging::summarize_pairing_params_for_log(&request.params)
     );
 
     crate::pairing::emit_pairing_progress(
@@ -2707,6 +2732,14 @@ pub fn handle_pair_device(
     match start_fn(state, &request.hub_type, params) {
         Ok(session) => {
             log::info!(target: "pair", "Pairing result: status={:?} error={:?}", session.status, session.error);
+            crate::pairing::record_pairing_history(
+                state,
+                crate::pairing::pairing_history_entry_for_pair(
+                    &request.hub_type,
+                    &request.params,
+                    &session,
+                ),
+            );
             let (stage, message) = match &session.status {
                 crate::pairing::PairingStatus::Complete => {
                     (crate::pairing::PairingStage::Complete, "Pairing complete")
@@ -2752,6 +2785,19 @@ pub fn handle_pair_device(
         }
         Err(e) => {
             log::error!(target: "pair", "Pairing failed: {}", e);
+            crate::pairing::record_pairing_history(
+                state,
+                crate::pairing::pairing_history_entry_for_pair(
+                    &request.hub_type,
+                    &request.params,
+                    &crate::pairing::PairingSession {
+                        hub_type: request.hub_type.clone(),
+                        status: crate::pairing::PairingStatus::Failed,
+                        device: None,
+                        error: Some(e.to_string()),
+                    },
+                ),
+            );
             crate::pairing::emit_pairing_progress(
                 state,
                 &request.hub_type,
