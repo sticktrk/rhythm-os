@@ -158,6 +158,75 @@ void main() {
       expect(status.ip, '192.168.1.157');
     });
 
+    test('falls forward to LAN after stale update progress with IP', () async {
+      final updates = StreamController<ProvisioningStatusMessage>();
+      addTearDown(updates.close);
+
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: updates.stream,
+        readStatus: () async => const ProvisioningStatusMessage(
+          status: 'updating',
+          ip: '192.168.1.158',
+          otaStage: 'checking',
+          message: 'Checking for stable update',
+        ),
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 5),
+        operationTimeout: const Duration(milliseconds: 20),
+        staleProgressTimeout: const Duration(milliseconds: 30),
+      );
+
+      expect(status.status, 'connected');
+      expect(status.isTerminal, isTrue);
+      expect(status.ip, '192.168.1.158');
+    });
+
+    test('recovers read timeout after update progress as restart pending',
+        () async {
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: Stream<ProvisioningStatusMessage>.value(
+          const ProvisioningStatusMessage(
+            status: 'updating',
+            ip: '192.168.1.159',
+            otaStage: 'installing',
+            message: 'Installing update',
+          ),
+        ),
+        readStatus: () => Completer<ProvisioningStatusMessage>().future,
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 5),
+        operationTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(status.status, 'restarting');
+      expect(status.ip, '192.168.1.159');
+    });
+
+    test('times out when status reads hang before progress starts', () async {
+      final updates = StreamController<ProvisioningStatusMessage>();
+      addTearDown(updates.close);
+
+      await expectLater(
+        BleProvisioningService.waitForTerminalProvisioningStatus(
+          enableNotifications: () async {},
+          writePayload: () async {},
+          statusUpdates: updates.stream,
+          readStatus: () => Completer<ProvisioningStatusMessage>().future,
+          timeout: const Duration(milliseconds: 60),
+          pollInterval: const Duration(milliseconds: 5),
+          operationTimeout: const Duration(milliseconds: 20),
+          staleProgressTimeout: const Duration(milliseconds: 30),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+    });
+
     test('treats BLE disconnect after update progress as restart pending',
         () async {
       final seen = <String>[];
