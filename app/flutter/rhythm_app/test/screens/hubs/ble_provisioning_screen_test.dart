@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/ble_provisioning_screen.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
@@ -49,6 +51,69 @@ void main() {
       );
 
       expect(homeName, isNull);
+    });
+  });
+
+  group('bleProvisioningWaitForServerHealthForTesting', () {
+    test('times out when health probes never complete', () async {
+      var probes = 0;
+      final elapsed = Stopwatch()..start();
+
+      final healthy = await bleProvisioningWaitForServerHealthForTesting(
+        healthCheck: () {
+          probes += 1;
+          return Completer<bool>().future;
+        },
+        timeout: const Duration(milliseconds: 70),
+        pollInterval: const Duration(milliseconds: 5),
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+      elapsed.stop();
+
+      expect(healthy, isFalse);
+      expect(probes, greaterThan(0));
+      expect(elapsed.elapsed, lessThan(const Duration(milliseconds: 250)));
+    });
+
+    test('keeps polling until a health probe succeeds', () async {
+      var probes = 0;
+
+      final healthy = await bleProvisioningWaitForServerHealthForTesting(
+        healthCheck: () async {
+          probes += 1;
+          return probes == 3;
+        },
+        timeout: const Duration(milliseconds: 200),
+        pollInterval: const Duration(milliseconds: 5),
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(healthy, isTrue);
+      expect(probes, 3);
+    });
+  });
+
+  group('bleProvisioningWaitForServerRestartAndHealthForTesting', () {
+    test('does not hang when the offline probe never completes', () async {
+      var probes = 0;
+
+      final healthy =
+          await bleProvisioningWaitForServerRestartAndHealthForTesting(
+        healthCheck: () {
+          probes += 1;
+          if (probes == 1) {
+            return Completer<bool>().future;
+          }
+          return Future<bool>.value(true);
+        },
+        offlineTimeout: const Duration(milliseconds: 60),
+        onlineTimeout: const Duration(milliseconds: 100),
+        pollInterval: const Duration(milliseconds: 5),
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(healthy, isTrue);
+      expect(probes, 2);
     });
   });
 }

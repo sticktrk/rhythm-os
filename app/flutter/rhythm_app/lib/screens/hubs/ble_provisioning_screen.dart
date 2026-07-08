@@ -52,6 +52,38 @@ String? bleProvisioningKnownHomeNameForTesting({
   )?.homeName;
 }
 
+@visibleForTesting
+Future<bool> bleProvisioningWaitForServerHealthForTesting({
+  required Future<bool> Function() healthCheck,
+  Duration timeout = _serverHealthTimeout,
+  Duration pollInterval = _serverHealthPollInterval,
+  Duration probeTimeout = _serverHealthProbeTimeout,
+}) {
+  return _waitForBleProvisioningServerHealth(
+    healthCheck: healthCheck,
+    timeout: timeout,
+    pollInterval: pollInterval,
+    probeTimeout: probeTimeout,
+  );
+}
+
+@visibleForTesting
+Future<bool> bleProvisioningWaitForServerRestartAndHealthForTesting({
+  required Future<bool> Function() healthCheck,
+  Duration offlineTimeout = _serverRestartOfflineTimeout,
+  Duration onlineTimeout = _serverRestartOnlineTimeout,
+  Duration pollInterval = _serverHealthPollInterval,
+  Duration probeTimeout = _serverHealthProbeTimeout,
+}) {
+  return _waitForBleProvisioningServerRestartAndHealth(
+    healthCheck: healthCheck,
+    offlineTimeout: offlineTimeout,
+    onlineTimeout: onlineTimeout,
+    pollInterval: pollInterval,
+    probeTimeout: probeTimeout,
+  );
+}
+
 _KnownBleHome? _knownHomeForBleDeviceName({
   required String deviceName,
   required Iterable<AccountHomeServerHubs> homeEntries,
@@ -87,6 +119,103 @@ const _genericBleDeviceNameKeys = {
   'rhythmdevice',
   'rhythmserver',
 };
+
+const _serverHealthTimeout = Duration(seconds: 30);
+const _serverRestartOfflineTimeout = Duration(seconds: 20);
+const _serverRestartOnlineTimeout = Duration(minutes: 5);
+const _serverHealthPollInterval = Duration(seconds: 1);
+const _serverHealthProbeTimeout = Duration(seconds: 3);
+
+Future<bool> _waitForBleProvisioningServerHealth({
+  required Future<bool> Function() healthCheck,
+  required Duration timeout,
+  required Duration pollInterval,
+  required Duration probeTimeout,
+}) async {
+  final deadline = DateTime.now().add(timeout);
+
+  while (DateTime.now().isBefore(deadline)) {
+    if (await _bleProvisioningServerIsHealthy(
+      healthCheck,
+      deadline: deadline,
+      probeTimeout: probeTimeout,
+    )) {
+      return true;
+    }
+    await _delayUntilNextBleProvisioningProbe(
+      deadline: deadline,
+      pollInterval: pollInterval,
+    );
+  }
+  return false;
+}
+
+Future<bool> _waitForBleProvisioningServerRestartAndHealth({
+  required Future<bool> Function() healthCheck,
+  required Duration offlineTimeout,
+  required Duration onlineTimeout,
+  required Duration pollInterval,
+  required Duration probeTimeout,
+}) async {
+  final offlineDeadline = DateTime.now().add(offlineTimeout);
+  var sawOffline = false;
+
+  while (DateTime.now().isBefore(offlineDeadline)) {
+    if (!await _bleProvisioningServerIsHealthy(
+      healthCheck,
+      deadline: offlineDeadline,
+      probeTimeout: probeTimeout,
+    )) {
+      sawOffline = true;
+      break;
+    }
+    await _delayUntilNextBleProvisioningProbe(
+      deadline: offlineDeadline,
+      pollInterval: pollInterval,
+    );
+  }
+
+  if (!sawOffline) {
+    return _bleProvisioningServerIsHealthy(
+      healthCheck,
+      deadline: DateTime.now().add(probeTimeout),
+      probeTimeout: probeTimeout,
+    );
+  }
+
+  return _waitForBleProvisioningServerHealth(
+    healthCheck: healthCheck,
+    timeout: onlineTimeout,
+    pollInterval: pollInterval,
+    probeTimeout: probeTimeout,
+  );
+}
+
+Future<bool> _bleProvisioningServerIsHealthy(
+  Future<bool> Function() healthCheck, {
+  required DateTime deadline,
+  required Duration probeTimeout,
+}) async {
+  final remaining = deadline.difference(DateTime.now());
+  if (remaining <= Duration.zero) return false;
+  final timeout = remaining < probeTimeout ? remaining : probeTimeout;
+  try {
+    return await healthCheck().timeout(timeout);
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<void> _delayUntilNextBleProvisioningProbe({
+  required DateTime deadline,
+  required Duration pollInterval,
+}) async {
+  final remaining = deadline.difference(DateTime.now());
+  if (remaining <= Duration.zero) return;
+  await Future<void>.delayed(
+    remaining < pollInterval ? remaining : pollInterval,
+  );
+}
 
 class BleProvisioningScreen extends StatefulWidget {
   const BleProvisioningScreen({super.key, this.initialDevice});
@@ -634,50 +763,23 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   Future<bool> _waitForServerHealth(String ip) async {
     final client = RhythmDiagnosticsApi(host: ip, port: 54448);
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
-
-    while (DateTime.now().isBefore(deadline)) {
-      if (await _serverIsHealthy(client)) {
-        return true;
-      }
-      await Future<void>.delayed(const Duration(seconds: 1));
-    }
-    return false;
-  }
-
-  Future<bool> _serverIsHealthy(RhythmDiagnosticsApi client) async {
-    try {
-      return await client.healthCheck();
-    } catch (_) {
-      return false;
-    }
+    return _waitForBleProvisioningServerHealth(
+      healthCheck: client.healthCheck,
+      timeout: _serverHealthTimeout,
+      pollInterval: _serverHealthPollInterval,
+      probeTimeout: _serverHealthProbeTimeout,
+    );
   }
 
   Future<bool> _waitForServerRestartAndHealth(String ip) async {
     final client = RhythmDiagnosticsApi(host: ip, port: 54448);
-    final offlineDeadline = DateTime.now().add(const Duration(seconds: 20));
-    var sawOffline = false;
-
-    while (DateTime.now().isBefore(offlineDeadline)) {
-      if (!await _serverIsHealthy(client)) {
-        sawOffline = true;
-        break;
-      }
-      await Future<void>.delayed(const Duration(seconds: 1));
-    }
-
-    if (!sawOffline) {
-      return _serverIsHealthy(client);
-    }
-
-    final onlineDeadline = DateTime.now().add(const Duration(minutes: 5));
-    while (DateTime.now().isBefore(onlineDeadline)) {
-      if (await _serverIsHealthy(client)) {
-        return true;
-      }
-      await Future<void>.delayed(const Duration(seconds: 1));
-    }
-    return false;
+    return _waitForBleProvisioningServerRestartAndHealth(
+      healthCheck: client.healthCheck,
+      offlineTimeout: _serverRestartOfflineTimeout,
+      onlineTimeout: _serverRestartOnlineTimeout,
+      pollInterval: _serverHealthPollInterval,
+      probeTimeout: _serverHealthProbeTimeout,
+    );
   }
 
   void _handleProvisioningStatus(ProvisioningStatusMessage status) {
