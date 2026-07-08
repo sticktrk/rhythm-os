@@ -86,15 +86,13 @@ class ProvisioningStatusMessage {
       status == 'wifi_failed' ||
       status == 'failed';
 
+  bool get hasIp => ip != null && ip!.trim().isNotEmpty;
+
   bool get isConnected =>
-      status == 'connected' ||
-      (status == 'updating' && otaStage == 'up_to_date');
+      status == 'connected' || (status == 'updating' && hasIp);
 
   bool get canResume =>
-      isTerminal ||
-      ((status == 'updating' || status == 'restarting') &&
-          ip != null &&
-          ip!.trim().isNotEmpty);
+      isTerminal || ((status == 'updating' || status == 'restarting') && hasIp);
 }
 
 class BleProvisioningService {
@@ -102,7 +100,9 @@ class BleProvisioningService {
   static const _authTokenTimeout = Duration(seconds: 20);
   static const _statusPollInterval = Duration(milliseconds: 500);
   static const _bleOperationTimeout = Duration(seconds: 8);
-  static const _staleProvisioningProgressTimeout = Duration(minutes: 2);
+  // Defensive guard for malformed progress states. Normal Wi-Fi handoff
+  // completes immediately when the appliance status includes an IP.
+  static const _staleProvisioningProgressTimeout = Duration(seconds: 12);
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   StreamController<BleDevice>? _scanController;
@@ -419,7 +419,7 @@ class BleProvisioningService {
       operationTimeout: _bleOperationTimeout,
     );
 
-    return _resultFromTerminalStatus(status);
+    return resultFromTerminalStatus(status);
   }
 
   Future<BleProvisioningResult> waitForProvisioningResult({
@@ -441,14 +441,14 @@ class BleProvisioningService {
       operationTimeout: _bleOperationTimeout,
     );
 
-    return _resultFromTerminalStatus(status);
+    return resultFromTerminalStatus(status);
   }
 
-  BleProvisioningResult _resultFromTerminalStatus(
+  static BleProvisioningResult resultFromTerminalStatus(
     ProvisioningStatusMessage status,
   ) {
     if (status.isConnected) {
-      final ip = status.ip;
+      final ip = status.ip?.trim();
       if (ip == null || ip.isEmpty) {
         throw StateError('Provisioning succeeded without an IP address');
       }
@@ -462,7 +462,7 @@ class BleProvisioningService {
 
     switch (status.status) {
       case 'restarting':
-        final ip = status.ip;
+        final ip = status.ip?.trim();
         if (ip == null || ip.isEmpty) {
           throw StateError(
               'Update restart status did not include an IP address');
@@ -677,14 +677,18 @@ class BleProvisioningService {
     if (!_isBleDisconnectedError(error) && error is! TimeoutException) {
       return null;
     }
-    if (latestStatus == null ||
-        (latestStatus.status != 'updating' &&
-            latestStatus.status != 'restarting')) {
+    if (latestStatus == null) {
       return null;
     }
 
     final ip = latestStatus.ip?.trim();
     if (ip == null || ip.isEmpty) {
+      return null;
+    }
+    if (latestStatus.isConnected) {
+      return latestStatus;
+    }
+    if (latestStatus.status != 'restarting') {
       return null;
     }
 

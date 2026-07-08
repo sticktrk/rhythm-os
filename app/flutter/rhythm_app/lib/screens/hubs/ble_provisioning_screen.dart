@@ -571,9 +571,11 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     _handleProvisioningStatus(status);
 
     try {
-      final result = await _bleService.waitForProvisioningResult(
-        onStatus: _handleProvisioningStatus,
-      );
+      final result = status.isTerminal
+          ? BleProvisioningService.resultFromTerminalStatus(status)
+          : await _bleService.waitForProvisioningResult(
+              onStatus: _handleProvisioningStatus,
+            );
       await _finishProvisioning(result);
     } catch (error) {
       if (!mounted) return;
@@ -710,37 +712,109 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     final provisioned = provisionedOwnerToken?.trim();
     if (provisioned != null && provisioned.isNotEmpty) return provisioned;
 
-    var lanRequiresAuth = true;
-    try {
-      final authApi = RhythmAuthApi(baseUrl: 'http://$ip:54448');
-      final status = await authApi.getStatus();
-      lanRequiresAuth = status.requiresAuth;
-      if (status.claimAvailable) {
-        try {
-          final claim = await authApi.claimOwnerToken();
-          return claim.token;
-        } catch (error) {
-          debugPrint('[BLE] LAN owner claim after provisioning failed: $error');
-          if (!status.requiresAuth) {
-            return null;
+    final storedToken = await _storedOwnerTokenForProvisionedServer(ip);
+    if (storedToken != null) return storedToken;
+
+    final authApi = RhythmAuthApi(baseUrl: 'http://$ip:54448');
+    final deadline = DateTime.now().add(const Duration(seconds: 12));
+    Object? lastLanAuthError;
+
+    while (true) {
+      try {
+        final status =
+            await authApi.getStatus().timeout(const Duration(seconds: 3));
+        var claimFailed = false;
+        if (status.claimAvailable) {
+          try {
+            final claim = await authApi
+                .claimOwnerToken()
+                .timeout(const Duration(seconds: 4));
+            return claim.token;
+          } catch (error) {
+            claimFailed = true;
+            lastLanAuthError = error;
+            debugPrint(
+                '[BLE] LAN owner claim after provisioning failed: $error');
+            if (!status.requiresAuth) {
+              return null;
+            }
           }
         }
+        if (!status.requiresAuth) {
+          return null;
+        }
+        if (!claimFailed) {
+          lastLanAuthError = null;
+        }
+      } catch (error) {
+        lastLanAuthError = error;
+        debugPrint('[BLE] auth token resolution over LAN failed: $error');
       }
-      if (!status.requiresAuth) {
-        return null;
+
+      if (!DateTime.now().isBefore(deadline)) {
+        break;
       }
-    } catch (error) {
-      debugPrint('[BLE] auth status after provisioning failed: $error');
+      await Future<void>.delayed(const Duration(seconds: 1));
     }
 
-    if (!_bleService.isConnected) {
-      if (!lanRequiresAuth) {
-        return null;
+    final errorSuffix =
+        lastLanAuthError == null ? '' : ' Last error: $lastLanAuthError';
+    throw StateError(
+      'Server requires API auth, but owner token was not available over Wi-Fi.'
+      '$errorSuffix',
+    );
+  }
+
+  Future<String?> _storedOwnerTokenForProvisionedServer(String ip) async {
+    final exactTokens = <String>[];
+    final fallbackTokens = <String>[];
+
+    void addToken(String? token, {required bool exact}) {
+      final clean = token?.trim();
+      if (clean == null || clean.isEmpty) return;
+      if (exactTokens.contains(clean) || fallbackTokens.contains(clean)) {
+        return;
       }
-      throw StateError('Server requires API auth, but Bluetooth disconnected.');
+      (exact ? exactTokens : fallbackTokens).add(clean);
     }
 
-    return _bleService.requestOwnerToken(label: 'Rhythm app');
+    final homeProvider = context.read<HomeProvider>();
+    final savedHubs = <Hub>[
+      for (final snapshot in homeProvider.homeServerHubSnapshots)
+        ...snapshot.serverHubs,
+      ...homeProvider.currentHomeHubs.where(
+        (hub) => hub.type == HubType.server,
+      ),
+    ];
+    for (final hub in savedHubs) {
+      if (hub.type != HubType.server) continue;
+      addToken(
+        hub.token,
+        exact: hub.endpoint.host == ip && hub.endpoint.port == 54448,
+      );
+    }
+
+    for (final recent in RecentServersService.instance.servers) {
+      addToken(
+        recent.token,
+        exact: recent.host == ip && recent.port == 54448,
+      );
+    }
+
+    for (final token in [...exactTokens, ...fallbackTokens]) {
+      try {
+        await RhythmConfigApi(
+          baseUrl: 'http://$ip:54448/',
+          authToken: token,
+        ).getState().timeout(const Duration(seconds: 4));
+        return token;
+      } catch (error) {
+        debugPrint(
+            '[BLE] stored token probe after provisioning failed: $error');
+      }
+    }
+
+    return null;
   }
 
   Future<void> _persistServerHub(String ip, String? ownerToken) async {

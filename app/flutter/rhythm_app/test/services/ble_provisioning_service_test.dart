@@ -98,27 +98,21 @@ void main() {
       expect(status.message, 'Updated, restarting');
     });
 
-    test('reports intermediate update statuses to caller', () async {
+    test('hands off to LAN when update progress includes an IP', () async {
       final seen = <String>[];
 
       final status =
           await BleProvisioningService.waitForTerminalProvisioningStatus(
         enableNotifications: () async {},
         writePayload: () async {},
-        statusUpdates: Stream<ProvisioningStatusMessage>.fromIterable(const [
-          ProvisioningStatusMessage(
+        statusUpdates: Stream<ProvisioningStatusMessage>.value(
+          const ProvisioningStatusMessage(
             status: 'updating',
             ip: '192.168.1.155',
-            otaStage: 'downloading',
-            message: 'Downloading update',
+            otaStage: 'checking',
+            message: 'Checking for stable update',
           ),
-          ProvisioningStatusMessage(
-            status: 'restarting',
-            ip: '192.168.1.155',
-            otaStage: 'restarting',
-            message: 'Updated, restarting',
-          ),
-        ]),
+        ),
         readStatus: () async =>
             const ProvisioningStatusMessage(status: 'updating'),
         onStatus: (update) {
@@ -129,9 +123,11 @@ void main() {
         pollInterval: const Duration(milliseconds: 50),
       );
 
-      expect(status.status, 'restarting');
-      expect(seen, contains('Downloading update'));
-      expect(seen, contains('Updated, restarting'));
+      expect(status.status, 'updating');
+      expect(status.isConnected, isTrue);
+      expect(status.isTerminal, isTrue);
+      expect(status.ip, '192.168.1.155');
+      expect(seen, contains('Checking for stable update'));
     });
 
     test('treats up-to-date update status as terminal', () async {
@@ -158,7 +154,8 @@ void main() {
       expect(status.ip, '192.168.1.157');
     });
 
-    test('falls forward to LAN after stale update progress with IP', () async {
+    test('polling hands off to LAN when update progress includes an IP',
+        () async {
       final updates = StreamController<ProvisioningStatusMessage>();
       addTearDown(updates.close);
 
@@ -176,15 +173,15 @@ void main() {
         timeout: const Duration(seconds: 1),
         pollInterval: const Duration(milliseconds: 5),
         operationTimeout: const Duration(milliseconds: 20),
-        staleProgressTimeout: const Duration(milliseconds: 30),
       );
 
-      expect(status.status, 'connected');
+      expect(status.status, 'updating');
+      expect(status.isConnected, isTrue);
       expect(status.isTerminal, isTrue);
       expect(status.ip, '192.168.1.158');
     });
 
-    test('recovers read timeout after update progress as restart pending',
+    test('keeps LAN handoff when BLE read times out after update progress',
         () async {
       final status =
           await BleProvisioningService.waitForTerminalProvisioningStatus(
@@ -204,7 +201,8 @@ void main() {
         operationTimeout: const Duration(milliseconds: 20),
       );
 
-      expect(status.status, 'restarting');
+      expect(status.status, 'updating');
+      expect(status.isConnected, isTrue);
       expect(status.ip, '192.168.1.159');
     });
 
@@ -227,8 +225,7 @@ void main() {
       );
     });
 
-    test('treats BLE disconnect after update progress as restart pending',
-        () async {
+    test('does not surface BLE disconnect after Wi-Fi handoff', () async {
       final seen = <String>[];
 
       final status =
@@ -258,10 +255,24 @@ void main() {
         pollInterval: const Duration(milliseconds: 50),
       );
 
-      expect(status.status, 'restarting');
+      expect(status.status, 'updating');
+      expect(status.isConnected, isTrue);
       expect(status.ip, '192.168.1.156');
-      expect(status.otaStage, 'restarting');
       expect(seen, contains('Installing update'));
+    });
+
+    test('maps update handoff status to a LAN provisioning result', () {
+      final result = BleProvisioningService.resultFromTerminalStatus(
+        const ProvisioningStatusMessage(
+          status: 'updating',
+          ip: ' 192.168.1.160 ',
+          otaStage: 'checking',
+          message: 'Checking for stable update',
+        ),
+      );
+
+      expect(result.ip, '192.168.1.160');
+      expect(result.restartPending, isFalse);
     });
 
     test('does not hide BLE disconnect before update progress', () async {
