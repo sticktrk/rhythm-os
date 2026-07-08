@@ -487,6 +487,10 @@ impl ChipTransport {
         first_error: &anyhow::Error,
     ) -> Result<Option<CommissionedDevice>> {
         self.recover_commissioning_sidecar(first_error, "Matter operational discovery error")?;
+        // The sidecar restart drops chipd's BLE connection to the bulb, so a
+        // follow-up BLE pairing attempt needs the same BlueZ settle time as
+        // the BLE recovery path.
+        self.mark_ble_recovery_cooldown(ble_recovery_cooldown(first_error));
 
         let discovery =
             self.scan_operational_node(node_id, OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT)?;
@@ -2160,6 +2164,11 @@ mod tests {
             .commission_light(&ble_commission_request())
             .expect_err("commissioning should surface the original discovery failure");
         assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown,
+            "operational discovery recovery should arm the BLE settle cooldown"
+        );
 
         transport
             .set_on_off(102, 1, true)
@@ -2256,6 +2265,11 @@ mod tests {
             .commission_light(&ble_commission_request())
             .expect("advertising recovered node should be probed and returned");
         assert_eq!(device.node_id, 100);
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown,
+            "operational discovery recovery should arm the BLE settle cooldown"
+        );
 
         let requests = server.join().unwrap();
         let kinds: Vec<&'static str> = requests
