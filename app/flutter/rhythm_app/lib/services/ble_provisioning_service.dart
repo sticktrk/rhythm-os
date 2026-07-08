@@ -32,11 +32,13 @@ class BleDeviceInfo {
   final String name;
   final String version;
   final String? mac;
+  final ProvisioningStatusMessage? provisioningStatus;
 
   const BleDeviceInfo({
     required this.name,
     required this.version,
     this.mac,
+    this.provisioningStatus,
   });
 }
 
@@ -79,16 +81,28 @@ class ProvisioningStatusMessage {
   });
 
   bool get isTerminal =>
-      status == 'connected' ||
+      isConnected ||
       status == 'restarting' ||
       status == 'wifi_failed' ||
       status == 'failed';
+
+  bool get isConnected =>
+      status == 'connected' ||
+      (status == 'updating' && otaStage == 'up_to_date');
+
+  bool get canResume =>
+      isTerminal ||
+      ((status == 'updating' || status == 'restarting') &&
+          ip != null &&
+          ip!.trim().isNotEmpty);
 }
 
 class BleProvisioningService {
   static const _provisioningTimeout = Duration(minutes: 35);
   static const _authTokenTimeout = Duration(seconds: 20);
   static const _statusPollInterval = Duration(milliseconds: 500);
+  static const _bleOperationTimeout = Duration(seconds: 8);
+  static const _staleProvisioningProgressTimeout = Duration(minutes: 2);
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   StreamController<BleDevice>? _scanController;
@@ -280,7 +294,8 @@ class BleProvisioningService {
     BluetoothDevice bluetoothDevice, {
     required bool requireProvisioningReady,
   }) async {
-    final services = await bluetoothDevice.discoverServices();
+    final services =
+        await bluetoothDevice.discoverServices().timeout(_bleOperationTimeout);
     final service = services.firstWhere(
       (candidate) => candidate.serviceUuid == _Uuids.service,
       orElse: () =>
@@ -320,14 +335,18 @@ class BleProvisioningService {
     final initialStatus = await _readStatus(_statusChar!);
     if (requireProvisioningReady &&
         initialStatus.status != 'waiting' &&
-        initialStatus.status != 'wifi_failed') {
+        initialStatus.status != 'wifi_failed' &&
+        !initialStatus.canResume) {
       await disconnect();
       throw StateError(
         'Device is not ready for provisioning (status: ${initialStatus.status})',
       );
     }
 
-    return _readDeviceInfo(_deviceInfoChar!);
+    return _readDeviceInfo(
+      _deviceInfoChar!,
+      provisioningStatus: initialStatus,
+    );
   }
 
   Future<String> requestOwnerToken({
@@ -358,6 +377,7 @@ class BleProvisioningService {
       timeoutMessage: 'Timed out waiting for owner token',
       timeout: _authTokenTimeout,
       pollInterval: _statusPollInterval,
+      operationTimeout: _bleOperationTimeout,
     );
 
     final ownerToken = status.ownerToken?.trim();
@@ -396,20 +416,51 @@ class BleProvisioningService {
       onStatus: onStatus,
       timeout: _provisioningTimeout,
       pollInterval: _statusPollInterval,
+      operationTimeout: _bleOperationTimeout,
     );
 
+    return _resultFromTerminalStatus(status);
+  }
+
+  Future<BleProvisioningResult> waitForProvisioningResult({
+    void Function(ProvisioningStatusMessage status)? onStatus,
+  }) async {
+    final statusChar = _statusChar;
+    if (statusChar == null) {
+      throw StateError('Not connected to a provisioning device');
+    }
+
+    final status = await waitForTerminalProvisioningStatus(
+      enableNotifications: () => statusChar.setNotifyValue(true),
+      writePayload: () async {},
+      statusUpdates: statusChar.onValueReceived.map(_parseStatus),
+      readStatus: () => _readStatus(statusChar),
+      onStatus: onStatus,
+      timeout: _provisioningTimeout,
+      pollInterval: _statusPollInterval,
+      operationTimeout: _bleOperationTimeout,
+    );
+
+    return _resultFromTerminalStatus(status);
+  }
+
+  BleProvisioningResult _resultFromTerminalStatus(
+    ProvisioningStatusMessage status,
+  ) {
+    if (status.isConnected) {
+      final ip = status.ip;
+      if (ip == null || ip.isEmpty) {
+        throw StateError('Provisioning succeeded without an IP address');
+      }
+      final ownerToken = status.ownerToken?.trim();
+      return BleProvisioningResult(
+        ip: ip,
+        ownerToken:
+            ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
+      );
+    }
+
     switch (status.status) {
-      case 'connected':
-        final ip = status.ip;
-        if (ip == null || ip.isEmpty) {
-          throw StateError('Provisioning succeeded without an IP address');
-        }
-        final ownerToken = status.ownerToken?.trim();
-        return BleProvisioningResult(
-          ip: ip,
-          ownerToken:
-              ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
-        );
       case 'restarting':
         final ip = status.ip;
         if (ip == null || ip.isEmpty) {
@@ -435,6 +486,8 @@ class BleProvisioningService {
     void Function(ProvisioningStatusMessage status)? onStatus,
     Duration timeout = _provisioningTimeout,
     Duration pollInterval = _statusPollInterval,
+    Duration operationTimeout = _bleOperationTimeout,
+    Duration? staleProgressTimeout = _staleProvisioningProgressTimeout,
   }) async {
     return waitForMatchingProvisioningStatus(
       enableNotifications: enableNotifications,
@@ -446,7 +499,10 @@ class BleProvisioningService {
       onStatus: onStatus,
       timeout: timeout,
       pollInterval: pollInterval,
+      operationTimeout: operationTimeout,
       recoverFromReadError: _recoverTerminalProvisioningReadError,
+      staleStatusTimeout: staleProgressTimeout,
+      recoverFromStaleStatus: _recoverStaleTerminalProvisioningStatus,
     );
   }
 
@@ -461,22 +517,48 @@ class BleProvisioningService {
     void Function(ProvisioningStatusMessage status)? onStatus,
     Duration timeout = _provisioningTimeout,
     Duration pollInterval = _statusPollInterval,
+    Duration operationTimeout = _bleOperationTimeout,
     ProvisioningStatusMessage? Function(
       Object error,
       ProvisioningStatusMessage? latestStatus,
     )? recoverFromReadError,
+    Duration? staleStatusTimeout,
+    ProvisioningStatusMessage? Function(
+      ProvisioningStatusMessage latestStatus,
+    )? recoverFromStaleStatus,
   }) async {
     final deadline = DateTime.now().add(timeout);
     Future<ProvisioningStatusMessage>? notificationStatus;
     ProvisioningStatusMessage? latestStatus;
+    String? latestStatusKey;
+    var latestStatusChangedAt = DateTime.now();
 
     void observeStatus(ProvisioningStatusMessage status) {
+      final statusKey =
+          '${status.status}|${status.ip}|${status.otaStage}|${status.message}|${status.error}';
+      if (statusKey != latestStatusKey) {
+        latestStatusKey = statusKey;
+        latestStatusChangedAt = DateTime.now();
+      }
       latestStatus = status;
       onStatus?.call(status);
     }
 
+    ProvisioningStatusMessage? recoverStaleStatus(
+      ProvisioningStatusMessage status,
+    ) {
+      if (staleStatusTimeout == null || recoverFromStaleStatus == null) {
+        return null;
+      }
+      if (DateTime.now().difference(latestStatusChangedAt) <
+          staleStatusTimeout) {
+        return null;
+      }
+      return recoverFromStaleStatus(status);
+    }
+
     try {
-      await enableNotifications();
+      await enableNotifications().timeout(operationTimeout);
       notificationStatus = statusUpdates
           .map((update) {
             observeStatus(update);
@@ -492,7 +574,7 @@ class BleProvisioningService {
       );
     }
 
-    await writePayload();
+    await writePayload().timeout(operationTimeout);
 
     final pollingStatus = _pollMatchingStatus(
       readStatus: readStatus,
@@ -500,9 +582,11 @@ class BleProvisioningService {
       onStatus: observeStatus,
       deadline: deadline,
       pollInterval: pollInterval,
+      operationTimeout: operationTimeout,
       recoverFromReadError: recoverFromReadError == null
           ? null
           : (error) => recoverFromReadError(error, latestStatus),
+      recoverFromStaleStatus: recoverStaleStatus,
     );
     final notificationOrPolling = notificationStatus?.catchError((error) {
       debugPrint(
@@ -527,12 +611,20 @@ class BleProvisioningService {
     void Function(ProvisioningStatusMessage status)? onStatus,
     required DateTime deadline,
     required Duration pollInterval,
+    required Duration operationTimeout,
     ProvisioningStatusMessage? Function(Object error)? recoverFromReadError,
+    ProvisioningStatusMessage? Function(ProvisioningStatusMessage status)?
+        recoverFromStaleStatus,
   }) async {
     while (DateTime.now().isBefore(deadline)) {
+      final remainingBeforeRead = deadline.difference(DateTime.now());
+      if (remainingBeforeRead <= Duration.zero) break;
+      final readTimeout = remainingBeforeRead < operationTimeout
+          ? remainingBeforeRead
+          : operationTimeout;
       final ProvisioningStatusMessage status;
       try {
-        status = await readStatus();
+        status = await readStatus().timeout(readTimeout);
       } catch (error) {
         final recovered = recoverFromReadError?.call(error);
         if (recovered != null) {
@@ -545,6 +637,11 @@ class BleProvisioningService {
       if (isMatch(status)) {
         return status;
       }
+      final recovered = recoverFromStaleStatus?.call(status);
+      if (recovered != null) {
+        onStatus?.call(recovered);
+        return recovered;
+      }
       final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) break;
       await Future<void>.delayed(
@@ -554,11 +651,30 @@ class BleProvisioningService {
     throw TimeoutException('Timed out waiting for matching status');
   }
 
+  static ProvisioningStatusMessage? _recoverStaleTerminalProvisioningStatus(
+    ProvisioningStatusMessage latestStatus,
+  ) {
+    if (latestStatus.isTerminal || latestStatus.status != 'updating') {
+      return null;
+    }
+
+    final ip = latestStatus.ip?.trim();
+    if (ip == null || ip.isEmpty) {
+      return null;
+    }
+
+    return ProvisioningStatusMessage(
+      status: 'connected',
+      ip: ip,
+      message: 'Continuing setup over LAN',
+    );
+  }
+
   static ProvisioningStatusMessage? _recoverTerminalProvisioningReadError(
     Object error,
     ProvisioningStatusMessage? latestStatus,
   ) {
-    if (!_isBleDisconnectedError(error)) {
+    if (!_isBleDisconnectedError(error) && error is! TimeoutException) {
       return null;
     }
     if (latestStatus == null ||
@@ -626,9 +742,10 @@ class BleProvisioningService {
   }
 
   Future<BleDeviceInfo> _readDeviceInfo(
-    BluetoothCharacteristic characteristic,
-  ) async {
-    final bytes = await characteristic.read();
+    BluetoothCharacteristic characteristic, {
+    ProvisioningStatusMessage? provisioningStatus,
+  }) async {
+    final bytes = await characteristic.read().timeout(_bleOperationTimeout);
     final jsonMap = _decodeJson(bytes);
 
     final mac = (jsonMap['mac'] as String?)?.trim();
@@ -640,13 +757,14 @@ class BleProvisioningService {
           ? (jsonMap['version'] as String).trim()
           : 'unknown',
       mac: mac == null || mac.isEmpty ? null : mac,
+      provisioningStatus: provisioningStatus,
     );
   }
 
   Future<ProvisioningStatusMessage> _readStatus(
     BluetoothCharacteristic characteristic,
   ) async {
-    final bytes = await characteristic.read();
+    final bytes = await characteristic.read().timeout(_bleOperationTimeout);
     return _parseStatus(bytes);
   }
 
@@ -686,7 +804,12 @@ class BleProvisioningService {
       }
     }
 
-    await FlutterBluePlus.isScanning
-        .firstWhere((isScanning) => isScanning == false);
+    try {
+      await FlutterBluePlus.isScanning
+          .firstWhere((isScanning) => isScanning == false)
+          .timeout(const Duration(seconds: 20));
+    } on TimeoutException {
+      stopScan();
+    }
   }
 }

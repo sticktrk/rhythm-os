@@ -483,6 +483,18 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
       setState(() {
         _deviceInfo = info;
+      });
+      final status = info.provisioningStatus;
+      if (status != null &&
+          status.status != 'waiting' &&
+          status.status != 'wifi_failed' &&
+          status.canResume) {
+        await _resumeProvisioning(status);
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() {
         _phase = _ProvisioningPhase.credentials;
       });
     } catch (error) {
@@ -516,46 +528,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         password,
         onStatus: _handleProvisioningStatus,
       );
-      final ip = result.ip;
-      if (!mounted) return;
-
-      setState(() {
-        _provisionedIp = ip;
-      });
-
-      final online = result.restartPending
-          ? await _waitForServerRestartAndHealth(ip)
-          : await _waitForServerHealth(ip);
-      if (!mounted) return;
-      if (!online) {
-        AnalyticsService().logEvent('ble_provisioning_failed', {
-          'stage': result.restartPending
-              ? 'post_update_health_timeout'
-              : 'health_timeout',
-        });
-        setState(() {
-          _phase = _ProvisioningPhase.error;
-          _errorMessage = result.restartPending
-              ? 'Your Rhythm Box installed an update but did not come back online in time. Make sure you\'re on the same network and try again.'
-              : 'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
-        });
-        return;
-      }
-
-      final ownerToken = await _resolveOwnerTokenAfterProvisioning(
-        ip,
-        result.ownerToken,
-      );
-      if (!mounted) return;
-
-      await _persistServerHub(ip, ownerToken);
-      if (!mounted) return;
-
-      AnalyticsService().logEvent('ble_provisioning_completed');
-      HapticFeedback.heavyImpact();
-      setState(() {
-        _phase = _ProvisioningPhase.success;
-      });
+      await _finishProvisioning(result);
     } on WifiFailedException catch (error) {
       if (!mounted) return;
       _passwordController.clear();
@@ -588,6 +561,73 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         });
       }
     }
+  }
+
+  Future<void> _resumeProvisioning(ProvisioningStatusMessage status) async {
+    AnalyticsService().logEvent('ble_provisioning_resumed', {
+      'status': status.status,
+      if (status.otaStage != null) 'ota_stage': status.otaStage!,
+    });
+    _handleProvisioningStatus(status);
+
+    try {
+      final result = await _bleService.waitForProvisioningResult(
+        onStatus: _handleProvisioningStatus,
+      );
+      await _finishProvisioning(result);
+    } catch (error) {
+      if (!mounted) return;
+      AnalyticsService().logEvent('ble_provisioning_failed', {
+        'stage': 'resume',
+      });
+      setState(() {
+        _phase = _ProvisioningPhase.error;
+        _errorMessage = 'Setup failed: $error';
+      });
+    }
+  }
+
+  Future<void> _finishProvisioning(BleProvisioningResult result) async {
+    final ip = result.ip;
+    if (!mounted) return;
+
+    setState(() {
+      _provisionedIp = ip;
+    });
+
+    final online = result.restartPending
+        ? await _waitForServerRestartAndHealth(ip)
+        : await _waitForServerHealth(ip);
+    if (!mounted) return;
+    if (!online) {
+      AnalyticsService().logEvent('ble_provisioning_failed', {
+        'stage': result.restartPending
+            ? 'post_update_health_timeout'
+            : 'health_timeout',
+      });
+      setState(() {
+        _phase = _ProvisioningPhase.error;
+        _errorMessage = result.restartPending
+            ? 'Your Rhythm Box installed an update but did not come back online in time. Make sure you\'re on the same network and try again.'
+            : 'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
+      });
+      return;
+    }
+
+    final ownerToken = await _resolveOwnerTokenAfterProvisioning(
+      ip,
+      result.ownerToken,
+    );
+    if (!mounted) return;
+
+    await _persistServerHub(ip, ownerToken);
+    if (!mounted) return;
+
+    AnalyticsService().logEvent('ble_provisioning_completed');
+    HapticFeedback.heavyImpact();
+    setState(() {
+      _phase = _ProvisioningPhase.success;
+    });
   }
 
   Future<bool> _waitForServerHealth(String ip) async {
@@ -643,7 +683,12 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     if (status.ip != null && status.ip!.isNotEmpty) {
       _provisionedIp = status.ip;
     }
-    if (status.status == 'updating' || status.status == 'restarting') {
+    if (status.isConnected) {
+      setState(() {
+        _phase = _ProvisioningPhase.provisioning;
+        _provisioningStatusMessage = null;
+      });
+    } else if (status.status == 'updating' || status.status == 'restarting') {
       final message = status.message?.trim();
       setState(() {
         _phase = _ProvisioningPhase.updating;
