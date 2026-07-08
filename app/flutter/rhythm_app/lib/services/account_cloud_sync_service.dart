@@ -176,11 +176,14 @@ class AccountCloudSyncService {
         return;
       }
 
+      final homeAlreadyInCloud = await _accountHomeExists(client, home.id);
+
       await client.from('homes').upsert(
             homeSnapshotPayload(home, userId: userId),
             onConflict: 'id',
           );
 
+      var syncedServerHubCount = 0;
       for (final hub in serverHubs) {
         final encryptedToken = await _encryptedHubToken(hub);
         if (hubTokenEncryptionUnavailableForTesting(
@@ -192,12 +195,26 @@ class AccountCloudSyncService {
             'hub=${hub.id} — encrypted_token not synced',
           );
         }
-        await _upsertServerHub(
-          client,
-          hub,
-          encryptedToken,
-          clearRemoteEndpoint: clearRemoteEndpointHubIds.contains(hub.id),
-        );
+        try {
+          await _upsertServerHub(
+            client,
+            hub,
+            encryptedToken,
+            clearRemoteEndpoint: clearRemoteEndpointHubIds.contains(hub.id),
+          );
+          syncedServerHubCount += 1;
+        } catch (error) {
+          if (!homeAlreadyInCloud &&
+              syncedServerHubCount == 0 &&
+              _isServerIdentityUniqueConflict(error)) {
+            await _deleteCloudHomeIfEmpty(
+              client,
+              homeId: home.id,
+              reason: 'server_identity_conflict',
+            );
+          }
+          rethrow;
+        }
       }
 
       debugPrint(
@@ -450,6 +467,46 @@ class AccountCloudSyncService {
         StateError('No compatible account hub upsert payload available');
   }
 
+  Future<bool> _accountHomeExists(SupabaseClient client, String homeId) async {
+    try {
+      final row = await client
+          .from('homes')
+          .select('id')
+          .eq('id', homeId)
+          .maybeSingle();
+      return row != null;
+    } catch (error) {
+      debugPrint(
+        'AccountCloudSyncService: home existence check failed for '
+        'home=$homeId: $error',
+      );
+      return true;
+    }
+  }
+
+  Future<void> _deleteCloudHomeIfEmpty(
+    SupabaseClient client, {
+    required String homeId,
+    required String reason,
+  }) async {
+    try {
+      final hubRows =
+          await client.from('hubs').select('id').eq('home_id', homeId).limit(1);
+      if (hubRows.whereType<Map>().isNotEmpty) return;
+
+      await client.from('homes').delete().eq('id', homeId);
+      debugPrint(
+        'AccountCloudSyncService: deleted empty cloud home=$homeId '
+        'reason=$reason',
+      );
+    } catch (error) {
+      debugPrint(
+        'AccountCloudSyncService: empty cloud home cleanup skipped for '
+        'home=$homeId reason=$reason error=$error',
+      );
+    }
+  }
+
   Future<
       ({
         String serverInstanceId,
@@ -541,12 +598,29 @@ class AccountCloudSyncService {
             message.contains('42703'));
   }
 
+  bool _isServerIdentityUniqueConflict(Object error) {
+    return isServerIdentityUniqueConflictForTesting(error);
+  }
+
   SupabaseClient? get _client {
     if (!BackendProvider.isInitialized) return null;
     final auth = BackendProvider.instance.auth;
     if (auth is SupabaseAuthBackend) return auth.client;
     return null;
   }
+}
+
+@visibleForTesting
+bool isServerIdentityUniqueConflictForTesting(Object error) {
+  final message = error.toString();
+  final isUniqueViolation =
+      error is PostgrestException ? error.code == '23505' : true;
+  if (!isUniqueViolation) return false;
+
+  return message.contains('hubs_server_instance_id_unique_idx') ||
+      message.contains('hub_remote_access_server_instance_id_unique_idx') ||
+      (message.contains('duplicate key') &&
+          message.contains('server_instance_id'));
 }
 
 /// True when a hub has a local owner token but encryption produced no

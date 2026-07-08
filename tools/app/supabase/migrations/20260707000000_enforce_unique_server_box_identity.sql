@@ -31,14 +31,22 @@ WITH ranked_hubs AS (
     ROW_NUMBER() OVER (
       PARTITION BY hubs.server_instance_id
       ORDER BY
+        (support.hub_id IS NOT NULL) DESC,
         (remote.hub_id IS NOT NULL) DESC,
         (hubs.remote_endpoint IS NOT NULL) DESC,
-        hubs.last_connected DESC NULLS LAST,
+        hubs.created_at ASC,
         hubs.updated_at DESC,
-        hubs.created_at DESC,
-        hubs.id DESC
+        hubs.last_connected DESC NULLS LAST,
+        hubs.id ASC
     ) AS duplicate_rank
   FROM public.hubs hubs
+  LEFT JOIN (
+    SELECT DISTINCT hub_id
+    FROM public.hub_support_access_grants
+    WHERE revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > NOW())
+  ) support
+    ON support.hub_id = hubs.id
   LEFT JOIN public.hub_remote_access remote
     ON remote.hub_id = hubs.id
    AND remote.server_instance_id = hubs.server_instance_id
@@ -63,14 +71,23 @@ WITH ranked_remote_access AS (
     ROW_NUMBER() OVER (
       PARTITION BY remote.server_instance_id
       ORDER BY
+        (support.hub_id IS NOT NULL) DESC,
         (hubs.server_instance_id = remote.server_instance_id) DESC,
+        hubs.created_at ASC NULLS LAST,
         remote.updated_at DESC,
         remote.created_at DESC,
-        remote.hub_id DESC
+        remote.hub_id ASC
     ) AS duplicate_rank
   FROM public.hub_remote_access remote
   LEFT JOIN public.hubs hubs
     ON hubs.id = remote.hub_id
+  LEFT JOIN (
+    SELECT DISTINCT hub_id
+    FROM public.hub_support_access_grants
+    WHERE revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > NOW())
+  ) support
+    ON support.hub_id = remote.hub_id
   WHERE remote.server_instance_id IS NOT NULL
 ),
 duplicate_remote_access AS (
@@ -89,14 +106,23 @@ WITH ranked_remote_access AS (
     ROW_NUMBER() OVER (
       PARTITION BY remote.server_instance_id
       ORDER BY
+        (support.hub_id IS NOT NULL) DESC,
         (hubs.server_instance_id = remote.server_instance_id) DESC,
+        hubs.created_at ASC NULLS LAST,
         remote.updated_at DESC,
         remote.created_at DESC,
-        remote.hub_id DESC
+        remote.hub_id ASC
     ) AS duplicate_rank
   FROM public.hub_remote_access remote
   LEFT JOIN public.hubs hubs
     ON hubs.id = remote.hub_id
+  LEFT JOIN (
+    SELECT DISTINCT hub_id
+    FROM public.hub_support_access_grants
+    WHERE revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > NOW())
+  ) support
+    ON support.hub_id = remote.hub_id
   WHERE remote.server_instance_id IS NOT NULL
 ),
 duplicate_remote_access AS (

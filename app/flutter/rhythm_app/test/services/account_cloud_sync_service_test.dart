@@ -307,6 +307,29 @@ void main() {
       );
     });
 
+    test('detects server identity unique-index conflicts narrowly', () {
+      expect(
+        isServerIdentityUniqueConflictForTesting(
+          'PostgrestException: duplicate key value violates unique constraint '
+          '"hubs_server_instance_id_unique_idx" code: 23505',
+        ),
+        isTrue,
+      );
+      expect(
+        isServerIdentityUniqueConflictForTesting(
+          'duplicate key value violates unique constraint on server_instance_id',
+        ),
+        isTrue,
+      );
+      expect(
+        isServerIdentityUniqueConflictForTesting(
+          'PostgrestException: duplicate key value violates unique constraint '
+          '"other_unique_idx" code: 23505',
+        ),
+        isFalse,
+      );
+    });
+
     test('groups account Homes with their server hubs', () {
       final homeA = Home.create(
         id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',

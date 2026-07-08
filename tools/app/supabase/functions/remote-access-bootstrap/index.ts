@@ -464,37 +464,8 @@ async function readAuthorizedServerHubByInstanceId(
   )
   if (rows.length === 0) return null
 
-  const authorized: Array<{ hub: HubRow; home: HomeRow }> = []
-  for (const hub of rows) {
-    const home = await fetchHome(adminClient, hub.home_id)
-    if (home && isHomeMember(home, userId)) {
-      authorized.push({ hub, home })
-    }
-  }
-
-  if (authorized.length === 0 && allowAutoJoin) {
-    const joined = await addUserToCanonicalHomeForServerHubs(
-      adminClient,
-      userId,
-      rows,
-    )
-    if (joined) return joined
-  }
-  if (authorized.length === 0) {
-    return jsonResponse({ error: 'Not authorized for this home' }, 403)
-  }
-
-  authorized.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
-  return authorized[0]
-}
-
-async function addUserToCanonicalHomeForServerHubs(
-  adminClient: any,
-  userId: string,
-  hubs: HubRow[],
-): Promise<{ hub: HubRow; home: HomeRow } | null> {
   const candidates: Array<{ hub: HubRow; home: HomeRow }> = []
-  for (const hub of hubs) {
+  for (const hub of rows) {
     const home = await fetchHome(adminClient, hub.home_id)
     if (home) candidates.push({ hub, home })
   }
@@ -502,20 +473,35 @@ async function addUserToCanonicalHomeForServerHubs(
 
   candidates.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
   const canonical = candidates[0]
-  const memberIds = memberIdsForUpsert(canonical.home, userId)
-  const { error } = await adminClient
-    .from('homes')
-    .update({ member_ids: memberIds, updated_at: new Date().toISOString() })
-    .eq('id', canonical.home.id)
-  if (error) throw new Error(error.message)
 
-  return {
-    hub: canonical.hub,
-    home: {
-      ...canonical.home,
-      member_ids: memberIds,
-    },
+  if (isHomeMember(canonical.home, userId)) return canonical
+
+  if (allowAutoJoin) {
+    const memberIds = memberIdsForUpsert(canonical.home, userId)
+    const { error } = await adminClient
+      .from('homes')
+      .update({ member_ids: memberIds, updated_at: new Date().toISOString() })
+      .eq('id', canonical.home.id)
+    if (error) throw new Error(error.message)
+
+    return {
+      hub: canonical.hub,
+      home: {
+        ...canonical.home,
+        member_ids: memberIds,
+      },
+    }
   }
+
+  const authorized = candidates.filter((candidate) =>
+    isHomeMember(candidate.home, userId)
+  )
+  if (authorized.length === 0) {
+    return jsonResponse({ error: 'Not authorized for this home' }, 403)
+  }
+
+  authorized.sort((left, right) => compareCanonicalServerHubs(left.hub, right.hub))
+  return authorized[0]
 }
 
 async function fetchHome(
@@ -693,10 +679,10 @@ function compareCanonicalServerHubs(left: HubRow, right: HubRow): number {
   const rightHasRemote = right.remote_endpoint == null ? 0 : 1
   if (leftHasRemote !== rightHasRemote) return rightHasRemote - leftHasRemote
 
-  return compareNullableIsoDesc(left.last_connected, right.last_connected) ||
+  return compareNullableIsoAsc(left.created_at, right.created_at) ||
     compareNullableIsoDesc(left.updated_at, right.updated_at) ||
-    compareNullableIsoDesc(left.created_at, right.created_at) ||
-    right.id.localeCompare(left.id)
+    compareNullableIsoDesc(left.last_connected, right.last_connected) ||
+    left.id.localeCompare(right.id)
 }
 
 function compareRemoteAccessMappings(
@@ -706,6 +692,21 @@ function compareRemoteAccessMappings(
   return compareNullableIsoDesc(left.updated_at, right.updated_at) ||
     compareNullableIsoDesc(left.created_at, right.created_at) ||
     right.hub_id.localeCompare(left.hub_id)
+}
+
+function compareNullableIsoAsc(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): number {
+  const leftTime = left ? Date.parse(left) : Number.NaN
+  const rightTime = right ? Date.parse(right) : Number.NaN
+  const leftValid = Number.isFinite(leftTime)
+  const rightValid = Number.isFinite(rightTime)
+  if (leftValid && rightValid && leftTime !== rightTime) {
+    return leftTime - rightTime
+  }
+  if (leftValid !== rightValid) return leftValid ? -1 : 1
+  return 0
 }
 
 function compareNullableIsoDesc(
