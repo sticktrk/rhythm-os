@@ -33,6 +33,61 @@ class _HomeNameCancelledException implements Exception {
   const _HomeNameCancelledException();
 }
 
+class _KnownBleHome {
+  const _KnownBleHome({
+    required this.homeName,
+  });
+
+  final String homeName;
+}
+
+@visibleForTesting
+String? bleProvisioningKnownHomeNameForTesting({
+  required String deviceName,
+  required Iterable<AccountHomeServerHubs> homeEntries,
+}) {
+  return _knownHomeForBleDeviceName(
+    deviceName: deviceName,
+    homeEntries: homeEntries,
+  )?.homeName;
+}
+
+_KnownBleHome? _knownHomeForBleDeviceName({
+  required String deviceName,
+  required Iterable<AccountHomeServerHubs> homeEntries,
+}) {
+  final deviceKey = _bleDeviceMatchKey(deviceName);
+  if (deviceKey == null) return null;
+
+  for (final entry in homeEntries) {
+    for (final hub in entry.serverHubs) {
+      if (hub.type != HubType.server) continue;
+      final hubKey = _bleDeviceMatchKey(hub.name);
+      if (hubKey == deviceKey) {
+        return _KnownBleHome(homeName: entry.home.name);
+      }
+    }
+  }
+
+  return null;
+}
+
+String? _bleDeviceMatchKey(String value) {
+  final key = value.trim().toLowerCase().replaceAll(
+        RegExp(r'[^a-z0-9]+'),
+        '',
+      );
+  if (key.isEmpty || _genericBleDeviceNameKeys.contains(key)) return null;
+  return key;
+}
+
+const _genericBleDeviceNameKeys = {
+  'rhythm',
+  'rhythmbox',
+  'rhythmdevice',
+  'rhythmserver',
+};
+
 class BleProvisioningScreen extends StatefulWidget {
   const BleProvisioningScreen({super.key, this.initialDevice});
 
@@ -558,7 +613,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   Future<bool> _waitForServerRestartAndHealth(String ip) async {
     final client = RhythmDiagnosticsApi(host: ip, port: 54448);
-    final offlineDeadline = DateTime.now().add(const Duration(seconds: 90));
+    final offlineDeadline = DateTime.now().add(const Duration(seconds: 20));
     var sawOffline = false;
 
     while (DateTime.now().isBefore(offlineDeadline)) {
@@ -569,7 +624,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       await Future<void>.delayed(const Duration(seconds: 1));
     }
 
-    if (!sawOffline) return false;
+    if (!sawOffline) {
+      return _serverIsHealthy(client);
+    }
 
     final onlineDeadline = DateTime.now().add(const Duration(minutes: 5));
     while (DateTime.now().isBefore(onlineDeadline)) {
@@ -608,12 +665,21 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     final provisioned = provisionedOwnerToken?.trim();
     if (provisioned != null && provisioned.isNotEmpty) return provisioned;
 
+    var lanRequiresAuth = true;
     try {
       final authApi = RhythmAuthApi(baseUrl: 'http://$ip:54448');
       final status = await authApi.getStatus();
+      lanRequiresAuth = status.requiresAuth;
       if (status.claimAvailable) {
-        final claim = await authApi.claimOwnerToken();
-        return claim.token;
+        try {
+          final claim = await authApi.claimOwnerToken();
+          return claim.token;
+        } catch (error) {
+          debugPrint('[BLE] LAN owner claim after provisioning failed: $error');
+          if (!status.requiresAuth) {
+            return null;
+          }
+        }
       }
       if (!status.requiresAuth) {
         return null;
@@ -623,6 +689,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     }
 
     if (!_bleService.isConnected) {
+      if (!lanRequiresAuth) {
+        return null;
+      }
       throw StateError('Server requires API auth, but Bluetooth disconnected.');
     }
 
@@ -944,6 +1013,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   }
 
   Widget _buildDevicesBody() {
+    final homeEntries =
+        context.watch<HomeProvider?>()?.homeServerHubSnapshots ??
+            const <AccountHomeServerHubs>[];
     if (_devices.isEmpty) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -978,7 +1050,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final device in _devices) _buildDeviceCard(device),
+        for (final device in _devices) _buildDeviceCard(device, homeEntries),
         const SizedBox(height: 16),
         _buildActionButton(
           onTap: _startScan,
@@ -1145,7 +1217,15 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     );
   }
 
-  Widget _buildDeviceCard(BleDevice device) {
+  Widget _buildDeviceCard(
+    BleDevice device,
+    Iterable<AccountHomeServerHubs> homeEntries,
+  ) {
+    final knownHome = _knownHomeForBleDeviceName(
+      deviceName: device.name,
+      homeEntries: homeEntries,
+    );
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: GestureDetector(
@@ -1188,10 +1268,16 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Signal ${_signalLabel(device.rssi)} • Ready to set up',
+                      knownHome == null
+                          ? 'Signal ${_signalLabel(device.rssi)} • Ready to set up'
+                          : 'Signal ${_signalLabel(device.rssi)} • Already in ${knownHome.homeName}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.72),
+                        color: knownHome == null
+                            ? CelestialColors.textSecondary
+                                .withValues(alpha: 0.72)
+                            : _teal.withValues(alpha: 0.88),
                         fontSize: 12,
                       ),
                     ),

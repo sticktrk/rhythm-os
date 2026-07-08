@@ -134,6 +134,65 @@ void main() {
       expect(seen, contains('Updated, restarting'));
     });
 
+    test('treats BLE disconnect after update progress as restart pending',
+        () async {
+      final seen = <String>[];
+
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: Stream<ProvisioningStatusMessage>.value(
+          const ProvisioningStatusMessage(
+            status: 'updating',
+            ip: '192.168.1.156',
+            otaStage: 'installing',
+            message: 'Installing update',
+          ),
+        ),
+        readStatus: () async {
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+          throw PlatformException(
+            code: 'device_disconnected',
+            message: 'device is disconnected',
+          );
+        },
+        onStatus: (update) {
+          final message = update.message;
+          if (message != null) seen.add(message);
+        },
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 50),
+      );
+
+      expect(status.status, 'restarting');
+      expect(status.ip, '192.168.1.156');
+      expect(status.otaStage, 'restarting');
+      expect(seen, contains('Installing update'));
+    });
+
+    test('does not hide BLE disconnect before update progress', () async {
+      final updates = StreamController<ProvisioningStatusMessage>();
+      addTearDown(updates.close);
+
+      await expectLater(
+        BleProvisioningService.waitForTerminalProvisioningStatus(
+          enableNotifications: () async {},
+          writePayload: () async {},
+          statusUpdates: updates.stream,
+          readStatus: () async {
+            throw PlatformException(
+              code: 'device_disconnected',
+              message: 'device is disconnected',
+            );
+          },
+          timeout: const Duration(seconds: 1),
+          pollInterval: const Duration(milliseconds: 50),
+        ),
+        throwsA(isA<PlatformException>()),
+      );
+    });
+
     test('can wait for auth token status', () async {
       var wrotePayload = false;
 

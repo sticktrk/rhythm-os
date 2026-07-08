@@ -299,6 +299,73 @@ code {
   white-space: nowrap;
 }
 
+.homeProbeList {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.homeProbeLine {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.homeProbeLine::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--dim);
+}
+
+.homeProbeLine.checking::before,
+.homeProbeLine.auth::before {
+  background: var(--amber);
+}
+
+.homeProbeLine.online::before {
+  background: var(--green);
+}
+
+.homeProbeLine.offline::before,
+.homeProbeLine.error::before {
+  background: var(--red);
+}
+
+.homeProbeHub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeProbeStatus {
+  color: var(--dim);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.homeProbeLine.checking .homeProbeStatus,
+.homeProbeLine.auth .homeProbeStatus {
+  color: var(--amber);
+}
+
+.homeProbeLine.online .homeProbeStatus {
+  color: var(--green);
+}
+
+.homeProbeLine.offline .homeProbeStatus,
+.homeProbeLine.error .homeProbeStatus {
+  color: var(--red);
+}
+
 .detailPane {
   overflow: hidden;
 }
