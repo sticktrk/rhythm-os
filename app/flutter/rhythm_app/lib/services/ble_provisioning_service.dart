@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
@@ -445,6 +446,7 @@ class BleProvisioningService {
       onStatus: onStatus,
       timeout: timeout,
       pollInterval: pollInterval,
+      recoverFromReadError: _recoverTerminalProvisioningReadError,
     );
   }
 
@@ -459,15 +461,25 @@ class BleProvisioningService {
     void Function(ProvisioningStatusMessage status)? onStatus,
     Duration timeout = _provisioningTimeout,
     Duration pollInterval = _statusPollInterval,
+    ProvisioningStatusMessage? Function(
+      Object error,
+      ProvisioningStatusMessage? latestStatus,
+    )? recoverFromReadError,
   }) async {
     final deadline = DateTime.now().add(timeout);
     Future<ProvisioningStatusMessage>? notificationStatus;
+    ProvisioningStatusMessage? latestStatus;
+
+    void observeStatus(ProvisioningStatusMessage status) {
+      latestStatus = status;
+      onStatus?.call(status);
+    }
 
     try {
       await enableNotifications();
       notificationStatus = statusUpdates
           .map((update) {
-            onStatus?.call(update);
+            observeStatus(update);
             return update;
           })
           .where(isMatch)
@@ -485,9 +497,12 @@ class BleProvisioningService {
     final pollingStatus = _pollMatchingStatus(
       readStatus: readStatus,
       isMatch: isMatch,
-      onStatus: onStatus,
+      onStatus: observeStatus,
       deadline: deadline,
       pollInterval: pollInterval,
+      recoverFromReadError: recoverFromReadError == null
+          ? null
+          : (error) => recoverFromReadError(error, latestStatus),
     );
     final notificationOrPolling = notificationStatus?.catchError((error) {
       debugPrint(
@@ -512,9 +527,20 @@ class BleProvisioningService {
     void Function(ProvisioningStatusMessage status)? onStatus,
     required DateTime deadline,
     required Duration pollInterval,
+    ProvisioningStatusMessage? Function(Object error)? recoverFromReadError,
   }) async {
     while (DateTime.now().isBefore(deadline)) {
-      final status = await readStatus();
+      final ProvisioningStatusMessage status;
+      try {
+        status = await readStatus();
+      } catch (error) {
+        final recovered = recoverFromReadError?.call(error);
+        if (recovered != null) {
+          onStatus?.call(recovered);
+          return recovered;
+        }
+        rethrow;
+      }
       onStatus?.call(status);
       if (isMatch(status)) {
         return status;
@@ -526,6 +552,49 @@ class BleProvisioningService {
       );
     }
     throw TimeoutException('Timed out waiting for matching status');
+  }
+
+  static ProvisioningStatusMessage? _recoverTerminalProvisioningReadError(
+    Object error,
+    ProvisioningStatusMessage? latestStatus,
+  ) {
+    if (!_isBleDisconnectedError(error)) {
+      return null;
+    }
+    if (latestStatus == null ||
+        (latestStatus.status != 'updating' &&
+            latestStatus.status != 'restarting')) {
+      return null;
+    }
+
+    final ip = latestStatus.ip?.trim();
+    if (ip == null || ip.isEmpty) {
+      return null;
+    }
+
+    final message = latestStatus.message?.trim();
+    return ProvisioningStatusMessage(
+      status: 'restarting',
+      ip: ip,
+      otaStage: 'restarting',
+      message: message == null || message.isEmpty
+          ? 'Update is restarting the device'
+          : message,
+    );
+  }
+
+  static bool _isBleDisconnectedError(Object error) {
+    if (error is PlatformException) {
+      final code = error.code.toLowerCase();
+      final message = error.message?.toLowerCase() ?? '';
+      return code.contains('disconnect') ||
+          message.contains('device is disconnected') ||
+          message.contains('device disconnected');
+    }
+
+    final text = '$error'.toLowerCase();
+    return text.contains('device is disconnected') ||
+        text.contains('device disconnected');
   }
 
   Future<void> disconnect() async {
