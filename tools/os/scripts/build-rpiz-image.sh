@@ -244,10 +244,6 @@ run_in_docker() {
     if [ -n "${RHYTHM_BUILD_VERSION:-}" ]; then
         docker_args+=(-e "RHYTHM_BUILD_VERSION=$RHYTHM_BUILD_VERSION")
     fi
-    if [ -n "${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-}" ]; then
-        docker_args+=(-e "RHYTHM_PROD_PAA_TRUST_STORE_PATH=$RHYTHM_PROD_PAA_TRUST_STORE_PATH")
-    fi
-
     # Forward the baked output prefix so the inner seed step can rewrite
     # Buildroot's hardcoded paths (fakeroot wrapper, *.pc, *.la, libtool) to
     # $OUTPUT_DIR. Normally unset: the builder image bakes the prefix into the
@@ -383,7 +379,7 @@ if is_truthy "$DEV_MODE"; then
     IMAGE_MODE=dev
     export RHYTHM_DEV_MODE=1
 else
-    echo "Building rpiz image in production mode (no Dropbear, no known root password, Matter attestation enforced)"
+    echo "Building rpiz image in production mode (no Dropbear, no known root password, Matter attestation bypass)"
     IMAGE_MODE=prod
     unset RHYTHM_DEV_MODE
 fi
