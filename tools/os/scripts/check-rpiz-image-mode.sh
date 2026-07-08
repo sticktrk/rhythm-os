@@ -24,7 +24,6 @@ TARGET_DIR="$OUTPUT_DIR/target"
 DEFAULTS_FILE="$TARGET_DIR/etc/default/rhythm"
 DEV_DEFAULTS_FILE="$TARGET_DIR/etc/default/rhythm-dev"
 IMAGE_VERSION_FILE="$TARGET_DIR/etc/rhythm-image-version"
-PROD_PAA_TRUST_STORE_PATH="${RHYTHM_PROD_PAA_TRUST_STORE_PATH:-/data/matter/paa-root-certs}"
 
 [ -f "$CONFIG_FILE" ] || fail "missing Buildroot config: $CONFIG_FILE"
 [ -d "$TARGET_DIR" ] || fail "missing Buildroot target directory: $TARGET_DIR"
@@ -41,6 +40,15 @@ reject_config_line() {
 
     if grep -Fxq "$line" "$CONFIG_FILE"; then
         fail "production image contains forbidden Buildroot option: $line"
+    fi
+}
+
+reject_defaults_prefix() {
+    local file="$1"
+    local prefix="$2"
+
+    if grep -q "^$prefix" "$file"; then
+        fail "image defaults contain forbidden setting prefix: $prefix"
     fi
 }
 
@@ -71,8 +79,8 @@ case "$IMAGE_MODE" in
         [ ! -e "$DEV_DEFAULTS_FILE" ] || fail "production image contains $DEV_DEFAULTS_FILE"
         [ -f "$DEFAULTS_FILE" ] || fail "production image missing $DEFAULTS_FILE"
         require_line "$DEFAULTS_FILE" "RHYTHM_DEV_MODE=0"
-        require_line "$DEFAULTS_FILE" "RHYTHM_MATTER_PAA_TRUST_STORE_PATH=$PROD_PAA_TRUST_STORE_PATH"
-        require_line "$DEFAULTS_FILE" "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=0"
+        reject_defaults_prefix "$DEFAULTS_FILE" "RHYTHM_MATTER_PAA_TRUST_STORE_PATH="
+        require_line "$DEFAULTS_FILE" "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1"
         require_line "$DEFAULTS_FILE" "RHYTHM_MATTER_ALLOW_TEST_PAA=0"
         ;;
     *)

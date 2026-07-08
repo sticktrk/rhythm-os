@@ -127,7 +127,7 @@ RHYTHM_CHIP_OUT_DIR=/path/to/connectedhomeip/out/rpiz ./tools/os/scripts/build-s
 For `rpiz`, the build comes from the `rhythm-linux-appliance` crate and writes `dist/bin/rpiz/rhythm-server`.
 If `RHYTHM_CHIP_OUT_DIR` or `RHYTHM_CHIP_LIB_DIR` is set, the helper automatically builds `rhythm-chipd` with `--features chip-ffi`. For native builds, `RHYTHM_CHIP_ROOT` also enables the direct bridge.
 The native Matter bridge also accepts `RHYTHM_MATTER_CONTROLLER_VENDOR_ID` to override the controller vendor ID used by `rhythm-chipd`. It defaults to `0xFFF1` for development and accepts either hex (`0xFFF1`) or decimal.
-For bring-up only, `RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1` makes `rhythm-chipd` skip Matter DAC/PAA verification. Leave it unset for normal builds and any image you intend to ship.
+`RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1` makes `rhythm-chipd` skip Matter DAC/PAA verification. Until production PAA provisioning is wired, rpiz dev and prod images both set it at boot.
 
 ### build-rpiz-image.sh
 
@@ -159,12 +159,9 @@ Build a Raspberry Pi Zero SD-card image using the Buildroot external tree in `in
 
 **Output:** `out/rpiz/images/sdcard.img`
 With `--docker` and no explicit `--output-dir`, the default becomes `out/rpiz-docker/images/sdcard.img`.
-By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn those off.
-Production images also bake `/etc/default/rhythm` with Matter attestation
-enforced, test PAA roots disabled, and
-`RHYTHM_MATTER_PAA_TRUST_STORE_PATH=/data/matter/paa-root-certs`. Override that
-path at build time with `RHYTHM_PROD_PAA_TRUST_STORE_PATH` if your provisioning
-flow uses a different trust-store location.
+By default, rpiz image builds include the bring-up extras: Dropbear SSH, root password `rhythm`, and Matter device attestation bypass. Use `--prod` or `RHYTHM_DEV_MODE=0` to turn off Dropbear and the known root password. Production images still bake Matter device attestation bypass until the fleet has production PAA trust-store provisioning.
+Production images bake `/etc/default/rhythm` with `RHYTHM_DEV_MODE=0`,
+`RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1`, and test PAA roots disabled.
 
 `--docker` pulls `dtconcepts/rhythm-rpiz-builder:latest` from Docker Hub and
 runs the full cross-compile + image packaging inside it. Override the image

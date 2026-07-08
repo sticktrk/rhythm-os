@@ -60,19 +60,18 @@ If `./buildroot` does not exist, the helper script now clones Buildroot there au
 ```
 
 Use `--prod` or `RHYTHM_DEV_MODE=0` when you want a production-style image
-without Dropbear, without the known root password, and with Matter device
-attestation enforced. Production images write `/etc/default/rhythm` with:
+without Dropbear and without the known root password. Matter device attestation
+is still bypassed until production PAA trust-store provisioning is wired.
+Production images write `/etc/default/rhythm` with:
 
 ```sh
 RHYTHM_DEV_MODE=0
-RHYTHM_MATTER_PAA_TRUST_STORE_PATH=/data/matter/paa-root-certs
-RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=0
+RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION=1
 RHYTHM_MATTER_ALLOW_TEST_PAA=0
 ```
 
-Provision CSA production PAA roots under that trust-store directory before
-commissioning production devices. You can override the baked path during the
-image build with `RHYTHM_PROD_PAA_TRUST_STORE_PATH`.
+Do not add `RHYTHM_MATTER_PAA_TRUST_STORE_PATH` to stable/prod images until
+the production PAA roots are provisioned on every shipped appliance.
 
 The image lands at:
 

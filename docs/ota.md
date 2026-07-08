@@ -16,7 +16,7 @@ release.sh ── tag ────▶│ ci.yml: release-plan → binaries (+ima
 | Term | Values | What it is |
 |------|--------|------------|
 | **Channel** | `beta` / `stable` | Which OTA feed a device polls. Beta = every tagged release (`rpiz/`). Stable = promoted releases (`rpiz-stable/`), consumed by the fleet's daily auto-update window. |
-| **Image posture** | `dev` / `prod` | Security posture *baked into a rootfs image*: dev = bring-up extras (Dropbear, root password `rhythm`, Matter attestation bypass); prod = hardened. Flags: `build-rpiz-image.sh --dev/--prod`, workflow input `image_mode`. `auto` maps beta→dev, stable→prod. |
+| **Image posture** | `dev` / `prod` | Security posture *baked into a rootfs image*: dev = bring-up extras (Dropbear, root password `rhythm`, Matter attestation bypass); prod = no Dropbear or known root password, while Matter attestation bypass remains enabled until production PAA provisioning is wired. Flags: `build-rpiz-image.sh --dev/--prod`, workflow input `image_mode`. `auto` maps beta→dev, stable→prod. |
 | **Dev loop** | — | `push-rpiz-dev.sh`: cross-compile and scp a binary straight to a bench device. Not OTA at all. |
 
 ## Channels
