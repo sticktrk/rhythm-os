@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use rhythm_matter::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
     ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcJsonValueResponse,
-    ChipRpcListDevicesResponse, ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
-    ChipRpcRequest,
+    ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse, ChipRpcProbeLightResponse,
+    ChipRpcReadOnOffResponse, ChipRpcRequest,
 };
 use rhythm_matter::transport::{CommissionedDevice, MatterDeviceInfo};
 
@@ -102,6 +102,25 @@ impl ChipControllerService {
                 let device = self.backend().probe_light(node_id)?;
                 self.device_store().upsert(device.clone())?;
                 Ok(serde_json::to_value(ChipRpcProbeLightResponse { device })?)
+            }
+            ChipRpcRequest::ScanOperationalNode {
+                node_id,
+                timeout_ms,
+            } => {
+                self.require_initialized()?;
+                let timeout = Duration::from_millis(timeout_ms.min(60_000));
+                let observed = scan_matter_operational_fabrics(HashSet::from([node_id]), timeout)?;
+                let mut fabrics: Vec<String> = observed
+                    .get(&node_id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                fabrics.sort();
+                Ok(serde_json::to_value(ChipRpcOperationalDiscoveryResponse {
+                    node_id,
+                    fabrics,
+                })?)
             }
             ChipRpcRequest::DecommissionDevice { node_id, force } => {
                 self.require_initialized()?;
@@ -600,8 +619,8 @@ mod tests {
 
     use rhythm_matter::chip_rpc::{
         ChipRpcAttributeReportsResponse, ChipRpcCommissionLightResponse, ChipRpcEmpty,
-        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
-        ChipRpcReadOnOffResponse,
+        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse,
+        ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
     };
     use rhythm_matter::transport::{
         MatterColorMode, MatterCommissionRequest, MatterCommissioningNetwork,
@@ -708,6 +727,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(probed.device.light_endpoint, 2);
+
+        let discovery: ChipRpcOperationalDiscoveryResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::ScanOperationalNode {
+                    node_id: 10,
+                    timeout_ms: 0,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(discovery.node_id, 10);
+        assert!(discovery.fabrics.is_empty());
 
         let commissioned: ChipRpcCommissionLightResponse = serde_json::from_value(
             service

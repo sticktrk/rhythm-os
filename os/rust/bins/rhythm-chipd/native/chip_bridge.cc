@@ -868,8 +868,11 @@ public:
     void OnCommissioningFailure(PeerId peerId, CHIP_ERROR error, Controller::CommissioningStage stageFailed,
                                 Optional<Credentials::AttestationVerificationResult> additionalErrorInfo) override
     {
-        (void) stageFailed;
-        (void) additionalErrorInfo;
+        ChipLogError(Controller,
+                     "Matter commissioning failed: node=" ChipLogFormatX64 " stage=%u error=%" CHIP_ERROR_FORMAT
+                     " attestation=%d",
+                     ChipLogValueX64(peerId.GetNodeId()), static_cast<unsigned>(stageFailed), error.Format(),
+                     additionalErrorInfo.HasValue() ? static_cast<int>(additionalErrorInfo.Value()) : -1);
         Complete(peerId.GetNodeId(), error);
     }
 
