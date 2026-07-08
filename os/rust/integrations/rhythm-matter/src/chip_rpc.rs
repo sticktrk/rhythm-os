@@ -173,6 +173,7 @@ pub enum ChipRpcErrorKind {
     Other,
     ControllerUninitialized,
     BleCommissioningStack,
+    OperationalDiscovery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +214,16 @@ impl ChipRpcError {
             };
         }
 
+        if is_operational_discovery_message(&lower) {
+            return Self {
+                message,
+                kind: ChipRpcErrorKind::OperationalDiscovery,
+                recoverable: true,
+                requires_restart: true,
+                retry_after_ms: Some(BLE_RECOVERY_RETRY_AFTER_MS),
+            };
+        }
+
         Self {
             message,
             kind: ChipRpcErrorKind::Other,
@@ -239,6 +250,12 @@ impl ChipRpcError {
 
     pub fn is_recoverable_ble_commissioning_stack_failure(&self) -> bool {
         self.kind == ChipRpcErrorKind::BleCommissioningStack
+            && self.recoverable
+            && self.requires_restart
+    }
+
+    pub fn is_recoverable_operational_discovery_failure(&self) -> bool {
+        self.kind == ChipRpcErrorKind::OperationalDiscovery
             && self.recoverable
             && self.requires_restart
     }
@@ -294,6 +311,21 @@ fn is_ble_commissioning_stack_message(lower_message: &str) -> bool {
     .any(|needle| lower_message.contains(needle));
 
     has_ble_source && has_recoverable_failure
+}
+
+/// Operational discovery failed after commissioning reached the network stage:
+/// the device is on the LAN but the controller's mDNS resolve timed out. Seen
+/// when chipd's minimal-mDNS sockets go stale after a wlan0 address change
+/// (issue #117) — every broadcast fails with `Address not available` until the
+/// sidecar restarts, so the failure is unrecoverable without a restart.
+fn is_operational_discovery_message(lower_message: &str) -> bool {
+    let has_discovery_source = lower_message.contains("addressresolve")
+        || lower_message.contains("operational discovery failed");
+
+    let has_timeout = lower_message.contains("chip error 0x00000032")
+        || lower_message.contains("timeout");
+
+    has_discovery_source && has_timeout
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +434,29 @@ mod tests {
                 error.kind,
                 ChipRpcErrorKind::BleCommissioningStack,
                 "expected BLE stack classification for {message}"
+            );
+            assert!(error.recoverable);
+            assert!(error.requires_restart);
+            assert_eq!(error.retry_after_ms, Some(BLE_RECOVERY_RETRY_AFTER_MS));
+        }
+    }
+
+    /// Regression for issue #117: after a wlan0 address change wedged chipd's
+    /// mDNS sockets, commissioning failed at operational discovery with an
+    /// AddressResolve timeout. The error was classified `Other`, so the
+    /// sidecar was never restarted and every retry failed identically.
+    #[test]
+    fn rpc_error_classifies_operational_discovery_failures() {
+        for message in [
+            "commissioning Matter light: src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: CHIP Error 0x00000032: Timeout",
+            "OperationalSessionSetup[1:0000000000000066]: operational discovery failed: src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: CHIP Error 0x00000032: Timeout",
+        ] {
+            let error = ChipRpcError::from_message(message);
+
+            assert_eq!(
+                error.kind,
+                ChipRpcErrorKind::OperationalDiscovery,
+                "expected operational-discovery classification for {message}"
             );
             assert!(error.recoverable);
             assert!(error.requires_restart);

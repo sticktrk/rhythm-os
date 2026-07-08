@@ -169,6 +169,10 @@ fn summarize_commissioning_error(error: &anyhow::Error) -> String {
     let detail = format!("{:#}", error);
     let lower = detail.to_ascii_lowercase();
 
+    if lower.contains("addressresolve") || lower.contains("operational discovery failed") {
+        return "The light joined the Wi-Fi network, but Rhythm could not discover it over mDNS afterwards. Rhythm reset its Matter controller to recover; wait a few seconds and retry pairing without factory-resetting the light.".to_string();
+    }
+
     if lower.contains("gatt write characteristic operation failed") {
         return "Matter BLE commissioning reached the bulb, but macOS CoreBluetooth failed the GATT write. This matches the current official Matter controller behavior on this host. Try Linux/BlueZ or the appliance target for real commissioning.".to_string();
     }
@@ -867,6 +871,25 @@ mod tests {
         let message = summarize_commissioning_error(&error);
 
         assert!(message.contains("timed out while discovering the bulb"));
+    }
+
+    /// Regression for issue #117: operational-discovery timeouts were
+    /// summarized with the BLE-discovery message telling the user to
+    /// factory-reset the bulb and keep it close — advice that cannot help
+    /// when the host's mDNS resolution is what actually failed.
+    #[test]
+    fn commissioning_error_summarizes_operational_discovery_timeouts() {
+        let error = anyhow::anyhow!(
+            "commissioning Matter light: src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: CHIP Error 0x00000032: Timeout"
+        )
+        .context("Matter operational discovery failed; reset CHIP sidecar before next attempt");
+
+        let message = summarize_commissioning_error(&error);
+
+        assert!(message.contains("could not discover it over mDNS"));
+        assert!(message.contains("retry pairing"));
+        assert!(!message.contains("Factory-reset the bulb"));
+        assert!(!message.contains("AddressResolve_DefaultImpl.cpp"));
     }
 
     #[test]
