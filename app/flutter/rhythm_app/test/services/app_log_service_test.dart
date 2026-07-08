@@ -20,7 +20,10 @@ void main() {
     expect(snapshot, isNot(contains('secret')));
   });
 
-  test('caps stored log text to a small support bundle budget', () async {
+  test('caps stored log text to the support bundle budget', () async {
+    // Budget sized so the bundled app.log spans the whole support
+    // interaction (issue #123 lost the removal attempt one minute before
+    // the report), while staying well under the transfer path's limits.
     for (var i = 0; i < 1000; i++) {
       AppLogService.instance.record(
         '${i.toString().padLeft(4, '0')} ${'x' * 1000}',
@@ -29,7 +32,7 @@ void main() {
 
     final snapshot = await AppLogService.instance.snapshotText();
 
-    expect(snapshot.length, lessThanOrEqualTo(241000));
+    expect(snapshot.length, lessThanOrEqualTo(513000));
     expect(snapshot, contains('0999'));
     expect(snapshot, isNot(contains('0000')));
   });

@@ -55,6 +55,25 @@ class RhythmWifiChangeResponse {
   bool get accepted => httpStatus == 200 && error == null;
 }
 
+/// Outcome of asking the device to submit its debug bundle directly.
+class RhythmDebugBundleSubmissionResult {
+  const RhythmDebugBundleSubmissionResult({
+    this.uploadedFileName,
+    this.uploadedSizeBytes,
+    this.legacyBundle,
+  });
+
+  /// Set when the device uploaded the bundle itself.
+  final String? uploadedFileName;
+  final int? uploadedSizeBytes;
+
+  /// Set when the firmware predates direct upload and returned the bundle
+  /// bytes instead — the caller uploads them the old way.
+  final RhythmDebugBundle? legacyBundle;
+
+  bool get uploadedByDevice => uploadedFileName != null;
+}
+
 /// Lightweight HTTP client for device diagnostic endpoints.
 ///
 /// Can be instantiated directly with a host for one-off operations
@@ -161,6 +180,83 @@ class RhythmDiagnosticsApi {
       throw _wrapDioException(
         e,
         message: 'Failed to generate debug bundle',
+      );
+    }
+  }
+
+  /// Ask the device to build the debug bundle and upload it straight to
+  /// [uploadUrl] (a signed storage upload URL), embedding [appLog] +
+  /// [appMetadata] as `app/app.log` / `app/metadata.json`.
+  ///
+  /// This keeps large bundles out of the app's memory and receive-timeout
+  /// window — the transfer that used to time out was device -> app -> cloud.
+  /// Firmware that predates direct upload ignores the request body and
+  /// replies with the bundle bytes; that surfaces as [legacyBundle] so the
+  /// caller can fall back to uploading from the app.
+  Future<RhythmDebugBundleSubmissionResult> submitDebugBundle({
+    required String uploadUrl,
+    String? appLog,
+    Map<String, dynamic>? appMetadata,
+  }) async {
+    try {
+      final response = await _dio.post(
+        'api/diag/debug-bundle',
+        data: {
+          'upload_url': uploadUrl,
+          if (appLog != null) 'app_log': appLog,
+          if (appMetadata != null) 'app_metadata': appMetadata,
+        },
+        options: Options(
+          responseType: ResponseType.bytes,
+          receiveTimeout: _debugBundleReceiveTimeout,
+          validateStatus: (_) => true,
+        ),
+      );
+
+      final contentType = response.headers.value('content-type') ?? '';
+      if (contentType.contains('application/gzip')) {
+        _throwForUnexpectedStatus(
+          response,
+          message: 'Failed to generate debug bundle',
+        );
+        return RhythmDebugBundleSubmissionResult(
+          legacyBundle: RhythmDebugBundle(
+            fileName: _attachmentFileName(
+                  response.headers.value('content-disposition'),
+                ) ??
+                'rhythm-debug-bundle.tar.gz',
+            bytes: _asBytes(
+              response.data,
+              errorMessage: 'Server returned an invalid debug bundle.',
+            ),
+            contentType: contentType,
+          ),
+        );
+      }
+
+      _throwForUnexpectedStatus(
+        response,
+        message: 'Device debug bundle upload failed',
+      );
+      final json = jsonDecode(utf8.decode(_asBytes(
+        response.data,
+        errorMessage: 'Server returned an invalid upload response.',
+      ))) as Map<String, dynamic>;
+      if (json['uploaded'] != true) {
+        throw RhythmApiException(
+          'Device debug bundle upload failed',
+          statusCode: response.statusCode,
+          serverMessage: json['message'] as String?,
+        );
+      }
+      return RhythmDebugBundleSubmissionResult(
+        uploadedFileName: json['file_name'] as String?,
+        uploadedSizeBytes: (json['size_bytes'] as num?)?.toInt(),
+      );
+    } on DioException catch (e) {
+      throw _wrapDioException(
+        e,
+        message: 'Device debug bundle upload failed',
       );
     }
   }

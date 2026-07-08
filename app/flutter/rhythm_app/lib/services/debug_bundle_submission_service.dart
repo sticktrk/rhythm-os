@@ -71,6 +71,18 @@ class DebugBundleSubmissionException implements Exception {
   String toString() => message;
 }
 
+/// Outcome of asking the device to upload the bundle to storage itself.
+class DeviceDirectUploadOutcome {
+  const DeviceDirectUploadOutcome({this.submission, this.legacyBundle});
+
+  /// Set when the device uploaded and the submission completed end-to-end.
+  final DebugBundleSubmission? submission;
+
+  /// Set when the firmware predates direct upload and returned the bundle
+  /// bytes; the caller feeds them into the classic [submit] path.
+  final RhythmDebugBundle? legacyBundle;
+}
+
 class DebugBundleSubmissionService {
   DebugBundleSubmissionService._();
 
@@ -83,6 +95,96 @@ class DebugBundleSubmissionService {
       _instance ??= DebugBundleSubmissionService._();
 
   static const _uuid = Uuid();
+
+  /// Preferred submission path: mint a signed upload URL and let the device
+  /// push the bundle straight to storage. Large bundles no longer round-trip
+  /// through the app (the old device -> app hop is what timed out in the
+  /// field), and the app log rides along in the request so the device embeds
+  /// it. Throws on failure; callers fall back to the download-then-upload
+  /// path.
+  Future<DeviceDirectUploadOutcome> submitViaDeviceUpload({
+    required Hub serverHub,
+    required RhythmDiagnosticsApi deviceClient,
+    required String serverVersion,
+    required String serverPlatformContext,
+    String? summary,
+  }) async {
+    final auth = AuthService();
+    final userId = auth.currentUserId;
+    final client = _client;
+
+    if (client == null || userId == null || auth.currentUser == null) {
+      throw const DebugBundleSubmissionException(
+        'Debug bundle submissions are unavailable right now.',
+      );
+    }
+
+    final packageInfo = await _loadPackageInfo();
+    final submissionId = _uuid.v4();
+    final fileName = _sanitizeFileName(
+      'rhythm-debug-bundle-$serverPlatformContext-$submissionId.tar.gz',
+    );
+    final storagePath = _buildStoragePath(
+      userId: userId,
+      submissionId: submissionId,
+      fileName: fileName,
+    );
+
+    final signedUpload =
+        await client.storage.from(bucketName).createSignedUploadUrl(storagePath);
+
+    final result = await deviceClient.submitDebugBundle(
+      uploadUrl: signedUpload.signedUrl,
+      appLog: await AppLogService.instance.snapshotText(),
+      appMetadata: _appLogMetadata(packageInfo),
+    );
+
+    if (!result.uploadedByDevice) {
+      return DeviceDirectUploadOutcome(legacyBundle: result.legacyBundle);
+    }
+
+    late final DebugBundleSubmission submission;
+    try {
+      final row = await client
+          .from(tableName)
+          .insert({
+            'id': submissionId,
+            'user_id': userId,
+            'user_email': auth.currentUser?.email,
+            'is_anonymous': auth.isAnonymous,
+            'summary': _normalizeSummary(summary),
+            'app_version': packageInfo.version,
+            'app_build': packageInfo.buildNumber,
+            'app_platform': _platformLabel(),
+            'server_hub_id': serverHub.id,
+            'server_name': serverHub.name,
+            'server_host': serverHub.endpoint.host,
+            'server_port': serverHub.endpoint.port,
+            'server_version': serverVersion,
+            'server_platform_context': serverPlatformContext,
+            'bundle_storage_path': storagePath,
+            'bundle_file_name': result.uploadedFileName ?? fileName,
+            'bundle_content_type': 'application/gzip',
+            'bundle_size_bytes': result.uploadedSizeBytes,
+          })
+          .select()
+          .single();
+
+      submission =
+          DebugBundleSubmission.fromRow(Map<String, dynamic>.from(row));
+    } catch (error) {
+      await _deleteUploadedBundle(client, storagePath);
+      throw DebugBundleSubmissionException(
+        _formatInsertError(error),
+        cause: error,
+      );
+    }
+
+    final issueReport = await _createGitHubIssue(client, submission.id);
+    return DeviceDirectUploadOutcome(
+      submission: _applyGitHubIssueReport(submission, issueReport),
+    );
+  }
 
   Future<DebugBundleSubmission> submit({
     required Hub serverHub,
@@ -274,6 +376,7 @@ class DebugBundleSubmissionService {
     return _appendAppLogToBundle(
       bundle: bundle,
       appLogText: await AppLogService.instance.snapshotText(),
+      metadata: _appLogMetadata(await _loadPackageInfo()),
     );
   }
 
@@ -282,11 +385,26 @@ class DebugBundleSubmissionService {
     _addAppLogFiles(
       archive,
       await AppLogService.instance.snapshotText(),
+      metadata: _appLogMetadata(await _loadPackageInfo()),
     );
     return _encodeArchive(
       archive: archive,
       fileName: _appOnlyBundleFileName(),
     );
+  }
+
+  /// Bundle-embedded metadata for app/app.log. App version/build/platform
+  /// used to travel only via the DB row and issue body — inside the bundle
+  /// they survive even when the issue text is unavailable.
+  Map<String, dynamic> _appLogMetadata(PackageInfo packageInfo) {
+    return {
+      'kind': 'rhythm_app_log',
+      'generated_at': DateTime.now().toUtc().toIso8601String(),
+      'path': 'app/app.log',
+      'app_version': packageInfo.version,
+      'app_build': packageInfo.buildNumber,
+      'app_platform': _platformLabel(),
+    };
   }
 
   @visibleForTesting
@@ -312,6 +430,7 @@ class DebugBundleSubmissionService {
   static RhythmDebugBundle _appendAppLogToBundle({
     required RhythmDebugBundle bundle,
     required String appLogText,
+    Map<String, dynamic>? metadata,
   }) {
     final archive = _decodeTarGz(bundle.bytes) ??
         (Archive()
@@ -324,7 +443,7 @@ class DebugBundleSubmissionService {
             'The original server bundle could not be decoded by the app. '
                 'It is preserved as server/${_safeArchiveFileName(bundle.fileName)}.\n',
           )));
-    _addAppLogFiles(archive, appLogText);
+    _addAppLogFiles(archive, appLogText, metadata: metadata);
     return _encodeArchive(
       archive: archive,
       fileName: _ensureTarGzFileName(bundle.fileName),
@@ -364,15 +483,20 @@ class DebugBundleSubmissionService {
     return archive;
   }
 
-  static void _addAppLogFiles(Archive archive, String appLogText) {
+  static void _addAppLogFiles(
+    Archive archive,
+    String appLogText, {
+    Map<String, dynamic>? metadata,
+  }) {
     archive.addFile(ArchiveFile.string('app/app.log', appLogText));
     archive.addFile(ArchiveFile.string(
       'app/metadata.json',
-      jsonEncode({
-        'kind': 'rhythm_app_log',
-        'generated_at': DateTime.now().toUtc().toIso8601String(),
-        'path': 'app/app.log',
-      }),
+      jsonEncode(metadata ??
+          {
+            'kind': 'rhythm_app_log',
+            'generated_at': DateTime.now().toUtc().toIso8601String(),
+            'path': 'app/app.log',
+          }),
     ));
   }
 

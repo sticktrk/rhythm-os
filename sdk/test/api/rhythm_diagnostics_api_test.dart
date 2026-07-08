@@ -39,6 +39,57 @@ void main() {
       expect(result, isNull);
     });
 
+    test('submitDebugBundle reports a device-side upload on new firmware',
+        () async {
+      server = await _FakeDiagnosticsServer.start(supportsDirectUpload: true);
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      final result = await api.submitDebugBundle(
+        uploadUrl: 'https://storage.example.com/signed-upload',
+        appLog: 'line one\nline two\n',
+        appMetadata: {'app_version': '9.9.9'},
+      );
+
+      expect(result.uploadedByDevice, isTrue);
+      expect(result.uploadedFileName, 'rhythm-debug-bundle-test.tar.gz');
+      expect(result.uploadedSizeBytes, 4321);
+      expect(result.legacyBundle, isNull);
+      expect(server!.debugBundleBodies, hasLength(1));
+      expect(
+        server!.debugBundleBodies.single['upload_url'],
+        'https://storage.example.com/signed-upload',
+      );
+      expect(
+        server!.debugBundleBodies.single['app_log'],
+        'line one\nline two\n',
+      );
+    });
+
+    test('submitDebugBundle falls back to bundle bytes on older firmware',
+        () async {
+      server = await _FakeDiagnosticsServer.start();
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      final result = await api.submitDebugBundle(
+        uploadUrl: 'https://storage.example.com/signed-upload',
+        appLog: 'line one\n',
+      );
+
+      expect(result.uploadedByDevice, isFalse);
+      expect(result.legacyBundle, isNotNull);
+      expect(result.legacyBundle!.bytes, [1, 2, 3, 4]);
+      expect(
+        result.legacyBundle!.fileName,
+        'rhythm-debug-bundle-test.tar.gz',
+      );
+    });
+
     test('downloadDebugBundle posts bundle route and returns attachment',
         () async {
       server = await _FakeDiagnosticsServer.start();
@@ -175,25 +226,34 @@ class _FakeDiagnosticsServer {
     this._server, {
     required this.debugBundleStatusCode,
     required this.debugBundleDelay,
+    required this.supportsDirectUpload,
   });
 
   final HttpServer _server;
   final int debugBundleStatusCode;
   final Duration debugBundleDelay;
+
+  /// Mimics firmware with device-direct upload: a request body carrying
+  /// `upload_url` gets a JSON `{uploaded: true}` reply instead of bundle
+  /// bytes. When false the body is ignored, like pre-upload firmware.
+  final bool supportsDirectUpload;
   final List<String> requests = [];
   final List<Map<String, dynamic>> wifiBodies = [];
+  final List<Map<String, dynamic>> debugBundleBodies = [];
 
   int get port => _server.port;
 
   static Future<_FakeDiagnosticsServer> start({
     int debugBundleStatusCode = HttpStatus.ok,
     Duration debugBundleDelay = Duration.zero,
+    bool supportsDirectUpload = false,
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeDiagnosticsServer._(
       server,
       debugBundleStatusCode: debugBundleStatusCode,
       debugBundleDelay: debugBundleDelay,
+      supportsDirectUpload: supportsDirectUpload,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -211,6 +271,15 @@ class _FakeDiagnosticsServer {
 
     if (request.method == 'POST' &&
         request.uri.path == '/api/diag/debug-bundle') {
+      final rawBody = await utf8.decoder.bind(request).join();
+      Map<String, dynamic>? body;
+      if (rawBody.trim().isNotEmpty) {
+        try {
+          body = Map<String, dynamic>.from(jsonDecode(rawBody) as Map);
+          debugBundleBodies.add(body);
+        } catch (_) {}
+      }
+
       if (debugBundleDelay > Duration.zero) {
         await Future<void>.delayed(debugBundleDelay);
       }
@@ -219,6 +288,15 @@ class _FakeDiagnosticsServer {
         request.response.statusCode = debugBundleStatusCode;
         request.response.write('bundle failed');
         await request.response.close();
+        return;
+      }
+
+      if (supportsDirectUpload && body?['upload_url'] != null) {
+        await _writeJson(request.response, {
+          'uploaded': true,
+          'file_name': 'rhythm-debug-bundle-test.tar.gz',
+          'size_bytes': 4321,
+        });
         return;
       }
 
