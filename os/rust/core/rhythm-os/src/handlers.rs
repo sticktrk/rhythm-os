@@ -722,7 +722,7 @@ fn appliance_delete_unpair_request(
 
     Ok(native_id.map(|device_id| crate::pairing::UnpairingRequest {
         hub_type: "matter".to_string(),
-        params: serde_json::json!({ "device_id": device_id, "force": true }),
+        params: serde_json::json!({ "device_id": device_id, "force": false }),
     }))
 }
 
@@ -3025,6 +3025,7 @@ mod tests {
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_core::{RhythmMode, RoomModeDefault, RoomModeState};
     use rhythm_runtime_api::{
         LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
         RuntimeResult, RuntimeSnapshot,
@@ -5293,6 +5294,25 @@ mod tests {
     fn delete_device_hard_removes_canonical_topology_and_registry_entries() {
         let (state, registry, canonical_id, room_id, hub_key) =
             handler_state_with_canonical_light();
+        {
+            let mut s = state.lock().unwrap();
+            s.mode_configs
+                .get_mut(&RhythmMode::Day)
+                .unwrap()
+                .room_defaults
+                .push(RoomModeDefault {
+                    room_id: canonical_id.clone(),
+                    state: RoomModeState::Active,
+                });
+            s.mode_configs
+                .get_mut(&RhythmMode::Sleep)
+                .unwrap()
+                .room_defaults
+                .push(RoomModeDefault {
+                    room_id: canonical_id.clone(),
+                    state: RoomModeState::HardOff,
+                });
+        }
 
         let r = handle_delete_device(&state, "device-1");
         assert_eq!(r.status, 204);
@@ -5305,6 +5325,10 @@ mod tests {
             .hub_room_bindings
             .iter()
             .any(|t| t.hub_key == hub_key && t.hub_room_id == "device-1"));
+        assert!(s.mode_configs().into_iter().all(|config| config
+            .room_defaults
+            .iter()
+            .all(|default| default.room_id != canonical_id)));
         drop(s);
 
         let reg = registry.lock().unwrap();
@@ -5313,7 +5337,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_device_on_appliance_matter_uses_unpairing() {
+    fn delete_device_on_appliance_matter_gracefully_unpairs_before_local_cleanup() {
         let (state, registry, canonical_id, room_id, hub_key) =
             handler_state_with_canonical_light_for_hub("matter", "matter-100");
         let calls = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
@@ -5343,7 +5367,7 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, "matter");
         assert_eq!(recorded[0].1["device_id"], "matter-100");
-        assert_eq!(recorded[0].1["force"], true);
+        assert_eq!(recorded[0].1["force"], false);
         drop(recorded);
 
         let s = state.lock().unwrap();
