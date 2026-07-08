@@ -134,6 +134,30 @@ void main() {
       expect(seen, contains('Updated, restarting'));
     });
 
+    test('treats up-to-date update status as terminal', () async {
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: Stream<ProvisioningStatusMessage>.value(
+          const ProvisioningStatusMessage(
+            status: 'updating',
+            ip: '192.168.1.157',
+            otaStage: 'up_to_date',
+            message: 'Device is already on the latest stable update',
+          ),
+        ),
+        readStatus: () async =>
+            const ProvisioningStatusMessage(status: 'updating'),
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 50),
+      );
+
+      expect(status.isConnected, isTrue);
+      expect(status.isTerminal, isTrue);
+      expect(status.ip, '192.168.1.157');
+    });
+
     test('treats BLE disconnect after update progress as restart pending',
         () async {
       final seen = <String>[];

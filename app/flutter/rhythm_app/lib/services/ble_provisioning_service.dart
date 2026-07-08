@@ -32,11 +32,13 @@ class BleDeviceInfo {
   final String name;
   final String version;
   final String? mac;
+  final ProvisioningStatusMessage? provisioningStatus;
 
   const BleDeviceInfo({
     required this.name,
     required this.version,
     this.mac,
+    this.provisioningStatus,
   });
 }
 
@@ -79,10 +81,20 @@ class ProvisioningStatusMessage {
   });
 
   bool get isTerminal =>
-      status == 'connected' ||
+      isConnected ||
       status == 'restarting' ||
       status == 'wifi_failed' ||
       status == 'failed';
+
+  bool get isConnected =>
+      status == 'connected' ||
+      (status == 'updating' && otaStage == 'up_to_date');
+
+  bool get canResume =>
+      isTerminal ||
+      ((status == 'updating' || status == 'restarting') &&
+          ip != null &&
+          ip!.trim().isNotEmpty);
 }
 
 class BleProvisioningService {
@@ -320,14 +332,18 @@ class BleProvisioningService {
     final initialStatus = await _readStatus(_statusChar!);
     if (requireProvisioningReady &&
         initialStatus.status != 'waiting' &&
-        initialStatus.status != 'wifi_failed') {
+        initialStatus.status != 'wifi_failed' &&
+        !initialStatus.canResume) {
       await disconnect();
       throw StateError(
         'Device is not ready for provisioning (status: ${initialStatus.status})',
       );
     }
 
-    return _readDeviceInfo(_deviceInfoChar!);
+    return _readDeviceInfo(
+      _deviceInfoChar!,
+      provisioningStatus: initialStatus,
+    );
   }
 
   Future<String> requestOwnerToken({
@@ -398,18 +414,47 @@ class BleProvisioningService {
       pollInterval: _statusPollInterval,
     );
 
+    return _resultFromTerminalStatus(status);
+  }
+
+  Future<BleProvisioningResult> waitForProvisioningResult({
+    void Function(ProvisioningStatusMessage status)? onStatus,
+  }) async {
+    final statusChar = _statusChar;
+    if (statusChar == null) {
+      throw StateError('Not connected to a provisioning device');
+    }
+
+    final status = await waitForTerminalProvisioningStatus(
+      enableNotifications: () => statusChar.setNotifyValue(true),
+      writePayload: () async {},
+      statusUpdates: statusChar.onValueReceived.map(_parseStatus),
+      readStatus: () => _readStatus(statusChar),
+      onStatus: onStatus,
+      timeout: _provisioningTimeout,
+      pollInterval: _statusPollInterval,
+    );
+
+    return _resultFromTerminalStatus(status);
+  }
+
+  BleProvisioningResult _resultFromTerminalStatus(
+    ProvisioningStatusMessage status,
+  ) {
+    if (status.isConnected) {
+      final ip = status.ip;
+      if (ip == null || ip.isEmpty) {
+        throw StateError('Provisioning succeeded without an IP address');
+      }
+      final ownerToken = status.ownerToken?.trim();
+      return BleProvisioningResult(
+        ip: ip,
+        ownerToken:
+            ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
+      );
+    }
+
     switch (status.status) {
-      case 'connected':
-        final ip = status.ip;
-        if (ip == null || ip.isEmpty) {
-          throw StateError('Provisioning succeeded without an IP address');
-        }
-        final ownerToken = status.ownerToken?.trim();
-        return BleProvisioningResult(
-          ip: ip,
-          ownerToken:
-              ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
-        );
       case 'restarting':
         final ip = status.ip;
         if (ip == null || ip.isEmpty) {
@@ -626,8 +671,9 @@ class BleProvisioningService {
   }
 
   Future<BleDeviceInfo> _readDeviceInfo(
-    BluetoothCharacteristic characteristic,
-  ) async {
+    BluetoothCharacteristic characteristic, {
+    ProvisioningStatusMessage? provisioningStatus,
+  }) async {
     final bytes = await characteristic.read();
     final jsonMap = _decodeJson(bytes);
 
@@ -640,6 +686,7 @@ class BleProvisioningService {
           ? (jsonMap['version'] as String).trim()
           : 'unknown',
       mac: mac == null || mac.isEmpty ? null : mac,
+      provisioningStatus: provisioningStatus,
     );
   }
 
