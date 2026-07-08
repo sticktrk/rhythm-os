@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
+import '../services/matter_removal_flow.dart';
 import 'off_behavior_switch.dart';
 import 'room_picker_sheet.dart';
 import 'segmented_tab_bar.dart';
@@ -851,7 +852,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           style: TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          'This will decommission "${widget.device.displayName}" and remove it from your system. The device can be re-paired afterwards.',
+          'This will decommission "${widget.device.displayName}" and remove it from your system. The device can be re-paired afterwards.\n\nIf the device is offline this can take a minute, after which you can force-remove it.',
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -868,27 +869,61 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
 
     if (confirmed != true || !context.mounted) return;
-    await _removeDevice(context, force: true);
+    await _removeDevice(context);
   }
 
-  Future<void> _removeDevice(BuildContext context,
-      {required bool force}) async {
+  Future<void> _removeDevice(BuildContext context) async {
     final nativeId = _matterNativeId;
     if (nativeId == null) return;
 
-    setState(() => _removing = true);
-
     final syncProvider = context.read<ServerSyncProvider>();
-    final result = await syncProvider.api.unpairDevice(
-      hubType: 'matter',
-      deviceId: nativeId,
-      force: force,
+    final api = syncProvider.api;
+
+    final outcome = await runMatterRemovalFlow(
+      unpair: ({required bool force}) {
+        if (mounted) setState(() => _removing = true);
+        return api.unpairDevice(
+          hubType: 'matter',
+          deviceId: nativeId,
+          force: force,
+        );
+      },
+      confirmForceRemove: (error) async {
+        if (!context.mounted) return false;
+        setState(() => _removing = false);
+        // Offer force-remove if the device is unreachable.
+        final forceRemove = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: CelestialColors.backgroundCard,
+            title: const Text(
+              'Removal Failed',
+              style: TextStyle(color: CelestialColors.textPrimary),
+            ),
+            content: Text(
+              '$error\n\nForce remove? This cleans up local state without contacting the device.',
+              style: const TextStyle(color: CelestialColors.textSecondary),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: Text('Force Remove',
+                    style: TextStyle(color: Colors.red.shade300)),
+              ),
+            ],
+          ),
+        );
+        return forceRemove == true && context.mounted;
+      },
     );
 
     if (!context.mounted) return;
 
-    final status = result?['status'] as String?;
-    if (status == 'complete') {
+    if (outcome == MatterRemovalOutcome.removed) {
       await syncProvider.connection.reconnect();
       if (!context.mounted) return;
       Navigator.of(context).pop();
@@ -896,38 +931,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         SnackBar(content: Text('Removed ${widget.device.displayName}')),
       );
     } else {
-      final error = result?['error'] as String? ?? 'Unknown error';
       setState(() => _removing = false);
-      if (!context.mounted) return;
-      // Offer force-remove if the device is unreachable.
-      final forceRemove = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: CelestialColors.backgroundCard,
-          title: const Text(
-            'Removal Failed',
-            style: TextStyle(color: CelestialColors.textPrimary),
-          ),
-          content: Text(
-            '$error\n\nForce remove? This cleans up local state without contacting the device.',
-            style: const TextStyle(color: CelestialColors.textSecondary),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text('Force Remove',
-                  style: TextStyle(color: Colors.red.shade300)),
-            ),
-          ],
-        ),
-      );
-      if (forceRemove == true && context.mounted) {
-        await _removeDevice(context, force: true);
-      }
     }
   }
 

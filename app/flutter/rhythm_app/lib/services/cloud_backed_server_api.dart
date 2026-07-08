@@ -693,11 +693,13 @@ class CloudBackedServerApi {
     required String hubType,
     required String deviceId,
     bool force = false,
+    Duration receiveTimeout = const Duration(seconds: 90),
   }) {
     return _delegate.unpairDevice(
       hubType: hubType,
       deviceId: deviceId,
       force: force,
+      receiveTimeout: receiveTimeout,
     );
   }
 
