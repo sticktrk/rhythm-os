@@ -233,6 +233,7 @@ struct DebugBundleRequest {
 }
 
 const DEBUG_BUNDLE_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const DEBUG_BUNDLE_UPLOAD_CACHE_CONTROL: &str = "3600";
 
 /// The upload URL comes from the authenticated app, but the device still
 /// refuses to POST its diagnostics anywhere unencrypted — except loopback,
@@ -250,6 +251,55 @@ fn upload_url_is_acceptable(url: &str) -> bool {
         .and_then(|bracketed| bracketed.split(']').next())
         .unwrap_or_else(|| host_port.split(':').next().unwrap_or(""));
     host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+fn debug_bundle_upload_boundary(size_bytes: usize) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "rhythm-debug-bundle-{}-{nanos}-{size_bytes}",
+        std::process::id()
+    )
+}
+
+fn append_multipart_text_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("content-disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+fn append_multipart_file_field(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(format!("content-type: {content_type}\r\n").as_bytes());
+    body.extend_from_slice(b"content-disposition: form-data; name=\"\"; filename=\"\"\r\n\r\n");
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(b"\r\n");
+}
+
+/// Supabase signed upload URLs use `multipart/form-data` for `PUT` uploads.
+/// This mirrors `storage_client`'s `uploadBinaryToSignedUrl` wire shape so the
+/// device can upload directly with only the signed URL from the app.
+fn supabase_signed_upload_body(bundle_bytes: Vec<u8>, boundary: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(bundle_bytes.len() + 512);
+    append_multipart_text_field(
+        &mut body,
+        boundary,
+        "cacheControl",
+        DEBUG_BUNDLE_UPLOAD_CACHE_CONTROL,
+    );
+    append_multipart_file_field(&mut body, boundary, "application/gzip", bundle_bytes);
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
 }
 
 async fn debug_bundle(
@@ -316,16 +366,21 @@ async fn debug_bundle(
         return tar_gz_attachment(&bundle.file_name, bundle.bytes);
     };
 
-    let size_bytes = bundle.bytes.len();
+    let upload_file_name = bundle.file_name;
+    let bundle_bytes = bundle.bytes;
+    let size_bytes = bundle_bytes.len();
     let upload_result = async {
+        let boundary = debug_bundle_upload_boundary(size_bytes);
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        let upload_body = supabase_signed_upload_body(bundle_bytes, &boundary);
         let client = reqwest::Client::builder()
             .timeout(DEBUG_BUNDLE_UPLOAD_TIMEOUT)
             .build()?;
         let response = client
             .put(&upload_url)
-            .header(reqwest::header::CONTENT_TYPE, "application/gzip")
+            .header(reqwest::header::CONTENT_TYPE, content_type)
             .header("x-upsert", "false")
-            .body(bundle.bytes)
+            .body(upload_body)
             .send()
             .await?;
         let status = response.status();
@@ -342,7 +397,7 @@ async fn debug_bundle(
             log::info!(
                 target: "http",
                 "Uploaded debug bundle {} ({} bytes) directly to storage in {} ms",
-                bundle.file_name,
+                upload_file_name,
                 size_bytes,
                 started_at.elapsed().as_millis()
             );
@@ -350,7 +405,7 @@ async fn debug_bundle(
                 StatusCode::OK,
                 serde_json::json!({
                     "uploaded": true,
-                    "file_name": bundle.file_name,
+                    "file_name": upload_file_name,
                     "size_bytes": size_bytes,
                 }),
             )
@@ -1647,9 +1702,9 @@ mod tests {
         assert!(!upload_url_is_acceptable("ftp://example.com/upload"));
     }
 
-    /// Direct-to-storage upload: the device PUTs the bundle to the signed
-    /// URL itself (bypassing the app's memory and receive timeout) and
-    /// embeds the app log the request carried.
+    /// Direct-to-storage upload: the device PUTs a Supabase-compatible
+    /// multipart body to the signed URL itself (bypassing the app's memory
+    /// and receive timeout) and embeds the app log the request carried.
     #[tokio::test]
     async fn debug_bundle_handler_uploads_directly_and_embeds_app_log() {
         let data_dir = unique_test_dir("debug-bundle-upload");
@@ -1667,7 +1722,7 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
-            let (headers_end, content_length) = loop {
+            let (headers_end, content_length, head) = loop {
                 let n = socket.read(&mut tmp).await.unwrap();
                 assert!(n > 0, "upload connection closed before headers");
                 buf.extend_from_slice(&tmp[..n]);
@@ -1682,7 +1737,7 @@ mod tests {
                                 .map(|value| value.trim().parse::<usize>().unwrap())
                         })
                         .expect("content-length header");
-                    break (pos + 4, content_length);
+                    break (pos + 4, content_length, head);
                 }
             };
             while buf.len() < headers_end + content_length {
@@ -1695,7 +1750,10 @@ mod tests {
                 .await
                 .unwrap();
             socket.flush().await.unwrap();
-            buf[headers_end..headers_end + content_length].to_vec()
+            (
+                head,
+                buf[headers_end..headers_end + content_length].to_vec(),
+            )
         });
 
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
@@ -1722,7 +1780,44 @@ mod tests {
         assert_eq!(json["uploaded"], true);
         assert!(json["size_bytes"].as_u64().unwrap() > 0);
 
-        let uploaded = received.await.unwrap();
+        let (upload_headers, uploaded_body) = received.await.unwrap();
+        let lower_headers = upload_headers.to_ascii_lowercase();
+        assert!(
+            lower_headers.contains("x-upsert: false"),
+            "signed uploads must preserve no-upsert semantics: {upload_headers}"
+        );
+        let content_type = upload_headers
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+            .expect("content-type header");
+        assert!(
+            content_type.contains("multipart/form-data; boundary="),
+            "Supabase signed upload expects multipart/form-data, got: {content_type}"
+        );
+        let boundary = content_type
+            .split("boundary=")
+            .nth(1)
+            .expect("multipart boundary")
+            .trim();
+        let body_text = String::from_utf8_lossy(&uploaded_body);
+        assert!(
+            body_text
+                .contains("content-disposition: form-data; name=\"cacheControl\"\r\n\r\n3600\r\n"),
+            "missing Supabase cacheControl form field: {body_text:?}"
+        );
+        let file_header = b"content-type: application/gzip\r\ncontent-disposition: form-data; name=\"\"; filename=\"\"\r\n\r\n";
+        let file_start = uploaded_body
+            .windows(file_header.len())
+            .position(|window| window == file_header)
+            .expect("multipart gzip file part")
+            + file_header.len();
+        let file_end_marker = format!("\r\n--{boundary}").into_bytes();
+        let file_end = uploaded_body[file_start..]
+            .windows(file_end_marker.len())
+            .position(|window| window == file_end_marker)
+            .expect("multipart file closing boundary")
+            + file_start;
+        let uploaded = uploaded_body[file_start..file_end].to_vec();
         assert_eq!(
             uploaded.len(),
             json["size_bytes"].as_u64().unwrap() as usize
