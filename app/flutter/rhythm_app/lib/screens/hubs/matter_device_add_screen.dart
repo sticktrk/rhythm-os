@@ -103,6 +103,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   static const _tealDeep = Color(0xFF00838F);
   static const _amber = CelestialColors.sunWarm;
   static const _danger = Color(0xFFEF5350);
+  static const _pairingRequestTimeout = Duration(minutes: 4);
 
   final _setupPayloadController = TextEditingController();
   late final AnimationController _pulseController;
@@ -266,7 +267,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         setupPayload: setupPayload,
         rendezvous: 'auto',
         network: 'wifi',
-        receiveTimeout: const Duration(seconds: 45),
+        receiveTimeout: _pairingRequestTimeout,
         sessionId: _sessionId,
       );
 

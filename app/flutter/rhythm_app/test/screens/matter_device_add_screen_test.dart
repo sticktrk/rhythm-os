@@ -35,9 +35,11 @@ void main() {
     final releaseResponse = Completer<void>();
     try {
       var pairRequestCount = 0;
+      final receiveTimeouts = <Duration>[];
       final api = _FakeRhythmMatterApi(
-        onPair: () async {
+        onPair: (receiveTimeout) async {
           pairRequestCount += 1;
+          receiveTimeouts.add(receiveTimeout);
           await releaseResponse.future;
           return const RhythmMatterPairingResponse(
             httpStatus: 200,
@@ -66,6 +68,7 @@ void main() {
       await tester.tap(transmitButton);
 
       expect(pairRequestCount, 1);
+      expect(receiveTimeouts.single, const Duration(minutes: 4));
 
       releaseResponse.complete();
       await tester.pump(const Duration(milliseconds: 100));
@@ -82,7 +85,8 @@ class _FakeRhythmMatterApi extends RhythmMatterApi {
   _FakeRhythmMatterApi({required this.onPair})
       : super(baseUrl: 'http://127.0.0.1');
 
-  final Future<RhythmMatterPairingResponse> Function() onPair;
+  final Future<RhythmMatterPairingResponse> Function(Duration receiveTimeout)
+      onPair;
 
   @override
   Future<RhythmMatterPairingResponse> pairDevice({
@@ -92,6 +96,6 @@ class _FakeRhythmMatterApi extends RhythmMatterApi {
     Duration receiveTimeout = const Duration(seconds: 45),
     String? sessionId,
   }) {
-    return onPair();
+    return onPair(receiveTimeout);
   }
 }
