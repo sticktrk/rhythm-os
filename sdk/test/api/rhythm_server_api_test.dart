@@ -1850,4 +1850,92 @@ void main() {
       await api.locationSet(lat: 40.0, lon: -90.0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // unpairDevice
+  // ---------------------------------------------------------------------------
+  group('unpairDevice', () {
+    test('posts the unpair request with an extended receive timeout',
+        () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {'status': 'complete', 'device_id': 'matter-100'},
+          ));
+
+      final result = await api.unpairDevice(
+        hubType: 'matter',
+        deviceId: 'matter-100',
+      );
+
+      expect(result?['status'], 'complete');
+
+      final captured = verify(() => dio.post(
+            'api/devices/unpair',
+            data: captureAny(named: 'data'),
+            options: captureAny(named: 'options'),
+          )).captured;
+      expect(captured[0], {
+        'hub_type': 'matter',
+        'params': {'device_id': 'matter-100', 'force': false},
+      });
+      final options = captured[1] as Options;
+      expect(options.receiveTimeout, const Duration(seconds: 90));
+      expect(options.sendTimeout, const Duration(seconds: 90));
+    });
+
+    test('passes force and a custom timeout through to the request',
+        () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {'status': 'complete', 'device_id': 'matter-100'},
+          ));
+
+      await api.unpairDevice(
+        hubType: 'matter',
+        deviceId: 'matter-100',
+        force: true,
+        receiveTimeout: const Duration(seconds: 5),
+      );
+
+      final captured = verify(() => dio.post(
+            'api/devices/unpair',
+            data: captureAny(named: 'data'),
+            options: captureAny(named: 'options'),
+          )).captured;
+      expect(
+        (captured[0] as Map<String, dynamic>)['params'],
+        {'device_id': 'matter-100', 'force': true},
+      );
+      expect((captured[1] as Options).receiveTimeout,
+          const Duration(seconds: 5));
+    });
+
+    test('returns null on DioException', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/devices/unpair'),
+        type: DioExceptionType.receiveTimeout,
+      ));
+
+      final result = await api.unpairDevice(
+        hubType: 'matter',
+        deviceId: 'matter-100',
+      );
+
+      expect(result, isNull);
+    });
+  });
 }

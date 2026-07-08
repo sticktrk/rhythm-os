@@ -1856,20 +1856,32 @@ class RhythmServerApi {
 
   /// Unpair / decommission a device (Matter, Zigbee, etc.).
   ///
+  /// A graceful (non-force) Matter unpair talks to the device over CASE and
+  /// can take up to a minute to fail when the device is offline, so the
+  /// default timeout is well above the connection-level default.
+  ///
   /// Returns the unpair result JSON, or `null` on error.
   Future<Map<String, dynamic>?> unpairDevice({
     required String hubType,
     required String deviceId,
     bool force = false,
+    Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
     try {
-      final response = await _dio.post('api/devices/unpair', data: {
-        'hub_type': hubType,
-        'params': {
-          'device_id': deviceId,
-          'force': force,
+      final response = await _dio.post(
+        'api/devices/unpair',
+        data: {
+          'hub_type': hubType,
+          'params': {
+            'device_id': deviceId,
+            'force': force,
+          },
         },
-      });
+        options: Options(
+          receiveTimeout: receiveTimeout,
+          sendTimeout: receiveTimeout,
+        ),
+      );
       return response.data as Map<String, dynamic>?;
     } catch (e) {
       _log.warning('unpairDevice failed', e);

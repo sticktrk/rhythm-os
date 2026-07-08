@@ -422,6 +422,8 @@ pub struct AppState {
     pub hub_startup_retry: HashMap<HubKey, HubStartupRetryState>,
     /// API-facing capability metadata for integrations available on this platform.
     pub hub_capabilities: Vec<crate::hub::HubIntegrationCapability>,
+    /// Pairing sessions currently running, keyed by hub type.
+    pub pairing_in_progress: HashSet<String>,
 
     // ---- Canonical device registry + topology ----
     /// Canonical device registry (cross-hub device identity and dedup).
@@ -779,6 +781,7 @@ impl Default for AppState {
             hub_credentials: HashMap::new(),
             hub_startup_retry: HashMap::new(),
             hub_capabilities: Vec::new(),
+            pairing_in_progress: HashSet::new(),
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
             topology_group_sync_in_progress: false,
@@ -1220,6 +1223,19 @@ impl AppState {
     /// Mark a per-hub room sync as finished.
     pub fn finish_hub_sync(&mut self, key: &HubKey) {
         self.hub_sync_in_progress.remove(key);
+    }
+
+    /// Mark a pairing attempt as running for a hub type.
+    ///
+    /// Returns `true` when this call acquired the pairing slot and the caller
+    /// should proceed. Returns `false` when another attempt is already running.
+    pub fn begin_pairing(&mut self, hub_type: &str) -> bool {
+        self.pairing_in_progress.insert(hub_type.to_string())
+    }
+
+    /// Mark a pairing attempt as finished for a hub type.
+    pub fn finish_pairing(&mut self, hub_type: &str) {
+        self.pairing_in_progress.remove(hub_type);
     }
 
     /// Get solar noon hour from runtime config.

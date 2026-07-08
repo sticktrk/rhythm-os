@@ -295,6 +295,14 @@ impl ApiResponse {
         }
     }
 
+    pub fn conflict(msg: &str) -> Self {
+        Self {
+            status: 409,
+            body: msg.to_string(),
+            content_type: "text/plain",
+        }
+    }
+
     pub fn server_error(e: impl Display) -> Self {
         Self {
             status: 500,
@@ -722,7 +730,7 @@ fn appliance_delete_unpair_request(
 
     Ok(native_id.map(|device_id| crate::pairing::UnpairingRequest {
         hub_type: "matter".to_string(),
-        params: serde_json::json!({ "device_id": device_id, "force": true }),
+        params: serde_json::json!({ "device_id": device_id, "force": false }),
     }))
 }
 
@@ -2610,6 +2618,38 @@ pub fn handle_get_version(version: &str) -> ApiResponse {
 // Device pairing handler
 // ---------------------------------------------------------------------------
 
+struct PairingAttemptGuard {
+    state: SharedState,
+    hub_type: String,
+}
+
+impl Drop for PairingAttemptGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.finish_pairing(&self.hub_type);
+        }
+    }
+}
+
+fn try_acquire_pairing_guard(
+    state: &SharedState,
+    hub_type: &str,
+) -> Result<PairingAttemptGuard, ApiResponse> {
+    let mut s = match state.lock() {
+        Ok(s) => s,
+        Err(_) => return Err(ApiResponse::server_error("lock")),
+    };
+    if !s.begin_pairing(hub_type) {
+        return Err(ApiResponse::conflict(&format!(
+            "Pairing already in progress for {hub_type}"
+        )));
+    }
+    Ok(PairingAttemptGuard {
+        state: state.clone(),
+        hub_type: hub_type.to_string(),
+    })
+}
+
 pub fn handle_pair_device(
     state: &SharedState,
     request: &crate::pairing::PairingRequest,
@@ -2623,6 +2663,11 @@ pub fn handle_pair_device(
 
     let Some(start_fn) = start_pairing else {
         return ApiResponse::server_error("No pairing support configured");
+    };
+
+    let _pairing_guard = match try_acquire_pairing_guard(state, &request.hub_type) {
+        Ok(guard) => guard,
+        Err(response) => return response,
     };
 
     log::info!(
@@ -3025,6 +3070,7 @@ mod tests {
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
     use crate::topology::HubRoomBinding;
     use rhythm_core::runtime::hub_registry::DeviceType;
+    use rhythm_core::{RhythmMode, RoomModeDefault, RoomModeState};
     use rhythm_runtime_api::{
         LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
         RuntimeResult, RuntimeSnapshot,
@@ -3032,7 +3078,7 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -3163,6 +3209,73 @@ mod tests {
             }
             other => panic!("expected pairing completion event, got {:?}", other),
         }
+
+        assert!(state.lock().unwrap().pairing_in_progress.is_empty());
+    }
+
+    #[test]
+    fn pair_device_rejects_concurrent_attempt_for_same_hub_type() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let called = Arc::new(AtomicBool::new(false));
+
+        {
+            let called = called.clone();
+            let mut s = state.lock().unwrap();
+            s.pairing_in_progress.insert("matter".to_string());
+            s.start_pairing_fn = Some(Arc::new(move |_, _, _| {
+                called.store(true, Ordering::SeqCst);
+                Ok(PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    error: Some("should not be called".to_string()),
+                })
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: Some("pair-busy".to_string()),
+                params: json!({ "setup_payload": "34970112332" }),
+            },
+        );
+
+        assert_eq!(response.status, 409);
+        assert_eq!(response.body, "Pairing already in progress for matter");
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
+    }
+
+    #[test]
+    fn pair_device_releases_in_progress_after_integration_error() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        {
+            let call_count = call_count.clone();
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _| {
+                call_count.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("commissioning failed"))
+            }));
+        }
+
+        let request = PairingRequest {
+            hub_type: "matter".to_string(),
+            session_id: Some("pair-fail".to_string()),
+            params: json!({ "setup_payload": "34970112332" }),
+        };
+
+        let first = handle_pair_device(&state, &request);
+        assert_eq!(first.status, 500);
+        assert_eq!(first.body, "commissioning failed");
+        assert!(state.lock().unwrap().pairing_in_progress.is_empty());
+
+        let second = handle_pair_device(&state, &request);
+        assert_eq!(second.status, 500);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        assert!(state.lock().unwrap().pairing_in_progress.is_empty());
     }
 
     // ---- Handler validation (400 paths) ----
@@ -5293,6 +5406,25 @@ mod tests {
     fn delete_device_hard_removes_canonical_topology_and_registry_entries() {
         let (state, registry, canonical_id, room_id, hub_key) =
             handler_state_with_canonical_light();
+        {
+            let mut s = state.lock().unwrap();
+            s.mode_configs
+                .get_mut(&RhythmMode::Day)
+                .unwrap()
+                .room_defaults
+                .push(RoomModeDefault {
+                    room_id: canonical_id.clone(),
+                    state: RoomModeState::Active,
+                });
+            s.mode_configs
+                .get_mut(&RhythmMode::Sleep)
+                .unwrap()
+                .room_defaults
+                .push(RoomModeDefault {
+                    room_id: canonical_id.clone(),
+                    state: RoomModeState::HardOff,
+                });
+        }
 
         let r = handle_delete_device(&state, "device-1");
         assert_eq!(r.status, 204);
@@ -5305,6 +5437,10 @@ mod tests {
             .hub_room_bindings
             .iter()
             .any(|t| t.hub_key == hub_key && t.hub_room_id == "device-1"));
+        assert!(s.mode_configs().into_iter().all(|config| config
+            .room_defaults
+            .iter()
+            .all(|default| default.room_id != canonical_id)));
         drop(s);
 
         let reg = registry.lock().unwrap();
@@ -5313,7 +5449,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_device_on_appliance_matter_uses_unpairing() {
+    fn delete_device_on_appliance_matter_gracefully_unpairs_before_local_cleanup() {
         let (state, registry, canonical_id, room_id, hub_key) =
             handler_state_with_canonical_light_for_hub("matter", "matter-100");
         let calls = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
@@ -5343,7 +5479,7 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, "matter");
         assert_eq!(recorded[0].1["device_id"], "matter-100");
-        assert_eq!(recorded[0].1["force"], true);
+        assert_eq!(recorded[0].1["force"], false);
         drop(recorded);
 
         let s = state.lock().unwrap();

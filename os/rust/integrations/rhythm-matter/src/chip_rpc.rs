@@ -42,6 +42,10 @@ pub enum ChipRpcRequest {
     ProbeLight {
         node_id: u64,
     },
+    ScanOperationalNode {
+        node_id: u64,
+        timeout_ms: u64,
+    },
     DecommissionDevice {
         node_id: u64,
         force: bool,
@@ -322,8 +326,8 @@ fn is_operational_discovery_message(lower_message: &str) -> bool {
     let has_discovery_source = lower_message.contains("addressresolve")
         || lower_message.contains("operational discovery failed");
 
-    let has_timeout = lower_message.contains("chip error 0x00000032")
-        || lower_message.contains("timeout");
+    let has_timeout =
+        lower_message.contains("chip error 0x00000032") || lower_message.contains("timeout");
 
     has_discovery_source && has_timeout
 }
@@ -411,6 +415,12 @@ pub struct ChipRpcCommissionLightResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipRpcProbeLightResponse {
     pub device: CommissionedDevice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipRpcOperationalDiscoveryResponse {
+    pub node_id: u64,
+    pub fabrics: Vec<String>,
 }
 
 #[cfg(test)]

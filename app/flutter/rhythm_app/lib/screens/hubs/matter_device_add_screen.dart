@@ -48,11 +48,13 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required this.endpoint,
     required this.addMethod,
     this.authToken,
+    @visibleForTesting this.pairingApi,
   });
 
   final HubEndpoint endpoint;
   final MatterAddMethod addMethod;
   final String? authToken;
+  final RhythmMatterApi? pairingApi;
 
   static Future<MatterDevicePairingResult?> show(
     BuildContext context, {
@@ -101,6 +103,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   static const _tealDeep = Color(0xFF00838F);
   static const _amber = CelestialColors.sunWarm;
   static const _danger = Color(0xFFEF5350);
+  static const _pairingRequestTimeout = Duration(minutes: 4);
 
   final _setupPayloadController = TextEditingController();
   late final AnimationController _pulseController;
@@ -111,16 +114,18 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
   bool _hasFailedOnce = false;
+  bool _pairingRequestInFlight = false;
   StreamSubscription<RhythmPairingProgress>? _progressSub;
   RhythmPairingProgress? _latestProgress;
 
   @override
   void initState() {
     super.initState();
-    _pairingApi = RhythmMatterApi(
-      baseUrl: widget.endpoint.baseUrl,
-      authToken: widget.authToken,
-    );
+    _pairingApi = widget.pairingApi ??
+        RhythmMatterApi(
+          baseUrl: widget.endpoint.baseUrl,
+          authToken: widget.authToken,
+        );
     _sessionId =
         'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
     _pulseController = AnimationController(
@@ -219,94 +224,99 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   Future<void> _startPairing() async {
     final setupPayload = _setupPayload;
-    if (setupPayload.isEmpty) return;
+    if (setupPayload.isEmpty || _pairingRequestInFlight) return;
 
-    FocusScope.of(context).unfocus();
-    HapticFeedback.mediumImpact();
-    _subscribeToPairingProgress();
-    setState(() {
-      _phase = _PairingPhase.pairing;
-      _errorText = null;
-      _latestProgress = null;
-    });
+    _pairingRequestInFlight = true;
+    try {
+      FocusScope.of(context).unfocus();
+      HapticFeedback.mediumImpact();
+      _subscribeToPairingProgress();
+      setState(() {
+        _phase = _PairingPhase.pairing;
+        _errorText = null;
+        _latestProgress = null;
+      });
 
-    if (HueServiceLocator.isDemoMode) {
-      await _simulateDemoPairing();
-      return;
-    }
+      if (HueServiceLocator.isDemoMode) {
+        await _simulateDemoPairing();
+        return;
+      }
 
-    if (_usesWifiCommissioningPreflight) {
-      final wifiStatus = await _pairingApi.getWifiStatus();
+      if (_usesWifiCommissioningPreflight) {
+        final wifiStatus = await _pairingApi.getWifiStatus();
+        if (!mounted) return;
+
+        if (wifiStatus != null && !wifiStatus.readyForMatterPairing) {
+          final details = <String>[
+            if (wifiStatus.configPresent != true)
+              'Wi-Fi configuration is not present on the server appliance.',
+            if (wifiStatus.connected != true)
+              'The server appliance is not currently connected to Wi-Fi.',
+            'Connect the appliance to Wi-Fi first, then try again.',
+            'You do not need to enter network credentials here.',
+          ];
+          _showPairingError(
+            'This Rhythm appliance is not ready to add a new device.',
+            detail: details.join(' '),
+          );
+          return;
+        }
+      }
+
+      final result = await _pairingApi.pairDevice(
+        setupPayload: setupPayload,
+        rendezvous: 'auto',
+        network: 'wifi',
+        receiveTimeout: _pairingRequestTimeout,
+        sessionId: _sessionId,
+      );
+
       if (!mounted) return;
 
-      if (wifiStatus != null && !wifiStatus.readyForMatterPairing) {
-        final details = <String>[
-          if (wifiStatus.configPresent != true)
-            'Wi-Fi configuration is not present on the server appliance.',
-          if (wifiStatus.connected != true)
-            'The server appliance is not currently connected to Wi-Fi.',
-          'Connect the appliance to Wi-Fi first, then try again.',
-          'You do not need to enter network credentials here.',
-        ];
+      if (result.httpStatus != null && result.httpStatus != 200) {
         _showPairingError(
-          'This Rhythm appliance is not ready to add a new device.',
-          detail: details.join(' '),
+          'The server rejected the pairing request.',
+          detail: result.error,
         );
         return;
       }
-    }
 
-    final result = await _pairingApi.pairDevice(
-      setupPayload: setupPayload,
-      rendezvous: 'auto',
-      network: 'wifi',
-      receiveTimeout: const Duration(seconds: 45),
-      sessionId: _sessionId,
-    );
+      if (result.status == 'failed') {
+        _showPairingError('Pairing failed.', detail: result.error);
+        return;
+      }
 
-    if (!mounted) return;
+      final device = result.device;
+      if (result.status == 'complete' && device != null) {
+        final nativeDeviceId = device['device_id'] as String? ?? '';
+        if (nativeDeviceId.isEmpty) {
+          _showPairingError(
+            'Pairing completed, but the server returned no device ID.',
+          );
+          return;
+        }
 
-    if (result.httpStatus != null && result.httpStatus != 200) {
+        HapticFeedback.heavyImpact();
+        Navigator.of(context).pop(
+          MatterDevicePairingResult(
+            nativeDeviceId: nativeDeviceId,
+            name: device['name'] as String? ?? 'Device',
+            deviceType: device['device_type'] as String? ?? 'light',
+            manufacturer: device['manufacturer'] as String?,
+            model: device['model'] as String?,
+          ),
+        );
+        return;
+      }
+
       _showPairingError(
-        'The server rejected the pairing request.',
-        detail: result.error,
+        'Pairing did not complete.',
+        detail:
+            result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
       );
-      return;
+    } finally {
+      _pairingRequestInFlight = false;
     }
-
-    if (result.status == 'failed') {
-      _showPairingError('Pairing failed.', detail: result.error);
-      return;
-    }
-
-    final device = result.device;
-    if (result.status == 'complete' && device != null) {
-      final nativeDeviceId = device['device_id'] as String? ?? '';
-      if (nativeDeviceId.isEmpty) {
-        _showPairingError(
-          'Pairing completed, but the server returned no device ID.',
-        );
-        return;
-      }
-
-      HapticFeedback.heavyImpact();
-      Navigator.of(context).pop(
-        MatterDevicePairingResult(
-          nativeDeviceId: nativeDeviceId,
-          name: device['name'] as String? ?? 'Device',
-          deviceType: device['device_type'] as String? ?? 'light',
-          manufacturer: device['manufacturer'] as String?,
-          model: device['model'] as String?,
-        ),
-      );
-      return;
-    }
-
-    _showPairingError(
-      'Pairing did not complete.',
-      detail:
-          result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
-    );
   }
 
   Future<void> _simulateDemoPairing() async {
@@ -482,7 +492,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         const SizedBox(height: 28),
         _PrimaryTransmitButton(
           label: widget.addMethod.actionLabel,
-          enabled: _hasSetupPayload,
+          enabled: _hasSetupPayload && !_pairingRequestInFlight,
           onTap: _startPairing,
         ),
         const SizedBox(height: 40),

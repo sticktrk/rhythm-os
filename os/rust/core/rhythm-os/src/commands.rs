@@ -877,6 +877,20 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
         .retain(|seed| seed.source_node_id != node_id && seed.target_node_id != node_id);
 }
 
+fn clear_removed_node_mode_defaults(s: &mut AppState, node_id: &str) -> bool {
+    let mut changed = false;
+
+    for config in s.mode_configs.values_mut() {
+        let original_len = config.room_defaults.len();
+        config
+            .room_defaults
+            .retain(|default| default.room_id != node_id);
+        changed |= config.room_defaults.len() != original_len;
+    }
+
+    changed
+}
+
 pub(crate) fn reconcile_hub_endpoint_visibility(
     state: &SharedState,
     hub_key: &HubKey,
@@ -9160,8 +9174,19 @@ pub fn do_device_hard_remove(
         }
     }
 
+    let mut mode_config_propagation = None;
     if let Some(canonical_id) = canonical_id.as_deref() {
         clear_removed_node_ephemeral_state(&mut s, canonical_id);
+        if clear_removed_node_mode_defaults(&mut s, canonical_id) {
+            let configs = s.mode_configs();
+            let runtimes = s
+                .hubs
+                .values()
+                .filter_map(|hub| hub.runtime.clone())
+                .collect::<Vec<_>>();
+            persist_settings_locked(&s);
+            mode_config_propagation = Some((configs, runtimes));
+        }
     }
 
     for (target_hub_key, native_id) in &registry_removals {
@@ -9176,6 +9201,10 @@ pub fn do_device_hard_remove(
     }
 
     drop(s);
+
+    if let Some((configs, runtimes)) = mode_config_propagation {
+        propagate_mode_configs_to_runtimes(runtimes, configs);
+    }
 
     if let Some(node_id) = canonical_id.as_deref() {
         queue_motion_timer_clear(state, node_id);

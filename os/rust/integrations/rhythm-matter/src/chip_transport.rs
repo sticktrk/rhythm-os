@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use crate::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
     ChipRpcCommissionLightResponse, ChipRpcError, ChipRpcJsonValueResponse,
-    ChipRpcListDevicesResponse, ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
-    ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
+    ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse, ChipRpcProbeLightResponse,
+    ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
 };
 use crate::fabric::MatterFabricIdentity;
 use crate::transport::{
@@ -44,6 +44,7 @@ const RPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
 const RPC_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
 const BLE_RECOVERY_COOLDOWN: Duration = Duration::from_secs(3);
+const OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
     match request {
@@ -441,26 +442,65 @@ impl ChipTransport {
         first_error: &anyhow::Error,
         cooldown: Duration,
     ) -> Result<()> {
+        self.recover_commissioning_sidecar(first_error, "Matter BLE commissioning error")?;
+        self.mark_ble_recovery_cooldown(cooldown);
+        Ok(())
+    }
+
+    fn recover_commissioning_sidecar(
+        &self,
+        first_error: &anyhow::Error,
+        reason: &str,
+    ) -> Result<()> {
         self.initialized.store(false, Ordering::SeqCst);
         self.set_sidecar_health(SidecarHealth::Recovering);
 
         if self.sidecar_config.is_some() {
             self.restart_sidecar().with_context(|| {
-                format!(
-                    "restarting CHIP sidecar after Matter BLE commissioning error: {:#}",
-                    first_error
-                )
+                format!("restarting CHIP sidecar after {reason}: {:#}", first_error)
             })?;
         }
 
         self.ensure_sidecar().with_context(|| {
             format!(
-                "re-initializing CHIP controller after Matter BLE commissioning error: {:#}",
+                "re-initializing CHIP controller after {reason}: {:#}",
                 first_error
             )
         })?;
-        self.mark_ble_recovery_cooldown(cooldown);
         Ok(())
+    }
+
+    fn scan_operational_node(
+        &self,
+        node_id: u64,
+        timeout: Duration,
+    ) -> Result<ChipRpcOperationalDiscoveryResponse> {
+        self.call(ChipRpcRequest::ScanOperationalNode {
+            node_id,
+            timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        })
+    }
+
+    fn recover_operational_discovery_failure(
+        &self,
+        node_id: u64,
+        first_error: &anyhow::Error,
+    ) -> Result<Option<CommissionedDevice>> {
+        self.recover_commissioning_sidecar(first_error, "Matter operational discovery error")?;
+        // The sidecar restart drops chipd's BLE connection to the bulb, so a
+        // follow-up BLE pairing attempt needs the same BlueZ settle time as
+        // the BLE recovery path.
+        self.mark_ble_recovery_cooldown(ble_recovery_cooldown(first_error));
+
+        let discovery =
+            self.scan_operational_node(node_id, OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT)?;
+        if discovery.fabrics.is_empty() {
+            return Ok(None);
+        }
+
+        let response: ChipRpcProbeLightResponse =
+            self.call(ChipRpcRequest::ProbeLight { node_id })?;
+        Ok(Some(response.device))
     }
 
     fn start_sidecar(&self) -> Result<()> {
@@ -807,12 +847,13 @@ impl MatterTransport for ChipTransport {
             // fixes. Applies to every rendezvous mode — mDNS resolution is
             // required for on-network commissioning too.
             Err(error) if is_recoverable_operational_discovery_error(&error) => {
-                match self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error)) {
-                    Ok(()) => Err(error.context(
-                        "Matter operational discovery failed; reset CHIP sidecar before next attempt",
+                match self.recover_operational_discovery_failure(request.node_id, &error) {
+                    Ok(Some(device)) => Ok(device),
+                    Ok(None) => Err(error.context(
+                        "Matter operational discovery failed; reset CHIP sidecar and did not observe node advertising after recovery",
                     )),
                     Err(recovery_error) => Err(error.context(format!(
-                        "Matter operational discovery failed and CHIP sidecar recovery failed: {:#}",
+                        "Matter operational discovery failed and post-recovery probe failed: {:#}",
                         recovery_error
                     ))),
                 }
@@ -1158,8 +1199,9 @@ mod tests {
     use crate::chip_rpc::{
         ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
         ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcError, ChipRpcErrorKind,
-        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcProbeLightResponse,
-        ChipRpcReadOnOffResponse, ChipRpcResponse, ChipRpcResponseEnvelope,
+        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse,
+        ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcResponse,
+        ChipRpcResponseEnvelope,
     };
     use crate::transport::{
         MatterAttributeValue, MatterColorMode, MatterCommissioningNetwork,
@@ -2092,19 +2134,41 @@ mod tests {
                         compressed_fabric_id: None,
                     },
                 ),
+                ChipRpcRequest::ScanOperationalNode {
+                    node_id,
+                    timeout_ms,
+                } => {
+                    assert_eq!(*node_id, 100);
+                    assert_eq!(
+                        *timeout_ms,
+                        OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT.as_millis() as u64
+                    );
+                    ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipRpcOperationalDiscoveryResponse {
+                            node_id: *node_id,
+                            fabrics: Vec::new(),
+                        },
+                    )
+                }
                 ChipRpcRequest::SetOnOff { .. } => {
                     ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
                 }
                 other => panic!("unexpected RPC during recovery test: {:?}", other),
             }
         };
-        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+        let server = spawn_fake_server_multi(socket_path.clone(), 4, handler);
 
         let transport = ChipTransport::for_test(socket_path.clone());
         let error = transport
             .commission_light(&ble_commission_request())
             .expect_err("commissioning should surface the original discovery failure");
         assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown,
+            "operational discovery recovery should arm the BLE settle cooldown"
+        );
 
         transport
             .set_on_off(102, 1, true)
@@ -2116,14 +2180,117 @@ mod tests {
             .map(|envelope| match envelope.request {
                 ChipRpcRequest::CommissionLight(_) => "commission_light",
                 ChipRpcRequest::InitController(_) => "init_controller",
+                ChipRpcRequest::ScanOperationalNode { .. } => "scan_operational_node",
                 ChipRpcRequest::SetOnOff { .. } => "set_on_off",
                 _ => "other",
             })
             .collect();
         assert_eq!(
             kinds,
-            vec!["commission_light", "init_controller", "set_on_off"],
-            "expected the failed commission to reset and re-init the controller without retrying the commission"
+            vec![
+                "commission_light",
+                "init_controller",
+                "scan_operational_node",
+                "set_on_off"
+            ],
+            "expected the failed commission to reset and scan for the node without retrying the commission"
+        );
+        assert_eq!(
+            commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "commissioning should not be retried automatically after an operational discovery failure"
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn operational_discovery_timeout_completes_when_recovered_node_advertises_and_probes() {
+        const ADDRESS_RESOLVE_TIMEOUT_ERROR: &str = concat!(
+            "commissioning Matter light: ",
+            "src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: ",
+            "CHIP Error 0x00000032: Timeout"
+        );
+
+        let socket_path = temp_socket_path("recover-operational-discovery-probe");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ChipRpcResponseEnvelope::error(request.id, ADDRESS_RESOLVE_TIMEOUT_ERROR)
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                        compressed_fabric_id: Some("F800F5FBD9C145CD".to_string()),
+                    },
+                ),
+                ChipRpcRequest::ScanOperationalNode {
+                    node_id,
+                    timeout_ms,
+                } => {
+                    assert_eq!(*node_id, 100);
+                    assert_eq!(
+                        *timeout_ms,
+                        OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT.as_millis() as u64
+                    );
+                    ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipRpcOperationalDiscoveryResponse {
+                            node_id: *node_id,
+                            fabrics: vec!["F800F5FBD9C145CD".to_string()],
+                        },
+                    )
+                }
+                ChipRpcRequest::ProbeLight { node_id } => {
+                    assert_eq!(*node_id, 100);
+                    ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipRpcProbeLightResponse {
+                            device: commissioned_test_device(*node_id),
+                        },
+                    )
+                }
+                other => panic!("unexpected RPC during recovery test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 4, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let device = transport
+            .commission_light(&ble_commission_request())
+            .expect("advertising recovered node should be probed and returned");
+        assert_eq!(device.node_id, 100);
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown,
+            "operational discovery recovery should arm the BLE settle cooldown"
+        );
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                ChipRpcRequest::ScanOperationalNode { .. } => "scan_operational_node",
+                ChipRpcRequest::ProbeLight { .. } => "probe_light",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "commission_light",
+                "init_controller",
+                "scan_operational_node",
+                "probe_light"
+            ],
+            "expected the failed commission to reset, scan, and probe without retrying the commission"
         );
         assert_eq!(
             commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
