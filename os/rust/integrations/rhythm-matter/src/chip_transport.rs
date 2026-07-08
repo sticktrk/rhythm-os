@@ -45,6 +45,12 @@ const RPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 const RPC_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
 const BLE_RECOVERY_COOLDOWN: Duration = Duration::from_secs(3);
 const OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
+/// A recoverable BLE commissioning failure is retried once automatically after
+/// the sidecar recovery, but only when the failed attempt itself was quick.
+/// The app waits 4 minutes per pairing request and a retry can spend up to
+/// chipd's 180s kCommissioningTimeout, so the first attempt must have failed
+/// inside this budget for the retry to still fit the request window.
+const BLE_AUTO_RETRY_FIRST_ATTEMPT_BUDGET: Duration = Duration::from_secs(45);
 
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
     match request {
@@ -94,6 +100,7 @@ pub struct ChipTransport {
     next_request_id: AtomicU64,
     commissioning_lock: Mutex<()>,
     ble_commissioning_ready_after: Mutex<Option<Instant>>,
+    ble_auto_retry_first_attempt_budget: Duration,
 }
 
 impl ChipTransport {
@@ -135,6 +142,7 @@ impl ChipTransport {
             next_request_id: AtomicU64::new(1),
             commissioning_lock: Mutex::new(()),
             ble_commissioning_ready_after: Mutex::new(None),
+            ble_auto_retry_first_attempt_budget: BLE_AUTO_RETRY_FIRST_ATTEMPT_BUDGET,
         };
 
         transport.ensure_sidecar()?;
@@ -159,6 +167,7 @@ impl ChipTransport {
             next_request_id: AtomicU64::new(1),
             commissioning_lock: Mutex::new(()),
             ble_commissioning_ready_after: Mutex::new(None),
+            ble_auto_retry_first_attempt_budget: BLE_AUTO_RETRY_FIRST_ATTEMPT_BUDGET,
         }
     }
 
@@ -503,6 +512,36 @@ impl ChipTransport {
         Ok(Some(response.device))
     }
 
+    /// One commissioning attempt, including the operational-discovery
+    /// recovery that can still turn a post-join mDNS timeout into a success.
+    /// BLE stack failures are left for the caller, which owns sidecar
+    /// recovery and the single automatic retry.
+    fn commission_light_once(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
+        let result: Result<ChipRpcCommissionLightResponse> =
+            self.call(ChipRpcRequest::CommissionLight(request.clone()));
+        match result {
+            Ok(response) => Ok(response.device),
+            // Operational discovery timed out after the device joined the
+            // network: the usual cause is chipd's mDNS sockets going stale
+            // after a wlan0 address change, which only a sidecar restart
+            // fixes. Applies to every rendezvous mode — mDNS resolution is
+            // required for on-network commissioning too.
+            Err(error) if is_recoverable_operational_discovery_error(&error) => {
+                match self.recover_operational_discovery_failure(request.node_id, &error) {
+                    Ok(Some(device)) => Ok(device),
+                    Ok(None) => Err(error.context(
+                        "Matter operational discovery failed; reset CHIP sidecar and did not observe node advertising after recovery",
+                    )),
+                    Err(recovery_error) => Err(error.context(format!(
+                        "Matter operational discovery failed and post-recovery probe failed: {:#}",
+                        recovery_error
+                    ))),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn start_sidecar(&self) -> Result<()> {
         self.start_sidecar_inner(false)
     }
@@ -823,42 +862,73 @@ impl MatterTransport for ChipTransport {
 
         self.prepare_ble_commissioning(request)?;
 
-        let result: Result<ChipRpcCommissionLightResponse> =
-            self.call(ChipRpcRequest::CommissionLight(request.clone()));
-        match result {
-            Ok(response) => Ok(response.device),
+        let first_attempt_started = Instant::now();
+        match self.commission_light_once(request) {
             Err(error)
                 if uses_ble_commissioning(request)
                     && is_recoverable_ble_commissioning_error(&error) =>
             {
-                match self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error)) {
-                    Ok(()) => Err(error.context(
-                        "Matter BLE commissioning failed; reset CHIP sidecar before next attempt",
-                    )),
-                    Err(recovery_error) => Err(error.context(format!(
+                if let Err(recovery_error) =
+                    self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error))
+                {
+                    return Err(error.context(format!(
                         "Matter BLE commissioning failed and CHIP sidecar recovery failed: {:#}",
                         recovery_error
-                    ))),
+                    )));
+                }
+
+                // BLE discovery can lose a race against CHIP's fixed scan
+                // window: the bulb is matched right as the window expires and
+                // the in-flight connect is cancelled (issue #123). The same
+                // request succeeds once the sidecar is reset and BlueZ has
+                // settled, so retry once here instead of making the user do
+                // it — but only when the failed attempt was quick enough that
+                // a full retry still fits the app's pairing-request window.
+                if first_attempt_started.elapsed() > self.ble_auto_retry_first_attempt_budget {
+                    return Err(error.context(
+                        "Matter BLE commissioning failed; reset CHIP sidecar before next attempt",
+                    ));
+                }
+
+                tracing::warn!(
+                    target: "pair",
+                    event = "matter_ble_commission_auto_retry",
+                    node_id = request.node_id,
+                    error = %format!("{:#}", error),
+                    "Matter BLE commissioning failed; reset CHIP sidecar and retrying once"
+                );
+
+                if let Err(prepare_error) = self.prepare_ble_commissioning(request) {
+                    return Err(error.context(format!(
+                        "Matter BLE commissioning failed; reset CHIP sidecar but the BLE stack was not ready for the automatic retry: {:#}",
+                        prepare_error
+                    )));
+                }
+
+                match self.commission_light_once(request) {
+                    Ok(device) => Ok(device),
+                    Err(retry_error)
+                        if is_recoverable_ble_commissioning_error(&retry_error) =>
+                    {
+                        match self.recover_ble_commissioning_stack(
+                            &retry_error,
+                            ble_recovery_cooldown(&retry_error),
+                        ) {
+                            Ok(()) => Err(retry_error.context(
+                                "Matter BLE commissioning failed after automatic retry; reset CHIP sidecar before next attempt",
+                            )),
+                            Err(recovery_error) => Err(retry_error.context(format!(
+                                "Matter BLE commissioning failed after automatic retry and CHIP sidecar recovery failed: {:#}",
+                                recovery_error
+                            ))),
+                        }
+                    }
+                    Err(retry_error) => Err(
+                        retry_error.context("Matter BLE commissioning failed after automatic retry")
+                    ),
                 }
             }
-            // Operational discovery timed out after the device joined the
-            // network: the usual cause is chipd's mDNS sockets going stale
-            // after a wlan0 address change, which only a sidecar restart
-            // fixes. Applies to every rendezvous mode — mDNS resolution is
-            // required for on-network commissioning too.
-            Err(error) if is_recoverable_operational_discovery_error(&error) => {
-                match self.recover_operational_discovery_failure(request.node_id, &error) {
-                    Ok(Some(device)) => Ok(device),
-                    Ok(None) => Err(error.context(
-                        "Matter operational discovery failed; reset CHIP sidecar and did not observe node advertising after recovery",
-                    )),
-                    Err(recovery_error) => Err(error.context(format!(
-                        "Matter operational discovery failed and post-recovery probe failed: {:#}",
-                        recovery_error
-                    ))),
-                }
-            }
-            Err(error) => Err(error),
+            other => other,
         }
     }
 
@@ -2032,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn ble_commissioning_error_reinitializes_controller_without_retrying_commission() {
+    fn ble_commissioning_error_retries_once_then_reinitializes_controller() {
         const BLUEZ_ENDPOINT_ERROR: &str = concat!(
             "commissioning Matter light: ",
             "src/platform/Linux/bluez/BluezEndpoint.cpp:623: ",
@@ -2046,7 +2116,18 @@ mod tests {
             match &request.request {
                 ChipRpcRequest::CommissionLight(_) => {
                     observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    ChipRpcResponseEnvelope::error(request.id, BLUEZ_ENDPOINT_ERROR)
+                    ChipRpcResponseEnvelope {
+                        id: request.id,
+                        response: ChipRpcResponse::Error {
+                            error: ChipRpcError {
+                                message: BLUEZ_ENDPOINT_ERROR.to_string(),
+                                kind: ChipRpcErrorKind::BleCommissioningStack,
+                                recoverable: true,
+                                requires_restart: true,
+                                retry_after_ms: Some(1),
+                            },
+                        },
+                    }
                 }
                 ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
                     request.id,
@@ -2062,12 +2143,13 @@ mod tests {
                 other => panic!("unexpected RPC during recovery test: {:?}", other),
             }
         };
-        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+        let server = spawn_fake_server_multi(socket_path.clone(), 5, handler);
 
         let transport = ChipTransport::for_test(socket_path.clone());
         let error = transport
             .commission_light(&ble_commission_request())
-            .expect_err("commissioning should surface the original BLE failure");
+            .expect_err("commissioning should surface the BLE failure after the automatic retry");
+        assert!(format!("{:#}", error).contains("after automatic retry"));
         assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
         assert_eq!(
             transport.sidecar_health_for_test(),
@@ -2091,13 +2173,163 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["commission_light", "init_controller", "set_on_off"],
-            "expected the failed commission to reset and re-init the controller without retrying the commission"
+            vec![
+                "commission_light",
+                "init_controller",
+                "commission_light",
+                "init_controller",
+                "set_on_off"
+            ],
+            "expected the failed commission to reset, retry once, then reset again for the next attempt"
         );
         assert_eq!(
             commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "commissioning should not be retried automatically after a BLE stack failure"
+            2,
+            "commissioning should be retried exactly once after a BLE stack failure"
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    /// Regression for issue #123: the bulb was BLE-discovered with a
+    /// discriminator match right as CHIP's fixed scan window expired, so the
+    /// in-flight connect was cancelled and the attempt surfaced
+    /// `BLEManagerImpl.cpp:887: CHIP Error 0x00000032: Timeout`. The user's
+    /// manual second attempt succeeded ~35s later. The transport now runs
+    /// that second attempt itself after the sidecar recovery.
+    #[test]
+    fn ble_discovery_timeout_auto_retry_recovers_commissioning() {
+        const BLE_SCAN_TIMEOUT_ERROR: &str = concat!(
+            "commissioning Matter light: ",
+            "src/platform/Linux/BLEManagerImpl.cpp:887: ",
+            "CHIP Error 0x00000032: Timeout"
+        );
+
+        let socket_path = temp_socket_path("ble-scan-timeout-auto-retry");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    let attempt =
+                        observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt == 0 {
+                        // Legacy string-shaped error, exactly as chipd
+                        // surfaced it in the issue #123 debug bundle.
+                        ChipRpcResponseEnvelope::error(request.id, BLE_SCAN_TIMEOUT_ERROR)
+                    } else {
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcCommissionLightResponse {
+                                device: commissioned_test_device(106),
+                            },
+                        )
+                    }
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                        compressed_fabric_id: None,
+                    },
+                ),
+                other => panic!("unexpected RPC during auto-retry test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let device = transport
+            .commission_light(&ble_commission_request())
+            .expect("a transient BLE discovery timeout should be recovered by the automatic retry");
+        assert_eq!(device.node_id, 106);
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::Ready,
+            "a successful automatic retry should leave the sidecar ready"
+        );
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "commission_light"],
+            "expected the failed commission to reset the controller and retry once"
+        );
+        assert_eq!(
+            commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn slow_ble_commissioning_failure_is_not_auto_retried() {
+        let socket_path = temp_socket_path("slow-ble-failure-no-retry");
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    ChipRpcResponseEnvelope {
+                        id: request.id,
+                        response: ChipRpcResponse::Error {
+                            error: ChipRpcError {
+                                message: "commissioning failed".to_string(),
+                                kind: ChipRpcErrorKind::BleCommissioningStack,
+                                recoverable: true,
+                                requires_restart: true,
+                                retry_after_ms: Some(1),
+                            },
+                        },
+                    }
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                        compressed_fabric_id: None,
+                    },
+                ),
+                other => panic!("unexpected RPC during budget test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 2, handler);
+
+        let mut transport = ChipTransport::for_test(socket_path.clone());
+        transport.ble_auto_retry_first_attempt_budget = Duration::from_millis(10);
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .expect_err("a slow BLE failure should be surfaced without an automatic retry");
+        assert!(format!("{:#}", error).contains("reset CHIP sidecar before next attempt"));
+        assert!(!format!("{:#}", error).contains("after automatic retry"));
+        assert_eq!(
+            transport.sidecar_health_for_test(),
+            SidecarHealth::BleCooldown
+        );
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller"],
+            "a first attempt past the retry budget should only reset the controller"
         );
 
         let _ = fs::remove_file(socket_path);
@@ -2328,7 +2560,11 @@ mod tests {
         };
         let server = spawn_fake_server_multi(socket_path.clone(), 2, handler);
 
-        let transport = ChipTransport::for_test(socket_path.clone());
+        // Zero retry budget: this test pins legacy-error classification and
+        // recovery, not the automatic retry (covered elsewhere) — and the
+        // legacy error's implied 3s cooldown would slow the retry path down.
+        let mut transport = ChipTransport::for_test(socket_path.clone());
+        transport.ble_auto_retry_first_attempt_budget = Duration::ZERO;
         let error = transport
             .commission_light(&ble_commission_request())
             .expect_err("legacy BLE error response should surface the original failure");
@@ -2435,7 +2671,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_ble_commissioning_error_uses_retry_after_and_allows_next_ble_attempt_after_cooldown() {
+    fn typed_ble_commissioning_error_uses_retry_after_for_automatic_retry() {
         let socket_path = temp_socket_path("typed-ble-recovery-cooldown");
         let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_attempts = commission_attempts.clone();
@@ -2480,18 +2716,9 @@ mod tests {
         let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
 
         let transport = ChipTransport::for_test(socket_path.clone());
-        let error = transport
-            .commission_light(&ble_commission_request())
-            .expect_err("first BLE commissioning attempt should surface the CHIP failure");
-        assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
-        assert_eq!(
-            transport.sidecar_health_for_test(),
-            SidecarHealth::BleCooldown
-        );
-
         let device = transport
             .commission_light(&ble_commission_request())
-            .expect("second BLE commissioning attempt should run after the short cooldown");
+            .expect("the automatic retry should honor the RPC retry_after cooldown and succeed");
         assert_eq!(device.node_id, 100);
         assert_eq!(transport.sidecar_health_for_test(), SidecarHealth::Ready);
 
@@ -2507,7 +2734,7 @@ mod tests {
         assert_eq!(
             kinds,
             vec!["commission_light", "init_controller", "commission_light"],
-            "expected failed BLE commission, controller re-init, then the next user retry"
+            "expected failed BLE commission, controller re-init, then the automatic retry"
         );
         assert_eq!(
             commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
