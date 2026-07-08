@@ -26,7 +26,7 @@ const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 const RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV: &str = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
-const RHYTHM_DEV_MODE_ENV: &str = "RHYTHM_DEV_MODE";
+const RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV: &str = "RHYTHM_MATTER_PAA_TRUST_STORE_PATH";
 const STARTUP_WIFI_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const PERIODIC_WIFI_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLOCK_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(15);
@@ -53,50 +53,43 @@ struct Args {
     log_level: String,
 }
 
-fn beta_build_enables_matter_attestation_bypass(version: &str) -> bool {
-    version.contains("-beta")
-}
-
-fn env_value_is_falsey(value: &str) -> bool {
+fn env_value_is_truthy(value: &str) -> bool {
     let value = value.trim();
-    value == "0"
-        || value.eq_ignore_ascii_case("false")
-        || value.eq_ignore_ascii_case("no")
-        || value.eq_ignore_ascii_case("off")
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
 }
 
-fn dev_mode_explicitly_disabled_value(value: Option<&str>) -> bool {
-    value.is_some_and(env_value_is_falsey)
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MatterAttestationDefaults {
+    bypass_forced: bool,
+    paa_trust_store_path_cleared: bool,
 }
 
-fn dev_mode_explicitly_disabled() -> bool {
-    dev_mode_explicitly_disabled_value(std::env::var(RHYTHM_DEV_MODE_ENV).ok().as_deref())
-}
+fn apply_appliance_matter_attestation_defaults() -> MatterAttestationDefaults {
+    let mut defaults = MatterAttestationDefaults::default();
 
-fn set_env_default(name: &str, value: &str) -> bool {
-    match std::env::var_os(name) {
-        Some(existing) if !existing.is_empty() => false,
-        _ => {
-            std::env::set_var(name, value);
-            true
-        }
-    }
-}
-
-fn apply_beta_build_defaults() -> bool {
-    if !beta_build_enables_matter_attestation_bypass(VERSION) {
-        return false;
-    }
-    if dev_mode_explicitly_disabled() {
-        return false;
+    let bypass_enabled = std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV)
+        .ok()
+        .as_deref()
+        .is_some_and(env_value_is_truthy);
+    if !bypass_enabled {
+        std::env::set_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "1");
+        defaults.bypass_forced = true;
     }
 
-    set_env_default(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "1")
+    if std::env::var_os(RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV).is_some() {
+        std::env::remove_var(RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV);
+        defaults.paa_trust_store_path_cleared = true;
+    }
+
+    defaults
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let beta_defaults_applied = apply_beta_build_defaults();
+    let matter_attestation_defaults = apply_appliance_matter_attestation_defaults();
     let platform_type =
         std::env::var("RHYTHM_PLATFORM_TYPE").unwrap_or_else(|_| "appliance".to_string());
     let platform_context =
@@ -107,10 +100,16 @@ fn main() -> Result<()> {
     logging::init_native_logging(&args.log_level)?;
 
     info!(target: "sys", "Rhythm Linux Appliance v{} starting...", VERSION);
-    if beta_defaults_applied {
+    if matter_attestation_defaults.bypass_forced {
         info!(
             target: "sys",
-            "Applied beta appliance defaults: Matter device attestation bypass enabled"
+            "Applied appliance Matter attestation fallback: device attestation bypass enabled"
+        );
+    }
+    if matter_attestation_defaults.paa_trust_store_path_cleared {
+        warn!(
+            target: "sys",
+            "Cleared Matter PAA trust-store path because appliance PAA provisioning is not enabled yet"
         );
     }
 
@@ -820,13 +819,12 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_beta_build_defaults, beta_build_enables_matter_attestation_bypass,
-        boot_success_health, dev_mode_explicitly_disabled, dev_mode_explicitly_disabled_value,
-        env_value_is_falsey, extract_serial_suffix, install_factory_reset_hook,
-        periodic_startup_action, run_bootstate_script_action, save_commissioning_wifi_credentials,
-        set_env_default, startup_wifi_restore_action, BootSuccessHealth, PeriodicStartupAction,
-        StartupWifiRestoreAction, RHYTHM_DEV_MODE_ENV, RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
-        STARTUP_WIFI_RESTORE_TIMEOUT, VERSION,
+        apply_appliance_matter_attestation_defaults, boot_success_health, env_value_is_truthy,
+        extract_serial_suffix, install_factory_reset_hook, periodic_startup_action,
+        run_bootstate_script_action, save_commissioning_wifi_credentials,
+        startup_wifi_restore_action, BootSuccessHealth, PeriodicStartupAction,
+        StartupWifiRestoreAction, RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
+        RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV, STARTUP_WIFI_RESTORE_TIMEOUT,
     };
     use crate::time_sync::clock_is_sane_at;
     use chrono::{TimeZone, Utc};
@@ -920,75 +918,62 @@ mod tests {
     }
 
     #[test]
-    fn env_default_helpers_treat_empty_values_as_unset_and_preserve_existing_values() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let key = "RHYTHM_TEST_APPLIANCE_ENV_DEFAULT";
-        let _restore = EnvRestore::new(&[key]);
-
-        std::env::remove_var(key);
-        assert!(set_env_default(key, "one"));
-        assert_eq!(std::env::var(key).as_deref(), Ok("one"));
-
-        std::env::set_var(key, "already-set");
-        assert!(!set_env_default(key, "two"));
-        assert_eq!(std::env::var(key).as_deref(), Ok("already-set"));
-
-        std::env::set_var(key, "");
-        assert!(set_env_default(key, "filled"));
-        assert_eq!(std::env::var(key).as_deref(), Ok("filled"));
-    }
-
-    #[test]
-    fn dev_mode_falsey_helpers_trim_and_ignore_case() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _restore = EnvRestore::new(&[RHYTHM_DEV_MODE_ENV]);
-
-        for value in ["0", " false ", "NO", "off"] {
-            assert!(env_value_is_falsey(value), "{value:?} should be falsey");
-            std::env::set_var(RHYTHM_DEV_MODE_ENV, value);
-            assert!(dev_mode_explicitly_disabled());
+    fn truthy_env_helper_trims_and_ignores_case() {
+        for value in ["1", " true ", "YES", "on"] {
+            assert!(env_value_is_truthy(value), "{value:?} should be truthy");
         }
 
-        for value in ["", "1", "true", "dev"] {
-            assert!(!env_value_is_falsey(value), "{value:?} should stay truthy");
-            std::env::set_var(RHYTHM_DEV_MODE_ENV, value);
-            assert!(!dev_mode_explicitly_disabled());
+        for value in ["", "0", "false", "manual"] {
+            assert!(
+                !env_value_is_truthy(value),
+                "{value:?} should not be truthy"
+            );
         }
     }
 
     #[test]
-    fn beta_default_application_respects_version_env_and_existing_values() {
+    fn appliance_matter_defaults_force_bypass_and_clear_stale_paa_path() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _restore = EnvRestore::new(&[
-            RHYTHM_DEV_MODE_ENV,
             RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
+            RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV,
         ]);
 
-        std::env::remove_var(RHYTHM_DEV_MODE_ENV);
-        std::env::remove_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV);
-        let applied = apply_beta_build_defaults();
-        if beta_build_enables_matter_attestation_bypass(VERSION) {
-            assert!(applied);
-            assert_eq!(
-                std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).as_deref(),
-                Ok("1")
-            );
-        } else {
-            assert!(!applied);
-            assert!(std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).is_err());
-        }
+        std::env::set_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "0");
+        std::env::set_var(
+            RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV,
+            "/data/matter/paa-root-certs",
+        );
 
-        std::env::set_var(RHYTHM_DEV_MODE_ENV, "0");
-        std::env::remove_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV);
-        assert!(!apply_beta_build_defaults());
-        assert!(std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).is_err());
+        let defaults = apply_appliance_matter_attestation_defaults();
 
-        std::env::remove_var(RHYTHM_DEV_MODE_ENV);
-        std::env::set_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "manual");
-        assert!(!apply_beta_build_defaults());
+        assert!(defaults.bypass_forced);
+        assert!(defaults.paa_trust_store_path_cleared);
         assert_eq!(
             std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).as_deref(),
-            Ok("manual")
+            Ok("1")
+        );
+        assert!(std::env::var_os(RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV).is_none());
+    }
+
+    #[test]
+    fn appliance_matter_defaults_preserve_truthy_bypass() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
+            RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV,
+        ]);
+
+        std::env::set_var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, "yes");
+        std::env::remove_var(RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV);
+
+        let defaults = apply_appliance_matter_attestation_defaults();
+
+        assert!(!defaults.bypass_forced);
+        assert!(!defaults.paa_trust_store_path_cleared);
+        assert_eq!(
+            std::env::var(RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV).as_deref(),
+            Ok("yes")
         );
     }
 
@@ -1245,27 +1230,5 @@ mod tests {
         run_bootstate_script_action("/tmp/rhythm-definitely-missing-bootstate", "success");
 
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn beta_builds_enable_matter_attestation_bypass_defaults() {
-        assert!(beta_build_enables_matter_attestation_bypass("0.4.160-beta"));
-        assert!(beta_build_enables_matter_attestation_bypass(
-            "0.4.160-beta.dev.5.gabcdef"
-        ));
-    }
-
-    #[test]
-    fn stable_builds_do_not_enable_matter_attestation_bypass_defaults() {
-        assert!(!beta_build_enables_matter_attestation_bypass("0.4.160"));
-    }
-
-    #[test]
-    fn explicit_prod_mode_disables_beta_matter_attestation_bypass_defaults() {
-        assert!(dev_mode_explicitly_disabled_value(Some("0")));
-        assert!(dev_mode_explicitly_disabled_value(Some("false")));
-        assert!(dev_mode_explicitly_disabled_value(Some("OFF")));
-        assert!(!dev_mode_explicitly_disabled_value(None));
-        assert!(!dev_mode_explicitly_disabled_value(Some("1")));
     }
 }
