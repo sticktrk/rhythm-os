@@ -852,7 +852,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             if (roomProvider.hasRooms) {
               return _buildRoomGrid(roomProvider);
             }
-            return const HubPickerScreen();
+            return HubPickerScreen(
+              onChooseHome: () => ConnectHubScreen.show(
+                context,
+                mode: ConnectHubMode.rhythmServer,
+              ),
+            );
           }
 
           // First connection attempt.

@@ -15,7 +15,9 @@ import 'solar_orbit.dart';
 ///
 /// Offers Home Assistant, Hue, and Matter pairing options.
 class HubPickerScreen extends StatefulWidget {
-  const HubPickerScreen({super.key});
+  const HubPickerScreen({super.key, this.onChooseHome});
+
+  final VoidCallback? onChooseHome;
 
   @override
   State<HubPickerScreen> createState() => _HubPickerScreenState();
@@ -206,6 +208,22 @@ class _HubPickerScreenState extends State<HubPickerScreen>
               ),
             ),
           ),
+          if (widget.onChooseHome != null)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 8,
+              left: 12,
+              child: IconButton(
+                tooltip: 'Choose Home',
+                onPressed: () {
+                  HapticFeedback.lightImpact();
+                  widget.onChooseHome!();
+                },
+                icon: Icon(
+                  Icons.home_rounded,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.82),
+                ),
+              ),
+            ),
         ],
       ),
     );
