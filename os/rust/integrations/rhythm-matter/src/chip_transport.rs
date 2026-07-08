@@ -745,6 +745,16 @@ fn is_recoverable_ble_commissioning_error(error: &anyhow::Error) -> bool {
         })
 }
 
+fn is_recoverable_operational_discovery_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ChipRpcError>()
+        .map(ChipRpcError::is_recoverable_operational_discovery_failure)
+        .unwrap_or_else(|| {
+            ChipRpcError::from_message(format!("{:#}", error))
+                .is_recoverable_operational_discovery_failure()
+        })
+}
+
 fn ble_recovery_cooldown(error: &anyhow::Error) -> Duration {
     error
         .downcast_ref::<ChipRpcError>()
@@ -787,6 +797,22 @@ impl MatterTransport for ChipTransport {
                     )),
                     Err(recovery_error) => Err(error.context(format!(
                         "Matter BLE commissioning failed and CHIP sidecar recovery failed: {:#}",
+                        recovery_error
+                    ))),
+                }
+            }
+            // Operational discovery timed out after the device joined the
+            // network: the usual cause is chipd's mDNS sockets going stale
+            // after a wlan0 address change, which only a sidecar restart
+            // fixes. Applies to every rendezvous mode — mDNS resolution is
+            // required for on-network commissioning too.
+            Err(error) if is_recoverable_operational_discovery_error(&error) => {
+                match self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error)) {
+                    Ok(()) => Err(error.context(
+                        "Matter operational discovery failed; reset CHIP sidecar before next attempt",
+                    )),
+                    Err(recovery_error) => Err(error.context(format!(
+                        "Matter operational discovery failed and CHIP sidecar recovery failed: {:#}",
                         recovery_error
                     ))),
                 }
@@ -2030,6 +2056,79 @@ mod tests {
             commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "commissioning should not be retried automatically after a BLE stack failure"
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    /// Regression for issue #117: a wlan0 address change left chipd's mDNS
+    /// sockets bound to a stale address, so commissioning succeeded through
+    /// WiFiNetworkEnable but timed out at operational discovery
+    /// (AddressResolve). The transport treated the error as non-recoverable
+    /// and never restarted the wedged sidecar, so every retry failed the same
+    /// way until a manual reboot.
+    #[test]
+    fn operational_discovery_timeout_reinitializes_controller_without_retrying_commission() {
+        const ADDRESS_RESOLVE_TIMEOUT_ERROR: &str = concat!(
+            "commissioning Matter light: ",
+            "src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: ",
+            "CHIP Error 0x00000032: Timeout"
+        );
+
+        let socket_path = temp_socket_path("recover-operational-discovery");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ChipRpcResponseEnvelope::error(request.id, ADDRESS_RESOLVE_TIMEOUT_ERROR)
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                        compressed_fabric_id: None,
+                    },
+                ),
+                ChipRpcRequest::SetOnOff { .. } => {
+                    ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                }
+                other => panic!("unexpected RPC during recovery test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .expect_err("commissioning should surface the original discovery failure");
+        assert!(format!("{:#}", error).contains("reset CHIP sidecar"));
+
+        transport
+            .set_on_off(102, 1, true)
+            .expect("subsequent commands should use the re-initialized controller");
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                ChipRpcRequest::SetOnOff { .. } => "set_on_off",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "set_on_off"],
+            "expected the failed commission to reset and re-init the controller without retrying the commission"
+        );
+        assert_eq!(
+            commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "commissioning should not be retried automatically after an operational discovery failure"
         );
 
         let _ = fs::remove_file(socket_path);
