@@ -34,6 +34,7 @@ import 'widgets/disabled_mode_banner.dart';
 import 'widgets/hardware_gate_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
+import 'widgets/report_bug_flow.dart';
 import 'widgets/solar_orbit.dart';
 import 'widgets/virtual_experience_banner.dart';
 
@@ -292,6 +293,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _showPreHomeSignIn() {
     SignInModal.show(context);
+  }
+
+  Future<void> _showReportBug() async {
+    final serverHub =
+        context.read<HomeProvider>().getFirstHubOfType(HubType.server);
+    await showReportBugFlow(context, serverHub: serverHub);
   }
 
   /// Leave the Virtual Experience: clear the seeded demo state and land back
@@ -657,8 +664,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         children: [
                           if (isVirtual)
                             VirtualExperienceBanner(
-                              onExit: () =>
-                                  unawaited(_exitVirtualExperience()),
+                              onExit: () => unawaited(_exitVirtualExperience()),
                             ),
                           if (showDisabledBanner)
                             DisabledModeBanner(
@@ -737,6 +743,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         tabs: visibleTabs,
                         disabledTabs: disabledTabs,
                         onSelected: _handleTabSelected,
+                        onReportBug: () => unawaited(_showReportBug()),
                       ),
                     ),
                 ],
@@ -1303,12 +1310,14 @@ class _NavFanButton extends StatefulWidget {
     required this.tabs,
     required this.disabledTabs,
     required this.onSelected,
+    required this.onReportBug,
   });
 
   final MainNavTab currentTab;
   final List<MainNavTab> tabs;
   final Set<MainNavTab> disabledTabs;
   final ValueChanged<MainNavTab> onSelected;
+  final VoidCallback onReportBug;
 
   @override
   State<_NavFanButton> createState() => _NavFanButtonState();
@@ -1346,6 +1355,11 @@ class _NavFanButtonState extends State<_NavFanButton>
     widget.onSelected(tab);
   }
 
+  void _reportBug() {
+    _close();
+    widget.onReportBug();
+  }
+
   /// (outline icon, filled icon, label, accent) per destination.
   static (IconData, IconData, String, Color) _meta(MainNavTab tab) =>
       switch (tab) {
@@ -1375,6 +1389,23 @@ class _NavFanButtonState extends State<_NavFanButton>
     // isn't one of the fanned destinations.
     final tabs =
         widget.tabs.where((t) => t != MainNavTab.home).toList(growable: false);
+    final itemCount = tabs.length + 1;
+    final fanItems = <Widget>[];
+    var index = 0;
+    var reportBugAdded = false;
+    for (final tab in tabs) {
+      if (tab == MainNavTab.settings) {
+        fanItems.add(_buildReportBugFanItem(itemCount - 1 - index));
+        index += 1;
+        reportBugAdded = true;
+      }
+      fanItems.add(_buildFanItem(tab, itemCount - 1 - index));
+      index += 1;
+    }
+    if (!reportBugAdded) {
+      fanItems.add(_buildReportBugFanItem(itemCount - 1 - index));
+    }
+
     return Stack(
       children: [
         if (_open)
@@ -1406,8 +1437,7 @@ class _NavFanButtonState extends State<_NavFanButton>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              for (var i = 0; i < tabs.length; i++)
-                _buildFanItem(tabs[i], tabs.length - 1 - i),
+              ...fanItems,
               const SizedBox(height: 20),
               _buildGear(),
             ],
@@ -1421,6 +1451,39 @@ class _NavFanButtonState extends State<_NavFanButton>
     final (outline, filled, label, accent) = _meta(tab);
     final selected = tab == widget.currentTab;
     final disabled = widget.disabledTabs.contains(tab);
+    return _buildMenuItem(
+      slotFromBottom: slotFromBottom,
+      outline: outline,
+      filled: filled,
+      label: label,
+      accent: accent,
+      selected: selected,
+      disabled: disabled,
+      onTap: () => _select(tab),
+    );
+  }
+
+  Widget _buildReportBugFanItem(int slotFromBottom) {
+    return _buildMenuItem(
+      slotFromBottom: slotFromBottom,
+      outline: Icons.bug_report_outlined,
+      filled: Icons.bug_report_rounded,
+      label: 'Report Bug',
+      accent: const Color(0xFF26C6DA),
+      onTap: _reportBug,
+    );
+  }
+
+  Widget _buildMenuItem({
+    required int slotFromBottom,
+    required IconData outline,
+    required IconData filled,
+    required String label,
+    required Color accent,
+    required VoidCallback onTap,
+    bool selected = false,
+    bool disabled = false,
+  }) {
     // Items nearest the gear spring in first.
     final start = (slotFromBottom * 0.09).clamp(0.0, 0.55);
     final anim = CurvedAnimation(
@@ -1467,7 +1530,7 @@ class _NavFanButtonState extends State<_NavFanButton>
               borderRadius: BorderRadius.circular(26),
               clipBehavior: Clip.antiAlias,
               child: InkWell(
-                onTap: disabled ? null : () => _select(tab),
+                onTap: disabled ? null : onTap,
                 child: Container(
                   height: 50,
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),

@@ -910,6 +910,48 @@ void main() {
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
+  testWidgets('settings fan opens report bug flow from the room grid',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _openNavigationFan(tester);
+    expect(find.text('Report Bug'), findsOneWidget);
+
+    await tester.tap(find.text('Report Bug'));
+    await tester.pump();
+
+    expect(
+      find.text(
+        'This sends a snapshot of recent logs and redacted state to Rhythm support.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('What went wrong? (optional)'), findsOneWidget);
+  });
+
   testWidgets('app resume refresh gates cached rooms until fresh hello',
       (tester) async {
     final roomProvider = RoomProvider();
