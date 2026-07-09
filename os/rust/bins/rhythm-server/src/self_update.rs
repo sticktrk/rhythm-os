@@ -3039,7 +3039,11 @@ pub enum StartupUpdateDisposition {
     /// The new build failed to start too many times; the previous binaries
     /// were restored. The caller should exit so the supervisor restarts into
     /// the restored build.
-    RolledBack { restored: Vec<PathBuf> },
+    RolledBack {
+        restored: Vec<PathBuf>,
+        previous_version: Option<String>,
+        target_version: Option<String>,
+    },
 }
 
 fn pending_update_marker_path(install_root: &Path) -> PathBuf {
@@ -3153,7 +3157,11 @@ fn startup_update_health_check_at(marker_path: &Path) -> StartupUpdateDispositio
             &marker,
         );
         remove_if_exists(marker_path);
-        return StartupUpdateDisposition::RolledBack { restored };
+        return StartupUpdateDisposition::RolledBack {
+            restored,
+            previous_version: marker.previous_version.clone(),
+            target_version: marker.target_version.clone(),
+        };
     }
 
     if let Err(error) = write_pending_marker_file(marker_path, &marker) {
@@ -3201,16 +3209,33 @@ fn roll_back_pending_update(marker: &PendingUpdateMarker) -> Vec<PathBuf> {
 }
 
 /// Discard the pending-update marker and its rollback backups after the new
-/// build proved healthy.
-pub fn mark_update_verified() {
+/// build proved healthy. `data_dir`, when known, receives an OTA-history
+/// "verified" entry.
+pub fn mark_update_verified(data_dir: Option<&Path>) {
     let Ok(install_root) = install_target_executable() else {
         return;
     };
-    if mark_update_verified_at(&pending_update_marker_path(&install_root)) {
+    let marker_path = pending_update_marker_path(&install_root);
+    let marker_versions = fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PendingUpdateMarker>(&raw).ok())
+        .map(|marker| (marker.previous_version, marker.target_version));
+    if mark_update_verified_at(&marker_path) {
         log::info!(
             target: "sys",
             "Update verified after healthy startup; cleared rollback backups"
         );
+        if let (Some(data_dir), Some((previous, target))) = (data_dir, marker_versions) {
+            crate::ota_history::record(
+                data_dir,
+                crate::ota_history::entry(
+                    previous.as_deref(),
+                    target.as_deref(),
+                    "startup",
+                    "verified",
+                ),
+            );
+        }
     }
 }
 
@@ -3432,12 +3457,12 @@ fn clear_drift_repair_state_at(path: &Path) {
 /// Spawn the post-startup verification thread. Call after the HTTP listener
 /// has bound; once [`STARTUP_VERIFY_GRACE_SECS`] pass with the process still
 /// alive, the pending update is considered good and its backups are removed.
-pub fn spawn_update_verification_marker() {
+pub fn spawn_update_verification_marker(data_dir: Option<PathBuf>) {
     let spawn_result = std::thread::Builder::new()
         .name("update-verify".to_string())
-        .spawn(|| {
+        .spawn(move || {
             std::thread::sleep(Duration::from_secs(STARTUP_VERIFY_GRACE_SECS));
-            mark_update_verified();
+            mark_update_verified(data_dir.as_deref());
         });
     if let Err(error) = spawn_result {
         log::warn!(
@@ -5168,7 +5193,7 @@ mod tests {
 
         // One more failed start restores the previous build.
         let disposition = startup_update_health_check_at(&marker_path);
-        let StartupUpdateDisposition::RolledBack { restored } = disposition else {
+        let StartupUpdateDisposition::RolledBack { restored, .. } = disposition else {
             panic!("expected rollback, got {:?}", disposition);
         };
         assert_eq!(restored.len(), 2);
@@ -5475,7 +5500,7 @@ mod tests {
             let _ = startup_update_health_check_at(&marker_path);
         }
         let disposition = startup_update_health_check_at(&marker_path);
-        let StartupUpdateDisposition::RolledBack { restored } = disposition else {
+        let StartupUpdateDisposition::RolledBack { restored, .. } = disposition else {
             panic!("expected rollback, got {:?}", disposition);
         };
 

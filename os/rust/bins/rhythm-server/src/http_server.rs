@@ -219,20 +219,122 @@ struct LogStreamState {
     deadline: Instant,
 }
 
-async fn debug_bundle(State(state): State<SharedState>) -> Response {
+/// Optional body for POST /api/diag/debug-bundle. Legacy clients post no
+/// body and download the tar.gz; newer apps pass `upload_url` (a signed
+/// storage upload URL) so the device streams the bundle to storage directly
+/// — large bundles used to time out the app-side download because the whole
+/// archive had to round-trip through the phone first. `app_log` rides along
+/// so the device can embed it (the app can no longer append it post-hoc).
+#[derive(Debug, Default, serde::Deserialize)]
+struct DebugBundleRequest {
+    upload_url: Option<String>,
+    app_log: Option<String>,
+    app_metadata: Option<serde_json::Value>,
+}
+
+const DEBUG_BUNDLE_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const DEBUG_BUNDLE_UPLOAD_CACHE_CONTROL: &str = "3600";
+
+/// The upload URL comes from the authenticated app, but the device still
+/// refuses to POST its diagnostics anywhere unencrypted — except loopback,
+/// which local development and the handler tests rely on.
+fn upload_url_is_acceptable(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host_port = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host_port
+        .strip_prefix('[')
+        .and_then(|bracketed| bracketed.split(']').next())
+        .unwrap_or_else(|| host_port.split(':').next().unwrap_or(""));
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+fn debug_bundle_upload_boundary(size_bytes: usize) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "rhythm-debug-bundle-{}-{nanos}-{size_bytes}",
+        std::process::id()
+    )
+}
+
+fn append_multipart_text_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("content-disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+fn append_multipart_file_field(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(format!("content-type: {content_type}\r\n").as_bytes());
+    body.extend_from_slice(b"content-disposition: form-data; name=\"\"; filename=\"\"\r\n\r\n");
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(b"\r\n");
+}
+
+/// Supabase signed upload URLs use `multipart/form-data` for `PUT` uploads.
+/// This mirrors `storage_client`'s `uploadBinaryToSignedUrl` wire shape so the
+/// device can upload directly with only the signed URL from the app.
+fn supabase_signed_upload_body(bundle_bytes: Vec<u8>, boundary: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(bundle_bytes.len() + 512);
+    append_multipart_text_field(
+        &mut body,
+        boundary,
+        "cacheControl",
+        DEBUG_BUNDLE_UPLOAD_CACHE_CONTROL,
+    );
+    append_multipart_file_field(&mut body, boundary, "application/gzip", bundle_bytes);
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+async fn debug_bundle(
+    State(state): State<SharedState>,
+    body: Option<Json<DebugBundleRequest>>,
+) -> Response {
     let started_at = std::time::Instant::now();
-    match tokio::task::spawn_blocking(move || crate::debug_bundle::build_debug_bundle(&state)).await
-    {
-        Ok(Ok(bundle)) => {
-            log::info!(
-                target: "http",
-                "Generated debug bundle {} ({} bytes) in {} ms",
-                bundle.file_name,
-                bundle.bytes.len(),
-                started_at.elapsed().as_millis()
+    let request = body.map(|Json(request)| request).unwrap_or_default();
+
+    if let Some(upload_url) = request.upload_url.as_deref() {
+        if !upload_url_is_acceptable(upload_url) {
+            return json_status(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "error",
+                    "message": "upload_url must be an https URL (or http to loopback)",
+                }),
             );
-            tar_gz_attachment(&bundle.file_name, bundle.bytes)
         }
+    }
+
+    let app_log = request
+        .app_log
+        .map(|log_text| crate::debug_bundle::AppLogAttachment {
+            log_text,
+            metadata: request.app_metadata,
+        });
+
+    let build_state = state.clone();
+    let bundle = match tokio::task::spawn_blocking(move || {
+        crate::debug_bundle::build_debug_bundle_with_app_log(&build_state, app_log)
+    })
+    .await
+    {
+        Ok(Ok(bundle)) => bundle,
         Ok(Err(e)) => {
             log::error!(
                 target: "http",
@@ -240,16 +342,89 @@ async fn debug_bundle(State(state): State<SharedState>) -> Response {
                 started_at.elapsed().as_millis(),
                 e
             );
-            err_500(e)
+            return err_500(e);
         }
         Err(e) => {
             log::error!(
                 target: "http",
-                "Debug bundle worker join failed after {} ms: {}",
+                "Debug bundle generation panicked after {} ms: {}",
                 started_at.elapsed().as_millis(),
                 e
             );
-            err_500(e)
+            return err_500(e);
+        }
+    };
+
+    let Some(upload_url) = request.upload_url else {
+        log::info!(
+            target: "http",
+            "Generated debug bundle {} ({} bytes) in {} ms",
+            bundle.file_name,
+            bundle.bytes.len(),
+            started_at.elapsed().as_millis()
+        );
+        return tar_gz_attachment(&bundle.file_name, bundle.bytes);
+    };
+
+    let upload_file_name = bundle.file_name;
+    let bundle_bytes = bundle.bytes;
+    let size_bytes = bundle_bytes.len();
+    let upload_result = async {
+        let boundary = debug_bundle_upload_boundary(size_bytes);
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        let upload_body = supabase_signed_upload_body(bundle_bytes, &boundary);
+        let client = reqwest::Client::builder()
+            .timeout(DEBUG_BUNDLE_UPLOAD_TIMEOUT)
+            .build()?;
+        let response = client
+            .put(&upload_url)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .header("x-upsert", "false")
+            .body(upload_body)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            anyhow::bail!("upload target returned {status}: {detail}");
+        }
+        anyhow::Ok(())
+    }
+    .await;
+
+    match upload_result {
+        Ok(()) => {
+            log::info!(
+                target: "http",
+                "Uploaded debug bundle {} ({} bytes) directly to storage in {} ms",
+                upload_file_name,
+                size_bytes,
+                started_at.elapsed().as_millis()
+            );
+            json_status(
+                StatusCode::OK,
+                serde_json::json!({
+                    "uploaded": true,
+                    "file_name": upload_file_name,
+                    "size_bytes": size_bytes,
+                }),
+            )
+        }
+        Err(e) => {
+            log::error!(
+                target: "http",
+                "Debug bundle direct upload failed after {} ms: {:#}",
+                started_at.elapsed().as_millis(),
+                e
+            );
+            json_status(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({
+                    "status": "error",
+                    "uploaded": false,
+                    "message": format!("debug bundle direct upload failed: {e:#}"),
+                }),
+            )
         }
     }
 }
@@ -939,6 +1114,21 @@ async fn do_update(
         }
     };
     ota_status.mark_restarting(&previous, &latest, apply_result.checksum_verified);
+    {
+        let data_dir = state
+            .lock()
+            .map(|s| std::path::PathBuf::from(&s.data_dir))
+            .unwrap_or_default();
+        crate::ota_history::record(
+            &data_dir,
+            crate::ota_history::entry(
+                Some(&previous),
+                Some(&latest),
+                "manual",
+                "applied",
+            ),
+        );
+    }
     emit_ota_progress(
         &state,
         rhythm_os::server_event::OtaUpdateStage::Restarting,
@@ -1477,7 +1667,7 @@ mod tests {
             state.data_dir = data_dir.display().to_string();
         }
 
-        let response = debug_bundle(State(state)).await;
+        let response = debug_bundle(State(state), None).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1499,6 +1689,178 @@ mod tests {
         assert!(!body.is_empty());
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn upload_url_gate_allows_https_and_loopback_only() {
+        assert!(upload_url_is_acceptable("https://storage.example.com/x"));
+        assert!(upload_url_is_acceptable("http://127.0.0.1:8080/upload"));
+        assert!(upload_url_is_acceptable("http://localhost/upload"));
+        assert!(upload_url_is_acceptable("http://[::1]:9000/upload"));
+        assert!(!upload_url_is_acceptable("http://192.168.5.1/upload"));
+        assert!(!upload_url_is_acceptable("http://evil.example.com/upload"));
+        assert!(!upload_url_is_acceptable("ftp://example.com/upload"));
+    }
+
+    /// Direct-to-storage upload: the device PUTs a Supabase-compatible
+    /// multipart body to the signed URL itself (bypassing the app's memory
+    /// and receive timeout) and embeds the app log the request carried.
+    #[tokio::test]
+    async fn debug_bundle_handler_uploads_directly_and_embeds_app_log() {
+        let data_dir = unique_test_dir("debug-bundle-upload");
+        std::fs::create_dir_all(data_dir.join("log")).unwrap();
+        std::fs::write(
+            data_dir.join("log").join("rhythm-server.log"),
+            b"server-log",
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let (headers_end, content_length, head) = loop {
+                let n = socket.read(&mut tmp).await.unwrap();
+                assert!(n > 0, "upload connection closed before headers");
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                    assert!(head.starts_with("PUT /upload"), "expected PUT, got: {head}");
+                    let content_length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .expect("content-length header");
+                    break (pos + 4, content_length, head);
+                }
+            };
+            while buf.len() < headers_end + content_length {
+                let n = socket.read(&mut tmp).await.unwrap();
+                assert!(n > 0, "upload connection closed before body finished");
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            (
+                head,
+                buf[headers_end..headers_end + content_length].to_vec(),
+            )
+        });
+
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut state = state.lock().unwrap();
+            state.firmware_version = "1.2.3";
+            state.platform_type = "server";
+            state.platform_context = "desktop";
+            state.data_dir = data_dir.display().to_string();
+        }
+
+        let request = DebugBundleRequest {
+            upload_url: Some(format!("http://127.0.0.1:{}/upload", addr.port())),
+            app_log: Some("app log line one\napp log line two\n".to_string()),
+            app_metadata: Some(serde_json::json!({
+                "kind": "rhythm_app_log",
+                "app_version": "9.9.9",
+            })),
+        };
+        let response = debug_bundle(State(state), Some(Json(request))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["uploaded"], true);
+        assert!(json["size_bytes"].as_u64().unwrap() > 0);
+
+        let (upload_headers, uploaded_body) = received.await.unwrap();
+        let lower_headers = upload_headers.to_ascii_lowercase();
+        assert!(
+            lower_headers.contains("x-upsert: false"),
+            "signed uploads must preserve no-upsert semantics: {upload_headers}"
+        );
+        let content_type = upload_headers
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+            .expect("content-type header");
+        assert!(
+            content_type.contains("multipart/form-data; boundary="),
+            "Supabase signed upload expects multipart/form-data, got: {content_type}"
+        );
+        let boundary = content_type
+            .split("boundary=")
+            .nth(1)
+            .expect("multipart boundary")
+            .trim();
+        let body_text = String::from_utf8_lossy(&uploaded_body);
+        assert!(
+            body_text
+                .contains("content-disposition: form-data; name=\"cacheControl\"\r\n\r\n3600\r\n"),
+            "missing Supabase cacheControl form field: {body_text:?}"
+        );
+        let file_header = b"content-type: application/gzip\r\ncontent-disposition: form-data; name=\"\"; filename=\"\"\r\n\r\n";
+        let file_start = uploaded_body
+            .windows(file_header.len())
+            .position(|window| window == file_header)
+            .expect("multipart gzip file part")
+            + file_header.len();
+        let file_end_marker = format!("\r\n--{boundary}").into_bytes();
+        let file_end = uploaded_body[file_start..]
+            .windows(file_end_marker.len())
+            .position(|window| window == file_end_marker)
+            .expect("multipart file closing boundary")
+            + file_start;
+        let uploaded = uploaded_body[file_start..file_end].to_vec();
+        assert_eq!(
+            uploaded.len(),
+            json["size_bytes"].as_u64().unwrap() as usize
+        );
+        let tar_bytes = {
+            use std::io::Read as _;
+            let mut decoder = flate2::read::GzDecoder::new(uploaded.as_slice());
+            let mut tar_bytes = Vec::new();
+            decoder.read_to_end(&mut tar_bytes).unwrap();
+            tar_bytes
+        };
+        let mut archive = tar::Archive::new(tar_bytes.as_slice());
+        let mut entries = std::collections::BTreeMap::new();
+        for entry in archive.entries().unwrap() {
+            use std::io::Read as _;
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().display().to_string();
+            let mut contents = Vec::new();
+            entry.read_to_end(&mut contents).unwrap();
+            entries.insert(path, contents);
+        }
+        assert_eq!(
+            entries.get("app/app.log").map(|bytes| bytes.as_slice()),
+            Some("app log line one\napp log line two\n".as_bytes())
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(entries.get("app/metadata.json").unwrap()).unwrap();
+        assert_eq!(metadata["app_version"], "9.9.9");
+        assert!(entries.contains_key("manifest.json"));
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn debug_bundle_handler_rejects_non_loopback_http_upload_url() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let request = DebugBundleRequest {
+            upload_url: Some("http://192.168.5.9/upload".to_string()),
+            app_log: None,
+            app_metadata: None,
+        };
+        let response = debug_bundle(State(state), Some(Json(request))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

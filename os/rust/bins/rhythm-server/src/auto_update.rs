@@ -405,6 +405,21 @@ fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDec
                 result.installed_targets,
                 result.checksum_verified,
             );
+            {
+                let data_dir = state
+                    .lock()
+                    .map(|s| PathBuf::from(&s.data_dir))
+                    .unwrap_or_default();
+                crate::ota_history::record(
+                    &data_dir,
+                    crate::ota_history::entry(
+                        Some(&info.current_version),
+                        Some(&info.latest_version),
+                        "auto",
+                        "applied",
+                    ),
+                );
+            }
             let restart_persist_error = if let Err(error) =
                 self_update::schedule_post_update_restart_with_best_effort_persist(state.clone())
             {

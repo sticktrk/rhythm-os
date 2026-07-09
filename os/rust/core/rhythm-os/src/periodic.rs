@@ -518,7 +518,7 @@ pub(crate) fn enqueue_periodic_tick(
         };
         if !s.light_breaker_enabled {
             tracing::debug!(
-                target: "sys",
+                target: "periodic",
                 event = "periodic_tick_skipped",
                 command_id = %tick.command_id,
                 node_id = %tick.node_id,
@@ -530,7 +530,7 @@ pub(crate) fn enqueue_periodic_tick(
         }
         if s.light_dispatch_generation != tick.dispatch_generation {
             tracing::debug!(
-                target: "sys",
+                target: "periodic",
                 event = "periodic_tick_skipped",
                 command_id = %tick.command_id,
                 node_id = %tick.node_id,
@@ -554,7 +554,7 @@ pub(crate) fn enqueue_periodic_tick(
                 } else {
                     entry.get_mut().current_hour = tick.current_hour;
                     tracing::debug!(
-                        target: "sys",
+                        target: "periodic",
                         event = "periodic_tick_coalesced",
                         command_id = %tick.command_id,
                         node_id = %tick.node_id,
@@ -874,7 +874,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         || dispatch_summary.no_dispatch_node_count > 0
     {
         tracing::debug!(
-            target: "sys",
+            target: "periodic",
             event = "periodic_cycle_detail",
             command_id = %command_id,
             dispatch_count = dispatch_summary.dispatch_node_count,
@@ -893,7 +893,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
     }
 
     tracing::info!(
-        target: "sys",
+        target: "periodic",
         event = "periodic_cycle",
         command_id = %command_id,
         local_hour = current_hour,
@@ -938,7 +938,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         for (idx, node) in periodic_nodes.iter().enumerate() {
             if !light_dispatch_generation_current(&state, dispatch_generation) {
                 tracing::debug!(
-                    target: "sys",
+                    target: "periodic",
                     event = "periodic_cycle_invalidated",
                     command_id = %command_id,
                     dispatch_generation,
@@ -966,7 +966,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                 },
             ) {
                 tracing::warn!(
-                    target: "sys",
+                    target: "periodic",
                     event = "periodic_tick_dropped",
                     command_id = %command_id,
                     node_id = %node.node_id,
@@ -983,7 +983,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         for (idx, node) in periodic_nodes.iter().enumerate() {
             if !light_dispatch_generation_current(&state, dispatch_generation) {
                 tracing::debug!(
-                    target: "sys",
+                    target: "periodic",
                     event = "periodic_cycle_invalidated",
                     command_id = %command_id,
                     dispatch_generation,
@@ -1011,7 +1011,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                 },
             ) {
                 tracing::warn!(
-                    target: "sys",
+                    target: "periodic",
                     event = "periodic_tick_dropped",
                     command_id = %command_id,
                     node_id = %node.node_id,
@@ -1040,7 +1040,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                     runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
                 {
                     tracing::warn!(
-                        target: "sys",
+                        target: "periodic",
                         event = "periodic_node_tick_failed",
                         command_id = %command_id,
                         node_id = %node.node_id,
@@ -1052,7 +1052,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                     );
                 } else {
                     tracing::debug!(
-                        target: "sys",
+                        target: "periodic",
                         event = "periodic_node_tick_applied",
                         command_id = %command_id,
                         node_id = %node.node_id,
@@ -1077,7 +1077,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             }
         } else if !periodic_nodes.is_empty() {
             debug!(
-                target: "sys",
+                target: "periodic",
                 "Periodic tick skipped {} queued node(s): no runtime available",
                 periodic_nodes.len()
             );

@@ -11,9 +11,13 @@ class AppLogService {
   static final AppLogService instance = AppLogService._();
 
   static const _storageKey = 'app_logs_v1';
-  static const _maxEntries = 600;
+  // Sized so the bundle's app.log spans the whole support interaction, not
+  // just its last couple of minutes: server sync chatter runs ~40-90 lines
+  // per sync, and a 240k budget once rolled a removal attempt out of the
+  // window one minute before the bug report captured it (issue #123).
+  static const _maxEntries = 3000;
   static const _maxLineLength = 1200;
-  static const _maxStoredChars = 240000;
+  static const _maxStoredChars = 512000;
   static const _flushDelay = Duration(seconds: 2);
 
   final List<String> _entries = [];

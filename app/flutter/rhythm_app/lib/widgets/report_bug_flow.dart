@@ -154,20 +154,48 @@ Future<void> showReportBugFlow(
       final client = resolved.diagnosticsApi(
         debugBundleReceiveTimeout: _serverDebugBundleReceiveTimeout,
       );
+
+      // Preferred: the device uploads the bundle straight to storage, so a
+      // large bundle never has to fit through the app's download window.
+      DebugBundleSubmission? directSubmission;
       RhythmDebugBundle? bundle;
       String? bundleFailure;
       try {
-        bundle = await client.downloadDebugBundle();
-        bundleFailure = null;
+        final direct =
+            await DebugBundleSubmissionService.instance.submitViaDeviceUpload(
+          serverHub: serverHub,
+          deviceClient: client,
+          serverVersion: serverVersion,
+          serverPlatformContext: serverPlatformContext,
+          summary: summary,
+        );
+        directSubmission = direct.submission;
+        // Older firmware ignores the upload request and returns the bundle
+        // bytes — reuse them below instead of downloading twice.
+        bundle = direct.legacyBundle;
       } catch (error) {
-        bundleFailure = _formatDebugBundleFailure(error);
         debugPrint(
-          'ReportBugFlow: server debug bundle download failed from '
-          '${resolved.baseUrl}: $bundleFailure',
+          'ReportBugFlow: device-direct upload unavailable from '
+          '${resolved.baseUrl}, falling back to download: $error',
         );
       }
 
-      if (bundle != null) {
+      if (directSubmission == null && bundle == null) {
+        try {
+          bundle = await client.downloadDebugBundle();
+          bundleFailure = null;
+        } catch (error) {
+          bundleFailure = _formatDebugBundleFailure(error);
+          debugPrint(
+            'ReportBugFlow: server debug bundle download failed from '
+            '${resolved.baseUrl}: $bundleFailure',
+          );
+        }
+      }
+
+      if (directSubmission != null) {
+        submission = directSubmission;
+      } else if (bundle != null) {
         submission = await DebugBundleSubmissionService.instance.submit(
           serverHub: serverHub,
           bundle: bundle,

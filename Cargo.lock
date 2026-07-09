@@ -1933,6 +1933,7 @@ version = "0.6.232-beta"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "dbus",
  "log",
  "reqwest",

@@ -57,12 +57,25 @@ fn main() -> Result<()> {
                 attempt
             );
         }
-        rhythm_server::self_update::StartupUpdateDisposition::RolledBack { restored } => {
+        rhythm_server::self_update::StartupUpdateDisposition::RolledBack {
+            restored,
+            previous_version,
+            target_version,
+        } => {
             log::error!(
                 target: "sys",
                 "Self-update failed verification after repeated start attempts; restored {} previous binar{} — exiting so the supervisor restarts the previous build",
                 restored.len(),
                 if restored.len() == 1 { "y" } else { "ies" }
+            );
+            rhythm_server::ota_history::record(
+                std::path::Path::new(&shellexpand(&args.data_dir)),
+                rhythm_server::ota_history::entry(
+                    previous_version.as_deref(),
+                    target_version.as_deref(),
+                    "startup",
+                    "rolled_back",
+                ),
             );
             std::process::exit(1);
         }
@@ -239,7 +252,12 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
 
     // The listener is up: give the (possibly freshly updated) build its
     // post-startup grace period, then discard self-update rollback backups.
-    rhythm_server::self_update::spawn_update_verification_marker();
+    rhythm_server::self_update::spawn_update_verification_marker(
+        state
+            .lock()
+            .ok()
+            .map(|s| std::path::PathBuf::from(&s.data_dir)),
+    );
 
     // Register mDNS service for auto-discovery by clients
     let _mdns = rhythm_os::mdns::register_mdns_service(port, "server", VERSION, "rhythm-server");
