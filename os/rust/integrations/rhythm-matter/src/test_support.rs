@@ -243,6 +243,8 @@ impl MatterTransport for NoOpTransport {
     }
 }
 
+type GroupRemovalObserver = Box<dyn Fn(u16, &[MatterGroupMember]) + Send + Sync>;
+
 /// Spy transport that records typed operations and configurable results.
 pub struct SpyTransport {
     operations: Mutex<Vec<RecordedOperation>>,
@@ -254,6 +256,8 @@ pub struct SpyTransport {
     failing_read_nodes: Mutex<HashSet<u64>>,
     timing_out_nodes: Mutex<HashSet<u64>>,
     failing_groups: Mutex<HashSet<u16>>,
+    failing_group_removals: Mutex<HashSet<u16>>,
+    group_removal_observer: Mutex<Option<GroupRemovalObserver>>,
     commission_result: Mutex<Result<CommissionedDevice>>,
     commission_requests: Mutex<Vec<MatterCommissionRequest>>,
     decommissioned: Mutex<Vec<(u64, bool)>>,
@@ -271,6 +275,8 @@ impl SpyTransport {
             failing_read_nodes: Mutex::new(HashSet::new()),
             timing_out_nodes: Mutex::new(HashSet::new()),
             failing_groups: Mutex::new(HashSet::new()),
+            failing_group_removals: Mutex::new(HashSet::new()),
+            group_removal_observer: Mutex::new(None),
             commission_result: Mutex::new(Ok(default_device(99))),
             commission_requests: Mutex::new(Vec::new()),
             decommissioned: Mutex::new(Vec::new()),
@@ -338,6 +344,17 @@ impl SpyTransport {
         self.failing_groups.lock().unwrap().insert(group_id);
     }
 
+    pub fn fail_group_removals(&self, group_id: u16) {
+        self.failing_group_removals.lock().unwrap().insert(group_id);
+    }
+
+    pub fn observe_group_removals<F>(&self, observer: F)
+    where
+        F: Fn(u16, &[MatterGroupMember]) + Send + Sync + 'static,
+    {
+        *self.group_removal_observer.lock().unwrap() = Some(Box::new(observer));
+    }
+
     pub fn set_commission_result(&self, result: Result<CommissionedDevice>) {
         *self.commission_result.lock().unwrap() = result;
     }
@@ -371,6 +388,13 @@ impl SpyTransport {
 
     fn should_fail_group(&self, group_id: u16) -> bool {
         self.failing_groups.lock().unwrap().contains(&group_id)
+    }
+
+    fn should_fail_group_removal(&self, group_id: u16) -> bool {
+        self.failing_group_removals
+            .lock()
+            .unwrap()
+            .contains(&group_id)
     }
 
     fn record(&self, operation: RecordedOperation) {
@@ -468,11 +492,17 @@ impl MatterTransport for SpyTransport {
     }
 
     fn remove_group(&self, group_id: u16, members: &[MatterGroupMember]) -> Result<()> {
-        self.groups.lock().unwrap().remove(&group_id);
         self.record(RecordedOperation::RemoveGroup {
             group_id,
             members: members.to_vec(),
         });
+        if let Some(observer) = self.group_removal_observer.lock().unwrap().as_ref() {
+            observer(group_id, members);
+        }
+        if self.should_fail_group_removal(group_id) {
+            anyhow::bail!("group {} removal failed", group_id);
+        }
+        self.groups.lock().unwrap().remove(&group_id);
         Ok(())
     }
 
