@@ -64,6 +64,18 @@ void main() {
       );
     });
 
+    test('normalizes Rhythm OS mDNS instance names for display', () {
+      const hub = DiscoveredHub(
+        host: 'rhythm-server-31810e88.local',
+        address: '192.168.5.99',
+        port: rhythmServerDefaultPort,
+        name: 'Rhythm OS (rhythm-server-31810e88)',
+        type: HubType.server,
+      );
+
+      expect(rhythmDisplayNameForDiscoveredServerForTesting(hub), 'Rhythm Box');
+    });
+
     test('probes advertised port and Rhythm server default port', () {
       const service = BonsoirService.ignoreNorms(
         name: 'AMC0945FFD075E099B',

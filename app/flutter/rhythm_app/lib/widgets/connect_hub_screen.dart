@@ -37,6 +37,7 @@ import '../services/account_cloud_sync_service.dart';
 import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
 import '../services/ble_provisioning_service.dart';
+import '../services/cloud_home_join_service.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/recent_servers_service.dart';
 
@@ -448,11 +449,19 @@ Hub _serverHubForDiscoveredServer({
 
 String _displayNameForDiscoveredServer(DiscoveredHub server) {
   final name = server.name?.trim();
-  if (name == null || name.isEmpty || name == 'RhythmServer') {
+  if (name == null ||
+      name.isEmpty ||
+      name == 'RhythmServer' ||
+      name == 'Rhythm OS' ||
+      name.startsWith('Rhythm OS (rhythm-')) {
     return 'Rhythm Box';
   }
   return name;
 }
+
+@visibleForTesting
+String rhythmDisplayNameForDiscoveredServerForTesting(DiscoveredHub server) =>
+    _displayNameForDiscoveredServer(server);
 
 Hub _detachedServerHubForDiscoveredServer(
   DiscoveredHub server, {
@@ -1551,6 +1560,18 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     final name = _displayNameForDiscoveredServer(discovered);
+    final cloudHome =
+        await CloudHomeJoinService.instance.joinByServerInstanceId(
+      serverInstanceId: serverInstanceId,
+      host: discovered.address,
+      port: discovered.port,
+      ownerToken: authToken,
+      hubName: name,
+    );
+    if (cloudHome != null) {
+      return homeProvider.enterHome(cloudHome);
+    }
+
     if (!mounted) throw const _HomeNameCancelledException();
     final home = await AddHomeFlow.show(context, defaultName: name);
     if (home == null) throw const _HomeNameCancelledException();
@@ -1699,10 +1720,24 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     if (shouldClaimToken) {
+      final lanToken = await _claimOwnerTokenViaLan(baseUrl);
+      if (lanToken != null) return lanToken;
       return _requestOwnerTokenViaBle(hub);
     }
 
     return _requestOwnerTokenViaBle(hub);
+  }
+
+  Future<String?> _claimOwnerTokenViaLan(String baseUrl) async {
+    try {
+      final claim = await RhythmAuthApi(baseUrl: '$baseUrl/')
+          .claimOwnerToken(label: 'Rhythm app')
+          .timeout(const Duration(seconds: 4));
+      return claim.token.trim().isNotEmpty ? claim.token : null;
+    } catch (error) {
+      debugPrint('LAN owner token claim failed for $baseUrl: $error');
+      return null;
+    }
   }
 
   Future<String?> _serverInstanceIdForDiscoveredHub(

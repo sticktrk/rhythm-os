@@ -46,6 +46,9 @@ verify_jwt = false
 [functions.remote-access-bootstrap]
 verify_jwt = false
 
+[functions.join-home-by-server-instance]
+verify_jwt = false
+
 [functions.support-access-grant]
 verify_jwt = false
 

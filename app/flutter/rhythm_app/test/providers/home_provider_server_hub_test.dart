@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
+import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
@@ -244,6 +245,105 @@ void main() {
       expect(merged.endpoint.host, '192.168.5.99');
       expect(merged.token, 'local-owner-token');
       expect(merged.serverInstanceId, 'srv-rpiz-a');
+    });
+
+    test('server pairing reuses existing Home by server identity', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final hub = _serverHub(
+        id: 'server-1',
+        host: '100.64.0.12',
+        token: 'owner-token',
+        enabled: true,
+        serverInstanceId: 'srv-db768b',
+      );
+
+      final entry = serverHomeEntryForPairingForTesting(
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        host: '192.168.5.99',
+        port: 54448,
+        token: null,
+        serverInstanceId: 'srv-db768b',
+        hubName: 'Rhythm OS (rhythm-server-31810e88)',
+        now: DateTime.utc(2026, 7, 9, 12),
+      );
+
+      expect(entry, isNotNull);
+      expect(entry!.home.id, home.id);
+      expect(entry.serverHubs, hasLength(1));
+      final updatedHub = entry.serverHubs.single;
+      expect(updatedHub.id, hub.id);
+      expect(updatedHub.endpoint.host, '192.168.5.99');
+      expect(updatedHub.serverInstanceId, 'srv-db768b');
+      expect(updatedHub.name, hub.name);
+      expect(updatedHub.pendingSync, isTrue);
+    });
+
+    test('server pairing backfills identity on legacy same-token hub', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final hub = _serverHub(
+        id: 'server-1',
+        host: '100.64.0.12',
+        token: 'owner-token',
+        enabled: true,
+      );
+
+      final entry = serverHomeEntryForPairingForTesting(
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        host: '192.168.5.99',
+        port: 54448,
+        token: 'owner-token',
+        serverInstanceId: 'srv-db768b',
+        hubName: 'Rhythm Box',
+        now: DateTime.utc(2026, 7, 9, 12),
+      );
+
+      expect(entry, isNotNull);
+      final updatedHub = entry!.serverHubs.single;
+      expect(updatedHub.id, hub.id);
+      expect(updatedHub.endpoint.host, '192.168.5.99');
+      expect(updatedHub.token, 'owner-token');
+      expect(updatedHub.serverInstanceId, 'srv-db768b');
+    });
+
+    test('server pairing does not merge known-different server identities', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final hub = _serverHub(
+        id: 'server-1',
+        host: '192.168.5.99',
+        token: 'owner-token',
+        enabled: true,
+        serverInstanceId: 'srv-other',
+      );
+
+      final entry = serverHomeEntryForPairingForTesting(
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        host: '192.168.5.99',
+        port: 54448,
+        token: 'owner-token',
+        serverInstanceId: 'srv-db768b',
+        hubName: 'Rhythm Box',
+        now: DateTime.utc(2026, 7, 9, 12),
+      );
+
+      expect(entry, isNull);
     });
 
     test('cloud server hub import uses decrypted cloud owner token', () {
