@@ -1383,11 +1383,14 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   }
 
   Widget _buildCredentialsBody() {
-    final canSubmit = _ssidController.text.trim().isNotEmpty;
     final selectedNetwork = _manualSsidEntry
         ? null
         : _wifiNetworkForSsid(_ssidController.text.trim());
     final isOpenNetwork = selectedNetwork?.security == 'open';
+    final canSubmit = _ssidController.text.trim().isNotEmpty &&
+        (selectedNetwork == null ||
+            isOpenNetwork ||
+            _passwordController.text.isNotEmpty);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
