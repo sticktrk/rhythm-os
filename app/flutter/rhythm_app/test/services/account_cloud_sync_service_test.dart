@@ -1,9 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:rhythm_app/services/account_data_encryption_service.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
   group('AccountCloudSyncService payloads', () {
@@ -24,6 +27,108 @@ void main() {
       expect(payload['member_ids'], ['8f075ac1-e4e7-40f7-817c-4a27424307f4']);
       expect(payload['pendingSync'], isNull);
       expect(payload['sleep_schedule'], isA<Map<String, dynamic>>());
+    });
+
+    test('home payload preserves cloud owner and existing members', () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Shared Home',
+        ownerId: 'owner-user',
+      ).copyWith(memberIds: ['owner-user', 'joining-user']);
+
+      final payload = AccountCloudSyncService.homeSnapshotPayload(
+        home,
+        userId: 'joining-user',
+      );
+
+      expect(payload['owner_id'], 'owner-user');
+      expect(payload['member_ids'], ['owner-user', 'joining-user']);
+    });
+
+    test('home payload can preserve existing cloud membership columns', () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Shared Home',
+        ownerId: 'owner-user',
+      ).copyWith(memberIds: ['owner-user']);
+
+      final payload = AccountCloudSyncService.homeSnapshotPayload(
+        home,
+        userId: 'owner-user',
+        includeMembership: false,
+      );
+
+      expect(payload, isNot(contains('owner_id')));
+      expect(payload, isNot(contains('member_ids')));
+      expect(payload['name'], 'Shared Home');
+    });
+
+    test('existing cloud homes use update without membership columns',
+        () async {
+      http.Request? capturedRequest;
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          capturedRequest = request;
+          return http.Response('', 204, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Shared Home',
+        ownerId: 'owner-user',
+      ).copyWith(memberIds: ['owner-user', 'joining-user']);
+
+      await AccountCloudSyncService.writeHomeSnapshot(
+        client: client,
+        home: home,
+        userId: 'joining-user',
+        homeAlreadyInCloud: true,
+      );
+
+      expect(capturedRequest?.method, 'PATCH');
+      expect(capturedRequest?.url.queryParameters['id'], 'eq.${home.id}');
+      final body = jsonDecode(capturedRequest!.body) as Map<String, dynamic>;
+      expect(body, isNot(contains('id')));
+      expect(body, isNot(contains('owner_id')));
+      expect(body, isNot(contains('member_ids')));
+      expect(body['name'], 'Shared Home');
+    });
+
+    test('new cloud homes use full membership upsert', () async {
+      http.Request? capturedRequest;
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          capturedRequest = request;
+          return http.Response('', 201, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'New Home',
+        ownerId: 'anonymous-user',
+      );
+
+      await AccountCloudSyncService.writeHomeSnapshot(
+        client: client,
+        home: home,
+        userId: 'joining-user',
+        homeAlreadyInCloud: false,
+      );
+
+      expect(capturedRequest?.method, 'POST');
+      expect(capturedRequest?.url.queryParameters['on_conflict'], 'id');
+      final body = jsonDecode(capturedRequest!.body) as Map<String, dynamic>;
+      expect(body['id'], home.id);
+      expect(body['owner_id'], 'joining-user');
+      expect(body['member_ids'], ['joining-user']);
     });
 
     test('home sync requires at least one server hub', () {
@@ -102,6 +207,32 @@ void main() {
       );
     });
 
+    test('only the owning account can write shared hub token envelopes', () {
+      final ownedHome = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Owned Home',
+        ownerId: 'owner-user',
+      );
+      final joinedHome = ownedHome.copyWith(
+        memberIds: ['owner-user', 'joining-user'],
+      );
+
+      expect(
+        accountHomeCanWriteSharedHubTokensForTesting(
+          home: ownedHome,
+          userId: 'owner-user',
+        ),
+        isTrue,
+      );
+      expect(
+        accountHomeCanWriteSharedHubTokensForTesting(
+          home: joinedHome,
+          userId: 'joining-user',
+        ),
+        isFalse,
+      );
+    });
+
     test('server hub payload encrypts local owner token envelope', () async {
       final hub = Hub.server(
         id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
@@ -156,6 +287,24 @@ void main() {
         keyMaterial: 'signed-in-user-key-material',
       );
       expect(restored, 'owner-token');
+    });
+
+    test('server hub payload can preserve existing cloud token columns', () {
+      final hub = Hub.server(
+        id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
+        homeId: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Kitchen Server',
+        host: '192.168.5.123',
+        token: 'owner-token',
+      );
+
+      final payload = AccountCloudSyncService.serverHubSnapshotPayload(
+        hub,
+        preserveToken: true,
+      );
+
+      expect(payload, isNot(contains('token')));
+      expect(payload, isNot(contains('encrypted_token')));
     });
 
     test('server hub payload can omit server identity for old schemas', () {

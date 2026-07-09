@@ -144,6 +144,125 @@ Hub accountHomeServerHubForLocalStorageForTesting({
   return normalized;
 }
 
+AccountHomeServerHubs? _homeEntryForServerHubPairing({
+  required Iterable<AccountHomeServerHubs> homes,
+  required String host,
+  required int port,
+  required String? token,
+  required String? serverInstanceId,
+  String? hubName,
+  DateTime? now,
+}) {
+  final timestamp = now ?? DateTime.now();
+  for (final home in homes) {
+    final nextHubs = <Hub>[];
+    var matched = false;
+    for (final hub in home.serverHubs) {
+      if (_serverHubMatchesPairing(
+        hub,
+        host: host,
+        port: port,
+        token: token,
+        serverInstanceId: serverInstanceId,
+      )) {
+        matched = true;
+        nextHubs.add(
+          _serverHubForPairing(
+            hub: hub,
+            host: host,
+            port: port,
+            token: token,
+            serverInstanceId: serverInstanceId,
+            hubName: hubName,
+            now: timestamp,
+          ),
+        );
+      } else {
+        nextHubs.add(hub);
+      }
+    }
+
+    if (matched) {
+      return AccountHomeServerHubs(
+        home: home.home,
+        serverHubs: List.unmodifiable(nextHubs),
+      );
+    }
+  }
+  return null;
+}
+
+bool _serverHubMatchesPairing(
+  Hub hub, {
+  required String host,
+  required int port,
+  required String? token,
+  required String? serverInstanceId,
+}) {
+  if (hub.type != HubType.server) return false;
+
+  final cleanServerInstanceId = _cleanOptionalString(serverInstanceId);
+  final hubServerInstanceId = _cleanOptionalString(hub.serverInstanceId);
+  if (cleanServerInstanceId != null && hubServerInstanceId != null) {
+    return cleanServerInstanceId == hubServerInstanceId;
+  }
+
+  final cleanToken = _cleanOptionalString(token);
+  final hubToken = _cleanOptionalString(hub.token);
+  final endpointMatches =
+      hub.endpoint.host == host && hub.endpoint.port == port;
+  if (endpointMatches) {
+    if (cleanToken != null && hubToken != null && cleanToken != hubToken) {
+      return false;
+    }
+    return true;
+  }
+
+  return cleanToken != null && hubToken != null && cleanToken == hubToken;
+}
+
+Hub _serverHubForPairing({
+  required Hub hub,
+  required String host,
+  required int port,
+  required String? token,
+  required String? serverInstanceId,
+  required String? hubName,
+  required DateTime now,
+}) {
+  final cleanToken = _cleanOptionalString(token);
+  final cleanServerInstanceId = _cleanOptionalString(serverInstanceId);
+  final cleanHubName = _cleanOptionalString(hubName);
+  return hub.copyWith(
+    name: hub.name.trim().isNotEmpty ? hub.name : cleanHubName,
+    endpoint: HubEndpoint(host: host, port: port),
+    token: cleanToken,
+    serverInstanceId: cleanServerInstanceId,
+    updatedAt: now,
+    pendingSync: true,
+  );
+}
+
+@visibleForTesting
+AccountHomeServerHubs? serverHomeEntryForPairingForTesting({
+  required Iterable<AccountHomeServerHubs> homes,
+  required String host,
+  required int port,
+  required String? token,
+  required String? serverInstanceId,
+  String? hubName,
+  DateTime? now,
+}) =>
+    _homeEntryForServerHubPairing(
+      homes: homes,
+      host: host,
+      port: port,
+      token: token,
+      serverInstanceId: serverInstanceId,
+      hubName: hubName,
+      now: now,
+    );
+
 Home? _selectedHomeFrom(
   Iterable<Home> homes, {
   required String? selectedHomeId,
@@ -511,6 +630,22 @@ class HomeProvider extends ChangeNotifier {
     return AccountCloudSyncService.instance.loadHomesAndServerHubs();
   }
 
+  Future<AccountHomeServerHubs?> _existingHomeForServerHubPairing({
+    required String host,
+    required int port,
+    required String? token,
+    required String? serverInstanceId,
+    required String hubName,
+  }) async =>
+      _homeEntryForServerHubPairing(
+        homes: homeServerHubSnapshots,
+        host: host,
+        port: port,
+        token: token,
+        serverInstanceId: serverInstanceId,
+        hubName: hubName,
+      );
+
   /// Refresh the locally saved server endpoints from the signed-in account.
   Future<Hub> refreshServerHubEndpoints(Hub serverHub) async {
     if (serverHub.type != HubType.server) return serverHub;
@@ -855,6 +990,21 @@ class HomeProvider extends ChangeNotifier {
 
     Home? home;
     try {
+      final existingHome = await _existingHomeForServerHubPairing(
+        host: host,
+        port: port,
+        token: token,
+        serverInstanceId: serverInstanceId,
+        hubName: hubName,
+      );
+      if (existingHome != null) {
+        debugPrint(
+          'HomeProvider: reusing Home ${existingHome.home.id} for '
+          'server hub ${serverInstanceId ?? '$host:$port'}',
+        );
+        return enterHome(existingHome);
+      }
+
       home = await _repository.createHome(
         name: homeName,
         ownerId: userId,
@@ -1253,4 +1403,9 @@ bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
       rightId != null &&
       rightId.isNotEmpty &&
       leftId != rightId;
+}
+
+String? _cleanOptionalString(String? value) {
+  final clean = value?.trim();
+  return clean != null && clean.isNotEmpty ? clean : null;
 }

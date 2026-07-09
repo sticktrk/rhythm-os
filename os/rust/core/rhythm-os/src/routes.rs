@@ -50,6 +50,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT", "DELETE"],
     },
     SharedRoute {
+        path: "/api/cloud/join-proof",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: "/api/state",
         methods: &["GET"],
     },

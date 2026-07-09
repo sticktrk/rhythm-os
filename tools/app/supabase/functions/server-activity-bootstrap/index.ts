@@ -127,7 +127,6 @@ async function ensureServerHubRows(
     adminClient,
     userId,
     serverInstanceId,
-    true,
   )
   if (existingByServerInstanceId instanceof Response) {
     return existingByServerInstanceId
@@ -210,7 +209,6 @@ async function readAuthorizedExistingRows(
       adminClient,
       userId,
       serverInstanceId,
-      false,
     )
     if (existingByServerInstanceId) return existingByServerInstanceId
     return jsonResponse({ error: 'Server hub not found' }, 404)
@@ -240,7 +238,6 @@ async function readAuthorizedServerHubByInstanceId(
   adminClient: any,
   userId: string,
   serverInstanceId: string | null,
-  allowAutoJoin: boolean,
 ): Promise<{ hub: HubRow; home: HomeRow } | Response | null> {
   if (!serverInstanceId) return null
 
@@ -270,23 +267,6 @@ async function readAuthorizedServerHubByInstanceId(
   const canonical = candidates[0]
 
   if (isHomeMember(canonical.home, userId)) return canonical
-
-  if (allowAutoJoin) {
-    const memberIds = memberIdsForUpsert(canonical.home, userId)
-    const { error } = await adminClient
-      .from('homes')
-      .update({ member_ids: memberIds, updated_at: new Date().toISOString() })
-      .eq('id', canonical.home.id)
-    if (error) throw new Error(error.message)
-
-    return {
-      hub: canonical.hub,
-      home: {
-        ...canonical.home,
-        member_ids: memberIds,
-      },
-    }
-  }
 
   const authorized = candidates.filter((candidate) =>
     isHomeMember(candidate.home, userId)

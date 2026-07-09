@@ -23,6 +23,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmApiException,
         RhythmAuthStatus,
         RhythmAuthApi,
+        RhythmCloudJoinProof,
         RhythmConfigApi,
         RhythmDiagnosticsApi;
 import '../config/feature_flags.dart';
@@ -37,6 +38,7 @@ import '../services/account_cloud_sync_service.dart';
 import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
 import '../services/ble_provisioning_service.dart';
+import '../services/cloud_home_join_service.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/recent_servers_service.dart';
 
@@ -448,11 +450,19 @@ Hub _serverHubForDiscoveredServer({
 
 String _displayNameForDiscoveredServer(DiscoveredHub server) {
   final name = server.name?.trim();
-  if (name == null || name.isEmpty || name == 'RhythmServer') {
+  if (name == null ||
+      name.isEmpty ||
+      name == 'RhythmServer' ||
+      name == 'Rhythm OS' ||
+      name.startsWith('Rhythm OS (rhythm-')) {
     return 'Rhythm Box';
   }
   return name;
 }
+
+@visibleForTesting
+String rhythmDisplayNameForDiscoveredServerForTesting(DiscoveredHub server) =>
+    _displayNameForDiscoveredServer(server);
 
 Hub _detachedServerHubForDiscoveredServer(
   DiscoveredHub server, {
@@ -1367,6 +1377,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     if (isHealthy) {
       final serverInstanceId =
           await _serverInstanceIdForDiscoveredHub(hub, authToken: authToken);
+      authToken = await _ownerTokenForCloudJoinProof(
+            hub,
+            authToken: authToken,
+            serverInstanceId: serverInstanceId,
+          ) ??
+          authToken;
+      final joinProof = await _cloudJoinProofForDiscoveredHub(
+        hub,
+        authToken: authToken,
+        serverInstanceId: serverInstanceId,
+      );
 
       if (!LocalRhythmServerService.instance
           .isLocalEndpoint(hub.address, hub.port)) {
@@ -1383,6 +1404,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           hub,
           authToken,
           serverInstanceId: serverInstanceId,
+          joinProof: joinProof,
         );
       } on _HomeNameCancelledException {
         if (!mounted) return;
@@ -1538,6 +1560,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     DiscoveredHub discovered,
     String? authToken, {
     String? serverInstanceId,
+    RhythmCloudJoinProof? joinProof,
   }) async {
     final homeProvider = context.read<HomeProvider>();
     final existingHome = _homeEntryForDiscoveredServer(
@@ -1551,6 +1574,19 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     final name = _displayNameForDiscoveredServer(discovered);
+    final cloudHome =
+        await CloudHomeJoinService.instance.joinByLocalDeviceProof(
+      serverInstanceId: serverInstanceId,
+      joinProof: joinProof,
+      host: discovered.address,
+      port: discovered.port,
+      ownerToken: authToken,
+      hubName: name,
+    );
+    if (cloudHome != null) {
+      return homeProvider.enterHome(cloudHome);
+    }
+
     if (!mounted) throw const _HomeNameCancelledException();
     final home = await AddHomeFlow.show(context, defaultName: name);
     if (home == null) throw const _HomeNameCancelledException();
@@ -1699,10 +1735,24 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     if (shouldClaimToken) {
+      final lanToken = await _claimOwnerTokenViaLan(baseUrl);
+      if (lanToken != null) return lanToken;
       return _requestOwnerTokenViaBle(hub);
     }
 
     return _requestOwnerTokenViaBle(hub);
+  }
+
+  Future<String?> _claimOwnerTokenViaLan(String baseUrl) async {
+    try {
+      final claim = await RhythmAuthApi(baseUrl: '$baseUrl/')
+          .claimOwnerToken(label: 'Rhythm app')
+          .timeout(const Duration(seconds: 4));
+      return claim.token.trim().isNotEmpty ? claim.token : null;
+    } catch (error) {
+      debugPrint('LAN owner token claim failed for $baseUrl: $error');
+      return null;
+    }
   }
 
   Future<String?> _serverInstanceIdForDiscoveredHub(
@@ -1718,6 +1768,49 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     } catch (error) {
       debugPrint(
         'Server identity unavailable for ${hub.address}:${hub.port}: $error',
+      );
+      return null;
+    }
+  }
+
+  Future<String?> _ownerTokenForCloudJoinProof(
+    DiscoveredHub hub, {
+    required String? authToken,
+    required String? serverInstanceId,
+  }) async {
+    final cleanAuthToken = authToken?.trim();
+    if (cleanAuthToken != null && cleanAuthToken.isNotEmpty) {
+      return cleanAuthToken;
+    }
+    if (!CloudHomeJoinService.instance.canJoin ||
+        _cleanServerInstanceId(serverInstanceId) == null) {
+      return null;
+    }
+    return _claimOwnerTokenViaLan('http://${hub.address}:${hub.port}');
+  }
+
+  Future<RhythmCloudJoinProof?> _cloudJoinProofForDiscoveredHub(
+    DiscoveredHub hub, {
+    required String? authToken,
+    required String? serverInstanceId,
+  }) async {
+    final cleanServerInstanceId = _cleanServerInstanceId(serverInstanceId);
+    final cleanAuthToken = authToken?.trim();
+    if (cleanServerInstanceId == null ||
+        cleanAuthToken == null ||
+        cleanAuthToken.isEmpty) {
+      return null;
+    }
+
+    try {
+      final proof = await RhythmAuthApi(
+        baseUrl: 'http://${hub.address}:${hub.port}/',
+        authToken: cleanAuthToken,
+      ).createCloudJoinProof().timeout(const Duration(seconds: 4));
+      return proof.serverInstanceId == cleanServerInstanceId ? proof : null;
+    } catch (error) {
+      debugPrint(
+        'Cloud join proof unavailable for ${hub.address}:${hub.port}: $error',
       );
       return null;
     }

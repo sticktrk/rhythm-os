@@ -76,6 +76,43 @@ void main() {
     });
   });
 
+  group('createCloudJoinProof', () {
+    test('posts join proof request and parses proof payload', () async {
+      when(() => dio.post<Map<String, dynamic>>(any())).thenAnswer(
+        (_) async => Response<Map<String, dynamic>>(
+          requestOptions: RequestOptions(path: 'api/cloud/join-proof'),
+          statusCode: 200,
+          data: {
+            'status': 'ok',
+            'proof_version': 'activity-token-hmac-v1',
+            'algorithm': 'hmac-sha256',
+            'server_instance_id': 'srv-kitchen',
+            'home_id': 'home-1',
+            'hub_id': 'hub-1',
+            'token_id': 'token-1',
+            'issued_at_epoch_ms': 1000,
+            'expires_at_epoch_ms': 121000,
+            'nonce': '0123456789abcdef',
+            'signature':
+                '41b380e3ff97e37dd008c706e58ff422adbab4bcc0ad822dc98480319a585dc9',
+          },
+        ),
+      );
+
+      final proof = await api.createCloudJoinProof();
+
+      expect(proof.serverInstanceId, 'srv-kitchen');
+      expect(proof.homeId, 'home-1');
+      expect(proof.hubId, 'hub-1');
+      expect(proof.tokenId, 'token-1');
+      expect(proof.toJson(),
+          containsPair('proof_version', 'activity-token-hmac-v1'));
+
+      verify(() => dio.post<Map<String, dynamic>>('api/cloud/join-proof'))
+          .called(1);
+    });
+  });
+
   group('setSettings', () {
     test('puts auth settings and parses issued owner token', () async {
       when(() => dio.put<Map<String, dynamic>>(

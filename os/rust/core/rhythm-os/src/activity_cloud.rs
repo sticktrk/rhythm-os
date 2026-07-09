@@ -6,11 +6,14 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::Json;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::activity::{LightActivityEvent, LIGHT_ACTIVITY_HISTORY_LIMIT};
+use crate::auth::{ApiAuthRequestInfo, ApiTokenRole};
 use crate::handlers::ApiResponse;
 use crate::state::SharedState;
 
@@ -20,6 +23,9 @@ const UPLOAD_STATUS_OK: &str = "ok";
 const UPLOAD_STATUS_FAILED: &str = "failed";
 const UPLOAD_STATUS_AUTH_FAILED: &str = "auth_failed";
 const UPLOAD_STATUS_NOT_CONFIGURED: &str = "not_configured";
+const JOIN_PROOF_VERSION: &str = "activity-token-hmac-v1";
+const JOIN_PROOF_ALGORITHM: &str = "hmac-sha256";
+const JOIN_PROOF_TTL_MS: u64 = 2 * 60 * 1000;
 
 fn default_schema_version() -> u8 {
     ACTIVITY_CLOUD_SCHEMA_VERSION
@@ -122,6 +128,21 @@ struct ActivityCloudStatusBody {
     auth_failed_at_epoch_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CloudJoinProof {
+    status: &'static str,
+    proof_version: &'static str,
+    algorithm: &'static str,
+    server_instance_id: String,
+    home_id: String,
+    hub_id: String,
+    token_id: Option<String>,
+    issued_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+    nonce: String,
+    signature: String,
+}
+
 pub async fn get_config(State(state): State<SharedState>) -> ApiResponse {
     match load_config(&state) {
         Ok(config) => json_ok(status_body(config.as_ref())),
@@ -152,8 +173,156 @@ pub async fn delete_config(State(state): State<SharedState>) -> ApiResponse {
     json_ok(status_body(None))
 }
 
+pub async fn post_join_proof(
+    State(state): State<SharedState>,
+    auth_info: Option<Extension<ApiAuthRequestInfo>>,
+) -> ApiResponse {
+    if !matches!(
+        auth_info.map(|Extension(info)| info.role),
+        Some(Some(ApiTokenRole::Owner))
+    ) {
+        return ApiResponse::forbidden("Cloud Home join proof requires an owner token");
+    }
+
+    match create_join_proof(&state) {
+        Ok(proof) => json_ok(proof),
+        Err(JoinProofError::NotConfigured(message)) => ApiResponse::conflict(message),
+        Err(JoinProofError::Server(message)) => ApiResponse::server_error(message),
+    }
+}
+
 pub fn enqueue_light_activity_upload(state: &SharedState) {
     enqueue_recent_activity_upload(state);
+}
+
+enum JoinProofError {
+    NotConfigured(&'static str),
+    Server(anyhow::Error),
+}
+
+impl From<anyhow::Error> for JoinProofError {
+    fn from(error: anyhow::Error) -> Self {
+        JoinProofError::Server(error)
+    }
+}
+
+fn create_join_proof(state: &SharedState) -> Result<CloudJoinProof, JoinProofError> {
+    let config = load_config(state)?.ok_or(JoinProofError::NotConfigured(
+        "Activity cloud is not configured",
+    ))?;
+    if !config.is_usable() {
+        return Err(JoinProofError::NotConfigured(
+            "Activity cloud credentials are not usable",
+        ));
+    }
+
+    let state_server_instance_id = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .server_instance_id
+        .trim()
+        .to_string();
+    if state_server_instance_id.is_empty() {
+        return Err(JoinProofError::NotConfigured(
+            "Server identity is not available",
+        ));
+    }
+
+    if let Some(config_server_instance_id) = config.server_instance_id.as_deref() {
+        if !config_server_instance_id.eq_ignore_ascii_case(&state_server_instance_id) {
+            return Err(JoinProofError::NotConfigured(
+                "Activity cloud credentials belong to another server identity",
+            ));
+        }
+    }
+
+    let issued_at_epoch_ms = current_epoch_ms();
+    let expires_at_epoch_ms = issued_at_epoch_ms.saturating_add(JOIN_PROOF_TTL_MS);
+    let nonce = random_hex(16);
+    let token_hash = sha256_hex(config.upload_token.as_bytes());
+    let canonical = join_proof_canonical_string(
+        &state_server_instance_id,
+        &config.home_id,
+        &config.hub_id,
+        issued_at_epoch_ms,
+        expires_at_epoch_ms,
+        &nonce,
+    );
+    let signature = hmac_sha256_hex(token_hash.as_bytes(), canonical.as_bytes());
+
+    Ok(CloudJoinProof {
+        status: "ok",
+        proof_version: JOIN_PROOF_VERSION,
+        algorithm: JOIN_PROOF_ALGORITHM,
+        server_instance_id: state_server_instance_id,
+        home_id: config.home_id,
+        hub_id: config.hub_id,
+        token_id: config.token_id,
+        issued_at_epoch_ms,
+        expires_at_epoch_ms,
+        nonce,
+        signature,
+    })
+}
+
+fn join_proof_canonical_string(
+    server_instance_id: &str,
+    home_id: &str,
+    hub_id: &str,
+    issued_at_epoch_ms: u64,
+    expires_at_epoch_ms: u64,
+    nonce: &str,
+) -> String {
+    format!(
+        "{JOIN_PROOF_VERSION}\n{server_instance_id}\n{home_id}\n{hub_id}\n{issued_at_epoch_ms}\n{expires_at_epoch_ms}\n{nonce}"
+    )
+}
+
+fn random_hex(byte_count: usize) -> String {
+    let mut bytes = vec![0u8; byte_count];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex_lower(&bytes)
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    hex_lower(&Sha256::digest(value))
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed = Sha256::digest(key);
+        key_block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut outer_key_pad = [0x5c; BLOCK_SIZE];
+    let mut inner_key_pad = [0x36; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        outer_key_pad[i] ^= key_block[i];
+        inner_key_pad[i] ^= key_block[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_key_pad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_key_pad);
+    outer.update(inner_hash);
+    hex_lower(&outer.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
 }
 
 pub fn enqueue_recent_activity_upload(state: &SharedState) {
@@ -632,6 +801,26 @@ mod tests {
         assert_eq!(json["needs_reprovision"], true);
         assert_eq!(json["upload_status"], UPLOAD_STATUS_AUTH_FAILED);
         assert_eq!(json["last_upload_http_status"], 403);
+    }
+
+    #[test]
+    fn join_proof_hmac_uses_sha256_token_hash_key() {
+        let token_hash = sha256_hex(b"activity-upload-token");
+        let canonical =
+            join_proof_canonical_string("srv-1", "home-1", "hub-1", 1_000, 121_000, "nonce-1");
+
+        assert_eq!(
+            hmac_sha256_hex(token_hash.as_bytes(), canonical.as_bytes()),
+            "41b380e3ff97e37dd008c706e58ff422adbab4bcc0ad822dc98480319a585dc9",
+        );
+    }
+
+    #[test]
+    fn hmac_sha256_matches_known_vector() {
+        assert_eq!(
+            hmac_sha256_hex(b"key", b"The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+        );
     }
 
     fn test_state() -> SharedState {
