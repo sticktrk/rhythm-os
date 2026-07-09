@@ -229,10 +229,14 @@ fn render_wpa_conf(creds: &WifiCredentials, country: &str) -> String {
     body.push_str(&format!("country={}\n\n", country));
     body.push_str("network={\n");
     body.push_str(&format!("  ssid=\"{}\"\n", escape_wpa_value(&creds.ssid)));
-    body.push_str(&format!(
-        "  psk=\"{}\"\n",
-        escape_wpa_value(&creds.password)
-    ));
+    if creds.password.is_empty() {
+        body.push_str("  key_mgmt=NONE\n");
+    } else {
+        body.push_str(&format!(
+            "  psk=\"{}\"\n",
+            escape_wpa_value(&creds.password)
+        ));
+    }
     body.push_str("}\n");
     body
 }
@@ -435,10 +439,13 @@ fn parse_wpa_scan_results(output: &str) -> Vec<WifiScanNetwork> {
             continue;
         }
 
+        let Some(security) = supported_scan_security_label(flags) else {
+            continue;
+        };
         let candidate = WifiScanNetwork {
             ssid: ssid.to_string(),
             rssi,
-            security: scan_security_label(flags).to_string(),
+            security: security.to_string(),
             frequency,
         };
 
@@ -461,19 +468,38 @@ fn parse_wpa_scan_results(output: &str) -> Vec<WifiScanNetwork> {
     networks
 }
 
-fn scan_security_label(flags: &str) -> &'static str {
+fn supported_scan_security_label(flags: &str) -> Option<&'static str> {
     let normalized = flags.to_ascii_uppercase();
-    if normalized.contains("SAE") || normalized.contains("WPA3") {
-        "wpa3"
-    } else if normalized.contains("WPA2") || normalized.contains("RSN") {
-        "wpa2"
-    } else if normalized.contains("WPA") {
-        "wpa"
-    } else if normalized.contains("WEP") {
-        "wep"
-    } else {
-        "open"
+    if !normalized.contains("ESS")
+        || normalized.contains("WEP")
+        || normalized.contains("EAP")
+        || normalized.contains("OWE")
+    {
+        return None;
     }
+
+    if normalized.contains("PSK") {
+        return Some(
+            if normalized.contains("SAE") || normalized.contains("WPA3") {
+                "wpa3"
+            } else if normalized.contains("WPA2") || normalized.contains("RSN") {
+                "wpa2"
+            } else {
+                "wpa"
+            },
+        );
+    }
+
+    if normalized.contains("SAE")
+        || normalized.contains("WPA3")
+        || normalized.contains("WPA2")
+        || normalized.contains("RSN")
+        || normalized.contains("WPA")
+    {
+        return None;
+    }
+
+    Some("open")
 }
 
 fn escape_wpa_value(value: &str) -> String {
@@ -491,6 +517,7 @@ fn parse_wpa_credentials(content: &str, preferred_ssid: Option<&str>) -> Option<
     let mut in_network = false;
     let mut ssid: Option<String> = None;
     let mut password: Option<String> = None;
+    let mut open_network = false;
 
     for raw_line in content.lines() {
         let line = raw_line.trim();
@@ -503,12 +530,14 @@ fn parse_wpa_credentials(content: &str, preferred_ssid: Option<&str>) -> Option<
                 in_network = true;
                 ssid = None;
                 password = None;
+                open_network = false;
             }
             continue;
         }
 
         if line == "}" {
-            if let (Some(ssid), Some(password)) = (ssid.take(), password.take()) {
+            let password = password.take().or_else(|| open_network.then(String::new));
+            if let (Some(ssid), Some(password)) = (ssid.take(), password) {
                 networks.push(ParsedWifiNetwork { ssid, password });
             }
             in_network = false;
@@ -521,6 +550,12 @@ fn parse_wpa_credentials(content: &str, preferred_ssid: Option<&str>) -> Option<
         match key.trim() {
             "ssid" => ssid = parse_wpa_scalar(value.trim()),
             "psk" => password = parse_wpa_scalar(value.trim()),
+            "key_mgmt" => {
+                open_network = parse_wpa_scalar(value.trim())
+                    .as_deref()
+                    .map(|value| value.eq_ignore_ascii_case("NONE"))
+                    .unwrap_or(false);
+            }
             _ => {}
         }
     }
@@ -617,6 +652,20 @@ mod tests {
     }
 
     #[test]
+    fn render_wpa_conf_configures_open_network_without_psk() {
+        let creds = WifiCredentials {
+            ssid: "Guest".into(),
+            password: String::new(),
+        };
+
+        let body = render_wpa_conf(&creds, "US");
+
+        assert!(body.contains("ssid=\"Guest\""));
+        assert!(body.contains("key_mgmt=NONE"));
+        assert!(!body.contains("psk="));
+    }
+
+    #[test]
     fn render_wpa_conf_escapes_password_with_quote() {
         let creds = WifiCredentials {
             ssid: "net".into(),
@@ -649,6 +698,17 @@ mod tests {
         let creds = WifiCredentials {
             ssid: "Guest Wi-Fi".into(),
             password: "pa\\\"ss".into(),
+        };
+        let body = render_wpa_conf(&creds, "US");
+
+        assert_eq!(parse_wpa_credentials(&body, None), Some(creds));
+    }
+
+    #[test]
+    fn parse_wpa_credentials_reads_open_network() {
+        let creds = WifiCredentials {
+            ssid: "Guest".into(),
+            password: String::new(),
         };
         let body = render_wpa_conf(&creds, "US");
 
@@ -705,6 +765,10 @@ network={
 33:44:55:66:77:88\t5180\t-52\t[WPA2-PSK+SAE-CCMP][ESS]\tStudio\n\
 44:55:66:77:88:99\t2462\t-50\t[ESS]\tGuest\n\
 55:66:77:88:99:aa\t2462\t-45\t[WEP][ESS]\tLegacy\n\
+77:88:99:aa:bb:cc\t5180\t-20\t[WPA2-EAP-CCMP][ESS]\tCorporate\n\
+88:99:aa:bb:cc:dd\t5180\t-25\t[RSN-SAE-CCMP][ESS]\tWpa3Only\n\
+99:aa:bb:cc:dd:ee\t5180\t-30\t[RSN-OWE-CCMP][ESS]\tEnhancedOpen\n\
+aa:bb:cc:dd:ee:ff\t2412\t-10\t[IBSS]\tAdHoc\n\
 66:77:88:99:aa:bb\t2462\t-30\t[WPA2-PSK-CCMP][ESS]\t\n";
 
         let networks = parse_wpa_scan_results(output);
@@ -717,12 +781,6 @@ network={
                     rssi: -42,
                     security: "wpa2".into(),
                     frequency: Some(2412),
-                },
-                WifiScanNetwork {
-                    ssid: "Legacy".into(),
-                    rssi: -45,
-                    security: "wep".into(),
-                    frequency: Some(2462),
                 },
                 WifiScanNetwork {
                     ssid: "Guest".into(),

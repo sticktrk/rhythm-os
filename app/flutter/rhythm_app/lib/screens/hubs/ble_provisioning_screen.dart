@@ -711,6 +711,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     if (selected == null || selected.isEmpty) return;
     HapticFeedback.selectionClick();
     _ssidController.text = selected;
+    if (_wifiNetworkForSsid(selected)?.security == 'open') {
+      _passwordController.clear();
+    }
     setState(() {
       _manualSsidEntry = false;
       _wifiErrorMessage = null;
@@ -727,7 +730,9 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   Future<void> _submitCredentials() async {
     final ssid = _ssidController.text.trim();
-    final password = _passwordController.text;
+    final selectedNetwork = _manualSsidEntry ? null : _wifiNetworkForSsid(ssid);
+    final password =
+        selectedNetwork?.security == 'open' ? '' : _passwordController.text;
     if (ssid.isEmpty) return;
 
     AnalyticsService().logEvent('ble_provisioning_started');
@@ -1379,6 +1384,10 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   Widget _buildCredentialsBody() {
     final canSubmit = _ssidController.text.trim().isNotEmpty;
+    final selectedNetwork = _manualSsidEntry
+        ? null
+        : _wifiNetworkForSsid(_ssidController.text.trim());
+    final isOpenNetwork = selectedNetwork?.security == 'open';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1403,27 +1412,34 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ],
         _buildWifiNetworkField(),
         const SizedBox(height: 12),
-        _buildTextField(
-          controller: _passwordController,
-          label: 'Password',
-          hint: 'Password',
-          icon: Icons.password_rounded,
-          obscureText: _obscurePassword,
-          trailing: GestureDetector(
-            onTap: () {
-              setState(() {
-                _obscurePassword = !_obscurePassword;
-              });
-            },
-            child: Icon(
-              _obscurePassword
-                  ? Icons.visibility_off_rounded
-                  : Icons.visibility_rounded,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.7),
-              size: 20,
+        if (isOpenNetwork)
+          _buildInfoCard(
+            icon: Icons.lock_open_rounded,
+            title: 'Open network',
+            description: 'No password is required for this network.',
+          )
+        else
+          _buildTextField(
+            controller: _passwordController,
+            label: 'Password',
+            hint: 'Password',
+            icon: Icons.password_rounded,
+            obscureText: _obscurePassword,
+            trailing: GestureDetector(
+              onTap: () {
+                setState(() {
+                  _obscurePassword = !_obscurePassword;
+                });
+              },
+              child: Icon(
+                _obscurePassword
+                    ? Icons.visibility_off_rounded
+                    : Icons.visibility_rounded,
+                color: CelestialColors.textSecondary.withValues(alpha: 0.7),
+                size: 20,
+              ),
             ),
           ),
-        ),
         const SizedBox(height: 20),
         _buildActionButton(
           onTap: canSubmit ? _submitCredentials : null,
@@ -1604,6 +1620,13 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     if (rssi >= -70) return 'good';
     if (rssi >= -82) return 'fair';
     return 'weak';
+  }
+
+  WifiNetwork? _wifiNetworkForSsid(String ssid) {
+    for (final network in _wifiNetworks) {
+      if (network.ssid == ssid) return network;
+    }
+    return null;
   }
 
   Widget _buildWifiNetworkField() {
