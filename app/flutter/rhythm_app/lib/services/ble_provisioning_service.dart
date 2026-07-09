@@ -147,6 +147,10 @@ class BleProvisioningService {
   // Defensive guard for malformed progress states. Normal Wi-Fi handoff
   // completes immediately when the appliance status includes an IP.
   static const _staleProvisioningProgressTimeout = Duration(seconds: 12);
+  // A non-terminal status that never changes must not inherit the much longer
+  // OTA deadline. Ninety seconds is ample for Wi-Fi association while still
+  // turning malformed or wedged progress into a recoverable UI error.
+  static const _stalledProvisioningStatusTimeout = Duration(seconds: 90);
 
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   StreamController<BleDevice>? _scanController;
@@ -610,6 +614,7 @@ class BleProvisioningService {
     Duration pollInterval = _statusPollInterval,
     Duration operationTimeout = _bleOperationTimeout,
     Duration? staleProgressTimeout = _staleProvisioningProgressTimeout,
+    Duration? stalledStatusTimeout = _stalledProvisioningStatusTimeout,
   }) async {
     return waitForMatchingProvisioningStatus(
       enableNotifications: enableNotifications,
@@ -625,6 +630,7 @@ class BleProvisioningService {
       recoverFromReadError: _recoverTerminalProvisioningReadError,
       staleStatusTimeout: staleProgressTimeout,
       recoverFromStaleStatus: _recoverStaleTerminalProvisioningStatus,
+      stalledStatusTimeout: stalledStatusTimeout,
     );
   }
 
@@ -648,6 +654,7 @@ class BleProvisioningService {
     ProvisioningStatusMessage? Function(
       ProvisioningStatusMessage latestStatus,
     )? recoverFromStaleStatus,
+    Duration? stalledStatusTimeout,
   }) async {
     final deadline = DateTime.now().add(timeout);
     Future<ProvisioningStatusMessage>? notificationStatus;
@@ -669,14 +676,23 @@ class BleProvisioningService {
     ProvisioningStatusMessage? recoverStaleStatus(
       ProvisioningStatusMessage status,
     ) {
-      if (staleStatusTimeout == null || recoverFromStaleStatus == null) {
-        return null;
+      final unchangedFor = DateTime.now().difference(latestStatusChangedAt);
+      if (staleStatusTimeout != null &&
+          recoverFromStaleStatus != null &&
+          unchangedFor >= staleStatusTimeout) {
+        final recovered = recoverFromStaleStatus(status);
+        if (recovered != null) return recovered;
       }
-      if (DateTime.now().difference(latestStatusChangedAt) <
-          staleStatusTimeout) {
-        return null;
+      if (stalledStatusTimeout != null &&
+          !status.isTerminal &&
+          unchangedFor >= stalledStatusTimeout) {
+        return ProvisioningStatusMessage(
+          status: 'failed',
+          error:
+              'Setup stopped making progress while the device reported "${status.status}". Try setup again.',
+        );
       }
-      return recoverFromStaleStatus(status);
+      return null;
     }
 
     try {

@@ -6,8 +6,7 @@ import 'package:rhythm_app/widgets/hardware_gate_screen.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Just enough [HomeProvider] for the offstage [ConnectHubScreen] the gate
-/// keeps mounted for warm discovery.
+/// Just enough [HomeProvider] for [ConnectHubScreen] after the gate advances.
 class _FakeHomeProvider extends HomeProvider {
   @override
   Home? get currentHome => null;
@@ -75,5 +74,11 @@ void main() {
 
     expect(find.text('Create Your Account'), findsNothing);
     expect(find.text('I have one'), findsNothing);
+
+    // The connect screen legitimately starts its bounded discovery sweep when
+    // it becomes visible. Let the unsupported desktop test adapters hit their
+    // deadlines so no discovery timers leak out of the widget test.
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pump(const Duration(seconds: 4));
   });
 }

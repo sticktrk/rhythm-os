@@ -64,6 +64,8 @@ class HardwareOnboardingGate extends StatefulWidget {
 enum _GateStep { gate, upsell, account, connect }
 
 class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
+  static const _postSignInRefreshTimeout = Duration(seconds: 12);
+
   _GateStep _step = _GateStep.gate;
 
   /// Step to return to when backing out of the account step.
@@ -90,9 +92,8 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
     if (_requiresAccountForConnect) {
       AnalyticsService().logScreenView('onboarding_account');
       setState(() {
-        _accountReturnStep = _step == _GateStep.upsell
-            ? _GateStep.upsell
-            : _GateStep.gate;
+        _accountReturnStep =
+            _step == _GateStep.upsell ? _GateStep.upsell : _GateStep.gate;
         _step = _GateStep.account;
       });
       return;
@@ -111,7 +112,18 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
     // account signed in and restores a real account's cloud homes. When rooms
     // arrive the shell replaces this gate entirely, so only advance to the
     // connect step if the account step is still showing afterwards.
-    await AppStateRefresh.sync(context);
+    try {
+      await AppStateRefresh.sync(context).timeout(_postSignInRefreshTimeout);
+    } on TimeoutException {
+      debugPrint(
+        'HardwareOnboardingGate: account refresh timed out; continuing to Home selection',
+      );
+    } catch (error, stackTrace) {
+      debugPrint(
+        'HardwareOnboardingGate: account refresh failed; continuing to Home selection: $error',
+      );
+      debugPrint('$stackTrace');
+    }
     if (!mounted || _step != _GateStep.account) return;
     // Demo sign-in just seeded fake rooms — the shell is about to swap this
     // gate for the populated room grid, so don't flash the connect step.
@@ -142,18 +154,13 @@ class _HardwareOnboardingGateState extends State<HardwareOnboardingGate> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        Positioned.fill(
-          child: TickerMode(
-            enabled: _step == _GateStep.connect,
-            child: Offstage(
-              offstage: _step != _GateStep.connect,
-              child: ConnectHubScreen(
-                mode: widget.mode,
-                trackScreenView: false,
-              ),
+        if (_step == _GateStep.connect)
+          Positioned.fill(
+            child: ConnectHubScreen(
+              mode: widget.mode,
+              trackScreenView: false,
             ),
           ),
-        ),
         if (_step != _GateStep.connect)
           Positioned.fill(
             child: AnimatedSwitcher(

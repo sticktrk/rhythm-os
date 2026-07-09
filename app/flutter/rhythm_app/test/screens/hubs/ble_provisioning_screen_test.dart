@@ -1,11 +1,33 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/ble_provisioning_screen.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
+  group('bleProvisioningSupportsPlatformForTesting', () {
+    test('supports Android native provisioning', () {
+      expect(
+        bleProvisioningSupportsPlatformForTesting(
+          platform: TargetPlatform.android,
+        ),
+        isTrue,
+      );
+    });
+
+    test('does not advertise BLE provisioning on web', () {
+      expect(
+        bleProvisioningSupportsPlatformForTesting(
+          platform: TargetPlatform.android,
+          isWeb: true,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('bleProvisioningKnownHomeNameForTesting', () {
     test('matches a specific BLE device name to a saved server hub home', () {
       final home = Home.create(

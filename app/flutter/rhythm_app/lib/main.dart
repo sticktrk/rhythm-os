@@ -67,65 +67,74 @@ void main() async {
   // can render cached entries before HomeProvider/mDNS come up.
   await RecentServersService.instance.initialize();
 
-  // Initialize Backend (Supabase auth + analytics, or Offline)
+  String? initError;
+
+  // App builds with cloud capabilities require a real account backend. A
+  // missing or broken Supabase configuration is a build error, not an
+  // invitation to create an anonymous "offline" session: that session can
+  // never satisfy the account gate. Demo mode is handled by the account UI
+  // after the real backend has initialized.
   if (caps.hasCloudBackend) {
-    try {
-      if (SupabaseConfig.isConfigured) {
+    if (!SupabaseConfig.isConfigured) {
+      initError =
+          'Account sign-in is not configured for this app build. Rebuild with valid Supabase credentials.';
+      debugPrint(initError);
+    } else {
+      try {
         await BackendProvider.initialize(BackendConfig.supabase(
           url: SupabaseConfig.url,
           anonKey: SupabaseConfig.anonKey,
           enableLogging: true,
-        ));
+        )).timeout(const Duration(seconds: 20));
         debugPrint('Backend initialized with Supabase');
-      } else {
-        await BackendProvider.initialize(BackendConfig.offline(
-          enableLogging: true,
-        ));
-        debugPrint('Supabase not configured - running in offline mode');
+        // Initialize auth service for deep link handling.
+        await AuthService().initialize().timeout(const Duration(seconds: 20));
+        await AnalyticsService().initialize();
+      } catch (e) {
+        initError =
+            'Account sign-in could not be initialized. Check your connection and restart the app. ($e)';
+        debugPrint('Backend initialization failed: $e');
       }
-      // Initialize auth service for deep link handling
-      await AuthService().initialize();
-      // Initialize analytics
-      await AnalyticsService().initialize();
-    } catch (e) {
-      debugPrint('Backend initialization failed: $e');
     }
   }
 
   // Entitlements: resolves the user's plan tier (Basic vs Pro). Always
   // bootstraps — for HA add-on (no cloud) this short-circuits to Pro.
-  await EntitlementsService.bootstrap(caps);
+  if (initError == null) {
+    await EntitlementsService.bootstrap(caps);
+  }
 
   HybridApiClient? client;
-  String? initError;
 
-  try {
-    // Try hybrid mode first (local brain + remote API)
-    client = await HybridApiClient.create(
-      storedHubs: LocalDataSource().getAllHubs(),
-      syncSolarDataOnCreate: false,
-    );
-
-    // Fail explicitly if local brain isn't available (except on web,
-    // where the app works as a remote client to rhythm-server)
-    if (!client.hasLocalBrain && !kIsWeb) {
-      initError =
-          'WASM brain failed to initialize. The Rust WASM module must be built and loaded for the app to function.';
-    }
-  } catch (e) {
-    // If hybrid fails, try local-only mode
+  if (initError == null) {
     try {
-      debugPrint('Hybrid init failed, trying local-only: $e');
-      client = await HybridApiClient.localOnly();
+      // Try hybrid mode first (local brain + remote API)
+      client = await HybridApiClient.create(
+        storedHubs: LocalDataSource().getAllHubs(),
+        syncSolarDataOnCreate: false,
+      );
+
+      // Fail explicitly if local brain isn't available (except on web,
+      // where the app works as a remote client to rhythm-server)
       if (!client.hasLocalBrain && !kIsWeb) {
-        initError = 'WASM brain failed to initialize.';
+        initError =
+            'WASM brain failed to initialize. The Rust WASM module must be built and loaded for the app to function.';
       }
-    } catch (e2) {
-      if (kIsWeb) {
-        // Web can proceed without local brain — it'll connect to a remote device
-        debugPrint('Web: proceeding without local brain: $e2');
-      } else {
-        initError = 'Failed to initialize: $e2';
+    } catch (e) {
+      // If hybrid fails, try local-only mode
+      try {
+        debugPrint('Hybrid init failed, trying local-only: $e');
+        client = await HybridApiClient.localOnly();
+        if (!client.hasLocalBrain && !kIsWeb) {
+          initError = 'WASM brain failed to initialize.';
+        }
+      } catch (e2) {
+        if (kIsWeb) {
+          // Web can proceed without local brain — it'll connect to a remote device
+          debugPrint('Web: proceeding without local brain: $e2');
+        } else {
+          initError = 'Failed to initialize: $e2';
+        }
       }
     }
   }
