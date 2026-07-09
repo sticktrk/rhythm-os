@@ -1772,6 +1772,24 @@ class RhythmServerApi {
     return false;
   }
 
+  /// Replace all explicit topology control targets for a node.
+  Future<bool> setTopologyNodeControlTargets({
+    required String nodeId,
+    required String controlKind,
+    required List<String> targetIds,
+  }) async {
+    try {
+      await _dio.put(
+        'api/topology/nodes/$nodeId/controls/$controlKind',
+        data: {'target_ids': targetIds},
+      );
+      return true;
+    } catch (e) {
+      _log.warning('setTopologyNodeControlTargets failed', e);
+    }
+    return false;
+  }
+
   // =========================================================================
   // Device pairing
   // =========================================================================

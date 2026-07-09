@@ -243,3 +243,148 @@ Future<String?> showRoomPickerSheet(
   }
   return selection;
 }
+
+Future<Set<String>?> showMultiRoomPickerSheet(
+  BuildContext context, {
+  required String title,
+  required List<RoomPickerOption> rooms,
+  required Set<String> selectedRoomIds,
+  String description = 'Choose one or more rooms.',
+  String noOptionsMessage = 'No rooms available',
+}) async {
+  if (rooms.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(noOptionsMessage)),
+    );
+    return null;
+  }
+
+  final selected = Set<String>.of(selectedRoomIds);
+  return showModalBottomSheet<Set<String>>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (sheetContext) {
+      final mediaQuery = MediaQuery.of(sheetContext);
+      return StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          top: false,
+          child: Container(
+            constraints: BoxConstraints(
+              maxHeight: mediaQuery.size.height * 0.75,
+            ),
+            clipBehavior: Clip.antiAlias,
+            decoration: const BoxDecoration(
+              color: CelestialColors.backgroundCard,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                  child: Column(
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: CelestialColors.textPrimary,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        description,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.7),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    padding: EdgeInsets.zero,
+                    itemCount: rooms.length,
+                    itemBuilder: (context, index) {
+                      final room = rooms[index];
+                      return CheckboxListTile(
+                        value: selected.contains(room.id),
+                        onChanged: (checked) {
+                          setSheetState(() {
+                            if (checked == true) {
+                              selected.add(room.id);
+                            } else {
+                              selected.remove(room.id);
+                            }
+                          });
+                        },
+                        controlAffinity: ListTileControlAffinity.leading,
+                        activeColor: CelestialColors.sunWarm,
+                        checkColor: CelestialColors.backgroundDark,
+                        title: Text(
+                          room.name,
+                          style: const TextStyle(
+                            color: CelestialColors.textPrimary,
+                          ),
+                        ),
+                        subtitle: room.subtitle == null
+                            ? null
+                            : Text(
+                                room.subtitle!,
+                                style: TextStyle(
+                                  color: CelestialColors.textSecondary
+                                      .withValues(alpha: 0.7),
+                                  fontSize: 12,
+                                ),
+                              ),
+                      );
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    16,
+                    8,
+                    16,
+                    mediaQuery.padding.bottom + 12,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextButton(
+                          onPressed: () => Navigator.of(sheetContext).pop(),
+                          child: const Text('CANCEL'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () => Navigator.of(sheetContext).pop(
+                                    Set<String>.of(selected),
+                                  ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: CelestialColors.sunWarm,
+                            foregroundColor: CelestialColors.backgroundDark,
+                          ),
+                          child: const Text('SAVE'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
+}

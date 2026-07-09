@@ -87,6 +87,18 @@ pub struct MotionSourceState {
     pub stopped_at_epoch_ms: Option<u64>,
 }
 
+fn motion_source_tracking_key(
+    source_node_id: &str,
+    target_node_id: &str,
+    multi_target: bool,
+) -> String {
+    if multi_target {
+        format!("{source_node_id}::{target_node_id}")
+    } else {
+        source_node_id.to_string()
+    }
+}
+
 /// Per-target motion timer state managed by the main loop.
 ///
 /// Hub-agnostic: any hub can emit `HubEvent::Motion` and this struct
@@ -1452,11 +1464,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
-            let Some(target_node_id) = commands::resolve_node_control_target_for_source(
+            let target_node_ids = commands::resolve_node_control_targets_for_source(
                 state,
                 &source_node_id,
                 &NodeControlKind::Motion,
-            ) else {
+            );
+            if target_node_ids.is_empty() {
                 emit_motion_input_event(
                     state,
                     MotionInputEventFields {
@@ -1475,118 +1488,125 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     sensor_id
                 );
                 return;
-            };
-            emit_motion_input_event(
-                state,
-                MotionInputEventFields {
-                    hub_key: Some(hub_key),
-                    source_node_id: Some(source_node_id.as_str()),
-                    target_node_id: Some(target_node_id.as_str()),
-                    source_room_id: Some(room_id.as_str()),
-                    native_sensor_id: sensor_id,
-                    detected,
-                    route: InputEventRoute::NodeControl,
-                },
-            );
-            if !light_breaker_enabled {
-                tracing::info!(
-                    target: "evt",
-                    event = "motion_node_control_suppressed",
-                    source_node_id = %source_node_id,
-                    target_node_id = %target_node_id,
-                    source_room_id = %room_id,
-                    native_sensor_id = %sensor_id,
-                    detected,
-                    reason = "light_breaker_disabled",
-                    "Motion node control suppressed while light breaker is disabled"
-                );
-                return;
             }
-            if detected {
-                if motion.warning_active.remove(&target_node_id) {
-                    info!(
-                        target: "evt",
-                        "Motion: restoring full brightness in node {} (was warning-dimmed)",
-                        target_node_id
-                    );
-                    spawn_motion_dim_action(state, target_node_id.clone(), 1.0);
-                }
 
-                let is_new_activation = !motion.has_active_sources_for_target(&target_node_id);
-                let was_motion_owned = motion.motion_owned.contains(&target_node_id);
-                let prior_motion_turn_on_requested =
-                    motion.motion_turn_on_requested.contains(&target_node_id);
-                let observed_lights_on =
-                    observed_room_lights_on_for_motion_reactivation(state, &target_node_id);
-                motion.sensors.insert(
-                    source_node_id.clone(),
-                    MotionSourceState {
-                        source_node_id: source_node_id.clone(),
-                        target_node_id: target_node_id.clone(),
-                        stopped_at: None,
-                        stopped_at_epoch_ms: None,
+            let multi_target = target_node_ids.len() > 1;
+            for target_node_id in target_node_ids {
+                emit_motion_input_event(
+                    state,
+                    MotionInputEventFields {
+                        hub_key: Some(hub_key),
+                        source_node_id: Some(source_node_id.as_str()),
+                        target_node_id: Some(target_node_id.as_str()),
+                        source_room_id: Some(room_id.as_str()),
+                        native_sensor_id: sensor_id,
+                        detected,
+                        route: InputEventRoute::NodeControl,
                     },
                 );
+                if !light_breaker_enabled {
+                    tracing::info!(
+                        target: "evt",
+                        event = "motion_node_control_suppressed",
+                        source_node_id = %source_node_id,
+                        target_node_id = %target_node_id,
+                        source_room_id = %room_id,
+                        native_sensor_id = %sensor_id,
+                        detected,
+                        reason = "light_breaker_disabled",
+                        "Motion node control suppressed while light breaker is disabled"
+                    );
+                    continue;
+                }
 
-                if is_new_activation {
-                    motion.motion_owned.insert(target_node_id.clone());
-
-                    let should_turn_on = !was_motion_owned
-                        || observed_lights_on == Some(false)
-                        || (observed_lights_on.is_none() && !prior_motion_turn_on_requested);
-
-                    if should_turn_on {
-                        motion
-                            .motion_turn_on_requested
-                            .insert(target_node_id.clone());
+                let source_key =
+                    motion_source_tracking_key(&source_node_id, &target_node_id, multi_target);
+                if detected {
+                    if motion.warning_active.remove(&target_node_id) {
                         info!(
                             target: "evt",
-                            "Motion: new activation source {} -> target {} (owned=true)",
-                            source_node_id,
+                            "Motion: restoring full brightness in node {} (was warning-dimmed)",
                             target_node_id
                         );
+                        spawn_motion_dim_action(state, target_node_id.clone(), 1.0);
+                    }
 
-                        spawn_motion_turn_on_action(state, target_node_id.clone());
+                    let is_new_activation = !motion.has_active_sources_for_target(&target_node_id);
+                    let was_motion_owned = motion.motion_owned.contains(&target_node_id);
+                    let prior_motion_turn_on_requested =
+                        motion.motion_turn_on_requested.contains(&target_node_id);
+                    let observed_lights_on =
+                        observed_room_lights_on_for_motion_reactivation(state, &target_node_id);
+                    motion.sensors.insert(
+                        source_key,
+                        MotionSourceState {
+                            source_node_id: source_node_id.clone(),
+                            target_node_id: target_node_id.clone(),
+                            stopped_at: None,
+                            stopped_at_epoch_ms: None,
+                        },
+                    );
+
+                    if is_new_activation {
+                        motion.motion_owned.insert(target_node_id.clone());
+
+                        let should_turn_on = !was_motion_owned
+                            || observed_lights_on == Some(false)
+                            || (observed_lights_on.is_none() && !prior_motion_turn_on_requested);
+
+                        if should_turn_on {
+                            motion
+                                .motion_turn_on_requested
+                                .insert(target_node_id.clone());
+                            info!(
+                                target: "evt",
+                                "Motion: new activation source {} -> target {} (owned=true)",
+                                source_node_id,
+                                target_node_id
+                            );
+
+                            spawn_motion_turn_on_action(state, target_node_id.clone());
+                        } else {
+                            info!(
+                                target: "evt",
+                                "Motion: reactivated source {} -> target {} during owned countdown; refreshed without turn_on",
+                                source_node_id,
+                                target_node_id
+                            );
+                        }
                     } else {
                         info!(
                             target: "evt",
-                            "Motion: reactivated source {} -> target {} during owned countdown; refreshed without turn_on",
+                            "Motion: continued/refreshed source {} -> target {}",
                             source_node_id,
                             target_node_id
                         );
                     }
+                } else if let Some(source) = motion.sensors.get_mut(&source_key) {
+                    source.target_node_id = target_node_id.clone();
+                    source.stopped_at = Some(Instant::now());
+                    source.stopped_at_epoch_ms = Some(current_epoch_ms());
+
+                    let all_cleared = motion
+                        .sensors
+                        .values()
+                        .filter(|source| source.target_node_id == target_node_id)
+                        .all(|source| source.stopped_at.is_some());
+                    info!(
+                        target: "evt",
+                        "Motion: source {} stopped on target {} - all_cleared={}",
+                        source_node_id,
+                        target_node_id,
+                        all_cleared
+                    );
                 } else {
                     info!(
                         target: "evt",
-                        "Motion: continued/refreshed source {} -> target {}",
+                        "Motion: detected=false for source {} target {} but not tracked, ignoring",
                         source_node_id,
                         target_node_id
                     );
                 }
-            } else if let Some(source) = motion.sensors.get_mut(&source_node_id) {
-                source.target_node_id = target_node_id.clone();
-                source.stopped_at = Some(Instant::now());
-                source.stopped_at_epoch_ms = Some(current_epoch_ms());
-
-                let all_cleared = motion
-                    .sensors
-                    .values()
-                    .filter(|source| source.target_node_id == target_node_id)
-                    .all(|source| source.stopped_at.is_some());
-                info!(
-                    target: "evt",
-                    "Motion: source {} stopped on target {} - all_cleared={}",
-                    source_node_id,
-                    target_node_id,
-                    all_cleared
-                );
-            } else {
-                info!(
-                    target: "evt",
-                    "Motion: detected=false for source {} target {} but not tracked, ignoring",
-                    source_node_id,
-                    target_node_id
-                );
             }
         }
 
@@ -2365,6 +2385,41 @@ pub fn apply_pending_motion_seeds(
     let mut deferred = Vec::new();
     let mut turn_on_targets = Vec::new();
 
+    // Live events use a source+target key whenever one source controls more
+    // than one target. Restore must make the same choice for every entry from
+    // that source; otherwise the first restored target is stored under the
+    // legacy source-only key and a later `detected=false` event cannot find it.
+    let mut seed_targets_by_source: HashMap<String, HashSet<String>> = HashMap::new();
+    for source in motion.sensors.values() {
+        seed_targets_by_source
+            .entry(source.source_node_id.clone())
+            .or_default()
+            .insert(source.target_node_id.clone());
+    }
+    for seed in &seeds {
+        seed_targets_by_source
+            .entry(seed.source_node_id.clone())
+            .or_default()
+            .insert(seed.target_node_id.clone());
+    }
+    let mut multi_target_sources: HashSet<String> = seed_targets_by_source
+        .iter()
+        .filter_map(|(source_node_id, target_ids)| {
+            (target_ids.len() > 1).then_some(source_node_id.clone())
+        })
+        .collect();
+    if let Ok(s) = state.lock() {
+        for source_node_id in seed_targets_by_source.keys() {
+            if s.topology
+                .effective_control_targets(source_node_id, &NodeControlKind::Motion)
+                .len()
+                > 1
+            {
+                multi_target_sources.insert(source_node_id.clone());
+            }
+        }
+    }
+
     for seed in seeds {
         let MotionSeedEntry {
             source_node_id,
@@ -2390,6 +2445,15 @@ pub fn apply_pending_motion_seeds(
         let warning_active = warning_active && !restore_too_stale && !is_active;
 
         if motion.sensors.contains_key(&source_node_id) {
+            live_count += 1;
+            continue;
+        }
+        let source_key = motion_source_tracking_key(
+            &source_node_id,
+            &target_node_id,
+            multi_target_sources.contains(&source_node_id),
+        );
+        if motion.sensors.contains_key(&source_key) {
             live_count += 1;
             continue;
         }
@@ -2444,7 +2508,7 @@ pub fn apply_pending_motion_seeds(
             motion_owned.unwrap_or_else(|| observed_lights_on.unwrap_or(false))
         };
         motion.sensors.insert(
-            source_node_id.clone(),
+            source_key,
             MotionSourceState {
                 source_node_id,
                 target_node_id: target_node_id.clone(),
@@ -2571,7 +2635,11 @@ fn motion_timers_for_storage(motion: &MotionTimerState) -> StoredMotionTimers {
             warning_active: motion.warning_active.contains(&source.target_node_id),
         })
         .collect();
-    entries.sort_by(|a, b| a.source_node_id.cmp(&b.source_node_id));
+    entries.sort_by(|a, b| {
+        a.source_node_id
+            .cmp(&b.source_node_id)
+            .then_with(|| a.target_node_id.cmp(&b.target_node_id))
+    });
     StoredMotionTimers {
         schema_version: 1,
         entries,
@@ -6164,6 +6232,83 @@ mod tests {
     }
 
     #[test]
+    fn motion_event_fans_out_to_multiple_control_targets() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology
+                .insert_room(TopologyRoom::new("room_b", "Room B"));
+            assert!(s.topology.set_control_targets(
+                &source_id,
+                NodeControlKind::Motion,
+                &["room_a", "room_b"],
+            ));
+        }
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        let mut targets = Vec::new();
+        for _ in 0..2 {
+            match event_rx.try_recv().expect("expected motion input event") {
+                crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                    route,
+                    source_node_id,
+                    target_node_id,
+                    native_sensor_id,
+                    detected,
+                    ..
+                }) => {
+                    assert_eq!(route, InputEventRoute::NodeControl);
+                    assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                    assert_eq!(native_sensor_id, "sensor_a");
+                    assert!(detected);
+                    targets.push(target_node_id.expect("target node id"));
+                }
+                other => panic!("unexpected event: {:?}", other),
+            }
+        }
+        targets.sort();
+        assert_eq!(targets, vec!["room_a".to_string(), "room_b".to_string()]);
+        assert_eq!(motion.sensors.len(), 2);
+        assert!(motion.has_active_sources_for_target("room_a"));
+        assert!(motion.has_active_sources_for_target("room_b"));
+
+        for _ in 0..50 {
+            if turn_on_room_calls.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn motion_turn_on_emits_node_state_event() {
         // Regression test for issue #72. Motion-triggered turn-on must
         // broadcast a NodeState SSE event so the app updates without
@@ -7317,6 +7462,51 @@ mod tests {
                 motion_owned: None,
                 warning_active: false,
             });
+    }
+
+    #[test]
+    fn multi_target_motion_seeds_restore_with_live_event_keys() {
+        let state = make_state();
+        push_seed(&state, "sensor_1", "room_a", true);
+        push_seed(&state, "sensor_1", "room_b", true);
+
+        let mut motion = MotionTimerState::new();
+        assert!(apply_pending_motion_seeds(
+            &state,
+            &mut motion,
+            Instant::now()
+        ));
+
+        assert_eq!(motion.sensors.len(), 2);
+        assert!(motion
+            .sensors
+            .contains_key(&motion_source_tracking_key("sensor_1", "room_a", true,)));
+        assert!(motion
+            .sensors
+            .contains_key(&motion_source_tracking_key("sensor_1", "room_b", true,)));
+        assert!(!motion.sensors.contains_key("sensor_1"));
+    }
+
+    #[test]
+    fn retried_multi_target_seed_keeps_live_event_key() {
+        let state = make_state();
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            motion_source_tracking_key("sensor_1", "room_a", true),
+            motion_source("sensor_1", "room_a", None),
+        );
+        push_seed(&state, "sensor_1", "room_b", true);
+
+        assert!(apply_pending_motion_seeds(
+            &state,
+            &mut motion,
+            Instant::now()
+        ));
+
+        assert!(motion
+            .sensors
+            .contains_key(&motion_source_tracking_key("sensor_1", "room_b", true,)));
+        assert!(!motion.sensors.contains_key("sensor_1"));
     }
 
     #[test]

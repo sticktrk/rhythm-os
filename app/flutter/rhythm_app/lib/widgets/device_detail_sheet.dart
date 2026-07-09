@@ -149,6 +149,82 @@ Future<bool> showDeviceRoomAssignmentFlow(
   );
 }
 
+Future<bool> showMotionTargetRoomsFlow(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentParentNodeId,
+}) async {
+  final syncProvider = context.read<ServerSyncProvider>();
+  final roomSummariesById = {
+    for (final room in syncProvider.helloRooms) room.id: room,
+  };
+  final topologyRooms = syncProvider.topologyNodes
+      .where((node) => node.isRoom && node.id.isNotEmpty)
+      .map(
+        (node) => RoomPickerOption(
+          id: node.id,
+          name: node.name,
+          subtitle: roomSummariesById[node.id]?.deviceSummary,
+        ),
+      )
+      .toList();
+  final rooms = (topologyRooms.isNotEmpty
+          ? topologyRooms
+          : syncProvider.helloRooms.map(
+              (room) => RoomPickerOption(
+                id: room.id,
+                name: room.name,
+                subtitle: room.deviceSummary,
+              ),
+            ))
+      .toList()
+    ..sort(
+      (left, right) => left.name.toLowerCase().compareTo(
+            right.name.toLowerCase(),
+          ),
+    );
+
+  final currentTargets = syncProvider.controlTargetNodeIds(
+    sourceNodeId: device.id,
+    controlKind: 'motion',
+  );
+  final initialTargets = <String>{...currentTargets};
+  if (initialTargets.isEmpty && currentParentNodeId.isNotEmpty) {
+    initialTargets.add(currentParentNodeId);
+  }
+
+  final selectedTargets = await showMultiRoomPickerSheet(
+    context,
+    title: 'Motion Controls',
+    rooms: rooms,
+    selectedRoomIds: initialTargets,
+    description: 'Turn on every selected room when motion is detected.',
+  );
+  if (selectedTargets == null || !context.mounted) return false;
+  if (selectedTargets.length == initialTargets.length &&
+      selectedTargets.containsAll(initialTargets)) {
+    return true;
+  }
+
+  final success = await syncProvider.setNodeControlTargets(
+    sourceNodeId: device.id,
+    controlKind: 'motion',
+    targetNodeIds: selectedTargets,
+  );
+  if (!context.mounted) return success;
+
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        success
+            ? 'Updated ${device.displayName} motion controls'
+            : 'Failed to update ${device.displayName}',
+      ),
+    ),
+  );
+  return success;
+}
+
 /// Bottom sheet showing canonical device details + connections.
 ///
 /// Opened by tapping a device row in [RoomSettingsSheet].
@@ -466,6 +542,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           _buildOffBehaviorSection(device),
           const SizedBox(height: 16),
         ],
+        if (device.type == RhythmDeviceType.motion) ...[
+          _buildMotionTargetsButton(context),
+          const SizedBox(height: 12),
+        ],
         if (_loading)
           _tabLoadingIndicator()
         else if (_canonicalData != null)
@@ -737,6 +817,73 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
+  Widget _buildMotionTargetsButton(BuildContext context) {
+    final targetCount = context.select<ServerSyncProvider, int>(
+      (sync) => sync
+          .controlTargetNodeIds(
+            sourceNodeId: widget.device.id,
+            controlKind: 'motion',
+          )
+          .length,
+    );
+    final targetSummary = switch (targetCount) {
+      0 => widget.roomId.isEmpty ? 'Choose rooms' : 'Current room',
+      1 => '1 room',
+      _ => '$targetCount rooms',
+    };
+
+    return Semantics(
+      button: true,
+      label: 'Motion controls, $targetSummary',
+      child: InkWell(
+        onTap: () => _showMotionTargetsDialog(context),
+        borderRadius: BorderRadius.circular(14),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.sensor_occupied_outlined,
+                color: const Color(0xFF81C784).withValues(alpha: 0.9),
+                size: 20,
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Motion controls',
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+              Text(
+                targetSummary,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Icon(
+                Icons.chevron_right,
+                color: CelestialColors.textSecondary,
+                size: 20,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildMatterTesterButton(BuildContext context, String nativeId) {
     return GestureDetector(
       onTap: () {
@@ -947,6 +1094,14 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     if (success && context.mounted) {
       Navigator.of(context).pop();
     }
+  }
+
+  Future<void> _showMotionTargetsDialog(BuildContext context) async {
+    await showMotionTargetRoomsFlow(
+      context,
+      device: widget.device,
+      currentParentNodeId: widget.roomId,
+    );
   }
 
   bool _canLeaveUnassigned(ServerSyncProvider syncProvider) {

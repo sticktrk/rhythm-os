@@ -3084,16 +3084,28 @@ pub fn handle_put_topology_node_control(
         Ok(kind) => kind,
         Err(e) => return ApiResponse::bad_request(&e),
     };
-    let target_id = if body.get("target_id").is_some_and(|value| value.is_null()) {
-        None
+    let target_ids: Vec<&str> = if let Some(value) = body.get("target_ids") {
+        let Some(values) = value.as_array() else {
+            return ApiResponse::bad_request("target_ids must be an array");
+        };
+        let mut targets = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(target_id) = value.as_str() else {
+                return ApiResponse::bad_request("target_ids must contain strings");
+            };
+            targets.push(target_id);
+        }
+        targets
+    } else if body.get("target_id").is_some_and(|value| value.is_null()) {
+        Vec::new()
     } else {
         match body.get("target_id").and_then(|value| value.as_str()) {
-            Some(target_id) => Some(target_id),
+            Some(target_id) => vec![target_id],
             None => return ApiResponse::bad_request("Missing target_id"),
         }
     };
 
-    match commands::do_topology_set_control_target(state, source_id, kind, target_id) {
+    match commands::do_topology_set_control_targets(state, source_id, kind, &target_ids) {
         Ok(()) => ApiResponse::no_content(),
         Err(e) => ApiResponse::server_error(e),
     }
@@ -5341,6 +5353,36 @@ mod tests {
                 .explicit_control_target(&source_id, &crate::topology::NodeControlKind::Motion),
             Some(target_id.as_str())
         );
+    }
+
+    #[test]
+    fn put_topology_node_control_accepts_target_ids() {
+        let state = test_state();
+        let (source_id, target_a, target_b) = {
+            let mut state = state.lock().unwrap();
+            let source_id = state.topology.create_room("Source");
+            let target_a = state.topology.create_room("Target A");
+            let target_b = state.topology.create_room("Target B");
+            (source_id, target_a, target_b)
+        };
+
+        let r = handle_put_topology_node_control(
+            &state,
+            &source_id,
+            "motion",
+            &json!({"target_ids": [target_a.clone(), target_b.clone()]}),
+        );
+        assert_eq!(r.status, 204);
+        assert!(r.body.is_empty());
+
+        let state = state.lock().unwrap();
+        let mut targets = state
+            .topology
+            .explicit_control_targets(&source_id, &crate::topology::NodeControlKind::Motion);
+        targets.sort();
+        let mut expected = vec![target_a.as_str(), target_b.as_str()];
+        expected.sort();
+        assert_eq!(targets, expected);
     }
 
     #[test]

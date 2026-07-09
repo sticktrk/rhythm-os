@@ -1062,6 +1062,30 @@ void main() {
           )).called(1);
     });
 
+    test('setTopologyNodeControlTargets sends every target_id', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(
+                  path: 'api/topology/nodes/sensor-1/controls/motion',
+                ),
+                statusCode: 200,
+              ));
+
+      final saved = await api.setTopologyNodeControlTargets(
+        nodeId: 'sensor-1',
+        controlKind: 'motion',
+        targetIds: ['room-1', 'room-2'],
+      );
+
+      expect(saved, isTrue);
+      verify(() => dio.put(
+            'api/topology/nodes/sensor-1/controls/motion',
+            data: {
+              'target_ids': ['room-1', 'room-2'],
+            },
+          )).called(1);
+    });
+
     test('assignDeviceParent sends parent_id including null', () async {
       when(() => dio.put(any(), data: any(named: 'data')))
           .thenAnswer((_) async => Response(

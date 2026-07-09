@@ -88,6 +88,11 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastAssignedDeviceId;
   String? lastAssignedParentId;
   bool assignDeviceParentResult = true;
+  int setTopologyNodeControlTargetsCalls = 0;
+  String? lastControlSourceNodeId;
+  String? lastControlKind;
+  List<String>? lastControlTargetIds;
+  bool setTopologyNodeControlTargetsResult = true;
   int createTopologyRoomCalls = 0;
   String? lastCreatedRoomName;
   int topologyDeleteRoomCalls = 0;
@@ -386,6 +391,42 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastAssignedDeviceId = deviceId;
     lastAssignedParentId = parentId;
     return assignDeviceParentResult;
+  }
+
+  @override
+  Future<bool> setTopologyNodeControlTargets({
+    required String nodeId,
+    required String controlKind,
+    required List<String> targetIds,
+  }) async {
+    setTopologyNodeControlTargetsCalls++;
+    lastControlSourceNodeId = nodeId;
+    lastControlKind = controlKind;
+    lastControlTargetIds = List<String>.of(targetIds);
+    if (!setTopologyNodeControlTargetsResult) return false;
+
+    topologyNodes = [
+      for (final node in topologyNodes)
+        if (node.id == nodeId)
+          RhythmTopologyNode(
+            id: node.id,
+            name: node.name,
+            kind: node.kind,
+            parentId: node.parentId,
+            controls: [
+              for (final targetId in targetIds)
+                RhythmTopologyControlLink(
+                  kind: controlKind,
+                  targetId: targetId,
+                ),
+            ],
+            manufacturer: node.manufacturer,
+            model: node.model,
+          )
+        else
+          node,
+    ];
+    return true;
   }
 
   @override
@@ -1163,11 +1204,16 @@ void main() {
       connection.dispose();
     });
 
-    test('marks motion-target nodes from topology controls', () async {
+    test('marks and updates multiple motion-target nodes', () async {
       api.topologyNodes = [
         RhythmTopologyNode.fromJson({
           'id': 'room-1',
           'name': 'Kitchen',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'room-2',
+          'name': 'Hall',
           'kind': 'room',
         }),
         RhythmTopologyNode.fromJson({
@@ -1178,6 +1224,11 @@ void main() {
             {
               'kind': 'motion',
               'target_id': 'room-1',
+              'inherited': false,
+            },
+            {
+              'kind': 'motion',
+              'target_id': 'room-2',
               'inherited': false,
             },
           ],
@@ -1207,6 +1258,18 @@ void main() {
               'brightness_offset': 0.0,
               'lights_on': true,
             },
+            {
+              'id': 'room-2',
+              'name': 'Hall',
+              'kind': 'room',
+              'hub_types': ['hue'],
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+            },
           ],
           'location': const <String, dynamic>{},
         }),
@@ -1215,7 +1278,9 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(roomProvider.hasMotionSensor('room-1'), isTrue);
+      expect(roomProvider.hasMotionSensor('room-2'), isTrue);
       expect(provider.nodeHasMotionControlTarget('room-1'), isTrue);
+      expect(provider.nodeHasMotionControlTarget('room-2'), isTrue);
       expect(
         provider.controlTargetNodeId(
           sourceNodeId: 'sensor-1',
@@ -1223,6 +1288,25 @@ void main() {
         ),
         'room-1',
       );
+      expect(
+        provider.controlTargetNodeIds(
+          sourceNodeId: 'sensor-1',
+          controlKind: 'motion',
+        ),
+        ['room-1', 'room-2'],
+      );
+
+      final success = await provider.setNodeControlTargets(
+        sourceNodeId: 'sensor-1',
+        controlKind: 'motion',
+        targetNodeIds: ['room-2', 'room-1', 'room-2', ''],
+      );
+
+      expect(success, isTrue);
+      expect(api.setTopologyNodeControlTargetsCalls, 1);
+      expect(api.lastControlSourceNodeId, 'sensor-1');
+      expect(api.lastControlKind, 'motion');
+      expect(api.lastControlTargetIds, ['room-1', 'room-2']);
     });
 
     test('keeps roomless light-device nodes in the room provider', () async {
@@ -3910,6 +3994,144 @@ void main() {
 
     final headerText = tester.widget<Text>(find.text(deviceName));
     expect(headerText.textAlign, TextAlign.center);
+  });
+
+  testWidgets('motion controls lightly select and save multiple rooms',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Hall',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'sensor-1',
+        'name': 'Kitchen Motion',
+        'kind': 'motion_sensor',
+        'parent_id': 'room-1',
+        'controls': [
+          {
+            'kind': 'motion',
+            'target_id': 'room-1',
+            'inherited': true,
+          },
+        ],
+      }),
+    ];
+    api.canonicalDevices['sensor-1'] = {
+      'id': 'sensor-1',
+      'name': 'Kitchen Motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'room-2',
+            'name': 'Hall',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'sensor-1',
+            type: RhythmDeviceType.motion,
+            name: 'Kitchen Motion',
+          ),
+          roomId: 'room-1',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Motion controls'), findsOneWidget);
+    expect(find.text('1 room'), findsOneWidget);
+
+    await tester.tap(find.text('Motion controls'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Motion Controls'), findsOneWidget);
+    expect(
+      tester.widget<CheckboxListTile>(
+        find.widgetWithText(CheckboxListTile, 'Kitchen'),
+      ).value,
+      isTrue,
+    );
+
+    await tester.tap(find.text('Kitchen'));
+    await tester.pump();
+    expect(
+      tester.widget<ElevatedButton>(
+        find.widgetWithText(ElevatedButton, 'SAVE'),
+      ).onPressed,
+      isNull,
+    );
+
+    await tester.tap(find.text('Kitchen'));
+    await tester.tap(find.text('Hall'));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'SAVE'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'sensor-1');
+    expect(api.lastControlKind, 'motion');
+    expect(api.lastControlTargetIds, ['room-1', 'room-2']);
+    expect(connection.reconnectCalls, 0);
+    expect(find.text('2 rooms'), findsOneWidget);
+    expect(
+      find.text('Updated Kitchen Motion motion controls'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',
