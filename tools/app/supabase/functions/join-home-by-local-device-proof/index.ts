@@ -58,7 +58,9 @@ type JoinProof = {
 
 const JOIN_PROOF_VERSION = 'activity-token-hmac-v1'
 const JOIN_PROOF_ALGORITHM = 'hmac-sha256'
+const JOIN_PROOF_TTL_MS = 2 * 60 * 1000
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000
+const MAX_JOIN_PROOF_AGE_MS = JOIN_PROOF_TTL_MS + MAX_CLOCK_SKEW_MS
 
 const HOME_COLUMNS =
   'id,name,owner_id,member_ids,location,sleep_schedule,curve_config,timezone,created_at,updated_at'
@@ -274,6 +276,18 @@ function readJoinProof(
   if (!/^[0-9a-f]{64}$/.test(parsed.signature)) {
     return jsonResponse({ error: 'Malformed join proof signature' }, 400)
   }
+  if (
+    parsed.issued_at_epoch_ms <= 0 ||
+    parsed.expires_at_epoch_ms <= parsed.issued_at_epoch_ms
+  ) {
+    return jsonResponse({ error: 'Malformed join proof timestamp' }, 400)
+  }
+  if (
+    parsed.expires_at_epoch_ms - parsed.issued_at_epoch_ms >
+      JOIN_PROOF_TTL_MS
+  ) {
+    return jsonResponse({ error: 'Join proof lifetime is too long' }, 403)
+  }
 
   const now = Date.now()
   if (parsed.expires_at_epoch_ms <= now) {
@@ -281,6 +295,9 @@ function readJoinProof(
   }
   if (parsed.issued_at_epoch_ms > now + MAX_CLOCK_SKEW_MS) {
     return jsonResponse({ error: 'Join proof issued in the future' }, 403)
+  }
+  if (parsed.issued_at_epoch_ms < now - MAX_JOIN_PROOF_AGE_MS) {
+    return jsonResponse({ error: 'Join proof issued too far in the past' }, 403)
   }
 
   return parsed
