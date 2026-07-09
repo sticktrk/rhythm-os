@@ -34,7 +34,8 @@ const CLOUDFLARED_BIN: &str = "/usr/bin/cloudflared";
 const CLOUDFLARED_INIT: &str = "/etc/init.d/rhythm-cloudflared";
 const CLOUDFLARED_PIDFILE: &str = "/var/run/rhythm-cloudflared.pid";
 const CLOUDFLARED_CHILD_PIDFILE: &str = "/var/run/rhythm-cloudflared-child.pid";
-const REMOTE_ACCESS_STARTUP_RECONCILE_DELAY: Duration = Duration::from_secs(60);
+const REMOTE_ACCESS_STARTUP_RECONCILE_DELAY: Duration = Duration::from_secs(10);
+const REMOTE_ACCESS_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Rhythm OS Linux appliance.
 #[derive(Parser, Debug)]
@@ -695,16 +696,20 @@ fn spawn_remote_access_startup_reconcile(state: SharedState) {
         .name("remote-access-startup".to_string())
         .spawn(move || {
             std::thread::sleep(REMOTE_ACCESS_STARTUP_RECONCILE_DELAY);
-            match rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
-                Ok(()) => info!(
-                    target: "sys",
-                    "Remote access runtime reconciled after appliance startup delay"
-                ),
-                Err(error) => warn!(
-                    target: "sys",
-                    "Remote access runtime did not reconcile after appliance startup delay: {:#}",
-                    error
-                ),
+            loop {
+                match rhythm_os::remote_access::ensure_remote_access_runtime(&state) {
+                    Ok(true) => info!(
+                        target: "sys",
+                        "Remote access watchdog repaired appliance process state"
+                    ),
+                    Ok(false) => {}
+                    Err(error) => warn!(
+                        target: "sys",
+                        "Remote access watchdog could not reconcile process state: {:#}",
+                        error
+                    ),
+                }
+                std::thread::sleep(REMOTE_ACCESS_WATCHDOG_INTERVAL);
             }
         })
         .expect("Failed to spawn remote-access startup reconcile thread");

@@ -37,6 +37,7 @@ class RemoteAccessEnableResult {
   const RemoteAccessEnableResult({
     required this.updatedHub,
     required this.status,
+    required this.routeVerified,
     required this.remoteUrl,
     required this.tunnelId,
     required this.tunnelName,
@@ -44,10 +45,15 @@ class RemoteAccessEnableResult {
 
   final Hub updatedHub;
   final RhythmRemoteAccessStatus status;
+  final bool routeVerified;
   final String remoteUrl;
   final String tunnelId;
   final String tunnelName;
 }
+
+enum _AutoEnableOutcome { complete, retry }
+
+enum _ExistingRemoteAccessState { healthy, needsRepair, unreachable }
 
 class RemoteAccessActivationException implements Exception {
   const RemoteAccessActivationException(this.status);
@@ -61,7 +67,8 @@ class RemoteAccessActivationException implements Exception {
         'service_running=${status.serviceRunning}, '
         'connector_healthy=${status.connectorHealthy}, '
         'registered_connections=${status.registeredConnections}, '
-        'metrics_error=${status.metricsError})';
+        'metrics_error=${status.metricsError}, '
+        'service_error=${status.serviceError})';
   }
 }
 
@@ -83,13 +90,27 @@ class RemoteAccessRouteException implements Exception {
   }
 }
 
+class RemoteAccessOptedOutException implements Exception {
+  const RemoteAccessOptedOutException();
+
+  @override
+  String toString() => 'Remote access is disabled for this server';
+}
+
 class RemoteAccessService {
   RemoteAccessService._({
     RemoteAccessApiFactory? apiFactory,
     Duration activationPollDelay = const Duration(seconds: 2),
-    int activationPollAttempts = 6,
+    int activationPollAttempts = 31,
     Duration remoteRoutePollDelay = const Duration(seconds: 5),
     int remoteRoutePollAttempts = 36,
+    List<Duration> autoEnableRetryDelays = const <Duration>[
+      Duration(seconds: 5),
+      Duration(seconds: 15),
+      Duration(minutes: 1),
+      Duration(minutes: 5),
+      Duration(minutes: 15),
+    ],
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
@@ -101,6 +122,11 @@ class RemoteAccessService {
         _activationPollAttempts = activationPollAttempts,
         _remoteRoutePollDelay = remoteRoutePollDelay,
         _remoteRoutePollAttempts = remoteRoutePollAttempts,
+        _autoEnableRetryDelays = List<Duration>.unmodifiable(
+          autoEnableRetryDelays.isEmpty
+              ? const <Duration>[Duration(minutes: 15)]
+              : autoEnableRetryDelays,
+        ),
         _supabaseClientFactory = supabaseClientFactory,
         _stateLoader = stateLoader ?? _defaultStateLoader,
         _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
@@ -112,6 +138,7 @@ class RemoteAccessService {
   static final RemoteAccessService instance = RemoteAccessService._();
   static const _bootstrapFunctionName = 'remote-access-bootstrap';
   static const _optOutPrefsKey = 'remote_access_opt_out_hub_ids';
+  static const _retryPrefsPrefix = 'remote_access_auto_enable_retry_';
 
   @visibleForTesting
   factory RemoteAccessService.testing({
@@ -120,6 +147,7 @@ class RemoteAccessService {
     int activationPollAttempts = 1,
     Duration remoteRoutePollDelay = Duration.zero,
     int remoteRoutePollAttempts = 1,
+    List<Duration> autoEnableRetryDelays = const <Duration>[Duration.zero],
     dynamic Function()? supabaseClientFactory,
     RemoteAccessStateLoader? stateLoader,
     RemoteAccessAuthApiFactory? authApiFactory,
@@ -133,6 +161,7 @@ class RemoteAccessService {
       activationPollAttempts: activationPollAttempts,
       remoteRoutePollDelay: remoteRoutePollDelay,
       remoteRoutePollAttempts: remoteRoutePollAttempts,
+      autoEnableRetryDelays: autoEnableRetryDelays,
       supabaseClientFactory: supabaseClientFactory,
       stateLoader: stateLoader ?? _emptyStateLoader,
       authApiFactory: authApiFactory,
@@ -147,6 +176,7 @@ class RemoteAccessService {
   final int _activationPollAttempts;
   final Duration _remoteRoutePollDelay;
   final int _remoteRoutePollAttempts;
+  final List<Duration> _autoEnableRetryDelays;
   final dynamic Function()? _supabaseClientFactory;
   final RemoteAccessStateLoader _stateLoader;
   final RemoteAccessAuthApiFactory _authApiFactory;
@@ -154,6 +184,8 @@ class RemoteAccessService {
   final Duration _supportGrantTimeout;
   final bool? _canUseRemoteAccessOverride;
   final Set<String> _autoEnableInFlight = <String>{};
+  final Map<String, Timer> _autoEnableRetryTimers = <String, Timer>{};
+  final Map<String, int> _autoEnableGenerations = <String, int>{};
   Set<String>? _optOutHubIds;
   Future<Set<String>>? _optOutHubIdsLoad;
 
@@ -171,11 +203,14 @@ class RemoteAccessService {
     Hub serverHub, {
     Home? home,
     bool requireSupportGrant = false,
+    bool explicitUserEnable = false,
   }) async {
     _ensureCanUse(serverHub);
 
-    // An explicit enable always wins over a previously recorded opt-out.
-    await _clearOptOut(serverHub.id);
+    if (explicitUserEnable) {
+      // An explicit enable always wins over a previously recorded opt-out.
+      await _clearOptOut(serverHub);
+    }
 
     await AccountCloudSyncService.instance.syncHomeAndServerHubs(
       home: home,
@@ -191,9 +226,13 @@ class RemoteAccessService {
         serverHub: serverHub,
         home: home,
         serverInstanceId: serverInstanceId,
+        explicitUserEnable: explicitUserEnable,
       ),
     );
     final data = Map<String, dynamic>.from(response.data as Map);
+    if (data['status'] == 'disabled_by_user') {
+      throw const RemoteAccessOptedOutException();
+    }
     final remoteEndpoint = HubEndpoint.fromJson(
       Map<String, dynamic>.from(data['remote_endpoint'] as Map),
     );
@@ -213,42 +252,41 @@ class RemoteAccessService {
     }
 
     final api = _apiForEndpoint(serverHub.endpoint, serverHub.token);
-    var deviceConfigMayExist = false;
     late final RhythmRemoteAccessStatus status;
     String? stableServerInstanceId;
-    try {
-      final initialStatus = await api.putConfig(
-        hostname: hostname,
-        connectorToken: connectorToken,
-        tunnelId: tunnelId,
-        tunnelName: tunnelName,
-      );
-      deviceConfigMayExist = true;
-      status = await _waitForActivation(
-        api: api,
-        initialStatus: initialStatus,
-      );
+    final initialStatus = await api.putConfig(
+      hostname: hostname,
+      connectorToken: connectorToken,
+      tunnelId: tunnelId,
+      tunnelName: tunnelName,
+    );
+    status = await _waitForActivation(
+      api: api,
+      initialStatus: initialStatus,
+    );
 
-      stableServerInstanceId =
-          serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+    stableServerInstanceId =
+        serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+    var routeVerified = false;
+    try {
       final remoteHello = await _waitForRemoteRoute(
         endpoint: remoteEndpoint,
         authToken: serverHub.token,
         expectedServerInstanceId: stableServerInstanceId,
       );
+      routeVerified = true;
       stableServerInstanceId ??= remoteHello.serverInstanceId?.trim();
       if (stableServerInstanceId?.isEmpty ?? false) {
         stableServerInstanceId = null;
       }
-    } catch (error, stackTrace) {
-      await _rollBackFailedEnable(
-        serverHub,
-        home: home,
-        api: api,
-        serverInstanceId: serverInstanceId,
-        clearDeviceConfig: deviceConfigMayExist,
+    } on RemoteAccessRouteException catch (error) {
+      // The connector is already registered with Cloudflare. A phone-side DNS
+      // or network failure must not tear down a healthy device tunnel; retain
+      // the endpoint and let background reconciliation verify it later.
+      debugPrint(
+        'RemoteAccessService: tunnel is active but the public route is still '
+        'pending for hub=${serverHub.id}: $error',
       );
-      Error.throwWithStackTrace(error, stackTrace);
     }
 
     final updatedHub = serverHub.copyWith(
@@ -266,6 +304,7 @@ class RemoteAccessService {
     return RemoteAccessEnableResult(
       updatedHub: updatedHub,
       status: status,
+      routeVerified: routeVerified,
       remoteUrl: remoteUrl,
       tunnelId: tunnelId,
       tunnelName: tunnelName,
@@ -289,18 +328,129 @@ class RemoteAccessService {
       return;
     }
 
-    final key = '${home.id}:${serverHub.id}';
-    if (!_autoEnableInFlight.add(key)) return;
+    final key = _autoEnableKey(home.id, serverHub);
+    if (!_autoEnableInFlight.add(key)) {
+      debugPrint(
+        'RemoteAccessService: remote access attempt already in flight for '
+        'hub=${serverHub.id}',
+      );
+      return;
+    }
+
+    _autoEnableRetryTimers.remove(key)?.cancel();
+    final generation = _autoEnableGenerations[key] ?? 0;
 
     unawaited(
-      _autoEnableForHub(
+      _runScheduledAutoEnable(
+        key: key,
+        generation: generation,
         home: home,
         serverHub: serverHub,
         saveHub: saveHub,
         resolveLatestHub: resolveLatestHub,
         onEnabled: onEnabled,
-      ).whenComplete(() => _autoEnableInFlight.remove(key)),
+      ),
     );
+  }
+
+  Future<void> _runScheduledAutoEnable({
+    required String key,
+    required int generation,
+    required Home home,
+    required Hub serverHub,
+    required RemoteAccessHubSaver saveHub,
+    RemoteAccessLatestHubResolver? resolveLatestHub,
+    RemoteAccessEnabledCallback? onEnabled,
+  }) async {
+    late final _AutoEnableOutcome outcome;
+    try {
+      outcome = await _autoEnableForHub(
+        home: home,
+        serverHub: serverHub,
+        saveHub: saveHub,
+        resolveLatestHub: resolveLatestHub,
+        onEnabled: onEnabled,
+        operationIsCurrent: () =>
+            (_autoEnableGenerations[key] ?? 0) == generation,
+      );
+    } finally {
+      _autoEnableInFlight.remove(key);
+    }
+
+    if ((_autoEnableGenerations[key] ?? 0) != generation) {
+      await _clearAutoEnableRetry(key);
+      return;
+    }
+    if (outcome == _AutoEnableOutcome.retry) {
+      await _scheduleAutoEnableRetry(
+        key: key,
+        home: home,
+        serverHub: serverHub,
+        saveHub: saveHub,
+        resolveLatestHub: resolveLatestHub,
+        onEnabled: onEnabled,
+      );
+    } else {
+      await _clearAutoEnableRetry(key);
+    }
+  }
+
+  Future<void> _scheduleAutoEnableRetry({
+    required String key,
+    required Home home,
+    required Hub serverHub,
+    required RemoteAccessHubSaver saveHub,
+    RemoteAccessLatestHubResolver? resolveLatestHub,
+    RemoteAccessEnabledCallback? onEnabled,
+  }) async {
+    final prefsKey = '$_retryPrefsPrefix${Uri.encodeComponent(key)}';
+    var attempt = 0;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      attempt = prefs.getInt(prefsKey) ?? 0;
+      await prefs.setInt(prefsKey, attempt + 1);
+    } catch (error) {
+      debugPrint(
+        'RemoteAccessService: failed to persist retry state for hub='
+        '${serverHub.id}: $error',
+      );
+    }
+
+    final delayIndex = attempt < _autoEnableRetryDelays.length
+        ? attempt
+        : _autoEnableRetryDelays.length - 1;
+    final delay = _autoEnableRetryDelays[delayIndex];
+    _autoEnableRetryTimers.remove(key)?.cancel();
+    _autoEnableRetryTimers[key] = Timer(delay, () {
+      _autoEnableRetryTimers.remove(key);
+      debugPrint(
+        'RemoteAccessService: running remote access retry for '
+        'hub=${serverHub.id}',
+      );
+      scheduleAutoEnableForHub(
+        home: home,
+        serverHub: serverHub,
+        saveHub: saveHub,
+        resolveLatestHub: resolveLatestHub,
+        onEnabled: onEnabled,
+      );
+    });
+    debugPrint(
+      'RemoteAccessService: retrying remote access for hub=${serverHub.id} '
+      'in ${delay.inSeconds}s (attempt=${attempt + 1})',
+    );
+  }
+
+  Future<void> _clearAutoEnableRetry(String key) async {
+    _autoEnableRetryTimers.remove(key)?.cancel();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('$_retryPrefsPrefix${Uri.encodeComponent(key)}');
+    } catch (error) {
+      debugPrint(
+        'RemoteAccessService: failed to clear retry state for key=$key: $error',
+      );
+    }
   }
 
   @visibleForTesting
@@ -310,8 +460,8 @@ class RemoteAccessService {
     required RemoteAccessHubSaver saveHub,
     RemoteAccessLatestHubResolver? resolveLatestHub,
     RemoteAccessEnabledCallback? onEnabled,
-  }) {
-    return _autoEnableForHub(
+  }) async {
+    await _autoEnableForHub(
       home: home,
       serverHub: serverHub,
       saveHub: saveHub,
@@ -320,57 +470,94 @@ class RemoteAccessService {
     );
   }
 
-  Future<void> _autoEnableForHub({
+  Future<_AutoEnableOutcome> _autoEnableForHub({
     required Home home,
     required Hub serverHub,
     required RemoteAccessHubSaver saveHub,
     RemoteAccessLatestHubResolver? resolveLatestHub,
     RemoteAccessEnabledCallback? onEnabled,
+    bool Function()? operationIsCurrent,
   }) async {
+    var hub = resolveLatestHub?.call(home.id, serverHub.id) ?? serverHub;
     try {
-      var hub = resolveLatestHub?.call(home.id, serverHub.id) ?? serverHub;
-      if (hub.remoteEndpoint != null) {
-        if (hub.token?.trim().isEmpty != false) {
-          debugPrint(
-            'RemoteAccessService: support access auto-grant skipped for '
-            'hub=${hub.id}: no saved owner token for existing remote access',
-          );
-          return;
-        }
-        await _grantSupportAccessForHub(hub);
-        return;
+      if (operationIsCurrent?.call() == false) {
+        return _AutoEnableOutcome.complete;
       }
-
-      if (await _isOptedOut(hub.id)) {
+      if (await _isOptedOut(hub)) {
         debugPrint(
           'RemoteAccessService: auto-enable skipped: user disabled remote '
           'access for hub=${hub.id}',
         );
-        return;
+        return _AutoEnableOutcome.complete;
       }
 
       final tokenHub = await ensureOwnerTokenForHub(hub);
       if (tokenHub.token != hub.token) {
         final saved = await saveHub(tokenHub);
-        if (!saved) return;
+        if (!saved) return _AutoEnableOutcome.retry;
         hub = resolveLatestHub?.call(home.id, serverHub.id) ?? tokenHub;
       }
 
-      final result = await enableForHub(hub, home: home);
-      final saved = await saveHub(result.updatedHub);
-      if (!saved) return;
+      if (hub.remoteEndpoint != null) {
+        final existingState = await _existingRemoteAccessState(hub);
+        if (existingState == _ExistingRemoteAccessState.healthy) {
+          await _grantSupportAccessForHub(hub);
+          onEnabled?.call(hub);
+          return _AutoEnableOutcome.complete;
+        }
+        if (existingState == _ExistingRemoteAccessState.unreachable) {
+          return _AutoEnableOutcome.retry;
+        }
+      }
 
-      onEnabled?.call(result.updatedHub);
+      if (operationIsCurrent?.call() == false) {
+        return _AutoEnableOutcome.complete;
+      }
+      final result = await enableForHub(hub, home: home);
+      if (operationIsCurrent?.call() == false) {
+        await _cleanUpSupersededAutoEnable(hub, home: home);
+        return _AutoEnableOutcome.complete;
+      }
+      final saved = await saveHub(result.updatedHub);
+      if (!saved) return _AutoEnableOutcome.retry;
+      if (operationIsCurrent?.call() == false) {
+        await _cleanUpSupersededAutoEnable(result.updatedHub, home: home);
+        await saveHub(result.updatedHub.copyWith(
+          clearRemoteEndpoint: true,
+          updatedAt: DateTime.now(),
+          pendingSync: true,
+        ));
+        return _AutoEnableOutcome.complete;
+      }
+
+      if (result.routeVerified) {
+        onEnabled?.call(result.updatedHub);
+        debugPrint(
+          'RemoteAccessService: auto-enabled remote access for '
+          'hub=${result.updatedHub.id}',
+        );
+        return _AutoEnableOutcome.complete;
+      }
+      return _AutoEnableOutcome.retry;
+    } on RemoteAccessOptedOutException {
       debugPrint(
-        'RemoteAccessService: auto-enabled remote access for '
-        'hub=${result.updatedHub.id}',
+        'RemoteAccessService: auto-enable skipped: cloud state records a '
+        'manual disable for hub=${serverHub.id}',
       );
+      if (hub.remoteEndpoint != null) {
+        await _clearDeviceConfigBestEffort(hub);
+        await saveHub(hub.copyWith(
+          clearRemoteEndpoint: true,
+          updatedAt: DateTime.now(),
+          pendingSync: true,
+        ));
+      }
+      return _AutoEnableOutcome.complete;
     } catch (error, stackTrace) {
-      debugPrint(
-        'RemoteAccessService: auto-enable skipped for hub=${serverHub.id}: '
-        '$error',
-      );
+      debugPrint('RemoteAccessService: auto-enable pending for '
+          'hub=${serverHub.id}: $error');
       debugPrint('$stackTrace');
+      return _AutoEnableOutcome.retry;
     }
   }
 
@@ -386,6 +573,96 @@ class RemoteAccessService {
       debugPrint(
           'RemoteAccessService: support access auto-grant failed: $error');
     }
+  }
+
+  Future<void> _cleanUpSupersededAutoEnable(
+    Hub hub, {
+    required Home home,
+  }) async {
+    for (final endpoint in _disableEndpoints(hub)) {
+      try {
+        await _apiForEndpoint(endpoint, hub.token).clearConfig();
+        break;
+      } catch (error) {
+        debugPrint(
+          'RemoteAccessService: superseded enable cleanup failed via '
+          '${endpoint.baseUrl}: $error',
+        );
+      }
+    }
+    try {
+      await _tearDownCloudRemoteAccess(
+        hub,
+        home: home,
+        serverInstanceId: await _serverInstanceIdFor(hub),
+      );
+    } catch (error) {
+      debugPrint(
+        'RemoteAccessService: superseded cloud enable cleanup failed for '
+        'hub=${hub.id}: $error',
+      );
+    }
+  }
+
+  Future<void> _clearDeviceConfigBestEffort(Hub hub) async {
+    for (final endpoint in _disableEndpoints(hub)) {
+      try {
+        await _apiForEndpoint(endpoint, hub.token).clearConfig();
+        return;
+      } catch (error) {
+        debugPrint(
+          'RemoteAccessService: stale disabled config cleanup failed via '
+          '${endpoint.baseUrl}: $error',
+        );
+      }
+    }
+  }
+
+  Future<_ExistingRemoteAccessState> _existingRemoteAccessState(
+    Hub hub,
+  ) async {
+    RhythmRemoteAccessStatus? status;
+    for (final endpoint in _disableEndpoints(hub)) {
+      try {
+        status = await _apiForEndpoint(endpoint, hub.token).getStatus();
+        break;
+      } catch (error) {
+        debugPrint(
+          'RemoteAccessService: remote access status unavailable via '
+          '${endpoint.baseUrl} for hub=${hub.id}: $error',
+        );
+      }
+    }
+
+    if (status != null && !_isActivated(status)) {
+      return _ExistingRemoteAccessState.needsRepair;
+    }
+
+    final remoteEndpoint = hub.remoteEndpoint;
+    if (remoteEndpoint == null) {
+      return _ExistingRemoteAccessState.needsRepair;
+    }
+    try {
+      await _waitForRemoteRoute(
+        endpoint: remoteEndpoint,
+        authToken: hub.token,
+        expectedServerInstanceId: hub.serverInstanceId,
+        attemptsOverride: 1,
+      );
+      return _ExistingRemoteAccessState.healthy;
+    } catch (error) {
+      debugPrint(
+        'RemoteAccessService: saved remote route is not ready for '
+        'hub=${hub.id}: $error',
+      );
+    }
+
+    // If device status was readable, a stopped or missing connector can be
+    // repaired through that same endpoint. If neither LAN nor tunnel status
+    // was reachable, retain cloud state and retry when connectivity changes.
+    return status == null
+        ? _ExistingRemoteAccessState.unreachable
+        : _ExistingRemoteAccessState.needsRepair;
   }
 
   Future<Hub> ensureOwnerTokenForHub(Hub serverHub) async {
@@ -438,7 +715,18 @@ class RemoteAccessService {
           'Remote access is only supported for Rhythm Server hubs.');
     }
 
+    final autoEnableKey =
+        _autoEnableKey(home?.id ?? serverHub.homeId, serverHub);
+    _autoEnableRetryTimers.remove(autoEnableKey)?.cancel();
+    _autoEnableGenerations[autoEnableKey] =
+        (_autoEnableGenerations[autoEnableKey] ?? 0) + 1;
+
     final serverInstanceId = await _serverInstanceIdFor(serverHub);
+    // Persist intent before either teardown path. This prevents a background
+    // enable from racing a device or cloud endpoint that is temporarily down.
+    await _recordOptOut(serverHub);
+    await _clearAutoEnableRetry(autoEnableKey);
+
     Object? lastError;
     StackTrace? lastStackTrace;
     var deviceConfigCleared = false;
@@ -457,17 +745,7 @@ class RemoteAccessService {
       }
     }
 
-    if (!deviceConfigCleared && lastError != null && lastStackTrace != null) {
-      Error.throwWithStackTrace(lastError, lastStackTrace);
-    }
-    if (!deviceConfigCleared) {
-      throw StateError('Remote access has no endpoint to disable.');
-    }
-
-    // Record the user's intent as soon as the device tunnel is cleared so a
-    // cloud-teardown failure cannot resurrect the tunnel via auto-enable.
-    await _recordOptOut(serverHub.id);
-
+    Object? cloudError;
     try {
       await _tearDownCloudRemoteAccess(
         serverHub,
@@ -475,11 +753,24 @@ class RemoteAccessService {
         serverInstanceId: serverInstanceId,
       );
     } catch (error) {
-      // The device tunnel is already off and the opt-out is recorded; a
-      // cloud-teardown failure must not make the disable look failed.
+      cloudError = error;
       debugPrint(
-        'RemoteAccessService: cloud teardown failed after device config '
-        'clear for hub=${serverHub.id}: $error',
+        'RemoteAccessService: cloud teardown failed for '
+        'hub=${serverHub.id}: $error',
+      );
+    }
+
+    if (!deviceConfigCleared && cloudError != null) {
+      if (lastError != null && lastStackTrace != null) {
+        Error.throwWithStackTrace(lastError, lastStackTrace);
+      }
+      throw StateError(
+          'Remote access could not be disabled on device or cloud.');
+    }
+    if (!deviceConfigCleared) {
+      debugPrint(
+        'RemoteAccessService: device config was unreachable, but the cloud '
+        'route was removed for hub=${serverHub.id}',
       );
     }
 
@@ -514,20 +805,45 @@ class RemoteAccessService {
     }
   }
 
-  Future<bool> _isOptedOut(String hubId) async {
-    return (await _optOutIds()).contains(hubId);
+  Future<bool> _isOptedOut(Hub hub) async {
+    final ids = await _optOutIds();
+    return _hubPreferenceIdentities(hub).any(ids.contains);
   }
 
-  Future<void> _recordOptOut(String hubId) async {
+  Future<void> _recordOptOut(Hub hub) async {
     final ids = await _optOutIds();
-    if (!ids.add(hubId)) return;
+    final changed = _hubPreferenceIdentities(hub).fold<bool>(
+      false,
+      (changed, identity) => ids.add(identity) || changed,
+    );
+    if (!changed) return;
     await _persistOptOutHubIds(ids);
   }
 
-  Future<void> _clearOptOut(String hubId) async {
+  Future<void> _clearOptOut(Hub hub) async {
     final ids = await _optOutIds();
-    if (!ids.remove(hubId)) return;
+    final changed = _hubPreferenceIdentities(hub).fold<bool>(
+      false,
+      (changed, identity) => ids.remove(identity) || changed,
+    );
+    if (!changed) return;
     await _persistOptOutHubIds(ids);
+  }
+
+  Iterable<String> _hubPreferenceIdentities(Hub hub) sync* {
+    yield hub.id;
+    final serverInstanceId = hub.serverInstanceId?.trim().toLowerCase();
+    if (serverInstanceId != null &&
+        serverInstanceId.isNotEmpty &&
+        serverInstanceId != hub.id) {
+      yield serverInstanceId;
+    }
+  }
+
+  String _autoEnableKey(String homeId, Hub hub) {
+    // Keep the operation key stable when first claim later discovers the
+    // physical server id; otherwise a disable could miss the in-flight task.
+    return '$homeId:${hub.id}';
   }
 
   Future<void> _persistOptOutHubIds(Set<String> ids) async {
@@ -589,38 +905,6 @@ class RemoteAccessService {
     );
   }
 
-  Future<void> _rollBackFailedEnable(
-    Hub serverHub, {
-    required RhythmRemoteAccessApi api,
-    required String serverInstanceId,
-    Home? home,
-    required bool clearDeviceConfig,
-  }) async {
-    if (clearDeviceConfig) {
-      try {
-        await api.clearConfig();
-      } catch (error) {
-        debugPrint(
-          'RemoteAccessService: failed to clear device config after '
-          'remote access enable failure for hub=${serverHub.id}: $error',
-        );
-      }
-    }
-
-    try {
-      await _tearDownCloudRemoteAccess(
-        serverHub,
-        home: home,
-        serverInstanceId: serverInstanceId,
-      );
-    } catch (error) {
-      debugPrint(
-        'RemoteAccessService: failed to roll back cloud remote access after '
-        'enable failure for hub=${serverHub.id}: $error',
-      );
-    }
-  }
-
   RhythmRemoteAccessApi _apiForEndpoint(
     HubEndpoint endpoint,
     String? authToken,
@@ -655,6 +939,9 @@ class RemoteAccessService {
         latest = await api.getStatus();
       }
 
+      if (latest.serviceError?.trim().isNotEmpty == true) {
+        throw RemoteAccessActivationException(latest);
+      }
       if (_isActivated(latest)) return latest;
     }
 
@@ -671,9 +958,10 @@ class RemoteAccessService {
     required HubEndpoint endpoint,
     required String? authToken,
     String? expectedServerInstanceId,
+    int? attemptsOverride,
   }) async {
-    final attempts =
-        _remoteRoutePollAttempts < 1 ? 1 : _remoteRoutePollAttempts;
+    final configuredAttempts = attemptsOverride ?? _remoteRoutePollAttempts;
+    final attempts = configuredAttempts < 1 ? 1 : configuredAttempts;
     Object? lastError;
     StackTrace? lastStackTrace;
 
@@ -786,6 +1074,7 @@ class RemoteAccessService {
     Home? home,
     String? serverInstanceId,
     bool clearRemoteEndpoint = false,
+    bool explicitUserEnable = false,
   }) {
     final normalizedServerInstanceId = serverInstanceId?.trim();
     final snapshotHub = normalizedServerInstanceId != null &&
@@ -794,6 +1083,7 @@ class RemoteAccessService {
         : serverHub;
     return {
       'hub_id': serverHub.id,
+      if (explicitUserEnable) 'explicit_enable': true,
       if (normalizedServerInstanceId != null &&
           normalizedServerInstanceId.isNotEmpty)
         'server_instance_id': normalizedServerInstanceId,
