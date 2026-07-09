@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-RHYTHM_CLOUDFLARED_VERSION = 2026.5.2
+RHYTHM_CLOUDFLARED_VERSION = 2026.6.0
 RHYTHM_CLOUDFLARED_SITE = https://github.com/cloudflare/cloudflared/releases/download/$(RHYTHM_CLOUDFLARED_VERSION)
 RHYTHM_CLOUDFLARED_SOURCE = cloudflared-linux-arm
 RHYTHM_CLOUDFLARED_LICENSE = Apache-2.0

@@ -349,6 +349,9 @@ fn cloudflared_service_is_manual_and_resource_guarded() {
     assert!(body.contains("RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB"));
     assert!(body.contains("start_cloudflared_child"));
     assert!(body.contains("connector restart limit reached"));
+    assert!(body.contains("RHYTHM_CLOUDFLARED_MAX_RESTARTS:-0"));
+    assert!(body.contains("run --token-file \"$TOKEN_FILE\""));
+    assert!(!body.contains("run --token \"$token\""));
     // Stale pidfiles must never leave an orphaned connector running: stop()
     // sweeps by binary name, not just recorded pids.
     assert!(body.contains("kill_stray_connectors"));

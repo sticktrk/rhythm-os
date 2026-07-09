@@ -58,6 +58,18 @@ void main() {
       });
     });
 
+    test('bootstrap body marks an explicit user enable', () {
+      final body = RemoteAccessService.buildBootstrapBody(
+        serverHub: _serverHub(),
+        explicitUserEnable: true,
+      );
+
+      expect(body, {
+        'hub_id': 'hub-1',
+        'explicit_enable': true,
+      });
+    });
+
     test('bootstrap repair snapshot includes probed server identity', () {
       final home = Home.create(
         id: 'home-1',
@@ -146,6 +158,7 @@ void main() {
       expect(result.updatedHub.remoteEndpoint?.host,
           'hub.devices.rhythm.lighting');
       expect(result.updatedHub.serverInstanceId, 'srv-test-instance');
+      expect(result.routeVerified, isTrue);
       expect(remoteApi.putConfigCalls, 1);
       expect(remoteApi.lastHostname, 'hub.devices.rhythm.lighting');
       expect(remoteApi.lastConnectorToken, 'connector-token');
@@ -203,6 +216,7 @@ void main() {
       expect(result.updatedHub.remoteEndpoint?.host,
           'hub.devices.rhythm.lighting');
       expect(result.updatedHub.serverInstanceId, 'srv-test-instance');
+      expect(result.routeVerified, isTrue);
       expect(grantStarted.isCompleted, isTrue);
       await Future<void>.delayed(const Duration(milliseconds: 5));
     });
@@ -255,6 +269,7 @@ void main() {
       expect(result.updatedHub.remoteEndpoint?.host,
           'hub.devices.rhythm.lighting');
       expect(result.updatedHub.serverInstanceId, 'srv-test-instance');
+      expect(result.routeVerified, isTrue);
       expect(stateLoads, [
         'http://192.168.5.123:54448|owner-token',
         'https://hub.devices.rhythm.lighting:443|owner-token',
@@ -262,7 +277,8 @@ void main() {
       ]);
     });
 
-    test('enable fails when the public remote hostname never routes', () async {
+    test('enable retains a healthy tunnel while its public route is pending',
+        () async {
       late _FakeRemoteAccessApi remoteApi;
       final supabase = _FakeSupabaseClient(
         responseData: {
@@ -296,20 +312,16 @@ void main() {
         canUseRemoteAccessOverride: true,
       );
 
-      await expectLater(
-        service.enableForHub(_serverHub()),
-        throwsA(isA<RemoteAccessRouteException>()),
-      );
-      expect(remoteApi.clearConfigCalls, 1);
-      expect(supabase.functions.invocations, hasLength(2));
-      expect(supabase.functions.invocations.last.body, {
-        'hub_id': 'hub-1',
-        'server_instance_id': 'srv-test-instance',
-        'action': 'disable',
-      });
+      final result = await service.enableForHub(_serverHub());
+
+      expect(result.routeVerified, isFalse);
+      expect(result.updatedHub.remoteEndpoint?.host,
+          'hub.devices.rhythm.lighting');
+      expect(remoteApi.clearConfigCalls, 0);
+      expect(supabase.functions.invocations, hasLength(1));
     });
 
-    test('enable tears down cloud mapping when device config write fails',
+    test('enable retains cloud mapping when device config write fails',
         () async {
       late _FakeRemoteAccessApi remoteApi;
       final supabase = _FakeSupabaseClient(
@@ -352,19 +364,14 @@ void main() {
 
       expect(remoteApi.putConfigCalls, 1);
       expect(remoteApi.clearConfigCalls, 0);
-      expect(supabase.functions.invocations, hasLength(2));
+      expect(supabase.functions.invocations, hasLength(1));
       expect(supabase.functions.invocations.first.body, {
         'hub_id': 'hub-1',
         'server_instance_id': 'srv-test-instance',
       });
-      expect(supabase.functions.invocations.last.body, {
-        'hub_id': 'hub-1',
-        'server_instance_id': 'srv-test-instance',
-        'action': 'disable',
-      });
     });
 
-    test('enable clears device config and cloud mapping on activation failure',
+    test('enable retains device config and cloud mapping on activation failure',
         () async {
       late _FakeRemoteAccessApi remoteApi;
       final supabase = _FakeSupabaseClient(
@@ -407,13 +414,8 @@ void main() {
         throwsA(isA<RemoteAccessActivationException>()),
       );
 
-      expect(remoteApi.clearConfigCalls, 1);
-      expect(supabase.functions.invocations, hasLength(2));
-      expect(supabase.functions.invocations.last.body, {
-        'hub_id': 'hub-1',
-        'server_instance_id': 'srv-test-instance',
-        'action': 'disable',
-      });
+      expect(remoteApi.clearConfigCalls, 0);
+      expect(supabase.functions.invocations, hasLength(1));
     });
 
     test('required support grant failure surfaces during enable', () async {
@@ -505,6 +507,28 @@ void main() {
         throwsA(isA<RemoteAccessActivationException>()),
       );
       expect(api.statusCalls, 1);
+    });
+
+    test('activation surfaces an immediate service error without polling',
+        () async {
+      final service = RemoteAccessService.testing(
+        activationPollAttempts: 3,
+      );
+      final api = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+      );
+
+      await expectLater(
+        service.waitForActivationForTesting(
+          api: api,
+          initialStatus: _remoteStatus(
+            serviceRunning: false,
+            serviceError: 'cloudflared service restart failed',
+          ),
+        ),
+        throwsA(isA<RemoteAccessActivationException>()),
+      );
+      expect(api.statusCalls, 0);
     });
 
     test('owner token claim returns a hub that can be saved', () async {
@@ -618,6 +642,156 @@ void main() {
       );
     });
 
+    test('auto-enable repairs stale endpoint metadata on the device', () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final saved = <Hub>[];
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final remoteApi = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+        statuses: [
+          _remoteStatus(
+            enabled: false,
+            configured: false,
+            serviceRunning: false,
+          ),
+        ],
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return remoteApi;
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(
+          serverInstanceId: 'srv-test-instance',
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.devices.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+        ),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(remoteApi.statusCalls, 1);
+      expect(remoteApi.putConfigCalls, 1);
+      expect(saved, hasLength(1));
+      expect(saved.single.remoteEndpoint?.host, 'hub.devices.rhythm.lighting');
+    });
+
+    test('scheduled auto-enable retries a pending public route', () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      var currentHub = _serverHub();
+      var routeAttempts = 0;
+      final enabled = Completer<Hub>();
+      final remoteApi = _FakeRemoteAccessApi(
+        baseUrl: currentHub.endpoint.baseUrl,
+        statuses: [_remoteStatus(registeredConnections: 1)],
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return remoteApi;
+        },
+        autoEnableRetryDelays: const [Duration.zero],
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          if (endpoint.host == '192.168.5.123') {
+            return RhythmHello.fromJson({
+              'server_instance_id': 'srv-test-instance',
+            });
+          }
+          routeAttempts += 1;
+          if (routeAttempts == 1) {
+            throw const RhythmApiException('route is still propagating');
+          }
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      service.scheduleAutoEnableForHub(
+        home: home,
+        serverHub: currentHub,
+        saveHub: (hub) async {
+          currentHub = hub;
+          return true;
+        },
+        resolveLatestHub: (_, __) => currentHub,
+        onEnabled: enabled.complete,
+      );
+
+      await enabled.future.timeout(const Duration(seconds: 1));
+      expect(routeAttempts, 2);
+      expect(supabase.functions.invocations, hasLength(1));
+      final prefs = await SharedPreferences.getInstance();
+      for (var attempt = 0; attempt < 20; attempt += 1) {
+        if (prefs
+            .getKeys()
+            .where(
+              (key) => key.startsWith('remote_access_auto_enable_retry_'),
+            )
+            .isEmpty) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(
+        prefs.getKeys().where(
+              (key) => key.startsWith('remote_access_auto_enable_retry_'),
+            ),
+        isEmpty,
+      );
+    });
+
     test('auto-enable skips existing remote access without an owner token',
         () async {
       final home = Home.create(
@@ -702,7 +876,7 @@ void main() {
       expect(updated.pendingSync, isTrue);
     });
 
-    test('disable surfaces the endpoint failure when no fallback exists',
+    test('disable removes the cloud route when the device is unavailable',
         () async {
       final calls = <String>[];
       final supabase = _FakeSupabaseClient();
@@ -719,15 +893,41 @@ void main() {
         supabaseClientFactory: () => supabase,
       );
 
+      final updated = await service.disableForHub(_serverHub());
+
+      expect(calls, ['http://192.168.5.123:54448']);
+      expect(supabase.functions.invocations, hasLength(1));
+      expect(updated.remoteEndpoint, isNull);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList(_optOutPrefsKey), ['hub-1']);
+    });
+
+    test('disable surfaces failure when device and cloud are unavailable',
+        () async {
+      final supabase = _FakeSupabaseClient(
+        invokeError: const RhythmApiException('cloud unavailable'),
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(
+            baseUrl: baseUrl,
+            onClear: () async {
+              throw const RhythmApiException('device unavailable');
+            },
+          );
+        },
+        supabaseClientFactory: () => supabase,
+      );
+
       await expectLater(
         service.disableForHub(_serverHub()),
         throwsA(isA<RhythmApiException>()),
       );
-      expect(calls, ['http://192.168.5.123:54448']);
-      expect(supabase.functions.invocations, isEmpty);
+      expect(supabase.functions.invocations, hasLength(1));
 
       final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getStringList(_optOutPrefsKey), isNull);
+      expect(prefs.getStringList(_optOutPrefsKey), ['hub-1']);
     });
 
     test('disable records the opt-out even when cloud teardown fails',
@@ -750,6 +950,85 @@ void main() {
 
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getStringList(_optOutPrefsKey), ['hub-1']);
+    });
+
+    test('disable supersedes an in-flight automatic enable', () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final hub = _serverHub(serverInstanceId: 'srv-test-instance');
+      final putStarted = Completer<void>();
+      final releasePut = Completer<void>();
+      final cleanupFinished = Completer<void>();
+      late _FakeRemoteAccessApi remoteApi;
+      remoteApi = _FakeRemoteAccessApi(
+        baseUrl: hub.endpoint.baseUrl,
+        onPut: () async {
+          putStarted.complete();
+          await releasePut.future;
+        },
+        onClear: () async {
+          if (remoteApi.clearConfigCalls >= 2 && !cleanupFinished.isCompleted) {
+            cleanupFinished.complete();
+          }
+        },
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final saved = <Hub>[];
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) => remoteApi,
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      service.scheduleAutoEnableForHub(
+        home: home,
+        serverHub: hub,
+        saveHub: (updated) async {
+          saved.add(updated);
+          return true;
+        },
+      );
+      await putStarted.future.timeout(const Duration(seconds: 1));
+
+      await service.disableForHub(hub, home: home);
+      releasePut.complete();
+      await cleanupFinished.future.timeout(const Duration(seconds: 1));
+      for (var attempt = 0; attempt < 20; attempt += 1) {
+        final disableCalls = supabase.functions.invocations
+            .where((invocation) => invocation.body['action'] == 'disable')
+            .length;
+        if (disableCalls >= 2) break;
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(remoteApi.clearConfigCalls, 2);
+      expect(saved, isEmpty);
+      expect(
+        supabase.functions.invocations
+            .where((invocation) => invocation.body['action'] == 'disable'),
+        hasLength(2),
+      );
     });
 
     test('auto-enable is skipped for a hub the user opted out of', () async {
@@ -790,6 +1069,114 @@ void main() {
       expect(supabase.functions.invocations, isEmpty);
     });
 
+    test('auto-enable respects an opt-out recorded by another client',
+        () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final saved = <Hub>[];
+      final supabase = _FakeSupabaseClient(
+        responseData: const {'status': 'disabled_by_user'},
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          throw StateError('device API should not be used');
+        },
+        supabaseClientFactory: () => supabase,
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(saved, isEmpty);
+      expect(supabase.functions.invocations, hasLength(1));
+      expect(
+        supabase.functions.invocations.single.body,
+        isNot(contains('explicit_enable')),
+      );
+    });
+
+    test('cloud opt-out clears stale local endpoint and device config',
+        () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final saved = <Hub>[];
+      final remoteApi = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+        statuses: [
+          _remoteStatus(
+            enabled: false,
+            configured: false,
+            serviceRunning: false,
+          ),
+        ],
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: const {'status': 'disabled_by_user'},
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) => remoteApi,
+        supabaseClientFactory: () => supabase,
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.devices.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+        ),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(remoteApi.clearConfigCalls, 1);
+      expect(saved, hasLength(1));
+      expect(saved.single.remoteEndpoint, isNull);
+    });
+
+    test('opt-out follows a physical server across local hub ids', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        _optOutPrefsKey: <String>['srv-test-instance'],
+      });
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          throw StateError('device API should not be used');
+        },
+        canUseRemoteAccessOverride: true,
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(serverInstanceId: 'srv-test-instance'),
+        saveHub: (_) async => true,
+      );
+    });
+
     test('explicit enable clears a previously recorded opt-out', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{
         _optOutPrefsKey: <String>['hub-1', 'hub-2'],
@@ -826,9 +1213,17 @@ void main() {
         canUseRemoteAccessOverride: true,
       );
 
-      final result = await service.enableForHub(_serverHub(), home: home);
+      final result = await service.enableForHub(
+        _serverHub(),
+        home: home,
+        explicitUserEnable: true,
+      );
 
       expect(result.updatedHub.remoteEndpoint, isNotNull);
+      expect(
+        supabase.functions.invocations.single.body['explicit_enable'],
+        isTrue,
+      );
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getStringList(_optOutPrefsKey), ['hub-2']);
     });
@@ -838,6 +1233,7 @@ void main() {
 Hub _serverHub({
   HubEndpoint? remoteEndpoint,
   String? token = 'owner-token',
+  String? serverInstanceId,
 }) {
   final now = DateTime.utc(2026, 6, 4);
   return Hub.server(
@@ -847,6 +1243,7 @@ Hub _serverHub({
     host: '192.168.5.123',
     token: token,
     remoteEndpoint: remoteEndpoint,
+    serverInstanceId: serverInstanceId,
   ).copyWith(
     createdAt: now,
     updatedAt: now,
@@ -855,12 +1252,15 @@ Hub _serverHub({
 }
 
 RhythmRemoteAccessStatus _remoteStatus({
+  bool enabled = true,
+  bool configured = true,
   bool serviceRunning = true,
   int? registeredConnections,
+  String? serviceError,
 }) {
   return RhythmRemoteAccessStatus(
-    enabled: true,
-    configured: true,
+    enabled: enabled,
+    configured: configured,
     hostname: 'hub.rhythm.lighting',
     updatedAtEpochMs: 0,
     cloudflaredAvailable: true,
@@ -871,6 +1271,7 @@ RhythmRemoteAccessStatus _remoteStatus({
     connectorHealthy:
         registeredConnections != null && registeredConnections > 0,
     registeredConnections: registeredConnections,
+    serviceError: serviceError,
   );
 }
 

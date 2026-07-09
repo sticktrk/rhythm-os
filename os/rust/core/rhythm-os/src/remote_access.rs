@@ -340,6 +340,34 @@ pub fn reconcile_remote_access_runtime(state: &SharedState) -> anyhow::Result<()
     }
 }
 
+/// Repair remote-access process state without restarting an already-running
+/// connector. This is safe to call periodically from the appliance watchdog.
+pub fn ensure_remote_access_runtime(state: &SharedState) -> anyhow::Result<bool> {
+    let config = load_config(state)?;
+    let controller = controller_for_state(state)
+        .ok_or_else(|| anyhow::anyhow!("remote access controller not configured"))?;
+    match config.as_ref() {
+        Some(config) if config.enabled => {
+            sync_runtime_files(state, Some(config))?;
+            let runtime = controller.status(&runtime_dir(state)?);
+            if runtime.service_running {
+                return Ok(false);
+            }
+            controller.start(&runtime_dir(state)?, config)?;
+            Ok(true)
+        }
+        _ => {
+            sync_runtime_files(state, None)?;
+            let runtime = controller.status(&runtime_dir(state)?);
+            if !runtime.service_running {
+                return Ok(false);
+            }
+            controller.stop(&runtime_dir(state)?)?;
+            Ok(true)
+        }
+    }
+}
+
 fn controller_for_state(state: &SharedState) -> Option<Arc<dyn RemoteAccessController>> {
     state
         .lock()
@@ -915,7 +943,6 @@ struct ChildProcessInner {
 
 #[derive(Clone)]
 struct ChildDesired {
-    token: String,
     runtime_dir: PathBuf,
 }
 
@@ -1103,7 +1130,7 @@ impl RemoteAccessController for ChildProcessRemoteAccessController {
         }
     }
 
-    fn start(&self, runtime_dir: &Path, config: &StoredRemoteAccessConfig) -> anyhow::Result<()> {
+    fn start(&self, runtime_dir: &Path, _config: &StoredRemoteAccessConfig) -> anyhow::Result<()> {
         if cloudflared_version_for(&self.inner.cloudflared_bin).is_none() {
             anyhow::bail!(
                 "cloudflared unavailable at {}",
@@ -1119,7 +1146,6 @@ impl RemoteAccessController for ChildProcessRemoteAccessController {
                 .map_err(|_| anyhow::anyhow!("remote access lock"))?;
             shared.generation = shared.generation.saturating_add(1);
             shared.desired = Some(ChildDesired {
-                token: config.connector_token.trim().to_string(),
                 runtime_dir: runtime_dir.to_path_buf(),
             });
             shared.status.state = "starting".to_string();
@@ -1304,8 +1330,8 @@ fn spawn_cloudflared(inner: &ChildProcessInner, desired: &ChildDesired) -> anyho
         .arg("--ha-connections")
         .arg(inner.ha_connections.to_string())
         .arg("run")
-        .arg("--token")
-        .arg(&desired.token)
+        .arg("--token-file")
+        .arg(desired.runtime_dir.join(CONNECTOR_TOKEN_FILE))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(err_file));
@@ -1428,6 +1454,46 @@ mod tests {
     use super::*;
     use crate::state::AppState;
     use crate::storage::{FileStorage, Storage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TestRemoteAccessController {
+        status: Mutex<RemoteAccessRuntimeStatus>,
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+    }
+
+    impl TestRemoteAccessController {
+        fn new(service_running: bool) -> Self {
+            Self {
+                status: Mutex::new(RemoteAccessRuntimeStatus {
+                    service_running,
+                    ..RemoteAccessRuntimeStatus::default()
+                }),
+                starts: AtomicUsize::new(0),
+                stops: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl RemoteAccessController for TestRemoteAccessController {
+        fn status(&self, _runtime_dir: &Path) -> RemoteAccessRuntimeStatus {
+            self.status.lock().unwrap().clone()
+        }
+
+        fn start(
+            &self,
+            _runtime_dir: &Path,
+            _config: &StoredRemoteAccessConfig,
+        ) -> anyhow::Result<()> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&self, _runtime_dir: &Path) -> anyhow::Result<()> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1489,6 +1555,81 @@ cloudflared_tunnel_ha_connections 1\n";
 cloudflared_tunnel_server_locations{edge_location=\"iad01\"} 1\n\
 cloudflared_tunnel_server_locations{edge_location=\"ewr01\"} 1\n";
         assert_eq!(parse_registered_connections(location_metrics), Some(2));
+    }
+
+    #[test]
+    fn watchdog_starts_configured_connector_only_when_not_running() {
+        for (service_running, expected_repair) in [(false, true), (true, false)] {
+            let root = temp_root(if service_running {
+                "watchdog-running"
+            } else {
+                "watchdog-stopped"
+            });
+            std::fs::create_dir_all(&root).unwrap();
+            let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+            storage
+                .save_remote_access_config(&StoredRemoteAccessConfig {
+                    schema_version: 1,
+                    enabled: true,
+                    hostname: "hub.rhythm.lighting".into(),
+                    connector_token: "secret".into(),
+                    tunnel_id: Some("tunnel-id".into()),
+                    tunnel_name: Some("tunnel-name".into()),
+                    updated_at_epoch_ms: current_epoch_ms(),
+                })
+                .unwrap();
+            let controller = Arc::new(TestRemoteAccessController::new(service_running));
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            {
+                let mut app = state.lock().unwrap();
+                app.data_dir = root.to_string_lossy().to_string();
+                app.storage = Some(Arc::new(storage));
+                app.remote_access_controller = Some(controller.clone());
+            }
+
+            assert_eq!(
+                ensure_remote_access_runtime(&state).unwrap(),
+                expected_repair
+            );
+            assert_eq!(
+                controller.starts.load(Ordering::SeqCst),
+                usize::from(expected_repair)
+            );
+            assert_eq!(controller.stops.load(Ordering::SeqCst), 0);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn watchdog_stops_an_unconfigured_connector_only_when_running() {
+        for (service_running, expected_repair) in [(false, false), (true, true)] {
+            let root = temp_root(if service_running {
+                "watchdog-stale-running"
+            } else {
+                "watchdog-unconfigured"
+            });
+            std::fs::create_dir_all(&root).unwrap();
+            let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+            let controller = Arc::new(TestRemoteAccessController::new(service_running));
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            {
+                let mut app = state.lock().unwrap();
+                app.data_dir = root.to_string_lossy().to_string();
+                app.storage = Some(Arc::new(storage));
+                app.remote_access_controller = Some(controller.clone());
+            }
+
+            assert_eq!(
+                ensure_remote_access_runtime(&state).unwrap(),
+                expected_repair
+            );
+            assert_eq!(controller.starts.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                controller.stops.load(Ordering::SeqCst),
+                usize::from(expected_repair)
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[tokio::test]

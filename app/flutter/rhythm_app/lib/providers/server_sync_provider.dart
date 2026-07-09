@@ -53,6 +53,18 @@ typedef ServerEndpointReachability = Future<bool> Function(
   String? authToken,
 );
 
+typedef ServerAuthApiFactory = RhythmAuthApi Function({
+  required String baseUrl,
+});
+
+typedef RemoteAccessAutoEnableScheduler = void Function({
+  required Home home,
+  required Hub serverHub,
+  required RemoteAccessHubSaver saveHub,
+  RemoteAccessLatestHubResolver? resolveLatestHub,
+  RemoteAccessEnabledCallback? onEnabled,
+});
+
 List<RhythmSceneDefinition> _userVisibleScenes(
   Iterable<RhythmSceneDefinition> scenes,
 ) =>
@@ -101,6 +113,8 @@ class ServerSyncProvider extends ChangeNotifier {
   final HomeProvider _homeProvider;
   final ServerEndpointReachability? _endpointReachability;
   final Future<List<ConnectivityResult>> Function()? _connectivityCheck;
+  final ServerAuthApiFactory _authApiFactory;
+  final RemoteAccessAutoEnableScheduler _remoteAccessAutoEnableScheduler;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -1215,11 +1229,17 @@ class ServerSyncProvider extends ChangeNotifier {
     @visibleForTesting ServerEndpointReachability? endpointReachability,
     @visibleForTesting
     Future<List<ConnectivityResult>> Function()? connectivityCheck,
+    @visibleForTesting ServerAuthApiFactory? authApiFactory,
+    @visibleForTesting
+    RemoteAccessAutoEnableScheduler? remoteAccessAutoEnableScheduler,
   })  : _connection = connection,
         _roomProvider = roomProvider,
         _homeProvider = homeProvider,
         _endpointReachability = endpointReachability,
-        _connectivityCheck = connectivityCheck {
+        _connectivityCheck = connectivityCheck,
+        _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
+        _remoteAccessAutoEnableScheduler = remoteAccessAutoEnableScheduler ??
+            RemoteAccessService.instance.scheduleAutoEnableForHub {
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
@@ -1393,6 +1413,10 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_sameServerHubIdentity(_serverHub, targetHub)) return;
 
     _serverHub = auth.hub;
+    // Owner claiming happens in _prepareServerHubAuth. Queue tunnel
+    // provisioning as soon as that token is persisted instead of making it
+    // wait for the full SDK connection, which can stall during first setup.
+    _scheduleRemoteAccessAutoEnable(auth.hub);
     final endpoint = await _selectConnectionEndpoint(
       auth.hub,
       auth.authToken,
@@ -1413,7 +1437,6 @@ class ServerSyncProvider extends ChangeNotifier {
       useSsl: endpoint.useSsl,
       authToken: auth.authToken,
     );
-    _scheduleRemoteAccessAutoEnable(auth.hub);
     notifyListeners();
   }
 
@@ -1426,7 +1449,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final home = _homeProvider.currentHome;
     if (home == null) return;
 
-    RemoteAccessService.instance.scheduleAutoEnableForHub(
+    _remoteAccessAutoEnableScheduler(
       home: home,
       serverHub: hub,
       saveHub: _homeProvider.updateHub,
@@ -1518,7 +1541,7 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     try {
-      final authApi = RhythmAuthApi(baseUrl: hub.endpoint.baseUrl);
+      final authApi = _authApiFactory(baseUrl: hub.endpoint.baseUrl);
       final status = await authApi.getStatus();
 
       final shouldClaimToken = status.claimAvailable &&
@@ -1526,7 +1549,10 @@ class ServerSyncProvider extends ChangeNotifier {
       if (shouldClaimToken) {
         final claim = await authApi.claimOwnerToken();
         final claimedHub = hub.copyWith(token: claim.token);
-        await _homeProvider.updateHub(claimedHub);
+        final saved = await _homeProvider.updateHub(claimedHub);
+        if (!saved) {
+          throw StateError('Could not persist the claimed server owner token.');
+        }
         debugPrint(
           'ServerSync: claimed owner token for ${hub.endpoint.host}:${hub.endpoint.port}',
         );
@@ -1557,6 +1583,10 @@ class ServerSyncProvider extends ChangeNotifier {
             : existingToken,
       );
     }
+  }
+
+  static RhythmAuthApi _defaultAuthApiFactory({required String baseUrl}) {
+    return RhythmAuthApi(baseUrl: baseUrl);
   }
 
   Future<HubEndpoint?> _selectConnectionEndpoint(

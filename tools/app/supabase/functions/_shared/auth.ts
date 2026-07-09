@@ -12,7 +12,9 @@ export type JsonObject = Record<string, unknown>
 export type AuthenticatedRequestContext = {
   userId: string
   claims: JsonObject
-  adminClient: ReturnType<typeof createClient>
+  // Supabase's generic factory currently infers `never` for an untyped schema
+  // when captured through ReturnType, even though the runtime client is valid.
+  adminClient: any
 }
 
 export async function withAuthenticatedRequest(
@@ -38,7 +40,7 @@ export async function withAuthenticatedRequest(
     const { data, error } = await authClient.auth.getClaims(token)
     const claims = asJsonObject(data?.claims)
     const userId = readClaimString(claims, 'sub')
-    if (error || !userId) {
+    if (error || !claims || !userId) {
       return jsonResponse({ error: 'Invalid token' }, 401)
     }
 

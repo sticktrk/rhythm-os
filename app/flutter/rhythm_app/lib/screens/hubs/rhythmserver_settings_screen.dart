@@ -2533,6 +2533,7 @@ class _RhythmServerAdvancedSettingsScreenState
     try {
       final service = RemoteAccessService.instance;
       Hub updatedHub;
+      var routeVerified = true;
       if (enabled) {
         var tokenHub = await service.ensureOwnerTokenForHub(serverHub);
         if (tokenHub.token != serverHub.token) {
@@ -2546,8 +2547,10 @@ class _RhythmServerAdvancedSettingsScreenState
         final result = await service.enableForHub(
           tokenHub,
           home: home,
+          explicitUserEnable: true,
         );
         updatedHub = result.updatedHub;
+        routeVerified = result.routeVerified;
       } else {
         updatedHub = await service.disableForHub(serverHub, home: home);
       }
@@ -2561,8 +2564,27 @@ class _RhythmServerAdvancedSettingsScreenState
       }
 
       syncProvider.connectIfAvailable();
+      if (enabled && !routeVerified) {
+        service.scheduleAutoEnableForHub(
+          home: home,
+          serverHub: updatedHub,
+          saveHub: homeProvider.updateHub,
+          resolveLatestHub: (homeId, hubId) {
+            if (homeProvider.currentHome?.id != homeId) return null;
+            for (final hub in homeProvider.currentHomeHubs) {
+              if (hub.id == hubId) return hub;
+            }
+            return null;
+          },
+          onEnabled: (_) => syncProvider.connectIfAvailable(),
+        );
+      }
       _showSnackBar(
-        enabled ? 'Remote access enabled.' : 'Remote access disabled.',
+        enabled
+            ? routeVerified
+                ? 'Remote access enabled.'
+                : 'Remote access is starting in the background.'
+            : 'Remote access disabled.',
       );
     } catch (error, stackTrace) {
       debugPrint('Remote access toggle failed: $error');

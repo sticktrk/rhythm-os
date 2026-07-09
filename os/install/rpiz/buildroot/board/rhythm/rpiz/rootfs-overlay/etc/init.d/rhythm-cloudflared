@@ -21,7 +21,10 @@ TOKEN_FILE="${RHYTHM_CLOUDFLARED_TOKEN_FILE:-$DATA_DIR/cloudflared/connector_tok
 PROTOCOL="${RHYTHM_CLOUDFLARED_PROTOCOL:-http2}"
 LOGLEVEL="${RHYTHM_CLOUDFLARED_LOGLEVEL:-warn}"
 HA_CONNECTIONS="${RHYTHM_CLOUDFLARED_HA_CONNECTIONS:-1}"
-MAX_RESTARTS="${RHYTHM_CLOUDFLARED_MAX_RESTARTS:-5}"
+# Zero means unlimited. The connector already uses capped exponential backoff;
+# stopping permanently after a handful of exits strands an otherwise configured
+# appliance until a reboot or app-side toggle.
+MAX_RESTARTS="${RHYTHM_CLOUDFLARED_MAX_RESTARTS:-0}"
 STOP_TIMEOUT_SECS="${RHYTHM_CLOUDFLARED_STOP_TIMEOUT_SECS:-5}"
 VMEM_LIMIT_KB="${RHYTHM_CLOUDFLARED_VMEM_LIMIT_KB:-262144}"
 NICE_LEVEL="${RHYTHM_CLOUDFLARED_NICE:-10}"
@@ -50,7 +53,7 @@ resolve_log_dir() {
 LOGFILE="$(resolve_log_dir)/cloudflared.log"
 
 case "$HA_CONNECTIONS" in ''|*[!0-9]*) HA_CONNECTIONS=1 ;; esac
-case "$MAX_RESTARTS" in ''|*[!0-9]*) MAX_RESTARTS=5 ;; esac
+case "$MAX_RESTARTS" in ''|*[!0-9]*) MAX_RESTARTS=0 ;; esac
 case "$STOP_TIMEOUT_SECS" in ''|*[!0-9]*) STOP_TIMEOUT_SECS=5 ;; esac
 case "$VMEM_LIMIT_KB" in ''|*[!0-9]*) VMEM_LIMIT_KB=262144 ;; esac
 case "$NICE_LEVEL" in ''|*[!0-9]*) NICE_LEVEL=10 ;; esac
@@ -163,14 +166,6 @@ write_status() {
     mv -f "$tmp" "$STATUS_FILE"
 }
 
-read_token() {
-    token="$(sed -n '1p' "$TOKEN_FILE" | tr -d '\r\n')"
-    if [ -z "$token" ]; then
-        return 1
-    fi
-    return 0
-}
-
 start_cloudflared_child() {
     (
         if [ "$VMEM_LIMIT_KB" != "0" ]; then
@@ -191,7 +186,8 @@ launch_connector() {
     if [ "$HA_CONNECTIONS" != "0" ]; then
         set -- "$@" --ha-connections "$HA_CONNECTIONS"
     fi
-    set -- "$@" run --token "$token"
+    # Keep the remotely-managed tunnel credential out of /proc/<pid>/cmdline.
+    set -- "$@" run --token-file "$TOKEN_FILE"
 
     log "starting connector: protocol=$PROTOCOL metrics=$METRICS_ADDR ha_connections=${HA_CONNECTIONS:-default} vmem_limit_kb=$VMEM_LIMIT_KB"
     start_cloudflared_child "$@"
@@ -218,11 +214,6 @@ supervise() {
 
     backoff="$BACKOFF_INITIAL_SECS"
     while [ -s "$TOKEN_FILE" ]; do
-        if ! read_token; then
-            log "connector token is empty"
-            break
-        fi
-
         launch_connector
         echo "$child_pid" > "$CHILD_PIDFILE"
         last_started_epoch_secs="$(epoch_secs)"

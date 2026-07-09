@@ -12,6 +12,7 @@ import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
+import 'package:rhythm_app/services/remote_access_service.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
@@ -422,6 +423,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   _FakeRhythmConnection(this.fakeApi);
 
   final _FakeRhythmServerApi fakeApi;
+  Completer<void>? connectBlocker;
   bool isConnected = true;
   int reconnectCalls = 0;
   bool? lastReconnectAuthoritative;
@@ -453,12 +455,42 @@ class _FakeRhythmConnection extends RhythmConnection {
       useSsl: useSsl,
       authToken: authToken,
     ));
+    await connectBlocker?.future;
   }
 
   @override
   Future<void> reconnect({bool authoritative = false}) async {
     reconnectCalls++;
     lastReconnectAuthoritative = authoritative;
+  }
+}
+
+class _FakeRhythmAuthApi extends RhythmAuthApi {
+  _FakeRhythmAuthApi() : super(baseUrl: 'http://127.0.0.1');
+
+  int statusCalls = 0;
+  int claimCalls = 0;
+
+  @override
+  Future<RhythmAuthStatus> getStatus() async {
+    statusCalls += 1;
+    return const RhythmAuthStatus(
+      requiresAuth: true,
+      ownerConfigured: false,
+      tokenCount: 0,
+      claimAvailable: true,
+    );
+  }
+
+  @override
+  Future<RhythmOwnerClaim> claimOwnerToken({
+    String label = 'Rhythm app',
+  }) async {
+    claimCalls += 1;
+    return const RhythmOwnerClaim(
+      tokenId: 'claimed-token-id',
+      token: 'claimed-owner-token',
+    );
   }
 }
 
@@ -2658,6 +2690,66 @@ void main() {
         localConnection.dispose();
         localRoomProvider.dispose();
       });
+    });
+
+    test('first owner claim queues tunnel before server connection completes',
+        () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'user-1',
+      );
+      final homeProvider = _TestHomeProvider(
+        [
+          Hub.server(
+            id: 'server-1',
+            homeId: home.id,
+            name: 'Kitchen Server',
+            host: '192.168.5.123',
+            port: 54448,
+          ),
+        ],
+        currentHome: home,
+      );
+      final authApi = _FakeRhythmAuthApi();
+      final scheduledHubs = <Hub>[];
+      connection.connectBlocker = Completer<void>();
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+        authApiFactory: ({required baseUrl}) {
+          expect(baseUrl, 'http://192.168.5.123:54448');
+          return authApi;
+        },
+        remoteAccessAutoEnableScheduler: ({
+          required Home home,
+          required Hub serverHub,
+          required RemoteAccessHubSaver saveHub,
+          RemoteAccessLatestHubResolver? resolveLatestHub,
+          RemoteAccessEnabledCallback? onEnabled,
+        }) {
+          scheduledHubs.add(serverHub);
+        },
+      );
+      addTearDown(provider.dispose);
+
+      final retry = provider.retryActiveServerConnection();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(authApi.statusCalls, 1);
+      expect(authApi.claimCalls, 1);
+      expect(homeProvider.currentHomeHubs.single.token, 'claimed-owner-token');
+      expect(connection.connectCalls, hasLength(1));
+      expect(connection.connectCalls.single.authToken, 'claimed-owner-token');
+      expect(
+        scheduledHubs.single.token,
+        'claimed-owner-token',
+        reason: 'tunnel provisioning must not wait for connect() to return',
+      );
+
+      connection.connectBlocker!.complete();
+      await retry;
     });
 
     test('home entry refresh gates until authoritative hello arrives',

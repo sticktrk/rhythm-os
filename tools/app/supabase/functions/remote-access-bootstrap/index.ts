@@ -48,6 +48,7 @@ type HubRow = {
   type: string
   server_instance_id?: string | null
   remote_endpoint?: unknown
+  remote_access_disabled_at?: string | null
   last_connected?: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -98,6 +99,7 @@ Deno.serve((req) =>
     )
     if (ensured instanceof Response) return ensured
     const { hub } = ensured
+    const explicitEnable = body['explicit_enable'] === true
 
     try {
       if (action === 'disable') {
@@ -109,6 +111,17 @@ Deno.serve((req) =>
           serverInstanceId,
           serverEndpoint,
         })
+      }
+
+      if (hub.remote_access_disabled_at && !explicitEnable) {
+        return jsonResponse({
+          status: 'disabled_by_user',
+          hub_id: hub.id,
+          requested_hub_id: hubId,
+        })
+      }
+      if (explicitEnable && hub.remote_access_disabled_at) {
+        await setRemoteAccessDisabled(adminClient, hub.id, false)
       }
 
       const accountId = requireEnv('CLOUDFLARE_ACCOUNT_ID')
@@ -161,10 +174,27 @@ Deno.serve((req) =>
         tunnelName: tunnel.name,
         serverInstanceId,
       })
-      await adminClient
+      const { data: endpointHub, error: endpointUpdateError } = await adminClient
         .from('hubs')
         .update({ remote_endpoint: remoteEndpoint })
         .eq('id', hub.id)
+        .is('remote_access_disabled_at', null)
+        .select('id')
+        .maybeSingle()
+      if (endpointUpdateError) throw new Error(endpointUpdateError.message)
+      if (!endpointHub) {
+        // A disable won the race while Cloudflare was provisioning. Remove
+        // everything this request may have created instead of resurrecting
+        // the route after the user turned it off.
+        await deleteDnsRecordIfPresent(zoneId, apiToken, hostname)
+        await deleteTunnelIfPresent(accountId, apiToken, tunnel.id)
+        await deleteRemoteAccessMapping(adminClient, hub.id)
+        return jsonResponse({
+          status: 'disabled_by_user',
+          hub_id: hub.id,
+          requested_hub_id: hubId,
+        })
+      }
       if (existing && existing.hub_id !== hub.id) {
         await clearHubRemoteEndpoint(adminClient, existing.hub_id)
       }
@@ -228,6 +258,10 @@ async function disableRemoteAccess({
   serverInstanceId: string | null
   serverEndpoint: RemoteAccessEndpoint | null
 }): Promise<Response> {
+  // Persist intent first. Even if Cloudflare is temporarily unavailable, a
+  // different client must not race this request and recreate the tunnel.
+  await setRemoteAccessDisabled(adminClient, hubId, true)
+
   const existing = await readExistingMapping(adminClient, {
     userId,
     hubId,
@@ -387,7 +421,11 @@ async function ensureServerHubRows(
     if (hubUpsertError) throw new Error(hubUpsertError.message)
 
     return {
-      hub: { id: requestedHubId, home_id: requestedHomeId, type: 'server' },
+      hub: existingHub ?? {
+        id: requestedHubId,
+        home_id: requestedHomeId,
+        type: 'server',
+      },
       home: {
         id: requestedHomeId,
         owner_id: ownerId,
@@ -432,7 +470,7 @@ async function fetchHub(adminClient: any, hubId: string): Promise<HubRow | null>
   const { data, error } = await adminClient
     .from('hubs')
     .select(
-      'id, home_id, type, server_instance_id, remote_endpoint, last_connected, created_at, updated_at',
+      'id, home_id, type, server_instance_id, remote_endpoint, remote_access_disabled_at, last_connected, created_at, updated_at',
     )
     .eq('id', hubId)
     .maybeSingle()
@@ -452,7 +490,7 @@ async function readAuthorizedServerHubByInstanceId(
   const { data, error } = await adminClient
     .from('hubs')
     .select(
-      'id, home_id, type, server_instance_id, remote_endpoint, last_connected, created_at, updated_at',
+      'id, home_id, type, server_instance_id, remote_endpoint, remote_access_disabled_at, last_connected, created_at, updated_at',
     )
     .eq('type', 'server')
     .eq('server_instance_id', serverInstanceId)
@@ -881,6 +919,20 @@ async function deleteRemoteAccessMapping(
     .from('hub_remote_access')
     .delete()
     .eq('hub_id', hubId)
+  if (error) throw new Error(error.message)
+}
+
+async function setRemoteAccessDisabled(
+  adminClient: any,
+  hubId: string,
+  disabled: boolean,
+): Promise<void> {
+  const { error } = await adminClient
+    .from('hubs')
+    .update({
+      remote_access_disabled_at: disabled ? new Date().toISOString() : null,
+    })
+    .eq('id', hubId)
   if (error) throw new Error(error.message)
 }
 

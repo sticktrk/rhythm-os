@@ -468,6 +468,19 @@ impl FileStorage {
     /// power loss. Removes any stale `.tmp` left behind by a crashed prior
     /// write before starting.
     fn write_atomic(&self, name: &str, data: &[u8]) -> Result<()> {
+        self.write_atomic_with_mode(name, data, None)
+    }
+
+    fn write_atomic_secret(&self, name: &str, data: &[u8]) -> Result<()> {
+        self.write_atomic_with_mode(name, data, Some(0o600))
+    }
+
+    fn write_atomic_with_mode(
+        &self,
+        name: &str,
+        data: &[u8],
+        unix_mode: Option<u32>,
+    ) -> Result<()> {
         use std::io::Write;
 
         let path = self.file_path(name);
@@ -481,7 +494,18 @@ impl FileStorage {
         }
 
         {
-            let mut file = std::fs::File::create(&tmp)
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            if let Some(mode) = unix_mode {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(mode);
+            }
+            #[cfg(not(unix))]
+            let _ = unix_mode;
+
+            let mut file = options
+                .open(&tmp)
                 .with_context(|| format!("Failed to create {}", tmp.display()))?;
             file.write_all(data)
                 .with_context(|| format!("Failed to write {}", tmp.display()))?;
@@ -1206,7 +1230,7 @@ impl Storage for FileStorage {
         config: &crate::remote_access::StoredRemoteAccessConfig,
     ) -> Result<()> {
         let json = serde_json::to_string_pretty(config)?;
-        self.write_atomic("remote_access.json", json.as_bytes())
+        self.write_atomic_secret("remote_access.json", json.as_bytes())
     }
 
     fn clear_remote_access_config(&self) -> Result<()> {
@@ -2968,6 +2992,16 @@ mod tests {
             };
 
             storage.save_remote_access_config(&config).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(path.join("remote_access.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600);
+            }
             let loaded = storage.load_remote_access_config().unwrap();
             assert_eq!(loaded, Some(config));
 
