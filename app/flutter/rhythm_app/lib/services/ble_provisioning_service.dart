@@ -11,6 +11,8 @@ class _Uuids {
   static final status = Guid('72797468-6d02-1000-8000-00805f9b34fb');
   static final deviceInfo = Guid('72797468-6d03-1000-8000-00805f9b34fb');
   static final authRequest = Guid('72797468-6d04-1000-8000-00805f9b34fb');
+  static final wifiScanRequest = Guid('72797468-6d05-1000-8000-00805f9b34fb');
+  static final wifiScanResult = Guid('72797468-6d06-1000-8000-00805f9b34fb');
 }
 
 class BleDevice {
@@ -52,6 +54,47 @@ class BleProvisioningResult {
     this.ownerToken,
     this.restartPending = false,
   });
+}
+
+class WifiNetwork {
+  final String ssid;
+  final int? rssi;
+  final String? security;
+  final int? frequency;
+
+  const WifiNetwork({
+    required this.ssid,
+    this.rssi,
+    this.security,
+    this.frequency,
+  });
+
+  String get band {
+    final value = frequency;
+    if (value == null) return '';
+    if (value >= 5925) return '6 GHz';
+    if (value >= 4900) return '5 GHz';
+    if (value >= 2400) return '2.4 GHz';
+    return '';
+  }
+}
+
+class WifiScanMessage {
+  final String status;
+  final String? requestId;
+  final WifiNetwork? network;
+  final int? count;
+  final String? error;
+
+  const WifiScanMessage({
+    required this.status,
+    this.requestId,
+    this.network,
+    this.count,
+    this.error,
+  });
+
+  bool get isTerminal => status == 'complete' || status == 'failed';
 }
 
 class WifiFailedException implements Exception {
@@ -98,6 +141,7 @@ class ProvisioningStatusMessage {
 class BleProvisioningService {
   static const _provisioningTimeout = Duration(minutes: 35);
   static const _authTokenTimeout = Duration(seconds: 20);
+  static const _wifiScanTimeout = Duration(seconds: 20);
   static const _statusPollInterval = Duration(milliseconds: 500);
   static const _bleOperationTimeout = Duration(seconds: 8);
   // Defensive guard for malformed progress states. Normal Wi-Fi handoff
@@ -111,12 +155,17 @@ class BleProvisioningService {
   BluetoothCharacteristic? _statusChar;
   BluetoothCharacteristic? _deviceInfoChar;
   BluetoothCharacteristic? _authRequestChar;
+  BluetoothCharacteristic? _wifiScanRequestChar;
+  BluetoothCharacteristic? _wifiScanResultChar;
 
   bool get isConnected =>
       _connectedDevice != null &&
       _statusChar != null &&
       _deviceInfoChar != null &&
       (_wifiCommandChar != null || _authRequestChar != null);
+
+  bool get supportsWifiScan =>
+      _wifiScanRequestChar != null && _wifiScanResultChar != null;
 
   Future<BluetoothAdapterState> _waitForStableAdapterState({
     Duration timeout = const Duration(seconds: 4),
@@ -222,9 +271,7 @@ class BleProvisioningService {
 
       // Match the older pre-ASK flow: do a plain scan and filter results in Dart
       // instead of relying on service UUID filtering.
-      await FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 15),
-      );
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
     } catch (error, stackTrace) {
       debugPrint('[BLE] startScan failed: $error');
       _scanController?.addError(error, stackTrace);
@@ -254,10 +301,7 @@ class BleProvisioningService {
 
     await bluetoothDevice.connect(timeout: const Duration(seconds: 10));
     _connectedDevice = bluetoothDevice;
-    return _setupConnection(
-      bluetoothDevice,
-      requireProvisioningReady: true,
-    );
+    return _setupConnection(bluetoothDevice, requireProvisioningReady: true);
   }
 
   Future<BleDeviceInfo> connectForAuth(BleDevice device) async {
@@ -271,10 +315,7 @@ class BleProvisioningService {
 
     await bluetoothDevice.connect(timeout: const Duration(seconds: 10));
     _connectedDevice = bluetoothDevice;
-    return _setupConnection(
-      bluetoothDevice,
-      requireProvisioningReady: false,
-    );
+    return _setupConnection(bluetoothDevice, requireProvisioningReady: false);
   }
 
   Future<BleDeviceInfo> connectById(String bluetoothId) async {
@@ -284,10 +325,7 @@ class BleProvisioningService {
     final bluetoothDevice = BluetoothDevice.fromId(bluetoothId);
     await bluetoothDevice.connect(timeout: const Duration(seconds: 10));
     _connectedDevice = bluetoothDevice;
-    return _setupConnection(
-      bluetoothDevice,
-      requireProvisioningReady: true,
-    );
+    return _setupConnection(bluetoothDevice, requireProvisioningReady: true);
   }
 
   Future<BleDeviceInfo> _setupConnection(
@@ -304,7 +342,8 @@ class BleProvisioningService {
 
     _wifiCommandChar = service.characteristics
         .where(
-            (candidate) => candidate.characteristicUuid == _Uuids.wifiCommand)
+          (candidate) => candidate.characteristicUuid == _Uuids.wifiCommand,
+        )
         .firstOrNull;
     _statusChar = service.characteristics
         .where((candidate) => candidate.characteristicUuid == _Uuids.status)
@@ -314,7 +353,18 @@ class BleProvisioningService {
         .firstOrNull;
     _authRequestChar = service.characteristics
         .where(
-            (candidate) => candidate.characteristicUuid == _Uuids.authRequest)
+          (candidate) => candidate.characteristicUuid == _Uuids.authRequest,
+        )
+        .firstOrNull;
+    _wifiScanRequestChar = service.characteristics
+        .where(
+          (candidate) => candidate.characteristicUuid == _Uuids.wifiScanRequest,
+        )
+        .firstOrNull;
+    _wifiScanResultChar = service.characteristics
+        .where(
+          (candidate) => candidate.characteristicUuid == _Uuids.wifiScanResult,
+        )
         .firstOrNull;
 
     final missingProvisioningChars = requireProvisioningReady &&
@@ -327,9 +377,11 @@ class BleProvisioningService {
             _deviceInfoChar == null);
     if (missingProvisioningChars || missingAuthChars) {
       await disconnect();
-      throw StateError(requireProvisioningReady
-          ? 'Device is missing required provisioning characteristics'
-          : 'Device is missing required auth characteristics');
+      throw StateError(
+        requireProvisioningReady
+            ? 'Device is missing required provisioning characteristics'
+            : 'Device is missing required auth characteristics',
+      );
     }
 
     final initialStatus = await _readStatus(_statusChar!);
@@ -349,9 +401,7 @@ class BleProvisioningService {
     );
   }
 
-  Future<String> requestOwnerToken({
-    String label = 'Rhythm app',
-  }) async {
+  Future<String> requestOwnerToken({String label = 'Rhythm app'}) async {
     final authRequestChar = _authRequestChar;
     final statusChar = _statusChar;
     if (authRequestChar == null || statusChar == null) {
@@ -367,10 +417,8 @@ class BleProvisioningService {
 
     final status = await waitForMatchingProvisioningStatus(
       enableNotifications: () => statusChar.setNotifyValue(true),
-      writePayload: () => authRequestChar.write(
-        payload,
-        withoutResponse: false,
-      ),
+      writePayload: () =>
+          authRequestChar.write(payload, withoutResponse: false),
       statusUpdates: statusChar.onValueReceived.map(_parseStatus),
       readStatus: () => _readStatus(statusChar),
       isMatch: (update) => update.status == 'auth_token',
@@ -387,6 +435,84 @@ class BleProvisioningService {
     return ownerToken;
   }
 
+  Future<List<WifiNetwork>> scanWifiNetworks({
+    Duration timeout = _wifiScanTimeout,
+  }) async {
+    final requestChar = _wifiScanRequestChar;
+    final resultChar = _wifiScanResultChar;
+    if (requestChar == null || resultChar == null) {
+      throw UnsupportedError('Connected device does not support Wi-Fi scan');
+    }
+
+    final requestId = DateTime.now().microsecondsSinceEpoch.toString();
+    final networksBySsid = <String, WifiNetwork>{};
+    final completer = Completer<List<WifiNetwork>>();
+    StreamSubscription<WifiScanMessage>? subscription;
+
+    void addNetwork(WifiNetwork network) {
+      final existing = networksBySsid[network.ssid];
+      final existingRssi = existing?.rssi;
+      final nextRssi = network.rssi;
+      if (existing == null ||
+          (nextRssi != null &&
+              (existingRssi == null || nextRssi > existingRssi))) {
+        networksBySsid[network.ssid] = network;
+      }
+    }
+
+    try {
+      await resultChar.setNotifyValue(true);
+      subscription = resultChar.onValueReceived
+          .map(parseWifiScanMessage)
+          .where((message) => message.requestId == requestId)
+          .listen(
+        (message) {
+          final network = message.network;
+          if (message.status == 'result' && network != null) {
+            addNetwork(network);
+            return;
+          }
+          if (message.status == 'complete') {
+            final networks = networksBySsid.values.toList()
+              ..sort(_compareWifiNetworks);
+            if (!completer.isCompleted) {
+              completer.complete(List.unmodifiable(networks));
+            }
+            return;
+          }
+          if (message.status == 'failed') {
+            if (!completer.isCompleted) {
+              completer.completeError(
+                StateError(message.error ?? 'Wi-Fi scan failed'),
+              );
+            }
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!completer.isCompleted) {
+            completer.completeError(error, stackTrace);
+          }
+        },
+      );
+
+      final payload = utf8.encode(json.encode({'request_id': requestId}));
+      await requestChar.write(payload, withoutResponse: false);
+
+      return await completer.future.timeout(timeout);
+    } on TimeoutException {
+      throw TimeoutException('Timed out waiting for Wi-Fi scan');
+    } finally {
+      await subscription?.cancel();
+      try {
+        if (resultChar.isNotifying) {
+          await resultChar.setNotifyValue(false);
+        }
+      } catch (_) {
+        // The peripheral may disconnect while provisioning continues.
+      }
+    }
+  }
+
   Future<BleProvisioningResult> sendWifiCredentials(
     String ssid,
     String password, {
@@ -399,18 +525,13 @@ class BleProvisioningService {
     }
 
     final payload = utf8.encode(
-      json.encode({
-        'ssid': ssid,
-        'password': password,
-      }),
+      json.encode({'ssid': ssid, 'password': password}),
     );
 
     final status = await waitForTerminalProvisioningStatus(
       enableNotifications: () => statusChar.setNotifyValue(true),
-      writePayload: () => wifiCommandChar.write(
-        payload,
-        withoutResponse: false,
-      ),
+      writePayload: () =>
+          wifiCommandChar.write(payload, withoutResponse: false),
       statusUpdates: statusChar.onValueReceived.map(_parseStatus),
       readStatus: () => _readStatus(statusChar),
       onStatus: onStatus,
@@ -465,7 +586,8 @@ class BleProvisioningService {
         final ip = status.ip?.trim();
         if (ip == null || ip.isEmpty) {
           throw StateError(
-              'Update restart status did not include an IP address');
+            'Update restart status did not include an IP address',
+          );
         }
         return BleProvisioningResult(ip: ip, restartPending: true);
       case 'wifi_failed':
@@ -723,10 +845,21 @@ class BleProvisioningService {
     _statusChar = null;
     _deviceInfoChar = null;
     _authRequestChar = null;
+    final wifiScanResultChar = _wifiScanResultChar;
+    _wifiScanRequestChar = null;
+    _wifiScanResultChar = null;
 
     try {
       if (statusChar?.isNotifying == true) {
         await statusChar!.setNotifyValue(false);
+      }
+    } catch (_) {
+      // Ignore teardown failures. The peripheral may already be gone.
+    }
+
+    try {
+      if (wifiScanResultChar?.isNotifying == true) {
+        await wifiScanResultChar!.setNotifyValue(false);
       }
     } catch (_) {
       // Ignore teardown failures. The peripheral may already be gone.
@@ -789,12 +922,66 @@ class BleProvisioningService {
     );
   }
 
+  @visibleForTesting
+  static WifiScanMessage parseWifiScanMessage(List<int> bytes) {
+    final jsonMap = _decodeJsonBytes(bytes);
+    final status = jsonMap['status'] as String?;
+    if (status == null || status.isEmpty) {
+      throw const FormatException('Wi-Fi scan payload missing status');
+    }
+
+    final networkJson = jsonMap['network'];
+    WifiNetwork? network;
+    if (networkJson != null) {
+      if (networkJson is! Map<String, dynamic>) {
+        throw const FormatException('Wi-Fi scan network must be an object');
+      }
+      final ssid = (networkJson['ssid'] as String?)?.trim();
+      if (ssid == null || ssid.isEmpty) {
+        throw const FormatException('Wi-Fi scan network missing ssid');
+      }
+      network = WifiNetwork(
+        ssid: ssid,
+        rssi: _asInt(networkJson['rssi']),
+        security: (networkJson['security'] as String?)?.trim(),
+        frequency: _asInt(networkJson['frequency']),
+      );
+    }
+
+    return WifiScanMessage(
+      status: status,
+      requestId: (jsonMap['request_id'] as String?)?.trim(),
+      network: network,
+      count: _asInt(jsonMap['count']),
+      error: jsonMap['error'] as String?,
+    );
+  }
+
   Map<String, dynamic> _decodeJson(List<int> bytes) {
+    return _decodeJsonBytes(bytes);
+  }
+
+  static Map<String, dynamic> _decodeJsonBytes(List<int> bytes) {
     final decoded = json.decode(utf8.decode(bytes));
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('Expected JSON object');
     }
     return decoded;
+  }
+
+  static int? _asInt(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
+  }
+
+  static int _compareWifiNetworks(WifiNetwork left, WifiNetwork right) {
+    final leftRssi = left.rssi ?? -999;
+    final rightRssi = right.rssi ?? -999;
+    final signalCompare = rightRssi.compareTo(leftRssi);
+    if (signalCompare != 0) return signalCompare;
+    return left.ssid.toLowerCase().compareTo(right.ssid.toLowerCase());
   }
 
   Future<void> _waitForScanToFinish() async {

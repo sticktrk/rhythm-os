@@ -22,6 +22,10 @@ pub const PROVISIONING_STATUS_UUID: u128 = 0x72797468_6d02_1000_8000_00805f9b34f
 pub const PROVISIONING_DEVICE_INFO_UUID: u128 = 0x72797468_6d03_1000_8000_00805f9b34fb;
 /// BLE write characteristic UUID for local API token requests.
 pub const PROVISIONING_AUTH_CMD_UUID: u128 = 0x72797468_6d04_1000_8000_00805f9b34fb;
+/// BLE write characteristic UUID for requesting a nearby Wi-Fi scan.
+pub const PROVISIONING_WIFI_SCAN_REQUEST_UUID: u128 = 0x72797468_6d05_1000_8000_00805f9b34fb;
+/// BLE read/notify characteristic UUID for nearby Wi-Fi scan events.
+pub const PROVISIONING_WIFI_SCAN_RESULT_UUID: u128 = 0x72797468_6d06_1000_8000_00805f9b34fb;
 
 /// Wi-Fi credentials received from a provisioning frontend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

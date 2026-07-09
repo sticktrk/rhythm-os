@@ -269,11 +269,13 @@ modprobe_logged() {
 }
 
 start() {
-    local iface attempt state ssid ip_addr
+    local iface attempt state ssid ip_addr configured
 
-    if ! has_wifi_config; then
-        log "no bundled credentials; skipping wlan0 bring-up"
-        return 0
+    configured=0
+    if has_wifi_config; then
+        configured=1
+    else
+        log "no configured network; starting wlan0 for local Wi-Fi scanning"
     fi
 
     log "starting wlan0"
@@ -333,6 +335,11 @@ start() {
             log_kernel_excerpt
             return 0
         fi
+    fi
+
+    if [ "$configured" -eq 0 ]; then
+        log "wpa_supplicant ready for local Wi-Fi scanning"
+        return 0
     fi
 
     if ! pid_is_running "$DHCP_PIDFILE"; then

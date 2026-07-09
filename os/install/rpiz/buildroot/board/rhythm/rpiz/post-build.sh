@@ -38,9 +38,9 @@ mkdir -p "${TARGET_DIR}/data/ota"
 {
     printf 'ctrl_interface=/var/run/wpa_supplicant\n'
     printf 'update_config=0\n'
+    printf 'country=%s\n' "$WIFI_COUNTRY"
 
     if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
-        printf 'country=%s\n' "$WIFI_COUNTRY"
         printf '\nnetwork={\n'
         printf '  ssid="%s"\n' "$(escape_wpa_string "$WIFI_SSID")"
         printf '  psk="%s"\n' "$(escape_wpa_string "$WIFI_PSK")"
