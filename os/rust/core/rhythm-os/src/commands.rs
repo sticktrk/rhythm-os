@@ -404,17 +404,24 @@ fn selected_mode_transition(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomationActionOutcome {
+    pub target_mode: RhythmMode,
+    pub transition_id: Option<String>,
+}
+
 fn apply_mode_action(
     state: &SharedState,
     target_mode: RhythmMode,
     transition_selection: &ModeTransitionSelection,
-) -> Result<()> {
+) -> Result<AutomationActionOutcome> {
     let previous_mode = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
         .active_mode;
     let transition =
         selected_mode_transition(state, previous_mode, target_mode, transition_selection)?;
+    let transition_id = transition.as_ref().map(|transition| transition.id.clone());
     let force_reapply_outputs = transition.is_some();
     let mode_change = ModeChangeContext::new(ModeChangeCause::Manual, transition);
 
@@ -428,8 +435,12 @@ fn apply_mode_action(
         force_reapply_outputs,
         None,
         None,
-    )
-    .map(|_| ())
+    )?;
+
+    Ok(AutomationActionOutcome {
+        target_mode,
+        transition_id,
+    })
 }
 
 fn next_mode_in_cycle(active_mode: RhythmMode, modes: &[RhythmMode]) -> Result<RhythmMode> {
@@ -465,7 +476,10 @@ fn validate_automation_action(action: &AutomationAction) -> Result<()> {
     Ok(())
 }
 
-pub fn do_execute_automation_action(state: &SharedState, action: &AutomationAction) -> Result<()> {
+pub fn do_execute_automation_action(
+    state: &SharedState,
+    action: &AutomationAction,
+) -> Result<AutomationActionOutcome> {
     match action {
         AutomationAction::ModeCycle { modes, transition } => {
             let active_mode = state
@@ -16969,9 +16983,11 @@ mod tests {
         }
 
         let binding = InputBinding::day_sleep_toggle("button-1", None);
-        do_execute_automation_action(&state, &binding.action).unwrap();
+        let outcome = do_execute_automation_action(&state, &binding.action).unwrap();
 
         let s = state.lock().unwrap();
+        assert_eq!(outcome.target_mode, RhythmMode::Day);
+        assert_eq!(outcome.transition_id.as_deref(), Some("sleep_to_day"));
         assert_eq!(s.active_mode, RhythmMode::Day);
         assert_eq!(
             s.last_active_mode_transition_id.as_deref(),

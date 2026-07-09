@@ -644,7 +644,15 @@ fn run_input_binding_action(
 ) {
     let started = Instant::now();
     match crate::commands::do_execute_automation_action(state, &action) {
-        Ok(()) => {
+        Ok(outcome) => {
+            record_input_binding_activity(
+                state,
+                source_node_id,
+                &action,
+                device_id,
+                command_id,
+                &outcome,
+            );
             tracing::info!(
                 target: "evt",
                 event = "input_binding_action_applied",
@@ -670,6 +678,48 @@ fn run_input_binding_action(
             );
         }
     }
+}
+
+fn record_input_binding_activity(
+    state: &SharedState,
+    source_node_id: &str,
+    action: &crate::topology::AutomationAction,
+    device_id: Option<&str>,
+    command_id: &str,
+    outcome: &crate::commands::AutomationActionOutcome,
+) {
+    let action_id = if outcome.transition_id.is_some() {
+        "trigger_transition"
+    } else {
+        "set_mode"
+    };
+    let mut record = crate::activity::LightActivityRecord::physical_input_binding(
+        "global",
+        action_id,
+        source_node_id,
+        device_id,
+    );
+    record.correlation_id = Some(command_id.to_string());
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("mode".to_string(), serde_json::json!(outcome.target_mode));
+    payload.insert(
+        "source_node_id".to_string(),
+        serde_json::json!(source_node_id),
+    );
+    payload.insert(
+        "automation_action".to_string(),
+        serde_json::to_value(action).unwrap_or_else(|_| serde_json::json!({ "kind": "unknown" })),
+    );
+    if let Some(transition_id) = &outcome.transition_id {
+        payload.insert(
+            "transition_id".to_string(),
+            serde_json::json!(transition_id),
+        );
+    }
+    record.payload = Some(serde_json::Value::Object(payload));
+
+    crate::activity::record_light_activity(state, record);
 }
 
 fn spawn_input_binding_action(
@@ -3566,6 +3616,15 @@ mod tests {
         }
     }
 
+    fn wait_for_light_activity_len(state: &SharedState, expected: usize) {
+        for _ in 0..30 {
+            if state.lock().unwrap().light_activity.len() >= expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[derive(Clone, Default)]
     struct MotionTimerTestStorage {
         saved_motion_timers: Arc<Mutex<Vec<StoredMotionTimers>>>,
@@ -4647,6 +4706,7 @@ mod tests {
         );
         {
             let mut s = state.lock().unwrap();
+            s.set_mode_transition_configs(rhythm_core::default_mode_transition_configs());
             s.topology.set_input_binding(InputBinding::day_sleep_toggle(
                 source_id.clone(),
                 Some(ButtonAction::OnPress),
@@ -4697,6 +4757,20 @@ mod tests {
             0,
             "input binding should not fall through to ordinary node control"
         );
+
+        wait_for_light_activity_len(&state, 1);
+        let activity = state.lock().unwrap().light_activity[0].clone();
+        assert_eq!(activity.node_id, "global");
+        assert_eq!(activity.action_id, "trigger_transition");
+        assert_eq!(activity.source.kind, "switch");
+        assert_eq!(activity.source.raw, "button_a");
+        assert_eq!(activity.source.control_id.as_deref(), Some("button_a"));
+        assert_eq!(activity.source.marks_touched, true);
+        assert_eq!(activity.active_mode, Some(serde_json::json!("sleep")));
+        let payload = activity.payload.expect("activity should include payload");
+        assert_eq!(payload["transition_id"], serde_json::json!("day_to_sleep"));
+        assert_eq!(payload["mode"], serde_json::json!("sleep"));
+        assert_eq!(payload["source_node_id"], serde_json::json!(source_id));
     }
 
     #[test]
