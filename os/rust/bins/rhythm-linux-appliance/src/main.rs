@@ -280,8 +280,7 @@ fn main() -> Result<()> {
             })
             .expect("Failed to spawn periodic thread");
     }
-    rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
-    info!(target: "sys", "Automatic appliance updates are disabled; use explicit OTA update requests");
+    spawn_appliance_background_workers(state.clone());
 
     let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string(), state.clone());
     if let Err(e) = provisioning.ensure_running_if_needed("startup") {
@@ -302,6 +301,23 @@ fn main() -> Result<()> {
             provisioning,
             periodic_gate_heartbeat,
         ))
+}
+
+fn spawn_appliance_background_workers(state: SharedState) {
+    spawn_appliance_background_workers_with(
+        state,
+        rhythm_server::liveness::spawn_periodic_watchdog,
+        rhythm_server::auto_update::spawn,
+    );
+}
+
+fn spawn_appliance_background_workers_with(
+    state: SharedState,
+    spawn_watchdog: impl FnOnce(SharedState),
+    spawn_auto_update: impl FnOnce(SharedState),
+) {
+    spawn_watchdog(state.clone());
+    spawn_auto_update(state);
 }
 
 fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
@@ -840,9 +856,10 @@ mod tests {
         apply_appliance_matter_attestation_defaults, boot_success_health, env_value_is_truthy,
         extract_serial_suffix, install_factory_reset_hook, periodic_startup_action,
         run_bootstate_script_action, save_commissioning_wifi_credentials,
-        startup_wifi_restore_action, BootSuccessHealth, PeriodicStartupAction,
-        StartupWifiRestoreAction, RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV,
-        RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV, STARTUP_WIFI_RESTORE_TIMEOUT,
+        spawn_appliance_background_workers_with, startup_wifi_restore_action, BootSuccessHealth,
+        PeriodicStartupAction, StartupWifiRestoreAction,
+        RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV,
+        STARTUP_WIFI_RESTORE_TIMEOUT,
     };
     use crate::time_sync::clock_is_sane_at;
     use chrono::{TimeZone, Utc};
@@ -1050,6 +1067,27 @@ mod tests {
             periodic_startup_action(false, true),
             PeriodicStartupAction::WaitForWifi
         );
+    }
+
+    #[test]
+    fn appliance_background_workers_start_watchdog_and_auto_update() {
+        let watchdog_started = Arc::new(AtomicBool::new(false));
+        let auto_update_started = Arc::new(AtomicBool::new(false));
+
+        spawn_appliance_background_workers_with(
+            test_state(),
+            {
+                let watchdog_started = watchdog_started.clone();
+                move |_| watchdog_started.store(true, std::sync::atomic::Ordering::SeqCst)
+            },
+            {
+                let auto_update_started = auto_update_started.clone();
+                move |_| auto_update_started.store(true, std::sync::atomic::Ordering::SeqCst)
+            },
+        );
+
+        assert!(watchdog_started.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(auto_update_started.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
