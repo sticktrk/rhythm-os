@@ -26,6 +26,40 @@ void main() {
       expect(payload['sleep_schedule'], isA<Map<String, dynamic>>());
     });
 
+    test('home payload preserves cloud owner and existing members', () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Shared Home',
+        ownerId: 'owner-user',
+      ).copyWith(memberIds: ['owner-user', 'joining-user']);
+
+      final payload = AccountCloudSyncService.homeSnapshotPayload(
+        home,
+        userId: 'joining-user',
+      );
+
+      expect(payload['owner_id'], 'owner-user');
+      expect(payload['member_ids'], ['owner-user', 'joining-user']);
+    });
+
+    test('home payload can preserve existing cloud membership columns', () {
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Shared Home',
+        ownerId: 'owner-user',
+      ).copyWith(memberIds: ['owner-user']);
+
+      final payload = AccountCloudSyncService.homeSnapshotPayload(
+        home,
+        userId: 'owner-user',
+        includeMembership: false,
+      );
+
+      expect(payload, isNot(contains('owner_id')));
+      expect(payload, isNot(contains('member_ids')));
+      expect(payload['name'], 'Shared Home');
+    });
+
     test('home sync requires at least one server hub', () {
       final home = Home.create(
         id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
@@ -102,6 +136,32 @@ void main() {
       );
     });
 
+    test('only the owning account can write shared hub token envelopes', () {
+      final ownedHome = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Owned Home',
+        ownerId: 'owner-user',
+      );
+      final joinedHome = ownedHome.copyWith(
+        memberIds: ['owner-user', 'joining-user'],
+      );
+
+      expect(
+        accountHomeCanWriteSharedHubTokensForTesting(
+          home: ownedHome,
+          userId: 'owner-user',
+        ),
+        isTrue,
+      );
+      expect(
+        accountHomeCanWriteSharedHubTokensForTesting(
+          home: joinedHome,
+          userId: 'joining-user',
+        ),
+        isFalse,
+      );
+    });
+
     test('server hub payload encrypts local owner token envelope', () async {
       final hub = Hub.server(
         id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
@@ -156,6 +216,24 @@ void main() {
         keyMaterial: 'signed-in-user-key-material',
       );
       expect(restored, 'owner-token');
+    });
+
+    test('server hub payload can preserve existing cloud token columns', () {
+      final hub = Hub.server(
+        id: 'ca2b97f3-0d6e-4396-8a63-c9b22ff2ee04',
+        homeId: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Kitchen Server',
+        host: '192.168.5.123',
+        token: 'owner-token',
+      );
+
+      final payload = AccountCloudSyncService.serverHubSnapshotPayload(
+        hub,
+        preserveToken: true,
+      );
+
+      expect(payload, isNot(contains('token')));
+      expect(payload, isNot(contains('encrypted_token')));
     });
 
     test('server hub payload can omit server identity for old schemas', () {

@@ -179,17 +179,28 @@ class AccountCloudSyncService {
       final homeAlreadyInCloud = await _accountHomeExists(client, home.id);
 
       await client.from('homes').upsert(
-            homeSnapshotPayload(home, userId: userId),
+            homeSnapshotPayload(
+              home,
+              userId: userId,
+              includeMembership: !homeAlreadyInCloud,
+            ),
             onConflict: 'id',
           );
 
       var syncedServerHubCount = 0;
+      final canWriteSharedHubTokens =
+          accountHomeCanWriteSharedHubTokensForTesting(
+        home: home,
+        userId: userId,
+      );
       for (final hub in serverHubs) {
-        final encryptedToken = await _encryptedHubToken(hub);
-        if (hubTokenEncryptionUnavailableForTesting(
-          hub: hub,
-          encryptedToken: encryptedToken,
-        )) {
+        final encryptedToken =
+            canWriteSharedHubTokens ? await _encryptedHubToken(hub) : null;
+        if (canWriteSharedHubTokens &&
+            hubTokenEncryptionUnavailableForTesting(
+              hub: hub,
+              encryptedToken: encryptedToken,
+            )) {
           debugPrint(
             'AccountCloudSyncService: hub token encryption unavailable for '
             'hub=${hub.id} — encrypted_token not synced',
@@ -201,6 +212,7 @@ class AccountCloudSyncService {
             hub,
             encryptedToken,
             clearRemoteEndpoint: clearRemoteEndpointHubIds.contains(hub.id),
+            preserveToken: !canWriteSharedHubTokens,
           );
           syncedServerHubCount += 1;
         } catch (error) {
@@ -273,12 +285,19 @@ class AccountCloudSyncService {
   static Map<String, dynamic> homeSnapshotPayload(
     Home home, {
     String? userId,
+    bool includeMembership = true,
   }) {
+    final ownerId = _cloudOwnerIdForHome(home, userId: userId);
+    final memberIds = _cloudMemberIdsForHome(
+      home,
+      ownerId: ownerId,
+      userId: userId,
+    );
     return {
       'id': home.id,
       'name': home.name,
-      if (userId != null) 'owner_id': userId,
-      if (userId != null) 'member_ids': [userId],
+      if (includeMembership && ownerId != null) 'owner_id': ownerId,
+      if (includeMembership && memberIds.isNotEmpty) 'member_ids': memberIds,
       if (home.location != null) 'location': home.location!.toJson(),
       'sleep_schedule': home.sleepSchedule.toJson(),
       if (home.curveConfigJson != null) 'curve_config': home.curveConfigJson,
@@ -294,6 +313,7 @@ class AccountCloudSyncService {
     bool useLegacyEncryptedTokenStorage = false,
     bool clearRemoteEndpoint = false,
     bool includeServerInstanceId = true,
+    bool preserveToken = false,
   }) {
     if (hub.type != HubType.server) {
       throw ArgumentError(
@@ -313,10 +333,13 @@ class AccountCloudSyncService {
       if (hub.remoteEndpoint != null || clearRemoteEndpoint)
         'remote_endpoint':
             clearRemoteEndpoint ? null : hub.remoteEndpoint?.toJson(),
-      'token': useLegacyEncryptedTokenStorage && encryptedToken != null
-          ? jsonEncode(encryptedToken)
-          : null,
-      if (!useLegacyEncryptedTokenStorage && encryptedToken != null)
+      if (!preserveToken)
+        'token': useLegacyEncryptedTokenStorage && encryptedToken != null
+            ? jsonEncode(encryptedToken)
+            : null,
+      if (!preserveToken &&
+          !useLegacyEncryptedTokenStorage &&
+          encryptedToken != null)
         'encrypted_token': encryptedToken,
       if (hub.lastConnected != null)
         'last_connected': hub.lastConnected!.toUtc().toIso8601String(),
@@ -408,6 +431,7 @@ class AccountCloudSyncService {
     Hub hub,
     Map<String, dynamic>? encryptedToken, {
     required bool clearRemoteEndpoint,
+    required bool preserveToken,
   }) async {
     final attempts = <({
       bool includeServerInstanceId,
@@ -445,6 +469,7 @@ class AccountCloudSyncService {
                 encryptedToken: encryptedToken,
                 clearRemoteEndpoint: clearRemoteEndpoint,
                 includeServerInstanceId: attempt.includeServerInstanceId,
+                preserveToken: preserveToken,
                 useLegacyEncryptedTokenStorage:
                     attempt.useLegacyEncryptedTokenStorage,
               ),
@@ -663,6 +688,56 @@ bool accountHomeCanSyncForUserForTesting({
   return ownerId.isEmpty ||
       ownerId == 'anonymous-user' ||
       ownerId == 'web-local';
+}
+
+@visibleForTesting
+bool accountHomeCanWriteSharedHubTokensForTesting({
+  required Home home,
+  required String? userId,
+}) {
+  final cleanUserId = userId?.trim();
+  if (cleanUserId == null || cleanUserId.isEmpty) return false;
+  final ownerId = home.ownerId.trim();
+  return ownerId == cleanUserId ||
+      ownerId.isEmpty ||
+      ownerId == 'anonymous-user' ||
+      ownerId == 'web-local';
+}
+
+String? _cloudOwnerIdForHome(Home home, {required String? userId}) {
+  final cleanOwnerId = home.ownerId.trim();
+  final cleanUserId = userId?.trim();
+  if (cleanOwnerId.isNotEmpty &&
+      cleanOwnerId != 'anonymous-user' &&
+      cleanOwnerId != 'web-local') {
+    return cleanOwnerId;
+  }
+  return cleanUserId != null && cleanUserId.isNotEmpty ? cleanUserId : null;
+}
+
+List<String> _cloudMemberIdsForHome(
+  Home home, {
+  required String? ownerId,
+  required String? userId,
+}) {
+  final members = <String>{
+    for (final memberId in home.memberIds)
+      if (_cloudAccountUserId(memberId) != null) _cloudAccountUserId(memberId)!,
+    if (ownerId != null && ownerId.trim().isNotEmpty) ownerId.trim(),
+    if (userId != null && userId.trim().isNotEmpty) userId.trim(),
+  };
+  return List.unmodifiable(members);
+}
+
+String? _cloudAccountUserId(String? userId) {
+  final clean = userId?.trim();
+  if (clean == null ||
+      clean.isEmpty ||
+      clean == 'anonymous-user' ||
+      clean == 'web-local') {
+    return null;
+  }
+  return clean;
 }
 
 @visibleForTesting

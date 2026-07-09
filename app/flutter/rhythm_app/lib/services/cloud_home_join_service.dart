@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../backend/backend.dart';
 import 'account_cloud_sync_service.dart';
@@ -8,7 +9,7 @@ import 'auth_service.dart';
 class CloudHomeJoinService {
   CloudHomeJoinService._();
 
-  static const functionName = 'join-home-by-server-instance';
+  static const functionName = 'join-home-by-local-device-proof';
 
   static final CloudHomeJoinService instance = CloudHomeJoinService._();
 
@@ -21,39 +22,51 @@ class CloudHomeJoinService {
         auth.currentUserId != null;
   }
 
-  Future<AccountHomeServerHubs?> joinByServerInstanceId({
+  Future<AccountHomeServerHubs?> joinByLocalDeviceProof({
     required String? serverInstanceId,
+    required RhythmCloudJoinProof? joinProof,
     required String host,
     required int port,
     required String? ownerToken,
     required String hubName,
   }) async {
     final cleanServerInstanceId = _cleanOptional(serverInstanceId);
-    if (!canJoin || cleanServerInstanceId == null) return null;
-
-    final client =
-        (BackendProvider.instance.auth as SupabaseAuthBackend).client;
-    final response = await client.functions.invoke(
-      functionName,
-      body: {'server_instance_id': cleanServerInstanceId},
-    );
-
-    if (response.status == 404) return null;
-    if (response.status < 200 || response.status >= 300) {
-      final data = response.data;
-      final message = data is Map && data['error'] != null
-          ? data['error'].toString()
-          : 'Cloud Home join failed (${response.status})';
-      throw StateError(message);
+    if (!canJoin || cleanServerInstanceId == null || joinProof == null) {
+      return null;
     }
 
-    return joinedHomeFromFunctionResponseForTesting(
-      response.data,
-      ownerToken: ownerToken,
-      lanEndpoint: HubEndpoint(host: host, port: port),
-      hubName: hubName,
-      serverInstanceId: cleanServerInstanceId,
-    );
+    try {
+      final client =
+          (BackendProvider.instance.auth as SupabaseAuthBackend).client;
+      final response = await client.functions.invoke(
+        functionName,
+        body: {
+          'server_instance_id': cleanServerInstanceId,
+          'join_proof': joinProof.toJson(),
+        },
+      );
+
+      if (response.status == 404 || response.status == 403) return null;
+      if (response.status < 200 || response.status >= 300) {
+        final data = response.data;
+        final message = data is Map && data['error'] != null
+            ? data['error'].toString()
+            : 'Cloud Home join failed (${response.status})';
+        debugPrint(message);
+        return null;
+      }
+
+      return joinedHomeFromFunctionResponseForTesting(
+        response.data,
+        ownerToken: ownerToken,
+        lanEndpoint: HubEndpoint(host: host, port: port),
+        hubName: hubName,
+        serverInstanceId: cleanServerInstanceId,
+      );
+    } catch (error) {
+      debugPrint('Cloud Home join skipped: $error');
+      return null;
+    }
   }
 }
 

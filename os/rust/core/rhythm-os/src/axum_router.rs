@@ -86,6 +86,10 @@ fn shared_routes() -> Router<SharedState> {
                 .put(crate::activity_cloud::put_config)
                 .delete(crate::activity_cloud::delete_config),
         )
+        .route(
+            "/api/cloud/join-proof",
+            post(crate::activity_cloud::post_join_proof),
+        )
         .route("/api/state", get(get_state))
         .route(
             "/api/profile-bundle",

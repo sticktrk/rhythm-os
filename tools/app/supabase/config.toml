@@ -46,7 +46,7 @@ verify_jwt = false
 [functions.remote-access-bootstrap]
 verify_jwt = false
 
-[functions.join-home-by-server-instance]
+[functions.join-home-by-local-device-proof]
 verify_jwt = false
 
 [functions.support-access-grant]

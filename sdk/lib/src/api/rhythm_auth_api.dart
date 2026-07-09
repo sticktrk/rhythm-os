@@ -47,6 +47,81 @@ class RhythmOwnerClaim {
   final String token;
 }
 
+class RhythmCloudJoinProof {
+  const RhythmCloudJoinProof({
+    required this.proofVersion,
+    required this.algorithm,
+    required this.serverInstanceId,
+    required this.homeId,
+    required this.hubId,
+    required this.issuedAtEpochMs,
+    required this.expiresAtEpochMs,
+    required this.nonce,
+    required this.signature,
+    this.tokenId,
+  });
+
+  factory RhythmCloudJoinProof.fromJson(Map<String, dynamic> json) {
+    final proofVersion = json['proof_version']?.toString() ?? '';
+    final algorithm = json['algorithm']?.toString() ?? '';
+    final serverInstanceId = json['server_instance_id']?.toString() ?? '';
+    final homeId = json['home_id']?.toString() ?? '';
+    final hubId = json['hub_id']?.toString() ?? '';
+    final issuedAtEpochMs = (json['issued_at_epoch_ms'] as num?)?.toInt() ?? 0;
+    final expiresAtEpochMs =
+        (json['expires_at_epoch_ms'] as num?)?.toInt() ?? 0;
+    final nonce = json['nonce']?.toString() ?? '';
+    final signature = json['signature']?.toString() ?? '';
+    if (proofVersion.isEmpty ||
+        algorithm.isEmpty ||
+        serverInstanceId.isEmpty ||
+        homeId.isEmpty ||
+        hubId.isEmpty ||
+        issuedAtEpochMs <= 0 ||
+        expiresAtEpochMs <= issuedAtEpochMs ||
+        nonce.isEmpty ||
+        signature.isEmpty) {
+      throw StateError('Server returned an invalid cloud join proof.');
+    }
+    return RhythmCloudJoinProof(
+      proofVersion: proofVersion,
+      algorithm: algorithm,
+      serverInstanceId: serverInstanceId,
+      homeId: homeId,
+      hubId: hubId,
+      tokenId: json['token_id']?.toString(),
+      issuedAtEpochMs: issuedAtEpochMs,
+      expiresAtEpochMs: expiresAtEpochMs,
+      nonce: nonce,
+      signature: signature,
+    );
+  }
+
+  final String proofVersion;
+  final String algorithm;
+  final String serverInstanceId;
+  final String homeId;
+  final String hubId;
+  final String? tokenId;
+  final int issuedAtEpochMs;
+  final int expiresAtEpochMs;
+  final String nonce;
+  final String signature;
+
+  Map<String, dynamic> toJson() => {
+        'proof_version': proofVersion,
+        'algorithm': algorithm,
+        'server_instance_id': serverInstanceId,
+        'home_id': homeId,
+        'hub_id': hubId,
+        if (tokenId != null && tokenId!.trim().isNotEmpty) 'token_id': tokenId,
+        'issued_at_epoch_ms': issuedAtEpochMs,
+        'expires_at_epoch_ms': expiresAtEpochMs,
+        'nonce': nonce,
+        'signature': signature,
+      };
+}
+
 class RhythmSupportToken {
   const RhythmSupportToken({
     required this.tokenId,
@@ -156,6 +231,25 @@ class RhythmAuthApi {
     } on DioException catch (error) {
       throw RhythmApiException(
         'Failed to claim owner token',
+        statusCode: error.response?.statusCode,
+        cause: error,
+      );
+    }
+  }
+
+  Future<RhythmCloudJoinProof> createCloudJoinProof() async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        'api/cloud/join-proof',
+      );
+      final data = response.data;
+      if (data == null) {
+        throw StateError('Server returned an empty cloud join proof response.');
+      }
+      return RhythmCloudJoinProof.fromJson(Map<String, dynamic>.from(data));
+    } on DioException catch (error) {
+      throw RhythmApiException(
+        'Failed to create cloud join proof',
         statusCode: error.response?.statusCode,
         cause: error,
       );
