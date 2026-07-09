@@ -259,6 +259,31 @@ impl LightActivityRecord {
             kelvin: None,
         }
     }
+
+    pub fn physical_input_binding(
+        node_id: impl Into<String>,
+        action_id: impl Into<String>,
+        source_node_id: &str,
+        control_id: Option<&str>,
+    ) -> Self {
+        let control = control_id
+            .map(str::to_string)
+            .or_else(|| (!source_node_id.is_empty()).then(|| source_node_id.to_string()));
+        Self {
+            node_id: node_id.into(),
+            action_id: action_id.into(),
+            source_kind: "switch".to_string(),
+            source_raw: control.clone().unwrap_or_else(|| "button".to_string()),
+            source_control_id: control,
+            marks_touched: true,
+            change: None,
+            payload: None,
+            correlation_id: None,
+            fanout_of: None,
+            brightness: None,
+            kelvin: None,
+        }
+    }
 }
 
 #[derive(Default)]
