@@ -178,14 +178,12 @@ class AccountCloudSyncService {
 
       final homeAlreadyInCloud = await _accountHomeExists(client, home.id);
 
-      await client.from('homes').upsert(
-            homeSnapshotPayload(
-              home,
-              userId: userId,
-              includeMembership: !homeAlreadyInCloud,
-            ),
-            onConflict: 'id',
-          );
+      await writeHomeSnapshot(
+        client: client,
+        home: home,
+        userId: userId,
+        homeAlreadyInCloud: homeAlreadyInCloud,
+      );
 
       var syncedServerHubCount = 0;
       final canWriteSharedHubTokens =
@@ -305,6 +303,28 @@ class AccountCloudSyncService {
       'created_at': home.createdAt.toUtc().toIso8601String(),
       'updated_at': home.updatedAt.toUtc().toIso8601String(),
     };
+  }
+
+  @visibleForTesting
+  static Future<void> writeHomeSnapshot({
+    required SupabaseClient client,
+    required Home home,
+    required String userId,
+    required bool homeAlreadyInCloud,
+  }) async {
+    final payload = homeSnapshotPayload(
+      home,
+      userId: userId,
+      includeMembership: !homeAlreadyInCloud,
+    );
+
+    if (homeAlreadyInCloud) {
+      final updatePayload = Map<String, dynamic>.from(payload)..remove('id');
+      await client.from('homes').update(updatePayload).eq('id', home.id);
+      return;
+    }
+
+    await client.from('homes').upsert(payload, onConflict: 'id');
   }
 
   static Map<String, dynamic> serverHubSnapshotPayload(

@@ -1,9 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:rhythm_app/services/account_data_encryption_service.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
   group('AccountCloudSyncService payloads', () {
@@ -58,6 +61,74 @@ void main() {
       expect(payload, isNot(contains('owner_id')));
       expect(payload, isNot(contains('member_ids')));
       expect(payload['name'], 'Shared Home');
+    });
+
+    test('existing cloud homes use update without membership columns',
+        () async {
+      http.Request? capturedRequest;
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          capturedRequest = request;
+          return http.Response('', 204, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'Shared Home',
+        ownerId: 'owner-user',
+      ).copyWith(memberIds: ['owner-user', 'joining-user']);
+
+      await AccountCloudSyncService.writeHomeSnapshot(
+        client: client,
+        home: home,
+        userId: 'joining-user',
+        homeAlreadyInCloud: true,
+      );
+
+      expect(capturedRequest?.method, 'PATCH');
+      expect(capturedRequest?.url.queryParameters['id'], 'eq.${home.id}');
+      final body = jsonDecode(capturedRequest!.body) as Map<String, dynamic>;
+      expect(body, isNot(contains('id')));
+      expect(body, isNot(contains('owner_id')));
+      expect(body, isNot(contains('member_ids')));
+      expect(body['name'], 'Shared Home');
+    });
+
+    test('new cloud homes use full membership upsert', () async {
+      http.Request? capturedRequest;
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          capturedRequest = request;
+          return http.Response('', 201, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+      final home = Home.create(
+        id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',
+        name: 'New Home',
+        ownerId: 'anonymous-user',
+      );
+
+      await AccountCloudSyncService.writeHomeSnapshot(
+        client: client,
+        home: home,
+        userId: 'joining-user',
+        homeAlreadyInCloud: false,
+      );
+
+      expect(capturedRequest?.method, 'POST');
+      expect(capturedRequest?.url.queryParameters['on_conflict'], 'id');
+      final body = jsonDecode(capturedRequest!.body) as Map<String, dynamic>;
+      expect(body['id'], home.id);
+      expect(body['owner_id'], 'joining-user');
+      expect(body['member_ids'], ['joining-user']);
     });
 
     test('home sync requires at least one server hub', () {
