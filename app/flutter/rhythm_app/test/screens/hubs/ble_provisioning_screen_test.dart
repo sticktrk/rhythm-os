@@ -358,6 +358,35 @@ void main() {
     });
   });
 
+  group('bleProvisioningAutoContinueForTesting', () {
+    test('shows success feedback and returns to Connect Hub', () async {
+      final events = <String>[];
+
+      await bleProvisioningAutoContinueForTesting(
+        showSuccess: () => events.add('success'),
+        waitForSuccessFeedback: () async => events.add('waited'),
+        isMounted: () => true,
+        continueToConnectHub: () => events.add('continued'),
+      );
+
+      expect(events, ['success', 'waited', 'continued']);
+    });
+
+    test('does not navigate after the provisioning screen is disposed',
+        () async {
+      var continued = false;
+
+      await bleProvisioningAutoContinueForTesting(
+        showSuccess: () {},
+        waitForSuccessFeedback: () async {},
+        isMounted: () => false,
+        continueToConnectHub: () => continued = true,
+      );
+
+      expect(continued, isFalse);
+    });
+  });
+
   testWidgets('unsupported desktop build shows the recoverable error UI',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;

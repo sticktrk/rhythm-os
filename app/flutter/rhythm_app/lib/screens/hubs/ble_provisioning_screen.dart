@@ -96,6 +96,18 @@ Future<bool> bleProvisioningWaitForServerRestartAndHealthForTesting({
 }
 
 @visibleForTesting
+Future<void> bleProvisioningAutoContinueForTesting({
+  required VoidCallback showSuccess,
+  required Future<void> Function() waitForSuccessFeedback,
+  required bool Function() isMounted,
+  required VoidCallback continueToConnectHub,
+}) async {
+  showSuccess();
+  await waitForSuccessFeedback();
+  if (isMounted()) continueToConnectHub();
+}
+
+@visibleForTesting
 Future<String> bleProvisioningResolveVerifiedOwnerTokenForTesting({
   required Iterable<String?> candidates,
   required Future<bool> Function(String token) verifyToken,
@@ -926,9 +938,18 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     _pendingPersistenceOwnerToken = null;
     AnalyticsService().logEvent('ble_provisioning_completed');
     HapticFeedback.heavyImpact();
-    setState(() {
-      _phase = _ProvisioningPhase.success;
-    });
+    await bleProvisioningAutoContinueForTesting(
+      showSuccess: () {
+        setState(() {
+          _phase = _ProvisioningPhase.success;
+        });
+      },
+      waitForSuccessFeedback: () => Future<void>.delayed(
+        const Duration(milliseconds: 750),
+      ),
+      isMounted: () => mounted,
+      continueToConnectHub: _close,
+    );
   }
 
   Future<bool> _waitForServerHealth(String ip) async {
