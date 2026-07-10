@@ -13,6 +13,10 @@ test-support = ["rhythm-core/test-support"]
 name = "integration_flow"
 required-features = ["test-support"]
 
+[[test]]
+name = "scenario_room_membership"
+required-features = ["test-support"]
+
 [dependencies]
 rhythm-core = { path = "../../core/rhythm-core" }
 rhythm-devices = { path = "../../core/rhythm-devices" }
