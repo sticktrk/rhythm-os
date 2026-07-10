@@ -545,9 +545,11 @@ impl CanonicalRegistry {
     ///
     /// Call this when a device is known to have no room assignment and the user
     /// should be prompted to assign one (e.g. after Matter commissioning).
-    /// No-op if the device already has a pending UnassignedDevice entry.
+    /// No-op if the device already has a pending or durable unassigned-device
+    /// decision. This keeps explicit standalone/ignore choices stable across
+    /// hub re-syncs.
     pub fn queue_unassigned(&mut self, device_id: &str, now: u64) {
-        if self.triage.has_unassigned_device(device_id) {
+        if self.triage.has_unassigned_decision(device_id) {
             return;
         }
         let (name, device_type, hub_key, native_id) = match self.devices.get(device_id) {

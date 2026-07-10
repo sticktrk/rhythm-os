@@ -37,6 +37,14 @@ fn manual_transition_dispatches_to_roomless_light_device() {
     let h = h.with_discovery(vec![], vec![light("matter-100", "")]);
     h.sync();
 
+    let triage_id = h
+        .triage_pending_ids()
+        .into_iter()
+        .next()
+        .expect("roomless light should require an explicit standalone decision");
+    let result = h.triage_new(&triage_id).unwrap();
+    assert!(result.contains(r#""status":"standalone""#));
+
     let standalone_id = {
         let s = h.state.lock().unwrap();
         s.canonical_registry

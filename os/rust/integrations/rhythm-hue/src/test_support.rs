@@ -4,6 +4,7 @@
 //! for use in integration tests. Accessible cross-crate when `test-support`
 //! is enabled.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -111,6 +112,7 @@ pub enum HueTransportCall {
 pub struct SpyHueTransport {
     calls: Arc<Mutex<Vec<HueTransportCall>>>,
     is_on: Arc<Mutex<bool>>,
+    resources: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     should_fail: Arc<AtomicBool>,
 }
 
@@ -120,6 +122,7 @@ impl SpyHueTransport {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_on: Arc::new(Mutex::new(false)),
+            resources: Arc::new(Mutex::new(HashMap::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -132,6 +135,14 @@ impl SpyHueTransport {
     /// Set whether transport calls should return errors.
     pub fn set_should_fail(&self, fail: bool) {
         self.should_fail.store(fail, Ordering::Relaxed);
+    }
+
+    /// Configure the response returned by `get_resources` for a resource path.
+    pub fn set_resource_response(&self, resource_type: &str, response: serde_json::Value) {
+        self.resources
+            .lock()
+            .unwrap()
+            .insert(resource_type.to_string(), response);
     }
 
     /// Get all recorded transport calls.
@@ -304,7 +315,13 @@ impl HueTransport for SpyHueTransport {
         if self.should_fail.load(Ordering::Relaxed) {
             anyhow::bail!("spy: get_resources failed");
         }
-        Ok(serde_json::json!({"data": []}))
+        Ok(self
+            .resources
+            .lock()
+            .unwrap()
+            .get(resource_type)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"data": []})))
     }
 }
 

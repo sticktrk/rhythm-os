@@ -286,6 +286,8 @@ impl TriageQueue {
                     (&e.kind, &e.status),
                     (TriageKind::RoomBinding, TriageStatus::KeptSeparate)
                         | (TriageKind::RoomBinding, TriageStatus::NewDevice)
+                        | (TriageKind::UnassignedDevice, TriageStatus::KeptSeparate)
+                        | (TriageKind::UnassignedDevice, TriageStatus::Dismissed)
                 )
                 || e.resolved_at.map(|t| t >= before).unwrap_or(true)
         });
@@ -346,6 +348,34 @@ impl TriageQueue {
             e.status == TriageStatus::Pending
                 && e.kind == TriageKind::UnassignedDevice
                 && e.canonical_id.as_deref() == Some(canonical_id)
+        })
+    }
+
+    /// Check whether an unassigned device already has a durable operator
+    /// decision. Pending entries remain quarantined; `KeptSeparate` means the
+    /// user explicitly enabled standalone operation; `Dismissed` means ignore.
+    pub fn has_unassigned_decision(&self, canonical_id: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.kind == TriageKind::UnassignedDevice
+                && entry.canonical_id.as_deref() == Some(canonical_id)
+                && matches!(
+                    entry.status,
+                    TriageStatus::Pending | TriageStatus::KeptSeparate | TriageStatus::Dismissed
+                )
+        })
+    }
+
+    /// Pending and ignored unassigned devices stay out of the automatic light
+    /// runtime. Assigning a room or explicitly keeping a device standalone
+    /// resolves the quarantine.
+    pub fn quarantines_unassigned_device(&self, canonical_id: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.kind == TriageKind::UnassignedDevice
+                && entry.canonical_id.as_deref() == Some(canonical_id)
+                && matches!(
+                    entry.status,
+                    TriageStatus::Pending | TriageStatus::Dismissed
+                )
         })
     }
 
@@ -705,13 +735,44 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_unassigned_allows_re_triage() {
+    fn dismissed_unassigned_is_a_durable_ignore_decision() {
         let mut q = TriageQueue::new();
         q.add(make_unassigned_entry("u1", "canonical-abc"));
         q.dismiss("u1", 2000);
 
-        // Dismissed entry should not block new triage
+        // It is no longer pending, but it keeps the device quarantined and
+        // prevents the same roomless discovery from nagging again.
         assert!(!q.has_unassigned_device("canonical-abc"));
+        assert!(q.has_unassigned_decision("canonical-abc"));
+        assert!(q.quarantines_unassigned_device("canonical-abc"));
+    }
+
+    #[test]
+    fn explicit_standalone_decision_enables_unassigned_device() {
+        let mut q = TriageQueue::new();
+        q.add(make_unassigned_entry("u1", "canonical-abc"));
+        q.resolve("u1", TriageStatus::KeptSeparate, "api", 2000);
+
+        assert!(q.has_unassigned_decision("canonical-abc"));
+        assert!(!q.quarantines_unassigned_device("canonical-abc"));
+    }
+
+    #[test]
+    fn durable_unassigned_decisions_survive_resolved_pruning() {
+        let mut q = TriageQueue::new();
+        let mut standalone = make_unassigned_entry("standalone", "canonical-a");
+        standalone.status = TriageStatus::KeptSeparate;
+        standalone.resolved_at = Some(500);
+        let mut ignored = make_unassigned_entry("ignored", "canonical-b");
+        ignored.status = TriageStatus::Dismissed;
+        ignored.resolved_at = Some(500);
+        q.add(standalone);
+        q.add(ignored);
+
+        q.prune_resolved(1000);
+
+        assert!(q.get("standalone").is_some());
+        assert!(q.get("ignored").is_some());
     }
 
     #[test]

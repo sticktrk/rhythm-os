@@ -61,4 +61,11 @@ fn backup_restore_after_room_delete_preserves_unassigned_triage() {
             .as_deref(),
         None
     );
+    assert!(
+        state
+            .hub_runtime()
+            .and_then(|runtime| runtime.engine_node_snapshot(&canonical_id))
+            .is_none(),
+        "restored pending device should stay outside the automatic runtime"
+    );
 }

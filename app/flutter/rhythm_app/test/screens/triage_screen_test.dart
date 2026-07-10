@@ -24,6 +24,7 @@ class _FakeTriageServerApi extends RhythmServerApi {
   int resolveTriageBindCalls = 0;
   int resolveTriageNewCalls = 0;
   int resolveTriageRoomCalls = 0;
+  int resolveTriageDismissCalls = 0;
   int createTopologyRoomCalls = 0;
 
   @override
@@ -63,6 +64,13 @@ class _FakeTriageServerApi extends RhythmServerApi {
   @override
   Future<bool> resolveTriageRoom(String entryId, String roomId) async {
     resolveTriageRoomCalls++;
+    triageEntries = [];
+    return true;
+  }
+
+  @override
+  Future<bool> resolveTriageDismiss(String entryId) async {
+    resolveTriageDismissCalls++;
     triageEntries = [];
     return true;
   }
@@ -295,6 +303,53 @@ void main() {
 
       expect(api.resolveTriageRoomCalls, 1);
       expect(connection.reconnectCalls, 1);
+    });
+
+    testWidgets('can explicitly keep an unassigned device standalone',
+        (tester) async {
+      api.triageEntries = [_unassignedDeviceEntry()];
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Use Standalone'), findsOneWidget);
+      await _tapVisible(tester, find.text('Use Standalone'));
+
+      expect(api.resolveTriageNewCalls, 1);
+      expect(connection.reconnectCalls, 1);
+      expect(
+        find.text('No devices need your attention right now.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('can ignore an unassigned device', (tester) async {
+      api.triageEntries = [_unassignedDeviceEntry()];
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Ignore Device'), findsOneWidget);
+      await _tapVisible(tester, find.text('Ignore Device'));
+
+      expect(api.resolveTriageDismissCalls, 1);
+      expect(connection.reconnectCalls, 1);
+      expect(
+        find.text('No devices need your attention right now.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets(

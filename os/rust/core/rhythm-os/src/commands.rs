@@ -10656,16 +10656,19 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             .topology
             .device_nodes()
             .filter_map(|node| {
-                s.canonical_registry
-                    .get(&node.canonical_device_id)
-                    .map(|device| {
-                        (
-                            node.id.clone(),
-                            device.name.clone(),
-                            device.device_type.clone(),
-                            node.parent_id.clone(),
-                        )
-                    })
+                let device = s.canonical_registry.get(&node.canonical_device_id)?;
+                let is_quarantined = device.room_id.is_none()
+                    && s.canonical_registry
+                        .triage()
+                        .quarantines_unassigned_device(&node.canonical_device_id);
+                (!is_quarantined).then(|| {
+                    (
+                        node.id.clone(),
+                        device.name.clone(),
+                        device.device_type.clone(),
+                        node.parent_id.clone(),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         (s.has_any_hub(), s.ensure_runtime_fn.is_some(), rooms, nodes)
@@ -11630,7 +11633,10 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
     }
 }
 
-/// Create a new device from a triage entry (rejected merge, keep separate).
+/// Resolve a triage entry by keeping the discovered device separate.
+///
+/// For an unassigned device, this is the explicit opt-in that enables it as a
+/// standalone runtime node.
 pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<String> {
     use crate::canonical::triage::TriageKind;
 
@@ -11699,6 +11705,32 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                 Err(anyhow::anyhow!("Failed to keep room binding separate"))
             }
         }
+        TriageKind::UnassignedDevice => {
+            let canonical_id = entry.canonical_id.clone().ok_or_else(|| {
+                anyhow::anyhow!("Triage entry '{}' is missing canonical_id", entry_id)
+            })?;
+            if s.canonical_registry.triage_mut().resolve(
+                entry_id,
+                crate::canonical::triage::TriageStatus::KeptSeparate,
+                "api",
+                now,
+            ) {
+                persist_canonical(&s);
+                drop(s);
+                reconcile_runtime_from_state(state)?;
+                emit_triage_changed(state);
+                crate::state::emit_server_event(
+                    state,
+                    crate::server_event::ServerEvent::NodesChanged,
+                );
+                Ok(format!(
+                    r#"{{"status":"standalone","canonical_id":"{}"}}"#,
+                    canonical_id
+                ))
+            } else {
+                Err(anyhow::anyhow!("Failed to keep device standalone"))
+            }
+        }
         _ => Err(anyhow::anyhow!(
             "Triage entry '{}' does not support /new",
             entry_id
@@ -11736,6 +11768,12 @@ pub fn do_triage_assign_room(state: &SharedState, entry_id: &str, room_id: &str)
 /// Dismiss a triage entry.
 pub fn do_triage_dismiss(state: &SharedState, entry_id: &str) -> Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let kind = s
+        .canonical_registry
+        .triage()
+        .get(entry_id)
+        .map(|entry| entry.kind.clone())
+        .ok_or_else(|| anyhow::anyhow!("Triage entry not found: {}", entry_id))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -11743,6 +11781,10 @@ pub fn do_triage_dismiss(state: &SharedState, entry_id: &str) -> Result<()> {
     if s.canonical_registry.triage_mut().dismiss(entry_id, now) {
         persist_canonical(&s);
         drop(s);
+        if kind == crate::canonical::triage::TriageKind::UnassignedDevice {
+            reconcile_runtime_from_state(state)?;
+            crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+        }
         emit_triage_changed(state);
         Ok(())
     } else {
@@ -22334,6 +22376,96 @@ mod tests {
     }
 
     #[test]
+    fn pending_unassigned_device_is_quarantined_until_standalone_is_confirmed() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key,
+            "hue-device-1",
+            "Unassigned Hue Lamp",
+            "",
+            "",
+        );
+        let entry_id = {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&device_id);
+            s.canonical_registry.queue_unassigned(&device_id, 1000);
+            s.canonical_registry
+                .triage()
+                .pending_by_kind(crate::canonical::triage::TriageKind::UnassignedDevice)
+                .first()
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        reconcile_runtime_from_state(&state).unwrap();
+        assert!(
+            runtime.engine_node_snapshot(&device_id).is_none(),
+            "pending unassigned devices must not enter automatic light control"
+        );
+
+        let result = do_triage_new_device(&state, &entry_id).unwrap();
+        assert!(result.contains(r#""status":"standalone""#));
+        assert!(
+            runtime.engine_node_snapshot(&device_id).is_some(),
+            "explicit standalone confirmation should activate the device"
+        );
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .triage()
+                .get(&entry_id)
+                .unwrap()
+                .status,
+            crate::canonical::triage::TriageStatus::KeptSeparate
+        );
+    }
+
+    #[test]
+    fn ignored_unassigned_device_stays_quarantined_without_retriage() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let device_id =
+            insert_canonical_device(&state, hub_key, "hue-device-1", "Ignored Hue Lamp", "", "");
+        let entry_id = {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&device_id);
+            s.canonical_registry.queue_unassigned(&device_id, 1000);
+            s.canonical_registry
+                .triage()
+                .pending_by_kind(crate::canonical::triage::TriageKind::UnassignedDevice)
+                .first()
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        do_triage_dismiss(&state, &entry_id).unwrap();
+        {
+            let mut s = state.lock().unwrap();
+            s.canonical_registry.queue_unassigned(&device_id, 2000);
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
+        }
+        assert!(
+            runtime.engine_node_snapshot(&device_id).is_none(),
+            "ignored devices must remain outside the automatic runtime"
+        );
+
+        let room_id = state.lock().unwrap().topology.create_room("Recovered Room");
+        do_canonical_assign_room(&state, &device_id, Some(&room_id)).unwrap();
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("assigning an ignored device should recover it")
+                .parent_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+    }
+
+    #[test]
     fn reconcile_runtime_from_state_bootstraps_persisted_room_and_device_assignments() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
         let room_id = state.lock().unwrap().topology.create_room("Office");
@@ -22811,7 +22943,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_assign_room_reparents_existing_runtime_device() {
+    fn canonical_assign_room_reparents_then_quarantines_unassigned_device() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
         let room_one = state.lock().unwrap().topology.create_room("Office");
         let room_two = state.lock().unwrap().topology.create_room("Desk");
@@ -22838,10 +22970,26 @@ mod tests {
         );
 
         do_canonical_assign_room(&state, &device_id, None).unwrap();
+        assert!(
+            runtime.engine_node_snapshot(&device_id).is_none(),
+            "unassigning should quarantine the device pending triage"
+        );
+        let entry_id = state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .triage()
+            .pending_by_kind(crate::canonical::triage::TriageKind::UnassignedDevice)
+            .first()
+            .unwrap()
+            .id
+            .clone();
+
+        do_triage_new_device(&state, &entry_id).unwrap();
         assert_eq!(
             runtime
                 .engine_node_snapshot(&device_id)
-                .expect("runtime node should still exist after unassign")
+                .expect("runtime node should return after standalone confirmation")
                 .parent_id,
             None
         );

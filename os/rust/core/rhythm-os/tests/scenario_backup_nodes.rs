@@ -66,6 +66,14 @@ fn backup_restore_preserves_standalone_device_nodes() {
     let harness = TestHarness::new().with_discovery(vec![], vec![light("matter-100", "")]);
     harness.sync();
 
+    let triage_id = harness
+        .triage_pending_ids()
+        .into_iter()
+        .next()
+        .expect("roomless light should require an explicit standalone decision");
+    let result = harness.triage_new(&triage_id).unwrap();
+    assert!(result.contains(r#""status":"standalone""#));
+
     let canonical_id = {
         let state = harness.state.lock().unwrap();
         state

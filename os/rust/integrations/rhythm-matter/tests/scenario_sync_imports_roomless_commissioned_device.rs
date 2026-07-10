@@ -5,6 +5,8 @@ mod harness;
 
 use rhythm_core::{RhythmMode, RoomModeState};
 use rhythm_os::canonical::identity::HubKey;
+use rhythm_os::canonical::triage::TriageKind;
+use rhythm_os::commands;
 use rhythm_os::hub::HubType;
 
 #[test]
@@ -46,14 +48,33 @@ fn scenario_sync_imports_roomless_commissioned_device() {
         state.canonical_registry.triage().pending_unassigned_count(),
         1
     );
-    let runtime = state
-        .hub_runtime()
-        .expect("syncing roomless Matter devices should bootstrap the runtime");
+    let triage_id = state
+        .canonical_registry
+        .triage()
+        .pending_by_kind(TriageKind::UnassignedDevice)
+        .first()
+        .expect("synced roomless Matter device should require triage")
+        .id
+        .clone();
+    assert!(
+        state.hub_runtime().is_none(),
+        "pending roomless Matter devices should stay outside automatic control"
+    );
     drop(state);
 
+    let result = commands::do_triage_new_device(&rig.state, &triage_id)
+        .expect("explicit standalone confirmation should succeed");
+    assert!(result.contains(r#""status":"standalone""#));
+
+    let runtime = rig
+        .state
+        .lock()
+        .unwrap()
+        .hub_runtime()
+        .expect("standalone confirmation should bootstrap the runtime");
     let node = runtime
         .engine_node_snapshot(&canonical_id)
-        .expect("roomless Matter canonical device should exist in the runtime");
+        .expect("confirmed standalone Matter device should exist in the runtime");
     assert_eq!(node.parent_id, None);
 
     let caps = rig.hub_data.device_caps.lock().unwrap();

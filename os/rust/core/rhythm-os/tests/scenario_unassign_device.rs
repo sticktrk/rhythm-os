@@ -57,4 +57,16 @@ fn unassign_device_keeps_synthetic_registry_room_for_standalone_queries() {
         registry.get_grouped_light_id("light-office"),
         Some("light-office".to_string())
     );
+    drop(registry);
+    assert_eq!(
+        state.canonical_registry.triage().pending_unassigned_count(),
+        1
+    );
+    assert!(
+        state
+            .hub_runtime()
+            .and_then(|runtime| runtime.engine_node_snapshot(&canonical_id))
+            .is_none(),
+        "unassigned device should stay quarantined until triage resolves it"
+    );
 }
