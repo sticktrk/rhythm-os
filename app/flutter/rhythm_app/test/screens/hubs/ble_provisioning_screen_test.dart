@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/ble_provisioning_screen.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
@@ -22,6 +23,34 @@ void main() {
         bleProvisioningSupportsPlatformForTesting(
           platform: TargetPlatform.android,
           isWeb: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('supports iOS and macOS but not desktop platforms without BLE setup',
+        () {
+      expect(
+        bleProvisioningSupportsPlatformForTesting(
+          platform: TargetPlatform.iOS,
+        ),
+        isTrue,
+      );
+      expect(
+        bleProvisioningSupportsPlatformForTesting(
+          platform: TargetPlatform.macOS,
+        ),
+        isTrue,
+      );
+      expect(
+        bleProvisioningSupportsPlatformForTesting(
+          platform: TargetPlatform.linux,
+        ),
+        isFalse,
+      );
+      expect(
+        bleProvisioningSupportsPlatformForTesting(
+          platform: TargetPlatform.windows,
         ),
         isFalse,
       );
@@ -74,6 +103,63 @@ void main() {
 
       expect(homeName, isNull);
     });
+
+    test('normalizes punctuation and casing in specific device names', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Town House',
+        ownerId: 'user-1',
+      );
+      final hub = Hub.server(
+        id: 'hub-1',
+        homeId: home.id,
+        name: 'Rhythm-RPIZ-0a:b2',
+        host: '192.168.1.20',
+      );
+
+      expect(
+        bleProvisioningKnownHomeNameForTesting(
+          deviceName: '  RHYTHM rpiz 0A B2  ',
+          homeEntries: [
+            AccountHomeServerHubs(home: home, serverHubs: [hub]),
+          ],
+        ),
+        'Town House',
+      );
+    });
+
+    test('ignores empty names and non-server hubs', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Town House',
+        ownerId: 'user-1',
+      );
+      final hueHub = Hub.hue(
+        id: 'hub-1',
+        homeId: home.id,
+        name: 'rhythm-rpiz-A1B2',
+        bridgeIp: '192.168.1.20',
+        appKey: 'key',
+      );
+      final entries = [
+        AccountHomeServerHubs(home: home, serverHubs: [hueHub]),
+      ];
+
+      expect(
+        bleProvisioningKnownHomeNameForTesting(
+          deviceName: '',
+          homeEntries: entries,
+        ),
+        isNull,
+      );
+      expect(
+        bleProvisioningKnownHomeNameForTesting(
+          deviceName: 'rhythm-rpiz-A1B2',
+          homeEntries: entries,
+        ),
+        isNull,
+      );
+    });
   });
 
   group('bleProvisioningWaitForServerHealthForTesting', () {
@@ -113,6 +199,41 @@ void main() {
       expect(healthy, isTrue);
       expect(probes, 3);
     });
+
+    test('treats thrown probe errors as unhealthy and keeps polling', () async {
+      var probes = 0;
+
+      final healthy = await bleProvisioningWaitForServerHealthForTesting(
+        healthCheck: () async {
+          probes += 1;
+          if (probes < 3) throw StateError('server is restarting');
+          return true;
+        },
+        timeout: const Duration(milliseconds: 200),
+        pollInterval: const Duration(milliseconds: 5),
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(healthy, isTrue);
+      expect(probes, 3);
+    });
+
+    test('returns false without probing when the timeout is zero', () async {
+      var probes = 0;
+
+      final healthy = await bleProvisioningWaitForServerHealthForTesting(
+        healthCheck: () async {
+          probes += 1;
+          return true;
+        },
+        timeout: Duration.zero,
+        pollInterval: Duration.zero,
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(healthy, isFalse);
+      expect(probes, 0);
+    });
   });
 
   group('bleProvisioningWaitForServerRestartAndHealthForTesting', () {
@@ -137,5 +258,74 @@ void main() {
       expect(healthy, isTrue);
       expect(probes, 2);
     });
+
+    test('waits for the server to return after observing it offline', () async {
+      var probes = 0;
+
+      final healthy =
+          await bleProvisioningWaitForServerRestartAndHealthForTesting(
+        healthCheck: () async {
+          probes += 1;
+          return switch (probes) {
+            1 => true,
+            2 => false,
+            3 => false,
+            _ => true,
+          };
+        },
+        offlineTimeout: const Duration(milliseconds: 100),
+        onlineTimeout: const Duration(milliseconds: 100),
+        pollInterval: const Duration(milliseconds: 5),
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(healthy, isTrue);
+      expect(probes, 4);
+    });
+
+    test('accepts a continuously healthy server after the offline window',
+        () async {
+      var probes = 0;
+
+      final healthy =
+          await bleProvisioningWaitForServerRestartAndHealthForTesting(
+        healthCheck: () async {
+          probes += 1;
+          return true;
+        },
+        offlineTimeout: const Duration(milliseconds: 35),
+        onlineTimeout: const Duration(milliseconds: 100),
+        pollInterval: const Duration(milliseconds: 5),
+        probeTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(healthy, isTrue);
+      expect(probes, greaterThan(1));
+    });
+  });
+
+  testWidgets('unsupported desktop build shows the recoverable error UI',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    await tester.pumpWidget(
+      const MaterialApp(home: BleProvisioningScreen()),
+    );
+    await tester.pump();
+
+    expect(find.text('Set Up New Box'), findsOneWidget);
+    expect(find.text('Something went wrong'), findsOneWidget);
+    expect(
+      find.text(
+        'Device setup is only available on the native mobile and desktop builds.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Try Again'), findsOneWidget);
+    expect(find.text('Back'), findsOneWidget);
+    expect(find.byIcon(Icons.error_outline_rounded), findsOneWidget);
+
+    debugDefaultTargetPlatformOverride = null;
   });
 }

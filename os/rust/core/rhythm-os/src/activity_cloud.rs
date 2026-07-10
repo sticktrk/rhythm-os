@@ -1073,4 +1073,392 @@ mod tests {
             "successful upload should drain the buffer and record ok status"
         );
     }
+
+    fn temp_storage_state(name: &str) -> (SharedState, std::path::PathBuf) {
+        let data_dir = std::env::temp_dir().join(format!(
+            "rhythm_activity_cloud_{name}_{}_{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let storage = crate::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap();
+        let state = test_state();
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = data_dir.to_string_lossy().to_string();
+            app.storage = Some(std::sync::Arc::new(storage));
+        }
+        (state, data_dir)
+    }
+
+    fn owner_auth() -> Option<Extension<ApiAuthRequestInfo>> {
+        Some(Extension(ApiAuthRequestInfo {
+            requires_auth: true,
+            claim_available: false,
+            via_remote_access: false,
+            role: Some(ApiTokenRole::Owner),
+            token_expires_at_epoch_ms: None,
+        }))
+    }
+
+    #[test]
+    fn stored_config_normalization_trims_and_bounds_persisted_fields() {
+        let mut config = usable_config(" https://example.test/ingest ");
+        config.schema_version = 0;
+        config.upload_token = " token ".into();
+        config.home_id = " home ".into();
+        config.hub_id = " hub ".into();
+        config.token_id = Some("  ".into());
+        config.server_instance_id = Some(" server ".into());
+        config.upload_status = Some(" ok ".into());
+        config.last_upload_error = Some(format!("  {}  ", "x".repeat(300)));
+
+        let normalized = config.normalized();
+        assert_eq!(normalized.schema_version, ACTIVITY_CLOUD_SCHEMA_VERSION);
+        assert_eq!(normalized.ingest_url, "https://example.test/ingest");
+        assert_eq!(normalized.upload_token, "token");
+        assert_eq!(normalized.home_id, "home");
+        assert_eq!(normalized.hub_id, "hub");
+        assert_eq!(normalized.token_id, None);
+        assert_eq!(normalized.server_instance_id.as_deref(), Some("server"));
+        assert_eq!(normalized.upload_status.as_deref(), Some(UPLOAD_STATUS_OK));
+        assert_eq!(normalized.last_upload_error.unwrap().len(), 256);
+    }
+
+    #[test]
+    fn stored_config_serde_defaults_and_usability_matrix() {
+        let config: StoredActivityCloudConfig = serde_json::from_value(serde_json::json!({
+            "ingest_url": "https://example.test/ingest",
+            "upload_token": "token",
+            "home_id": "home",
+            "hub_id": "hub",
+            "updated_at_epoch_ms": 1
+        }))
+        .unwrap();
+        assert_eq!(config.schema_version, ACTIVITY_CLOUD_SCHEMA_VERSION);
+        assert!(config.enabled);
+        assert!(config.is_usable());
+
+        let mutators: [fn(&mut StoredActivityCloudConfig); 6] = [
+            |value: &mut StoredActivityCloudConfig| value.enabled = false,
+            |value: &mut StoredActivityCloudConfig| value.ingest_url.clear(),
+            |value: &mut StoredActivityCloudConfig| value.upload_token.clear(),
+            |value: &mut StoredActivityCloudConfig| value.home_id.clear(),
+            |value: &mut StoredActivityCloudConfig| value.hub_id.clear(),
+            |value: &mut StoredActivityCloudConfig| value.auth_failed_at_epoch_ms = Some(1),
+        ];
+        for mutate in mutators {
+            let mut candidate = config.clone();
+            mutate(&mut candidate);
+            assert!(!candidate.is_usable());
+        }
+    }
+
+    #[test]
+    fn config_from_body_accepts_http_and_trims_optional_metadata() {
+        let config = config_from_body(PutActivityCloudConfig {
+            enabled: false,
+            ingest_url: Some(" http://127.0.0.1:54321/ingest ".into()),
+            upload_token: Some(" token ".into()),
+            home_id: Some(" home ".into()),
+            hub_id: Some(" hub ".into()),
+            token_id: Some("  ".into()),
+            server_instance_id: Some(" server ".into()),
+        })
+        .unwrap();
+
+        assert!(!config.enabled);
+        assert_eq!(config.ingest_url, "http://127.0.0.1:54321/ingest");
+        assert_eq!(config.upload_token, "token");
+        assert_eq!(config.home_id, "home");
+        assert_eq!(config.hub_id, "hub");
+        assert_eq!(config.token_id, None);
+        assert_eq!(config.server_instance_id.as_deref(), Some("server"));
+        assert_eq!(config.upload_status.as_deref(), Some(UPLOAD_STATUS_PENDING));
+    }
+
+    #[test]
+    fn config_from_body_reports_each_missing_required_value() {
+        let base = || PutActivityCloudConfig {
+            enabled: true,
+            ingest_url: Some("https://example.test/ingest".into()),
+            upload_token: Some("token".into()),
+            home_id: Some("home".into()),
+            hub_id: Some("hub".into()),
+            token_id: None,
+            server_instance_id: None,
+        };
+
+        let mut missing_url = base();
+        missing_url.ingest_url = Some(" ".into());
+        assert_eq!(
+            config_from_body(missing_url).unwrap_err(),
+            "Missing ingest_url"
+        );
+        let mut missing_token = base();
+        missing_token.upload_token = None;
+        assert_eq!(
+            config_from_body(missing_token).unwrap_err(),
+            "Missing upload_token"
+        );
+        let mut missing_home = base();
+        missing_home.home_id = None;
+        assert_eq!(
+            config_from_body(missing_home).unwrap_err(),
+            "Missing home_id"
+        );
+        let mut missing_hub = base();
+        missing_hub.hub_id = Some(" ".into());
+        assert_eq!(config_from_body(missing_hub).unwrap_err(), "Missing hub_id");
+    }
+
+    #[test]
+    fn status_body_covers_unconfigured_disabled_and_unknown_status() {
+        let unconfigured = serde_json::to_value(status_body(None)).unwrap();
+        assert_eq!(unconfigured["configured"], false);
+        assert_eq!(unconfigured["enabled"], false);
+        assert_eq!(unconfigured["upload_status"], UPLOAD_STATUS_NOT_CONFIGURED);
+        assert_eq!(unconfigured["needs_reprovision"], true);
+
+        let mut disabled = usable_config("https://example.test/ingest");
+        disabled.enabled = false;
+        disabled.upload_status = Some("unexpected".into());
+        let body = serde_json::to_value(status_body(Some(&disabled))).unwrap();
+        assert_eq!(body["configured"], false);
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["upload_status"], UPLOAD_STATUS_PENDING);
+        assert_eq!(body["needs_reprovision"], false);
+    }
+
+    #[test]
+    fn upload_snapshot_requires_usable_config_and_caps_history() {
+        let (state, data_dir) = temp_storage_state("snapshot");
+        assert!(upload_snapshot(&state).is_none());
+
+        let storage = storage_handle(&state).unwrap();
+        let mut disabled = usable_config("https://example.test/ingest");
+        disabled.enabled = false;
+        storage.save_activity_cloud_config(&disabled).unwrap();
+        assert!(upload_snapshot(&state).is_none());
+
+        storage
+            .save_activity_cloud_config(&usable_config("https://example.test/ingest"))
+            .unwrap();
+        {
+            let mut app = state.lock().unwrap();
+            for index in 0..(LIGHT_ACTIVITY_HISTORY_LIMIT + 5) {
+                let mut activity = test_activity();
+                activity.id = format!("activity-{index}");
+                app.light_activity.push(activity);
+            }
+        }
+        let (_, activities) = upload_snapshot(&state).unwrap();
+        assert_eq!(activities.len(), LIGHT_ACTIVITY_HISTORY_LIMIT);
+        assert_eq!(activities.first().unwrap().id, "activity-0");
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn config_endpoints_round_trip_and_clear_without_exposing_token() {
+        let missing_storage = test_state();
+        assert_eq!(get_config(State(missing_storage.clone())).await.status, 500);
+        assert_eq!(delete_config(State(missing_storage)).await.status, 500);
+
+        let (state, data_dir) = temp_storage_state("endpoints");
+        let response = put_config(
+            State(state.clone()),
+            Json(PutActivityCloudConfig {
+                enabled: true,
+                ingest_url: Some("https://example.test/ingest".into()),
+                upload_token: Some("secret-token".into()),
+                home_id: Some("home-1".into()),
+                hub_id: Some("hub-1".into()),
+                token_id: Some("token-1".into()),
+                server_instance_id: Some("server-1".into()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        assert!(!response.body.contains("secret-token"));
+
+        let response = get_config(State(state.clone())).await;
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["configured"], true);
+        assert_eq!(body["home_id"], "home-1");
+        assert_eq!(body["hub_id"], "hub-1");
+        assert!(!response.body.contains("secret-token"));
+
+        let response = delete_config(State(state.clone())).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["configured"],
+            false
+        );
+        assert!(load_config(&state).unwrap().is_none());
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn join_proof_requires_owner_auth_and_configured_credentials() {
+        let state = test_state();
+        assert_eq!(
+            post_join_proof(State(state.clone()), None).await.status,
+            403
+        );
+        let support = Some(Extension(ApiAuthRequestInfo {
+            requires_auth: true,
+            claim_available: false,
+            via_remote_access: true,
+            role: Some(ApiTokenRole::Support),
+            token_expires_at_epoch_ms: Some(current_epoch_ms() + 1_000),
+        }));
+        assert_eq!(
+            post_join_proof(State(state.clone()), support).await.status,
+            403
+        );
+        assert_eq!(
+            post_join_proof(State(state), owner_auth()).await.status,
+            500
+        );
+
+        let (state, data_dir) = temp_storage_state("join-unconfigured");
+        let response = post_join_proof(State(state), owner_auth()).await;
+        assert_eq!(response.status, 409);
+        assert!(response.body.contains("not configured"));
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn join_proof_rejects_identity_gaps_and_signs_matching_identity() {
+        let (state, data_dir) = temp_storage_state("join-proof");
+        let storage = storage_handle(&state).unwrap();
+        let mut config = usable_config("https://example.test/ingest");
+        config.server_instance_id = Some("server-a".into());
+        config.token_id = Some("token-id".into());
+        storage.save_activity_cloud_config(&config).unwrap();
+        state.lock().unwrap().server_instance_id.clear();
+
+        let response = post_join_proof(State(state.clone()), owner_auth()).await;
+        assert_eq!(response.status, 409);
+        assert!(response.body.contains("Server identity"));
+
+        state.lock().unwrap().server_instance_id = "server-b".into();
+        let response = post_join_proof(State(state.clone()), owner_auth()).await;
+        assert_eq!(response.status, 409);
+        assert!(response.body.contains("another server identity"));
+
+        state.lock().unwrap().server_instance_id = "SERVER-A".into();
+        let response = post_join_proof(State(state), owner_auth()).await;
+        assert_eq!(response.status, 200);
+        let proof: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(proof["status"], "ok");
+        assert_eq!(proof["proof_version"], JOIN_PROOF_VERSION);
+        assert_eq!(proof["algorithm"], JOIN_PROOF_ALGORITHM);
+        assert_eq!(proof["server_instance_id"], "SERVER-A");
+        assert_eq!(proof["home_id"], "home-1");
+        assert_eq!(proof["hub_id"], "hub-1");
+        assert_eq!(proof["token_id"], "token-id");
+        assert_eq!(proof["nonce"].as_str().unwrap().len(), 32);
+        assert_eq!(proof["signature"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            proof["expires_at_epoch_ms"].as_u64().unwrap()
+                - proof["issued_at_epoch_ms"].as_u64().unwrap(),
+            JOIN_PROOF_TTL_MS
+        );
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn crypto_helpers_cover_long_keys_hashing_and_random_hex() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let signature = hmac_sha256_hex(&vec![b'k'; 100], b"message");
+        assert_eq!(signature.len(), 64);
+        assert!(signature.chars().all(|value| value.is_ascii_hexdigit()));
+
+        let nonce = random_hex(24);
+        assert_eq!(nonce.len(), 48);
+        assert!(nonce.chars().all(|value| value.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn upload_result_updates_are_bounded_and_ignore_replaced_credentials() {
+        let (state, data_dir) = temp_storage_state("result-updates");
+        let storage = storage_handle(&state).unwrap();
+        let attempted = usable_config("https://example.test/ingest");
+        storage.save_activity_cloud_config(&attempted).unwrap();
+
+        let failure = UploadFailure {
+            http_status: Some(401),
+            message: "x".repeat(300),
+        };
+        record_upload_failure(&state, &attempted, 100, &failure).unwrap();
+        let failed = storage.load_activity_cloud_config().unwrap().unwrap();
+        assert_eq!(
+            failed.upload_status.as_deref(),
+            Some(UPLOAD_STATUS_AUTH_FAILED)
+        );
+        assert_eq!(failed.last_upload_attempt_epoch_ms, Some(100));
+        assert_eq!(failed.last_upload_http_status, Some(401));
+        assert_eq!(failed.last_upload_error.as_ref().unwrap().len(), 256);
+        assert!(failed.auth_failed_at_epoch_ms.is_some());
+
+        record_upload_success(&state, &failed, 200).unwrap();
+        let succeeded = storage.load_activity_cloud_config().unwrap().unwrap();
+        assert_eq!(succeeded.upload_status.as_deref(), Some(UPLOAD_STATUS_OK));
+        assert_eq!(succeeded.last_upload_attempt_epoch_ms, Some(200));
+        assert_eq!(succeeded.last_upload_http_status, Some(200));
+        assert_eq!(succeeded.last_upload_error, None);
+        assert_eq!(succeeded.auth_failed_at_epoch_ms, None);
+
+        let mut replacement = succeeded.clone();
+        replacement.upload_token = "replacement".into();
+        storage.save_activity_cloud_config(&replacement).unwrap();
+        record_upload_failure(
+            &state,
+            &succeeded,
+            300,
+            &UploadFailure {
+                http_status: Some(500),
+                message: "server error".into(),
+            },
+        )
+        .unwrap();
+        let unchanged = storage.load_activity_cloud_config().unwrap().unwrap();
+        assert_eq!(unchanged.upload_token, "replacement");
+        assert_eq!(unchanged.upload_status, replacement.upload_status);
+        std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn same_upload_config_compares_every_credential_dimension() {
+        let base = usable_config("https://example.test/ingest");
+        assert!(same_upload_config(&base, &base));
+
+        let mut variants = Vec::new();
+        let mut value = base.clone();
+        value.ingest_url.push_str("/other");
+        variants.push(value);
+        let mut value = base.clone();
+        value.upload_token.push_str("-other");
+        variants.push(value);
+        let mut value = base.clone();
+        value.home_id.push_str("-other");
+        variants.push(value);
+        let mut value = base.clone();
+        value.hub_id.push_str("-other");
+        variants.push(value);
+        let mut value = base.clone();
+        value.token_id = Some("other".into());
+        variants.push(value);
+        let mut value = base.clone();
+        value.server_instance_id = Some("other".into());
+        variants.push(value);
+
+        for variant in variants {
+            assert!(!same_upload_config(&base, &variant));
+        }
+    }
 }
