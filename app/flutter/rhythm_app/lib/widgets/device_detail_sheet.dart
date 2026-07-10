@@ -76,6 +76,11 @@ Future<bool> showDeviceNodeAssignmentFlow(
   if (targetRoomId == null || !context.mounted) return false;
   final targetParentNodeId = targetRoomId.isEmpty ? null : targetRoomId;
   final selectedIsUnassigned = targetParentNodeId == null;
+  final assignmentChanged =
+      targetParentNodeId != normalizedCurrentParentNodeId;
+  final activatesStandalone = selectedIsUnassigned &&
+      allowNoRoom &&
+      device.type == RhythmDeviceType.light;
   final roomNamesById = {
     for (final room in rooms) room.id: room.name,
     if (createdRoom != null) createdRoom!.id: createdRoom!.name,
@@ -87,7 +92,7 @@ Future<bool> showDeviceNodeAssignmentFlow(
         'selected room';
   }
 
-  if (targetParentNodeId == normalizedCurrentParentNodeId) {
+  if (!assignmentChanged && !activatesStandalone) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -100,8 +105,18 @@ Future<bool> showDeviceNodeAssignmentFlow(
     return true;
   }
 
-  final success =
-      await syncProvider.api.assignDeviceParent(device.id, targetParentNodeId);
+  var success = true;
+  if (assignmentChanged) {
+    success = await syncProvider.api
+        .assignDeviceParent(device.id, targetParentNodeId);
+  }
+
+  if (success && activatesStandalone) {
+    success = await _resolveUnassignedDeviceAsStandalone(
+      syncProvider,
+      device.id,
+    );
+  }
 
   if (!context.mounted) return false;
 
@@ -109,9 +124,11 @@ Future<bool> showDeviceNodeAssignmentFlow(
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          isUnassigned
-              ? 'Failed to assign ${device.displayName}'
-              : 'Failed to move ${device.displayName}',
+          activatesStandalone
+              ? 'Failed to activate ${device.displayName} as standalone'
+              : isUnassigned
+                  ? 'Failed to assign ${device.displayName}'
+                  : 'Failed to move ${device.displayName}',
         ),
       ),
     );
@@ -124,15 +141,44 @@ Future<bool> showDeviceNodeAssignmentFlow(
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(
-        selectedIsUnassigned
-            ? 'Removed ${device.displayName} from its room'
-            : isUnassigned
-                ? 'Assigned ${device.displayName} to $selectedLabel'
-                : 'Moved ${device.displayName} to $selectedLabel',
+        activatesStandalone
+            ? '${device.displayName} is ready to use standalone'
+            : selectedIsUnassigned
+                ? 'Removed ${device.displayName} from its room'
+                : isUnassigned
+                    ? 'Assigned ${device.displayName} to $selectedLabel'
+                    : 'Moved ${device.displayName} to $selectedLabel',
       ),
     ),
   );
   return true;
+}
+
+Future<bool> _resolveUnassignedDeviceAsStandalone(
+  ServerSyncProvider syncProvider,
+  String deviceId,
+) async {
+  final entries = await syncProvider.api.getTriageEntries();
+  if (entries == null) return false;
+
+  Map<String, dynamic>? pendingEntry;
+  for (final entry in entries) {
+    if (entry['kind'] == 'unassigned_device' &&
+        entry['canonical_id'] == deviceId) {
+      pendingEntry = entry;
+      break;
+    }
+  }
+
+  // No pending entry means this device already has a durable standalone
+  // decision (or is connected to a server that did not quarantine it).
+  if (pendingEntry == null) return true;
+
+  final entryId = pendingEntry['id']?.toString();
+  if (entryId == null || entryId.isEmpty) return false;
+
+  final result = await syncProvider.api.resolveTriageNewResult(entryId);
+  return result?['status'] == 'standalone';
 }
 
 Future<bool> showDeviceRoomAssignmentFlow(
