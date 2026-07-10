@@ -4405,6 +4405,9 @@ fn topology_node_snapshots_from_state(state: &SharedState) -> Vec<rhythm_core::N
         let Some(node) = s.topology.get_device_node(&node_id) else {
             continue;
         };
+        if canonical_device_is_quarantined(&s, &node.canonical_device_id) {
+            continue;
+        }
         let (name, kind) = s
             .canonical_registry
             .get(&node.canonical_device_id)
@@ -10657,11 +10660,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
             .device_nodes()
             .filter_map(|node| {
                 let device = s.canonical_registry.get(&node.canonical_device_id)?;
-                let is_quarantined = device.room_id.is_none()
-                    && s.canonical_registry
-                        .triage()
-                        .quarantines_unassigned_device(&node.canonical_device_id);
-                (!is_quarantined).then(|| {
+                (!canonical_device_is_quarantined(&s, &node.canonical_device_id)).then(|| {
                     (
                         node.id.clone(),
                         device.name.clone(),
@@ -10898,6 +10897,21 @@ fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()
         },
     );
     Ok(())
+}
+
+/// Whether a canonical device must stay outside user-visible runtime control
+/// until its unassigned-device review is resolved.
+pub(crate) fn canonical_device_is_quarantined(state: &AppState, canonical_device_id: &str) -> bool {
+    state
+        .canonical_registry
+        .get(canonical_device_id)
+        .is_some_and(|device| {
+            device.room_id.is_none()
+                && state
+                    .canonical_registry
+                    .triage()
+                    .quarantines_unassigned_device(canonical_device_id)
+        })
 }
 
 pub(crate) fn runtime_node_kind_for_device_type(device_type: DeviceType) -> LightNodeKind {
