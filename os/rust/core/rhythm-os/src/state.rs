@@ -604,6 +604,19 @@ pub struct AppState {
     pub sync_topology_groups_fn:
         Option<Arc<dyn Fn(&SharedState) -> anyhow::Result<()> + Send + Sync>>,
 
+    /// Give the owning integration a pre-commit device-room assignment hook.
+    #[allow(clippy::type_complexity)]
+    pub prepare_hub_device_room_assignment_fn: Option<
+        Arc<
+            dyn Fn(
+                    &SharedState,
+                    &crate::hub::HubDeviceRoomAssignment,
+                ) -> anyhow::Result<crate::hub::HubDeviceRoomAssignmentOutcome>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Platform-specific hub provider lookup.
     /// Returns a hub provider for a given hub type.
     pub get_hub_provider_fn: Option<
@@ -832,6 +845,7 @@ impl Default for AppState {
             ensure_runtime_fn: None,
             register_controller_fn: None,
             sync_topology_groups_fn: None,
+            prepare_hub_device_room_assignment_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
             start_unpairing_fn: None,

@@ -185,6 +185,8 @@ fn main() -> Result<()> {
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
         s.sync_topology_groups_fn = Some(callbacks.sync_topology_groups_fn);
+        s.prepare_hub_device_room_assignment_fn =
+            Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
         s.run_device_test_fn = Some(callbacks.run_device_test_fn);

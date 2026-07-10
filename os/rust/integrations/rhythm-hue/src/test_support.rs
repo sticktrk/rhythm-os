@@ -68,6 +68,14 @@ impl HueTransport for Arc<SpyHueTransport> {
     ) -> anyhow::Result<serde_json::Value> {
         (**self).get_resources(username, resource_type)
     }
+    fn update_room_children(
+        &self,
+        username: &str,
+        room_id: &str,
+        device_ids: &[String],
+    ) -> anyhow::Result<()> {
+        (**self).update_room_children(username, room_id, device_ids)
+    }
 }
 
 /// A recorded call to a `SpyHueTransport`.
@@ -101,6 +109,10 @@ pub enum HueTransportCall {
     GetResources {
         resource_type: String,
     },
+    UpdateRoomChildren {
+        room_id: String,
+        device_ids: Vec<String>,
+    },
     TestConnection,
     WarmupTls,
 }
@@ -114,6 +126,7 @@ pub struct SpyHueTransport {
     is_on: Arc<Mutex<bool>>,
     resources: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     should_fail: Arc<AtomicBool>,
+    fail_room_update: Arc<Mutex<Option<String>>>,
 }
 
 impl SpyHueTransport {
@@ -124,6 +137,7 @@ impl SpyHueTransport {
             is_on: Arc::new(Mutex::new(false)),
             resources: Arc::new(Mutex::new(HashMap::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
+            fail_room_update: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -135,6 +149,11 @@ impl SpyHueTransport {
     /// Set whether transport calls should return errors.
     pub fn set_should_fail(&self, fail: bool) {
         self.should_fail.store(fail, Ordering::Relaxed);
+    }
+
+    /// Configure one room ID whose membership update should fail.
+    pub fn set_fail_room_update(&self, room_id: Option<&str>) {
+        *self.fail_room_update.lock().unwrap() = room_id.map(str::to_string);
     }
 
     /// Configure the response returned by `get_resources` for a resource path.
@@ -322,6 +341,47 @@ impl HueTransport for SpyHueTransport {
             .get(resource_type)
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"data": []})))
+    }
+
+    fn update_room_children(
+        &self,
+        _username: &str,
+        room_id: &str,
+        device_ids: &[String],
+    ) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::UpdateRoomChildren {
+                room_id: room_id.to_string(),
+                device_ids: device_ids.to_vec(),
+            });
+        if self.should_fail.load(Ordering::Relaxed)
+            || self.fail_room_update.lock().unwrap().as_deref() == Some(room_id)
+        {
+            anyhow::bail!("spy: update_room_children failed");
+        }
+
+        let mut resources = self.resources.lock().unwrap();
+        let rooms = resources
+            .entry("room".to_string())
+            .or_insert_with(|| serde_json::json!({"data": []}));
+        let room = rooms
+            .get_mut("data")
+            .and_then(|value| value.as_array_mut())
+            .and_then(|rooms| {
+                rooms
+                    .iter_mut()
+                    .find(|room| room.get("id").and_then(|value| value.as_str()) == Some(room_id))
+            })
+            .ok_or_else(|| anyhow::anyhow!("spy: room not found: {}", room_id))?;
+        room["children"] = serde_json::Value::Array(
+            device_ids
+                .iter()
+                .map(|device_id| serde_json::json!({"rid": device_id, "rtype": "device"}))
+                .collect(),
+        );
+        Ok(())
     }
 }
 

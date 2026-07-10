@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{info, warn};
+use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::{ButtonAction, HubRegistry, RuntimeHandle};
 use serde::{Deserialize, Serialize};
 
@@ -316,6 +317,23 @@ pub trait HubProvider: Send + Sync {
 // ExternalLightHubIntegration — integration lifecycle bundled for platform crates
 // ============================================================================
 
+/// Integration-neutral context for a requested canonical device move.
+#[derive(Clone, Debug)]
+pub struct HubDeviceRoomAssignment {
+    pub hub_key: HubKey,
+    pub native_device_id: String,
+    pub device_type: DeviceType,
+    pub target_rhythm_room_id: Option<String>,
+    pub target_hub_room_ids: Vec<String>,
+}
+
+/// Whether an integration changed its authoritative native room membership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HubDeviceRoomAssignmentOutcome {
+    Unchanged,
+    Reassigned { target_hub_room_id: Option<String> },
+}
+
 /// Bundles everything a platform crate needs from an integration.
 ///
 /// Integration crates provide a static `INTEGRATION` value that platform
@@ -386,6 +404,20 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// routing is rebuilt. Default is a no-op.
     fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
         Ok(())
+    }
+
+    /// Prepare an integration-native device room assignment before Rhythm
+    /// commits the corresponding topology change.
+    ///
+    /// Integrations whose native room membership is authoritative override
+    /// this. Returning an error aborts the Rhythm-side move so the two
+    /// topologies cannot silently diverge.
+    fn prepare_device_room_assignment(
+        &self,
+        _state: &SharedState,
+        _assignment: &HubDeviceRoomAssignment,
+    ) -> Result<HubDeviceRoomAssignmentOutcome> {
+        Ok(HubDeviceRoomAssignmentOutcome::Unchanged)
     }
 
     /// Optional interceptor for auto-filling credentials on specific platforms.
@@ -998,6 +1030,12 @@ pub struct IntegrationCallbacks {
     pub register_controller_fn: Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
     /// Synchronize integration-managed topology groups.
     pub sync_topology_groups_fn: Arc<dyn Fn(&SharedState) -> Result<()> + Send + Sync>,
+    /// Give each integration a pre-commit device room assignment hook.
+    pub prepare_hub_device_room_assignment_fn: Arc<
+        dyn Fn(&SharedState, &HubDeviceRoomAssignment) -> Result<HubDeviceRoomAssignmentOutcome>
+            + Send
+            + Sync,
+    >,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::PairingSession>
@@ -1090,6 +1128,21 @@ pub fn integration_callbacks(
         Ok(())
     });
 
+    let prepare_hub_device_room_assignment_fn = Arc::new(
+        move |state: &SharedState,
+              assignment: &HubDeviceRoomAssignment|
+              -> Result<HubDeviceRoomAssignmentOutcome> {
+            let integration = find_integration(integrations, assignment.hub_key.hub_type.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No integration for hub type '{}'",
+                        assignment.hub_key.hub_type.as_str()
+                    )
+                })?;
+            integration.prepare_device_room_assignment(state, assignment)
+        },
+    );
+
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -1139,6 +1192,7 @@ pub fn integration_callbacks(
         get_hub_provider_fn,
         register_controller_fn,
         sync_topology_groups_fn,
+        prepare_hub_device_room_assignment_fn,
         start_pairing_fn,
         start_unpairing_fn,
         run_device_test_fn,

@@ -294,6 +294,49 @@ impl HueTransport for ReqwestHueTransport {
 
         Ok(resp.json()?)
     }
+
+    fn update_room_children(
+        &self,
+        username: &str,
+        room_id: &str,
+        device_ids: &[String],
+    ) -> Result<()> {
+        let url = format!("{}/clip/v2/resource/room/{}", self.base_url(), room_id);
+        let children = device_ids
+            .iter()
+            .map(|device_id| serde_json::json!({"rid": device_id, "rtype": "device"}))
+            .collect::<Vec<_>>();
+        let resp = self
+            .client
+            .put(&url)
+            .header("hue-application-key", username)
+            .json(&serde_json::json!({"children": children}))
+            .send()?;
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "PUT room/{} failed with status {}: {}",
+                room_id,
+                status,
+                body
+            ));
+        }
+
+        let envelope: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            anyhow::anyhow!("PUT room/{} returned invalid JSON: {}", room_id, error)
+        })?;
+        if let Some(errors) = envelope.get("errors").and_then(|value| value.as_array()) {
+            if !errors.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "PUT room/{} returned Hue errors: {}",
+                    room_id,
+                    serde_json::Value::Array(errors.clone())
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
