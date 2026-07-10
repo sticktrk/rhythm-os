@@ -48,11 +48,13 @@ class BleProvisioningResult {
   final String ip;
   final String? ownerToken;
   final bool restartPending;
+  final bool updateInProgress;
 
   const BleProvisioningResult({
     required this.ip,
     this.ownerToken,
     this.restartPending = false,
+    this.updateInProgress = false,
   });
 }
 
@@ -582,6 +584,8 @@ class BleProvisioningService {
         ip: ip,
         ownerToken:
             ownerToken == null || ownerToken.isEmpty ? null : ownerToken,
+        updateInProgress:
+            status.status == 'updating' && status.otaStage != 'up_to_date',
       );
     }
 

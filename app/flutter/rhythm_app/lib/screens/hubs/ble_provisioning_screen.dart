@@ -53,6 +53,20 @@ bool bleProvisioningSupportsPlatformForTesting({
 }
 
 @visibleForTesting
+bool bleProvisioningShowsUpdateStatusForTesting(
+  ProvisioningStatusMessage status,
+) {
+  return status.status == 'updating' || status.status == 'restarting';
+}
+
+@visibleForTesting
+bool bleProvisioningNeedsLanRestartWaitForTesting(
+  BleProvisioningResult result,
+) {
+  return result.restartPending || result.updateInProgress;
+}
+
+@visibleForTesting
 String? bleProvisioningKnownHomeNameForTesting({
   required String deviceName,
   required Iterable<AccountHomeServerHubs> homeEntries,
@@ -876,19 +890,21 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _provisionedIp = ip;
     });
 
-    final online = result.restartPending
+    final needsLanRestartWait =
+        bleProvisioningNeedsLanRestartWaitForTesting(result);
+    final online = needsLanRestartWait
         ? await _waitForServerRestartAndHealth(ip)
         : await _waitForServerHealth(ip);
     if (!mounted) return;
     if (!online) {
       AnalyticsService().logEvent('ble_provisioning_failed', {
-        'stage': result.restartPending
+        'stage': needsLanRestartWait
             ? 'post_update_health_timeout'
             : 'health_timeout',
       });
       setState(() {
         _phase = _ProvisioningPhase.error;
-        _errorMessage = result.restartPending
+        _errorMessage = needsLanRestartWait
             ? 'Your Rhythm Box installed an update but did not come back online in time. Make sure you\'re on the same network and try again.'
             : 'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
       });
@@ -978,17 +994,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     if (status.ip != null && status.ip!.isNotEmpty) {
       _provisionedIp = status.ip;
     }
-    if (status.isConnected) {
-      setState(() {
-        _phase = _ProvisioningPhase.provisioning;
-        _provisioningStatusMessage = null;
-      });
-    } else if (status.status == 'updating' || status.status == 'restarting') {
+    if (bleProvisioningShowsUpdateStatusForTesting(status)) {
       final message = status.message?.trim();
       setState(() {
         _phase = _ProvisioningPhase.updating;
         _provisioningStatusMessage =
             message == null || message.isEmpty ? null : message;
+      });
+    } else if (status.isConnected) {
+      setState(() {
+        _phase = _ProvisioningPhase.provisioning;
+        _provisioningStatusMessage = null;
       });
     } else if (status.status == 'connecting') {
       setState(() {

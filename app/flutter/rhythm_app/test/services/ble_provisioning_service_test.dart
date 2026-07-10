@@ -297,6 +297,21 @@ void main() {
 
       expect(result.ip, '192.168.1.160');
       expect(result.restartPending, isFalse);
+      expect(result.updateInProgress, isTrue);
+    });
+
+    test('maps up-to-date handoff to no update in progress', () {
+      final result = BleProvisioningService.resultFromTerminalStatus(
+        const ProvisioningStatusMessage(
+          status: 'updating',
+          ip: '192.168.1.162',
+          otaStage: 'up_to_date',
+          message: 'Device is already on the latest stable update',
+        ),
+      );
+
+      expect(result.restartPending, isFalse);
+      expect(result.updateInProgress, isFalse);
     });
 
     test('does not hide BLE disconnect before update progress', () async {
