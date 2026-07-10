@@ -32,6 +32,24 @@ release.sh ── tag ────▶│ ci.yml: release-plan → binaries (+ima
   anything about the channel. (Historically `auto_update=false` silently moved
   a device to the beta feed; that coupling is gone.)
 
+### Stable promotion evidence
+
+`promote-stable.sh` verifies that the remote beta tag matches the local tag and
+that the public `rpiz/manifest.json` exposes that exact beta package before it
+creates a stable tag. This prevents promoting a tag while its beta publish is
+still missing or stale.
+
+Add `--device http://HOST:54448 --token-file FILE --scenario smoke|state|onboarding|ota`
+to verify the exact package on a bench device and write a local receipt under
+`.release-evidence/`. Device evidence is optional so routine iteration remains
+fast. An emergency bypass must be explicit:
+
+```bash
+./tools/os/scripts/promote-stable.sh \
+  --skip-beta-verification \
+  --reason "documented incident reason"
+```
+
 ## Payload tiers: binary vs image
 
 | | Binary (package) | Full image (rootfs) |

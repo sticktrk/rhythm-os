@@ -13040,6 +13040,10 @@ mod tests {
             self.turn_on_calls.lock().unwrap().clone()
         }
 
+        fn clear_turn_on_calls(&self) {
+            self.turn_on_calls.lock().unwrap().clear();
+        }
+
         fn wait_for_turn_on_calls(&self, expected: usize) -> Vec<String> {
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
             loop {
@@ -23575,6 +23579,7 @@ mod tests {
         wait_for_sync_count(&sync_count, 1);
         do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
         wait_for_sync_count(&sync_count, 2);
+        recording.clear_turn_on_calls();
 
         futures::executor::block_on(
             composite.turn_on(&room_id, rhythm_core::LightingCommand::new(80, 4000)),
@@ -23664,6 +23669,7 @@ mod tests {
         wait_for_sync_count(&sync_attempts, 1);
         do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
         wait_for_sync_count(&sync_attempts, 2);
+        recording.clear_turn_on_calls();
 
         futures::executor::block_on(
             composite.turn_on(&room_id, rhythm_core::LightingCommand::new(80, 4000)),

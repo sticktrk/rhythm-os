@@ -34,6 +34,13 @@ WITH_IMAGE=false
 NO_IMAGE=false
 IMAGE_MODE="auto"
 IMAGE_MODE_EXPLICIT=false
+VERIFY_DEVICE=""
+VERIFY_TOKEN_FILE=""
+VERIFY_SCENARIO="smoke"
+VERIFY_RECEIPT=""
+VERIFY_WAIT_SECONDS=""
+SKIP_BETA_VERIFICATION=false
+SKIP_VERIFY_REASON=""
 WORKSPACE_LOCK_FILES=("Cargo.lock")
 WORKSPACE_VERSION_FILES=("Cargo.toml" "${WORKSPACE_LOCK_FILES[@]}" "os/install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="os/install/rpiz/builder-image.lock"
@@ -73,6 +80,14 @@ Options:
   --remote NAME     Remote to push to (default: origin)
   --no-push         Create the local tag but do not push branch or tag
   --dry-run         Print the planned tag/push actions without changing git state
+  --device URL      With --promote-stable, verify this rpiz before promotion
+  --token-file FILE With --promote-stable, read the rpiz bearer token from FILE
+  --scenario NAME   With --promote-stable: smoke, state, onboarding, or ota
+  --receipt FILE    With --promote-stable, write the verification receipt here
+  --wait-seconds N  With --promote-stable, wait for the public beta manifest
+  --skip-beta-verification
+                    Emergency stable-promotion escape hatch; requires --reason
+  --reason TEXT     Explanation for --skip-beta-verification
   --skip-builder-refresh
                     Do not invoke tools/os/scripts/build/refresh-builder-image.sh. Use
                     this when cutting a release from a non-Linux machine or
@@ -159,6 +174,34 @@ while [[ $# -gt 0 ]]; do
         --dry-run)
             DRY_RUN=true
             shift
+            ;;
+        --device)
+            VERIFY_DEVICE="${2:?--device requires a value}"
+            shift 2
+            ;;
+        --token-file)
+            VERIFY_TOKEN_FILE="${2:?--token-file requires a value}"
+            shift 2
+            ;;
+        --scenario)
+            VERIFY_SCENARIO="${2:?--scenario requires a value}"
+            shift 2
+            ;;
+        --receipt)
+            VERIFY_RECEIPT="${2:?--receipt requires a value}"
+            shift 2
+            ;;
+        --wait-seconds)
+            VERIFY_WAIT_SECONDS="${2:?--wait-seconds requires a value}"
+            shift 2
+            ;;
+        --skip-beta-verification)
+            SKIP_BETA_VERIFICATION=true
+            shift
+            ;;
+        --reason)
+            SKIP_VERIFY_REASON="${2:?--reason requires a value}"
+            shift 2
             ;;
         --skip-builder-refresh)
             SKIP_BUILDER_REFRESH=true
@@ -519,10 +562,42 @@ if [ "$PROMOTE_STABLE" = true ]; then
     if [ -n "$promote_version" ]; then
         promote_args+=(--version "$promote_version")
     fi
+    if [ -n "$VERIFY_DEVICE" ]; then
+        promote_args+=(--device "$VERIFY_DEVICE")
+    fi
+    if [ -n "$VERIFY_TOKEN_FILE" ]; then
+        promote_args+=(--token-file "$VERIFY_TOKEN_FILE")
+    fi
+    if [ "$VERIFY_SCENARIO" != "smoke" ]; then
+        promote_args+=(--scenario "$VERIFY_SCENARIO")
+    fi
+    if [ -n "$VERIFY_RECEIPT" ]; then
+        promote_args+=(--receipt "$VERIFY_RECEIPT")
+    fi
+    if [ -n "$VERIFY_WAIT_SECONDS" ]; then
+        promote_args+=(--wait-seconds "$VERIFY_WAIT_SECONDS")
+    fi
+    if [ "$SKIP_BETA_VERIFICATION" = true ]; then
+        promote_args+=(--skip-beta-verification)
+    fi
+    if [ -n "$SKIP_VERIFY_REASON" ]; then
+        promote_args+=(--reason "$SKIP_VERIFY_REASON")
+    fi
 
     # ${arr[@]+...} expansion: bash 3.2 (macOS) errors on "${arr[@]}" when the
     # array is empty under set -u.
     exec "$SCRIPT_DIR/promote-stable.sh" ${promote_args[@]+"${promote_args[@]}"}
+fi
+
+if [ -n "$VERIFY_DEVICE" ] \
+    || [ -n "$VERIFY_TOKEN_FILE" ] \
+    || [ "$VERIFY_SCENARIO" != "smoke" ] \
+    || [ -n "$VERIFY_RECEIPT" ] \
+    || [ -n "$VERIFY_WAIT_SECONDS" ] \
+    || [ "$SKIP_BETA_VERIFICATION" = true ] \
+    || [ -n "$SKIP_VERIFY_REASON" ]; then
+    echo "Error: beta verification options are only valid with --promote-stable" >&2
+    exit 1
 fi
 
 if [ "$WITH_IMAGE" = true ] && [ "$UPLOAD" = true ]; then
