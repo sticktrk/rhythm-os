@@ -1861,13 +1861,18 @@ printf '%s\n' "$1" > "$dir/marker"
             "init script start should not block API request"
         );
 
-        for _ in 0..20 {
-            if marker.exists() {
-                break;
+        let marker_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let marker_contents = loop {
+            match std::fs::read_to_string(&marker) {
+                Ok(contents) if contents.trim() == "restart" => break contents,
+                Ok(_) | Err(_) if std::time::Instant::now() < marker_deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(contents) => panic!("unexpected init script marker contents: {contents:?}"),
+                Err(error) => panic!("init script marker was not created: {error}"),
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        assert_eq!(std::fs::read_to_string(marker).unwrap().trim(), "restart");
+        };
+        assert_eq!(marker_contents.trim(), "restart");
 
         let _ = std::fs::remove_dir_all(root);
     }
