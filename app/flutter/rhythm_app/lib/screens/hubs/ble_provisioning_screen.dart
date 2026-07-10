@@ -60,6 +60,13 @@ bool bleProvisioningShowsUpdateStatusForTesting(
 }
 
 @visibleForTesting
+bool bleProvisioningNeedsLanRestartWaitForTesting(
+  BleProvisioningResult result,
+) {
+  return result.restartPending || result.updateInProgress;
+}
+
+@visibleForTesting
 String? bleProvisioningKnownHomeNameForTesting({
   required String deviceName,
   required Iterable<AccountHomeServerHubs> homeEntries,
@@ -876,52 +883,28 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   }
 
   Future<void> _finishProvisioning(BleProvisioningResult result) async {
+    final ip = result.ip;
     if (!mounted) return;
-
-    var completedResult = result;
-    if (result.updateInProgress) {
-      ProvisioningStatusMessage? completedStatus;
-      try {
-        completedStatus = await _bleService.waitForPostHandoffUpdate(
-          onStatus: _handleProvisioningStatus,
-        );
-      } catch (error) {
-        debugPrint(
-          '[BLE] update progress handoff ended before a terminal status: '
-          '$error',
-        );
-        completedResult = BleProvisioningResult(
-          ip: result.ip,
-          ownerToken: result.ownerToken,
-          restartPending: true,
-        );
-      }
-      if (completedStatus != null) {
-        completedResult =
-            BleProvisioningService.resultFromTerminalStatus(completedStatus);
-      }
-    }
-    if (!mounted) return;
-
-    final ip = completedResult.ip;
 
     setState(() {
       _provisionedIp = ip;
     });
 
-    final online = completedResult.restartPending
+    final needsLanRestartWait =
+        bleProvisioningNeedsLanRestartWaitForTesting(result);
+    final online = needsLanRestartWait
         ? await _waitForServerRestartAndHealth(ip)
         : await _waitForServerHealth(ip);
     if (!mounted) return;
     if (!online) {
       AnalyticsService().logEvent('ble_provisioning_failed', {
-        'stage': completedResult.restartPending
+        'stage': needsLanRestartWait
             ? 'post_update_health_timeout'
             : 'health_timeout',
       });
       setState(() {
         _phase = _ProvisioningPhase.error;
-        _errorMessage = completedResult.restartPending
+        _errorMessage = needsLanRestartWait
             ? 'Your Rhythm Box installed an update but did not come back online in time. Make sure you\'re on the same network and try again.'
             : 'Your Rhythm Box joined Wi-Fi at $ip but didn\'t come online in time. Make sure you\'re on the same network and try again.';
       });
@@ -930,7 +913,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
     final ownerToken = await _resolveOwnerTokenAfterProvisioning(
       ip,
-      completedResult.ownerToken ?? result.ownerToken,
+      result.ownerToken,
     );
     if (!mounted) return;
 

@@ -86,6 +86,29 @@ void main() {
     });
   });
 
+  group('bleProvisioningNeedsLanRestartWaitForTesting', () {
+    test('uses LAN restart monitoring after an update handoff', () {
+      expect(
+        bleProvisioningNeedsLanRestartWaitForTesting(
+          const BleProvisioningResult(
+            ip: '192.168.1.155',
+            updateInProgress: true,
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('uses the ordinary LAN health check when no update is running', () {
+      expect(
+        bleProvisioningNeedsLanRestartWaitForTesting(
+          const BleProvisioningResult(ip: '192.168.1.155'),
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('bleProvisioningKnownHomeNameForTesting', () {
     test('matches a specific BLE device name to a saved server hub home', () {
       final home = Home.create(

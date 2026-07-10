@@ -571,22 +571,6 @@ class BleProvisioningService {
     return resultFromTerminalStatus(status);
   }
 
-  Future<ProvisioningStatusMessage> waitForPostHandoffUpdate({
-    void Function(ProvisioningStatusMessage status)? onStatus,
-  }) async {
-    final statusChar = _statusChar;
-    if (statusChar == null) {
-      throw StateError('Not connected to a provisioning device');
-    }
-
-    return waitForPostHandoffUpdateStatusForTesting(
-      enableNotifications: () => statusChar.setNotifyValue(true),
-      statusUpdates: statusChar.onValueReceived.map(_parseStatus),
-      readStatus: () => _readStatus(statusChar),
-      onStatus: onStatus,
-    );
-  }
-
   static BleProvisioningResult resultFromTerminalStatus(
     ProvisioningStatusMessage status,
   ) {
@@ -651,35 +635,6 @@ class BleProvisioningService {
       staleStatusTimeout: staleProgressTimeout,
       recoverFromStaleStatus: _recoverStaleTerminalProvisioningStatus,
       stalledStatusTimeout: stalledStatusTimeout,
-    );
-  }
-
-  @visibleForTesting
-  static Future<ProvisioningStatusMessage>
-      waitForPostHandoffUpdateStatusForTesting({
-    required Future<void> Function() enableNotifications,
-    required Stream<ProvisioningStatusMessage> statusUpdates,
-    required Future<ProvisioningStatusMessage> Function() readStatus,
-    void Function(ProvisioningStatusMessage status)? onStatus,
-    Duration timeout = _provisioningTimeout,
-    Duration pollInterval = _statusPollInterval,
-    Duration operationTimeout = _bleOperationTimeout,
-    Duration? staleProgressTimeout = _staleProvisioningProgressTimeout,
-  }) {
-    return waitForMatchingProvisioningStatus(
-      enableNotifications: enableNotifications,
-      writePayload: () async {},
-      statusUpdates: statusUpdates,
-      readStatus: readStatus,
-      isMatch: _isPostHandoffUpdateTerminal,
-      timeoutMessage: 'Timed out waiting for the setup update to finish',
-      onStatus: onStatus,
-      timeout: timeout,
-      pollInterval: pollInterval,
-      operationTimeout: operationTimeout,
-      recoverFromReadError: _recoverPostHandoffUpdateReadError,
-      staleStatusTimeout: staleProgressTimeout,
-      recoverFromStaleStatus: _recoverStalePostHandoffUpdateStatus,
     );
   }
 
@@ -855,46 +810,6 @@ class BleProvisioningService {
       ip: ip,
       message: 'Continuing setup over LAN',
     );
-  }
-
-  static bool _isPostHandoffUpdateTerminal(
-    ProvisioningStatusMessage status,
-  ) {
-    if (status.status == 'updating') {
-      return status.otaStage == 'up_to_date';
-    }
-    return status.status == 'connected' ||
-        status.status == 'restarting' ||
-        status.status == 'wifi_failed' ||
-        status.status == 'failed';
-  }
-
-  static ProvisioningStatusMessage? _recoverStalePostHandoffUpdateStatus(
-    ProvisioningStatusMessage latestStatus,
-  ) {
-    if (latestStatus.status != 'updating' || !latestStatus.hasIp) {
-      return null;
-    }
-    if (latestStatus.otaStage == 'up_to_date') {
-      return latestStatus;
-    }
-    return ProvisioningStatusMessage(
-      status: 'restarting',
-      ip: latestStatus.ip!.trim(),
-      otaStage: 'restarting',
-      message: 'Waiting for the update to restart your Rhythm Box',
-    );
-  }
-
-  static ProvisioningStatusMessage? _recoverPostHandoffUpdateReadError(
-    Object error,
-    ProvisioningStatusMessage? latestStatus,
-  ) {
-    if (!_isBleDisconnectedError(error) && error is! TimeoutException) {
-      return null;
-    }
-    if (latestStatus == null) return null;
-    return _recoverStalePostHandoffUpdateStatus(latestStatus);
   }
 
   static ProvisioningStatusMessage? _recoverTerminalProvisioningReadError(

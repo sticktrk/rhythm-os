@@ -300,71 +300,16 @@ void main() {
       expect(result.updateInProgress, isTrue);
     });
 
-    test('keeps reporting update progress until the device restarts', () async {
-      final seen = <String>[];
-
-      final status =
-          await BleProvisioningService.waitForPostHandoffUpdateStatusForTesting(
-        enableNotifications: () async {},
-        statusUpdates: Stream<ProvisioningStatusMessage>.fromIterable(const [
-          ProvisioningStatusMessage(
-            status: 'updating',
-            ip: '192.168.1.161',
-            otaStage: 'installing',
-            message: 'Installing update',
-          ),
-          ProvisioningStatusMessage(
-            status: 'restarting',
-            ip: '192.168.1.161',
-            otaStage: 'restarting',
-            message: 'Updated, restarting',
-          ),
-        ]),
-        readStatus: () async => const ProvisioningStatusMessage(
-          status: 'updating',
-          ip: '192.168.1.161',
-          otaStage: 'installing',
-          message: 'Installing update',
-        ),
-        onStatus: (update) {
-          final message = update.message;
-          if (message != null) seen.add(message);
-        },
-        timeout: const Duration(seconds: 1),
-        pollInterval: const Duration(milliseconds: 5),
-        operationTimeout: const Duration(milliseconds: 20),
-      );
-
-      expect(status.status, 'restarting');
-      expect(seen, contains('Installing update'));
-      expect(seen, contains('Updated, restarting'));
-    });
-
-    test('finishes update progress without a reboot when already current',
-        () async {
-      final status =
-          await BleProvisioningService.waitForPostHandoffUpdateStatusForTesting(
-        enableNotifications: () async {},
-        statusUpdates: Stream<ProvisioningStatusMessage>.value(
-          const ProvisioningStatusMessage(
-            status: 'updating',
-            ip: '192.168.1.162',
-            otaStage: 'up_to_date',
-            message: 'Device is already on the latest stable update',
-          ),
-        ),
-        readStatus: () async => const ProvisioningStatusMessage(
+    test('maps up-to-date handoff to no update in progress', () {
+      final result = BleProvisioningService.resultFromTerminalStatus(
+        const ProvisioningStatusMessage(
           status: 'updating',
           ip: '192.168.1.162',
-          otaStage: 'checking',
+          otaStage: 'up_to_date',
+          message: 'Device is already on the latest stable update',
         ),
-        timeout: const Duration(seconds: 1),
-        pollInterval: const Duration(milliseconds: 5),
-        operationTimeout: const Duration(milliseconds: 20),
       );
 
-      expect(status.otaStage, 'up_to_date');
-      final result = BleProvisioningService.resultFromTerminalStatus(status);
       expect(result.restartPending, isFalse);
       expect(result.updateInProgress, isFalse);
     });
