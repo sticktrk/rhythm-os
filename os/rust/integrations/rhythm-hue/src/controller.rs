@@ -1121,6 +1121,36 @@ mod tests {
     }
 
     #[test]
+    fn direct_device_target_transport_failures_include_device_context() {
+        let (controller, _) = make_spy_controller();
+        controller.client.set_should_fail(true);
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["orphan".to_string()],
+        };
+
+        let read_error = block_on(controller.any_lights_on_target(&target)).unwrap_err();
+        assert!(read_error
+            .to_string()
+            .contains("Failed to check Hue light orphan for device orphan"));
+
+        let on_error = block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000)))
+            .unwrap_err();
+        assert!(on_error
+            .to_string()
+            .contains("Failed to turn on Hue light orphan for device orphan"));
+
+        let off_error = block_on(controller.turn_off_target(&target, None)).unwrap_err();
+        assert!(off_error
+            .to_string()
+            .contains("Failed to turn off Hue light orphan for device orphan"));
+
+        let identify_error = block_on(controller.flash_target(&target)).unwrap_err();
+        assert!(identify_error
+            .to_string()
+            .contains("Hue identify_light failed for orphan (device orphan)"));
+    }
+
+    #[test]
     fn no_dynamics_when_no_transition() {
         let (controller, _) = make_spy_controller();
 

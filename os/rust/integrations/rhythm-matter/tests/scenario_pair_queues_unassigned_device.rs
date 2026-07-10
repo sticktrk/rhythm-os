@@ -5,6 +5,7 @@ mod harness;
 
 use rhythm_core::{RhythmMode, RoomModeState};
 use rhythm_os::canonical::identity::HubKey;
+use rhythm_os::commands;
 use rhythm_os::hub::{ExternalLightHubIntegration, HubType};
 
 #[test]
@@ -58,18 +59,37 @@ fn scenario_pair_queues_unassigned_device() {
         state.canonical_registry.triage().pending_unassigned_count(),
         1
     );
+    let triage_id = state
+        .canonical_registry
+        .triage()
+        .pending_by_kind(rhythm_os::canonical::triage::TriageKind::UnassignedDevice)
+        .first()
+        .expect("paired roomless Matter device should require triage")
+        .id
+        .clone();
     let topology_node = state
         .topology
         .get_device_node(&canonical_id)
         .expect("paired roomless Matter device should exist in topology immediately");
     assert_eq!(topology_node.parent_id, None);
-    let runtime = state
-        .hub_runtime()
-        .expect("pairing a roomless Matter device should bootstrap the runtime");
+    assert!(
+        state.hub_runtime().is_none(),
+        "pending roomless Matter devices should stay outside automatic control"
+    );
     drop(state);
 
+    let result = commands::do_triage_new_device(&rig.state, &triage_id)
+        .expect("explicit standalone confirmation should succeed");
+    assert!(result.contains(r#""status":"standalone""#));
+
+    let runtime = rig
+        .state
+        .lock()
+        .unwrap()
+        .hub_runtime()
+        .expect("standalone confirmation should bootstrap the runtime");
     let runtime_node = runtime
         .engine_node_snapshot(&canonical_id)
-        .expect("paired roomless Matter device should exist in the runtime");
+        .expect("confirmed standalone Matter device should exist in the runtime");
     assert_eq!(runtime_node.parent_id, None);
 }
