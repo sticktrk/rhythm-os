@@ -341,6 +341,7 @@ class _TriageScreenState extends State<TriageScreen> {
           entry: entry,
           busy: _busy,
           onAssignRoom: () => _resolveAssignRoom(entry),
+          onUseStandalone: () => _resolveNew(entry),
           onDismiss: () => _resolveDismiss(entry),
         ),
       );
@@ -921,6 +922,7 @@ class _UnassignedDeviceCard extends StatelessWidget {
   final Map<String, dynamic> entry;
   final bool busy;
   final VoidCallback onAssignRoom;
+  final VoidCallback onUseStandalone;
   final VoidCallback onDismiss;
 
   const _UnassignedDeviceCard({
@@ -928,6 +930,7 @@ class _UnassignedDeviceCard extends StatelessWidget {
     required this.entry,
     this.busy = false,
     required this.onAssignRoom,
+    required this.onUseStandalone,
     required this.onDismiss,
   });
 
@@ -1001,7 +1004,7 @@ class _UnassignedDeviceCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Text(
-            'This device does not have a Rhythm room yet.',
+            'This device does not have a Rhythm room yet. Rhythm will leave it paused until you assign it or explicitly use it standalone.',
             style: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.7),
               fontSize: 13,
@@ -1022,18 +1025,31 @@ class _UnassignedDeviceCard extends StatelessWidget {
             opacity: busy ? 0.5 : 1.0,
             child: IgnorePointer(
               ignoring: busy,
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: _ActionButton(
-                      label: 'Assign Room',
-                      color: const Color(0xFF81C784),
-                      onTap: onAssignRoom,
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _ActionButton(
+                          label: 'Assign Room',
+                          color: const Color(0xFF81C784),
+                          onTap: onAssignRoom,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _ActionButton(
+                          label: 'Use Standalone',
+                          color: CelestialColors.accentBlue,
+                          onTap: onUseStandalone,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(height: 8),
                   _ActionButton(
-                    label: 'Dismiss',
+                    label: 'Ignore Device',
                     color: CelestialColors.textSecondary,
                     onTap: onDismiss,
                   ),

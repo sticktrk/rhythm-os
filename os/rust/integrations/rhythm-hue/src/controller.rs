@@ -4,6 +4,7 @@
 //! via any `HueTransport` implementation. Controls rooms through grouped_light
 //! resources with color_temperature.mirek (no xy conversion needed).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -33,6 +34,7 @@ pub struct HueLightController<H: HueTransport> {
     client: H,
     username: String,
     registry: Arc<Mutex<HueDeviceRegistry>>,
+    light_resource_ids: Mutex<HashMap<String, String>>,
     capability_state: Option<SharedState>,
     capability_hub_key: Option<HubKey>,
 }
@@ -50,6 +52,7 @@ impl<H: HueTransport> HueLightController<H> {
             client,
             username,
             registry,
+            light_resource_ids: Mutex::new(HashMap::new()),
             capability_state: None,
             capability_hub_key: None,
         }
@@ -287,19 +290,65 @@ impl<H: HueTransport> HueLightController<H> {
         Some((room_id, grouped_light_id))
     }
 
+    /// Canonical Hue endpoints are device resource IDs because Hue rooms own
+    /// devices. Direct control, however, targets the device's `light` service
+    /// resource. Resolve that service lazily so grouped-room matching can keep
+    /// using device IDs while standalone bulbs use the correct V2 endpoint.
+    fn light_resource_id(&self, device_id: &str) -> String {
+        if let Some(light_id) = self
+            .light_resource_ids
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(device_id).cloned())
+        {
+            return light_id;
+        }
+
+        let resource_path = format!("device/{device_id}");
+        let light_id = self
+            .client
+            .get_resources(&self.username, &resource_path)
+            .ok()
+            .and_then(|response| {
+                response
+                    .pointer("/data/0/services")
+                    .and_then(|services| services.as_array())
+                    .and_then(|services| {
+                        services.iter().find_map(|service| {
+                            (service.get("rtype").and_then(|value| value.as_str()) == Some("light"))
+                                .then(|| service.get("rid").and_then(|value| value.as_str()))
+                                .flatten()
+                        })
+                    })
+                    .map(str::to_string)
+            });
+
+        let Some(light_id) = light_id else {
+            // Backward/forward compatibility: some callers may already supply
+            // a light resource ID, in which case device/{id} has no result.
+            return device_id.to_string();
+        };
+
+        if let Ok(mut cache) = self.light_resource_ids.lock() {
+            cache.insert(device_id.to_string(), light_id.clone());
+        }
+        light_id
+    }
+
     fn device_any_lights_on(&self, native_ids: &[String]) -> LightControlResult<bool> {
         if let Some((room_id, grouped_light_id)) = self.group_target_for_devices(native_ids) {
             return self.group_any_lights_on(&room_id, &grouped_light_id);
         }
 
         for native_id in native_ids {
+            let light_id = self.light_resource_id(native_id);
             let is_on = self
                 .client
-                .is_light_on(&self.username, native_id)
+                .is_light_on(&self.username, &light_id)
                 .map_err(|e| {
                     LightControlError::CommandFailed(format!(
-                        "Failed to check Hue light {}: {}",
-                        native_id, e
+                        "Failed to check Hue light {} for device {}: {}",
+                        light_id, native_id, e
                     ))
                 })?;
             if is_on {
@@ -326,9 +375,10 @@ impl<H: HueTransport> HueLightController<H> {
         let started = Instant::now();
 
         for native_id in native_ids {
+            let light_id = self.light_resource_id(native_id);
             if let Err(e) = self.client.set_light(
                 &self.username,
-                native_id,
+                &light_id,
                 true,
                 adapted.brightness,
                 adapted.kelvin,
@@ -338,15 +388,16 @@ impl<H: HueTransport> HueLightController<H> {
                 tracing::warn!(
                     target: "cmd",
                     event = "hue_light_turn_on_failed",
-                    light_id = %native_id,
+                    light_id = %light_id,
+                    device_id = %native_id,
                     target = %label,
                     latency_ms = started.elapsed().as_millis(),
                     error = %e,
                     "Hue light turn_on failed"
                 );
                 return Err(LightControlError::CommandFailed(format!(
-                    "Failed to turn on Hue light {}: {}",
-                    native_id, e
+                    "Failed to turn on Hue light {} for device {}: {}",
+                    light_id, native_id, e
                 )));
             }
         }
@@ -412,22 +463,24 @@ impl<H: HueTransport> HueLightController<H> {
         let started = Instant::now();
 
         for native_id in native_ids {
+            let light_id = self.light_resource_id(native_id);
             if let Err(e) =
                 self.client
-                    .set_light(&self.username, native_id, false, None, None, None, fade_ms)
+                    .set_light(&self.username, &light_id, false, None, None, None, fade_ms)
             {
                 tracing::warn!(
                     target: "cmd",
                     event = "hue_light_turn_off_failed",
-                    light_id = %native_id,
+                    light_id = %light_id,
+                    device_id = %native_id,
                     target = %label,
                     latency_ms = started.elapsed().as_millis(),
                     error = %e,
                     "Hue light turn_off failed"
                 );
                 return Err(LightControlError::CommandFailed(format!(
-                    "Failed to turn off Hue light {}: {}",
-                    native_id, e
+                    "Failed to turn off Hue light {} for device {}: {}",
+                    light_id, native_id, e
                 )));
             }
         }
@@ -567,12 +620,13 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
         }
 
         for native_id in &native_ids {
+            let light_id = self.light_resource_id(native_id);
             self.client
-                .identify_light(&self.username, native_id)
+                .identify_light(&self.username, &light_id)
                 .map_err(|e| {
                     LightControlError::CommandFailed(format!(
-                        "Hue identify_light failed for {}: {}",
-                        native_id, e
+                        "Hue identify_light failed for {} (device {}): {}",
+                        light_id, native_id, e
                     ))
                 })?;
         }
@@ -891,6 +945,54 @@ mod tests {
             }
             other => panic!("Expected SetLight, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn direct_device_target_resolves_and_caches_light_service_id() {
+        let (controller, _) = make_spy_controller();
+        controller.client.set_resource_response(
+            "device/orphan-device",
+            serde_json::json!({
+                "data": [{
+                    "id": "orphan-device",
+                    "services": [
+                        {"rtype": "zigbee_connectivity", "rid": "zigbee-1"},
+                        {"rtype": "light", "rid": "light-service-1"}
+                    ]
+                }]
+            }),
+        );
+
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["orphan-device".to_string()],
+        };
+        block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000))).unwrap();
+        block_on(controller.turn_off_target(&target, None)).unwrap();
+
+        let light_ids: Vec<String> = controller
+            .client
+            .set_light_calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                HueTransportCall::SetLight { light_id, .. } => Some(light_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(light_ids, vec!["light-service-1", "light-service-1"]);
+        assert_eq!(
+            controller
+                .client
+                .calls()
+                .into_iter()
+                .filter(|call| matches!(
+                    call,
+                    HueTransportCall::GetResources { resource_type }
+                        if resource_type == "device/orphan-device"
+                ))
+                .count(),
+            1,
+            "the device-to-light mapping should be reused after the first lookup"
+        );
     }
 
     #[test]

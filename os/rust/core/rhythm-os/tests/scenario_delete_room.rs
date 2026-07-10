@@ -78,6 +78,11 @@ fn delete_room_unassigns_devices_and_queues_triage() {
         .expect("runtime should exist after sync")
         .engine_room_snapshot(&room_id)
         .is_none());
+    assert!(state
+        .hub_runtime()
+        .expect("runtime should exist after sync")
+        .engine_node_snapshot(&canonical_id)
+        .is_none());
 }
 
 #[test]
@@ -104,7 +109,7 @@ fn backup_restore_after_room_delete_preserves_unassigned_device_nodes() {
     assert!(bundle.installation.rooms.get(&room_id).is_none());
     assert!(
         bundle.installation.rooms.get(&canonical_id).is_some(),
-        "standalone device runtime state should be backed up"
+        "quarantined device settings should remain in the backup for later recovery"
     );
 
     let restored = TestHarness::new();
@@ -126,5 +131,16 @@ fn backup_restore_after_room_delete_preserves_unassigned_device_nodes() {
             .room_id
             .as_deref(),
         None
+    );
+    assert_eq!(
+        state.canonical_registry.triage().pending_unassigned_count(),
+        1
+    );
+    assert!(
+        state
+            .hub_runtime()
+            .and_then(|runtime| runtime.engine_node_snapshot(&canonical_id))
+            .is_none(),
+        "restored pending device should stay outside the automatic runtime"
     );
 }

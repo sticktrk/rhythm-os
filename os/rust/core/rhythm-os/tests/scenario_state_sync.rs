@@ -229,6 +229,14 @@ fn standby_toggle_controls_off_light_device_node() {
     let harness = harness.with_discovery(vec![], vec![light("matter-100", "")]);
     harness.sync();
 
+    let triage_id = harness
+        .triage_pending_ids()
+        .into_iter()
+        .next()
+        .expect("roomless light should require an explicit standalone decision");
+    let result = harness.triage_new(&triage_id).unwrap();
+    assert!(result.contains(r#""status":"standalone""#));
+
     let node_id = {
         let s = harness.state.lock().unwrap();
         s.canonical_registry
