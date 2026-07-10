@@ -913,6 +913,15 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     danger: true
   },
   {
+    id: 'cloud-join-proof',
+    category: 'Remote & Cloud',
+    label: 'Create cloud join proof',
+    description: 'Create a short-lived owner-authenticated proof for joining this server to a cloud Home.',
+    method: 'POST',
+    path: 'api/cloud/join-proof',
+    danger: true
+  },
+  {
     id: 'history-get',
     category: 'Remote & Cloud',
     label: 'Read history',

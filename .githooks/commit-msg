@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -euo pipefail
+
+MESSAGE_FILE="${1:?commit message file required}"
+SUBJECT="$(sed -n '1p' "$MESSAGE_FILE")"
+NORMALIZED="$(printf '%s' "$SUBJECT" | tr '[:upper:]' '[:lower:]')"
+
+case "$NORMALIZED" in
+    work|fix|fmt|test|version|amend|update|upate|app\ updates|flutter\ ui\ work|more\ ui\ work|remote\ access\ stuff|fix\ cards|fix\ release\ stuff)
+        echo "WARN: generic commit subject '$SUBJECT' makes release and incident history harder to use." >&2
+        echo "      Prefer an imperative outcome, for example: 'Isolate Matter dispatch timeouts'." >&2
+        if [ "$(git config --bool rhythm.strictHooks 2>/dev/null || echo false)" = "true" ]; then
+            exit 1
+        fi
+        ;;
+esac

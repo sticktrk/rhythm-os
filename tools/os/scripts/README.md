@@ -25,6 +25,7 @@ This directory contains all build and deployment scripts for Rhythm OS.
 ./tools/os/scripts/deploy-addon.sh --local       # Deploy to local HA for testing
 ./tools/os/scripts/release.sh                    # Tag + push a beta release (CI publishes; image auto-detected)
 ./tools/os/scripts/release.sh --promote-stable   # Promote latest beta tag to the stable feed
+./tools/os/scripts/verify-beta-release.sh        # Prove beta feed and optional bench device; write receipt
 ./tools/os/scripts/release.sh --upload           # Escape hatch: build + upload the rpiz OTA feed locally
 ```
 
@@ -44,6 +45,7 @@ Mostly invoked by the main flows above, but usable standalone:
 | `promote-stable.sh` | Promote a tested beta release to stable by creating the matching `-stable` tag |
 | `prune-server-releases.sh` | Prune old versioned release directories from the dl.rhythm.lighting server repo (manifest-referenced dirs are kept) |
 | `push-rpiz-dev.sh` | Fast dev loop: cross-compile the appliance binary, scp it to a device, respawn init |
+| `verify-beta-release.sh` | Verify remote beta tag/public feed and optionally exact package + journey endpoints on a live rpiz |
 | `resolve-version.sh` | Resolve the current version for a shipped Rhythm artifact from Git tags |
 | `lib/` | Shared helpers sourced by the scripts above (`version.sh` semver/channel/feed, `artifact.sh` sha256/size/json) |
 | `tests/package-feed-sim.sh` | Local OTA feed lifecycle simulation (image release → binary carry-forward → dry-run); runs in CI |
@@ -242,6 +244,10 @@ Run `release.sh --help` for the full flag list.
 - Updates the root workspace version in `Cargo.toml` before tagging and mechanically syncs only local `rhythm-*` package versions in the root `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
+- Stable promotion verifies the matching remote beta tag and public beta
+  manifest before creating the stable tag. Add `--device URL --token-file FILE`
+  for a bench receipt. Emergency skips require
+  `--skip-beta-verification --reason TEXT`.
 
 ### Versioning
 

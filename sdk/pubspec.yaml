@@ -1,5 +1,5 @@
 name: rhythm_sdk
-description: Dart SDK for communicating with Rhythm Lighting servers (ESP32, rhythm-server, HA addon).
+description: Dart SDK for communicating with Rhythm Lighting servers, Linux appliances, and HA add-ons.
 version: 0.1.0
 publish_to: 'none'
 

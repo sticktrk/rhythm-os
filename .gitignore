@@ -19,8 +19,11 @@ target/
 # Downloaded/extracted app bug-report debug bundles (see /triage).
 .triage/
 
-# Local Codex skills/config and server-side secrets.
-.codex/
+# Repo-owned Codex skills are versioned; other Codex state remains local.
+.codex/*
+!.codex/skills/
+!.codex/skills/**
+.release-evidence/
 admin-api/.env
 
 # Local assistant/worktree scratch state.
