@@ -29,6 +29,9 @@ enum _ProvisioningPhase {
   error,
 }
 
+@visibleForTesting
+const bleProvisioningUpdateLabel = 'Updating Device';
+
 class _HomeNameCancelledException implements Exception {
   const _HomeNameCancelledException();
 }
@@ -114,11 +117,11 @@ Future<void> bleProvisioningAutoContinueForTesting({
   required VoidCallback showSuccess,
   required Future<void> Function() waitForSuccessFeedback,
   required bool Function() isMounted,
-  required VoidCallback continueToConnectHub,
+  required VoidCallback completeProvisioning,
 }) async {
   showSuccess();
   await waitForSuccessFeedback();
-  if (isMounted()) continueToConnectHub();
+  if (isMounted()) completeProvisioning();
 }
 
 @visibleForTesting
@@ -295,9 +298,9 @@ class BleProvisioningScreen extends StatefulWidget {
 
   final BleDevice? initialDevice;
 
-  static Future<void> show(BuildContext context, {BleDevice? initialDevice}) {
-    return Navigator.of(context).push(
-      PageRouteBuilder<void>(
+  static Future<bool?> show(BuildContext context, {BleDevice? initialDevice}) {
+    return Navigator.of(context).push<bool>(
+      PageRouteBuilder<bool>(
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
@@ -345,7 +348,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   BleDevice? _selectedDevice;
   BleDeviceInfo? _deviceInfo;
   String? _provisionedIp;
-  String? _provisioningStatusMessage;
   String? _errorMessage;
   String? _wifiErrorMessage;
   String? _wifiScanErrorMessage;
@@ -410,7 +412,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _selectedDevice = null;
         _deviceInfo = null;
         _provisionedIp = null;
-        _provisioningStatusMessage = null;
         _pendingPersistenceIp = null;
         _pendingPersistenceOwnerToken = null;
         _hasAttemptedScan = false;
@@ -577,7 +578,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
-      _provisioningStatusMessage = null;
       _hasAttemptedScan = true;
       _wifiScanInProgress = false;
       _manualSsidEntry = false;
@@ -819,7 +819,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _errorMessage = null;
       _wifiErrorMessage = null;
       _provisionedIp = null;
-      _provisioningStatusMessage = null;
     });
 
     try {
@@ -964,7 +963,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         const Duration(milliseconds: 750),
       ),
       isMounted: () => mounted,
-      continueToConnectHub: _close,
+      completeProvisioning: _complete,
     );
   }
 
@@ -995,21 +994,16 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _provisionedIp = status.ip;
     }
     if (bleProvisioningShowsUpdateStatusForTesting(status)) {
-      final message = status.message?.trim();
       setState(() {
         _phase = _ProvisioningPhase.updating;
-        _provisioningStatusMessage =
-            message == null || message.isEmpty ? null : message;
       });
     } else if (status.isConnected) {
       setState(() {
         _phase = _ProvisioningPhase.provisioning;
-        _provisioningStatusMessage = null;
       });
     } else if (status.status == 'connecting') {
       setState(() {
         _phase = _ProvisioningPhase.provisioning;
-        _provisioningStatusMessage = null;
       });
     }
   }
@@ -1264,7 +1258,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _selectedDevice = null;
       _deviceInfo = null;
       _provisionedIp = null;
-      _provisioningStatusMessage = null;
       _pendingPersistenceIp = null;
       _pendingPersistenceOwnerToken = null;
       _hasAttemptedScan = false;
@@ -1276,6 +1269,10 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
 
   void _close() {
     Navigator.of(context).pop();
+  }
+
+  void _complete() {
+    Navigator.of(context).pop(true);
   }
 
   @override
@@ -1423,9 +1420,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
               ? 'Connecting to your Wi-Fi network...'
               : 'Joined at $_provisionedIp — finishing setup...',
         ),
-      _ProvisioningPhase.updating => _buildProgressCard(
-          _provisioningStatusMessage ?? 'Updating to the latest version...',
-        ),
+      _ProvisioningPhase.updating =>
+        _buildProgressCard(bleProvisioningUpdateLabel),
       _ProvisioningPhase.success => _buildSuccessBody(),
       _ProvisioningPhase.error => _buildErrorBody(),
     };
@@ -1577,7 +1573,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ),
         const SizedBox(height: 16),
         _buildActionButton(
-          onTap: _close,
+          onTap: _complete,
           icon: Icons.arrow_forward_rounded,
           label: 'Continue',
           isPrimary: true,

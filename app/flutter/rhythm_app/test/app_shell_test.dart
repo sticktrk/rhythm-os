@@ -688,29 +688,31 @@ void main() {
 
     await tester.pump(const Duration(seconds: 5));
 
-    expect(find.text('Waking Remote Tunnel'), findsOneWidget);
-    expect(find.text('Checking tunnel...'), findsOneWidget);
+    expect(find.text('Connecting to Your Home'), findsOneWidget);
+    expect(find.text('Connecting...'), findsOneWidget);
     expect(find.text('Trying local'), findsNothing);
     expect(find.text('Trying remote'), findsNothing);
     expect(find.text('Retry Now'), findsNothing);
     expect(find.text('Forget Server'), findsNothing);
-    expect(find.text('Choose a different Home'), findsOneWidget);
+    expect(find.text('Choose a different Home'), findsNothing);
+    expect(find.byTooltip('Choose Home'), findsOneWidget);
 
     connection.setConnectionState(RhythmConnectionState.connecting);
     await tester.pump(const Duration(milliseconds: 10));
-    expect(find.text('Waking Remote Tunnel'), findsOneWidget);
+    expect(find.text('Connecting to Your Home'), findsOneWidget);
 
     connection.setConnectionState(RhythmConnectionState.connected);
     await tester.pump(const Duration(milliseconds: 10));
-    expect(find.text('Waking Remote Tunnel'), findsNothing);
+    expect(find.text('Connecting to Your Home'), findsNothing);
     _emitSyncedHello(connection);
     await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Add Hubs'), findsOneWidget);
   });
 
-  testWidgets('remote server unreachable screen indicates tunnel retry state',
+  testWidgets('remote server reconnect screen keeps generic retry state',
       (tester) async {
     final retryCompleter = Completer<void>();
+    var chooseHomeCalls = 0;
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.binding.setSurfaceSize(const Size(390, 844));
@@ -720,20 +722,25 @@ void main() {
           serverHub: _serverHub(remote: true),
           retryInterval: const Duration(minutes: 1),
           onRetry: () => retryCompleter.future,
-          onChooseHome: () {},
+          onChooseHome: () => chooseHomeCalls += 1,
         ),
       ),
     );
 
     await tester.pump();
-    expect(find.text('Waking Remote Tunnel'), findsOneWidget);
-    expect(find.text('Checking tunnel...'), findsOneWidget);
+    expect(find.text('Connecting to Your Home'), findsOneWidget);
+    expect(find.text('Connecting...'), findsOneWidget);
     expect(find.text('Trying local'), findsNothing);
     expect(find.text('Trying remote'), findsNothing);
 
     retryCompleter.complete();
     await tester.pump();
-    expect(find.text('Retrying tunnel soon...'), findsOneWidget);
+    expect(find.text('Retrying soon...'), findsOneWidget);
+    expect(find.textContaining('tunnel', findRichText: true), findsNothing);
+    expect(find.byTooltip('Choose Home'), findsOneWidget);
+    await tester.tap(find.byTooltip('Choose Home'));
+    await tester.pump();
+    expect(chooseHomeCalls, 1);
   });
 
   testWidgets('LAN server unreachable screen keeps generic retry state',
@@ -759,7 +766,7 @@ void main() {
 
     retryCompleter.complete();
     await tester.pump();
-    expect(find.text('Waiting to Retry...'), findsOneWidget);
+    expect(find.text('Retrying soon...'), findsOneWidget);
   });
 
   testWidgets('server unreachable screen follows provider connecting state',
@@ -796,8 +803,8 @@ void main() {
 
     await tester.pump();
 
-    expect(find.text('Checking tunnel...'), findsOneWidget);
-    expect(find.text('Retrying tunnel soon...'), findsNothing);
+    expect(find.text('Connecting...'), findsOneWidget);
+    expect(find.text('Retrying soon...'), findsNothing);
   });
 
   testWidgets('pops pushed routes when the paired server hub is removed',

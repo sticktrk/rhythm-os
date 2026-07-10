@@ -18,6 +18,7 @@ import 'package:rhythm_core/models/hub.dart' show Hub, HubEndpoint, HubType;
 import 'package:rhythm_core/providers/hub_discovery.dart' show DiscoveredHub;
 import 'solar_orbit.dart'; // For CelestialColors
 import 'success_modal.dart';
+import 'hub_picker_screen.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmApiException,
@@ -124,6 +125,18 @@ Hub rhythmDetachedServerHubForTesting({
       server,
       authToken: authToken,
     );
+
+@visibleForTesting
+Future<void> connectHubContinueAfterBleProvisioningForTesting({
+  required Future<bool?> Function() provisionBox,
+  required bool Function() isMounted,
+  required Future<void> Function() openHubPicker,
+}) async {
+  final completed = await provisionBox();
+  if (completed == true && isMounted()) {
+    await openHubPicker();
+  }
+}
 
 List<AccountHomeServerHubs> _mergeHomeEntries({
   required Iterable<AccountHomeServerHubs> localHomes,
@@ -2093,7 +2106,44 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Future<void> _openBleProvisioning([BleDevice? initialDevice]) async {
     AnalyticsService().logRhythmServerSetupTapped('ble');
     HapticFeedback.mediumImpact();
-    await BleProvisioningScreen.show(context, initialDevice: initialDevice);
+    await connectHubContinueAfterBleProvisioningForTesting(
+      provisionBox: () =>
+          BleProvisioningScreen.show(context, initialDevice: initialDevice),
+      isMounted: () => mounted,
+      openHubPicker: _openHubPicker,
+    );
+  }
+
+  Future<void> _openHubPicker() {
+    return Navigator.of(context).push<void>(
+      PageRouteBuilder<void>(
+        opaque: true,
+        pageBuilder: (routeContext, animation, secondaryAnimation) {
+          return HubPickerScreen(
+            onChooseHome: () {
+              Navigator.of(routeContext).pop();
+              if (mounted) _returnToHomeChooser();
+            },
+          );
+        },
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final curve = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          );
+          return SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 1),
+              end: Offset.zero,
+            ).animate(curve),
+            child: child,
+          );
+        },
+        transitionDuration: const Duration(milliseconds: 350),
+        reverseTransitionDuration: const Duration(milliseconds: 300),
+      ),
+    );
   }
 
   void _openAddDeviceScreen() {

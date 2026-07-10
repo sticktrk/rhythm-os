@@ -679,4 +679,47 @@ void main() {
       expect(hub.pendingSync, isFalse);
     });
   });
+
+  group('connectHubContinueAfterBleProvisioningForTesting', () {
+    test('opens the three-option hub picker after Box setup completes',
+        () async {
+      final events = <String>[];
+
+      await connectHubContinueAfterBleProvisioningForTesting(
+        provisionBox: () async {
+          events.add('box');
+          return true;
+        },
+        isMounted: () => true,
+        openHubPicker: () async => events.add('hub-picker'),
+      );
+
+      expect(events, ['box', 'hub-picker']);
+    });
+
+    test('does not open the hub picker when Box setup is cancelled', () async {
+      var openedHubPicker = false;
+
+      await connectHubContinueAfterBleProvisioningForTesting(
+        provisionBox: () async => null,
+        isMounted: () => true,
+        openHubPicker: () async => openedHubPicker = true,
+      );
+
+      expect(openedHubPicker, isFalse);
+    });
+
+    test('does not navigate after the Connect Hub screen is disposed',
+        () async {
+      var openedHubPicker = false;
+
+      await connectHubContinueAfterBleProvisioningForTesting(
+        provisionBox: () async => true,
+        isMounted: () => false,
+        openHubPicker: () async => openedHubPicker = true,
+      );
+
+      expect(openedHubPicker, isFalse);
+    });
+  });
 }

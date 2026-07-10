@@ -19,8 +19,7 @@ class ServerDisconnectedScreen extends StatefulWidget {
   final FutureOr<void> Function()? onRetry;
   final bool autoRetry;
 
-  /// Non-destructive escape hatch. When provided, a "Choose a different Home"
-  /// action is offered so the user is never trapped on this screen.
+  /// Non-destructive escape hatch shown as the standard top-left Home icon.
   final VoidCallback? onChooseHome;
 
   final Duration retryInterval;
@@ -169,13 +168,29 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
                       _buildTitle(),
                       const SizedBox(height: 8),
                       _buildRetryStatus(),
-                      if (widget.onChooseHome != null) _buildEscapeHatch(),
                       const SizedBox(height: 24),
                     ],
                   ),
                 ),
               ),
             ),
+            if (widget.onChooseHome != null)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 8,
+                left: 12,
+                child: IconButton(
+                  tooltip: 'Choose Home',
+                  onPressed: () {
+                    HapticFeedback.lightImpact();
+                    widget.onChooseHome?.call();
+                  },
+                  icon: Icon(
+                    Icons.home_rounded,
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.82),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -232,7 +247,7 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
   Widget _buildTitle() {
     final title = widget.title ??
         (widget.serverHub.remoteEndpoint != null
-            ? 'Waking Remote Tunnel'
+            ? 'Connecting to Your Home'
             : 'Server Unreachable');
     return Text(
       title,
@@ -258,7 +273,6 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
         key: ValueKey(retrying),
         color: _accent,
         retrying: retrying,
-        remoteEndpoint: widget.serverHub.remoteEndpoint != null,
       ),
     );
   }
@@ -270,68 +284,16 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
       return null;
     }
   }
-
-  /// Non-destructive way off this screen.
-  Widget _buildEscapeHatch() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const SizedBox(height: 16),
-        _buildChooseHomeButton(),
-      ],
-    );
-  }
-
-  Widget _buildChooseHomeButton() {
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.mediumImpact();
-        widget.onChooseHome?.call();
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 13),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          color: _accent.withValues(alpha: 0.08),
-          border: Border.all(
-            color: _accent.withValues(alpha: 0.22),
-            width: 1,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.swap_horiz_rounded,
-              color: _accent.withValues(alpha: 0.85),
-              size: 18,
-            ),
-            const SizedBox(width: 10),
-            Text(
-              'Choose a different Home',
-              style: TextStyle(
-                color: _accent.withValues(alpha: 0.9),
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 class _RetryStatusChip extends StatelessWidget {
   final Color color;
   final bool retrying;
-  final bool remoteEndpoint;
 
   const _RetryStatusChip({
     super.key,
     required this.color,
     required this.retrying,
-    required this.remoteEndpoint,
   });
 
   @override
@@ -373,10 +335,7 @@ class _RetryStatusChip extends StatelessWidget {
   }
 
   String get _statusText {
-    if (remoteEndpoint) {
-      return retrying ? 'Checking tunnel...' : 'Retrying tunnel soon...';
-    }
-    return retrying ? 'Connecting...' : 'Waiting to Retry...';
+    return retrying ? 'Connecting...' : 'Retrying soon...';
   }
 }
 

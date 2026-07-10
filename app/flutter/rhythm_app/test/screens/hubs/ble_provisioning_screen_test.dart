@@ -59,6 +59,10 @@ void main() {
   });
 
   group('bleProvisioningShowsUpdateStatusForTesting', () {
+    test('uses a stable user-facing update label', () {
+      expect(bleProvisioningUpdateLabel, 'Updating Device');
+    });
+
     test('keeps update UI visible after Wi-Fi handoff', () {
       expect(
         bleProvisioningShowsUpdateStatusForTesting(
@@ -411,17 +415,17 @@ void main() {
   });
 
   group('bleProvisioningAutoContinueForTesting', () {
-    test('shows success feedback and returns to Connect Hub', () async {
+    test('shows success feedback and completes provisioning', () async {
       final events = <String>[];
 
       await bleProvisioningAutoContinueForTesting(
         showSuccess: () => events.add('success'),
         waitForSuccessFeedback: () async => events.add('waited'),
         isMounted: () => true,
-        continueToConnectHub: () => events.add('continued'),
+        completeProvisioning: () => events.add('completed'),
       );
 
-      expect(events, ['success', 'waited', 'continued']);
+      expect(events, ['success', 'waited', 'completed']);
     });
 
     test('does not navigate after the provisioning screen is disposed',
@@ -432,7 +436,7 @@ void main() {
         showSuccess: () {},
         waitForSuccessFeedback: () async {},
         isMounted: () => false,
-        continueToConnectHub: () => continued = true,
+        completeProvisioning: () => continued = true,
       );
 
       expect(continued, isFalse);
