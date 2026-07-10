@@ -88,6 +88,12 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastAssignedDeviceId;
   String? lastAssignedParentId;
   bool assignDeviceParentResult = true;
+  List<Map<String, dynamic>>? triageEntries = const [];
+  int resolveTriageNewCalls = 0;
+  String? lastResolvedTriageEntryId;
+  Map<String, dynamic>? resolveTriageNewResultValue = const {
+    'status': 'standalone',
+  };
   int setTopologyNodeControlTargetsCalls = 0;
   String? lastControlSourceNodeId;
   String? lastControlKind;
@@ -182,6 +188,17 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
+
+  @override
+  Future<List<Map<String, dynamic>>?> getTriageEntries() async =>
+      triageEntries;
+
+  @override
+  Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) async {
+    resolveTriageNewCalls++;
+    lastResolvedTriageEntryId = entryId;
+    return resolveTriageNewResultValue;
+  }
 
   @override
   Future<void> nodePreferencesSet({
@@ -3719,10 +3736,18 @@ void main() {
     });
   });
 
-  testWidgets('Unassigned keeps a new matter bulb unassigned', (tester) async {
+  testWidgets('Unassigned activates a new matter bulb as standalone',
+      (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
+    api.triageEntries = [
+      {
+        'id': 'unassigned-light-1',
+        'kind': 'unassigned_device',
+        'canonical_id': 'light-1',
+      },
+    ];
     final connection = _HelloRhythmConnection(api);
     final assignmentResult = Completer<bool>();
     final provider = ServerSyncProvider(
@@ -3797,8 +3822,10 @@ void main() {
 
     expect(await assignmentResult.future, isTrue);
     expect(api.assignDeviceParentCalls, 0);
-    expect(connection.reconnectCalls, 0);
-    expect(find.text('Desk Lamp has no room assignment'), findsOneWidget);
+    expect(api.resolveTriageNewCalls, 1);
+    expect(api.lastResolvedTriageEntryId, 'unassigned-light-1');
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('Desk Lamp is ready to use standalone'), findsOneWidget);
   });
 
   testWidgets('Move to Room sheet scrolls when many rooms are available',
@@ -4139,6 +4166,13 @@ void main() {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
     final api = _FakeRhythmServerApi();
+    api.triageEntries = [
+      {
+        'id': 'unassigned-light-1',
+        'kind': 'unassigned_device',
+        'canonical_id': 'light-1',
+      },
+    ];
     final connection = _HelloRhythmConnection(api);
     final provider = ServerSyncProvider(
       connection: connection,
@@ -4230,8 +4264,10 @@ void main() {
     expect(api.assignDeviceParentCalls, 1);
     expect(api.lastAssignedDeviceId, 'light-1');
     expect(api.lastAssignedParentId, isNull);
+    expect(api.resolveTriageNewCalls, 1);
+    expect(api.lastResolvedTriageEntryId, 'unassigned-light-1');
     expect(connection.reconnectCalls, 1);
-    expect(find.text('Removed Desk Lamp from its room'), findsOneWidget);
+    expect(find.text('Desk Lamp is ready to use standalone'), findsOneWidget);
   });
 
   testWidgets('Room device flow removes motion sensors from a room',
