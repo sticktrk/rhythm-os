@@ -11,6 +11,8 @@ class RhythmAuthStatus {
     required this.ownerConfigured,
     required this.tokenCount,
     required this.claimAvailable,
+    this.authenticatedRole,
+    this.reportsAuthenticatedRole = false,
   });
 
   factory RhythmAuthStatus.fromJson(Map<String, dynamic> json) {
@@ -19,6 +21,8 @@ class RhythmAuthStatus {
       ownerConfigured: json['owner_configured'] == true,
       tokenCount: (json['token_count'] as num?)?.toInt() ?? 0,
       claimAvailable: json['claim_available'] == true,
+      authenticatedRole: json['authenticated_role']?.toString(),
+      reportsAuthenticatedRole: json.containsKey('authenticated_role'),
     );
   }
 
@@ -26,6 +30,10 @@ class RhythmAuthStatus {
   final bool ownerConfigured;
   final int tokenCount;
   final bool claimAvailable;
+  final String? authenticatedRole;
+  final bool reportsAuthenticatedRole;
+
+  bool get hasAuthenticatedOwner => authenticatedRole == 'owner';
 }
 
 class RhythmOwnerClaim {
@@ -154,6 +162,8 @@ class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
     required super.ownerConfigured,
     required super.tokenCount,
     required super.claimAvailable,
+    super.authenticatedRole,
+    super.reportsAuthenticatedRole,
     this.tokenId,
     this.token,
   });
@@ -164,6 +174,8 @@ class RhythmAuthSettingsUpdate extends RhythmAuthStatus {
       ownerConfigured: json['owner_configured'] == true,
       tokenCount: (json['token_count'] as num?)?.toInt() ?? 0,
       claimAvailable: json['claim_available'] == true,
+      authenticatedRole: json['authenticated_role']?.toString(),
+      reportsAuthenticatedRole: json.containsKey('authenticated_role'),
       tokenId: json['token_id']?.toString(),
       token: json['token']?.toString(),
     );
@@ -276,6 +288,7 @@ class RhythmAuthApi {
       throw RhythmApiException(
         'Failed to issue support token',
         statusCode: error.response?.statusCode,
+        serverMessage: _authResponseMessage(error.response?.data),
         cause: error,
       );
     }
@@ -309,6 +322,15 @@ class RhythmAuthApi {
       );
     }
   }
+}
+
+String? _authResponseMessage(Object? data) {
+  if (data is Map) {
+    final message = data['message']?.toString().trim();
+    if (message != null && message.isNotEmpty) return message;
+  }
+  final text = data?.toString().trim();
+  return text == null || text.isEmpty ? null : text;
 }
 
 String _normalizeBaseUrl(String baseUrl) {

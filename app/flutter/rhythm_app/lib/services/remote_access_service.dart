@@ -267,6 +267,19 @@ class RemoteAccessService {
 
     stableServerInstanceId =
         serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+    final provisionedHub = serverHub.copyWith(
+      remoteEndpoint: remoteEndpoint,
+      serverInstanceId: stableServerInstanceId,
+      updatedAt: DateTime.now(),
+      pendingSync: true,
+    );
+    if (!requireSupportGrant) {
+      // Grant while the phone still has a known-good LAN path. Waiting for a
+      // brand-new Cloudflare route first can delay this by minutes and lets a
+      // transient propagation failure strand admin access indefinitely.
+      unawaited(_grantSupportAccessForHub(provisionedHub));
+    }
+
     var routeVerified = false;
     try {
       final remoteHello = await _waitForRemoteRoute(
@@ -289,16 +302,13 @@ class RemoteAccessService {
       );
     }
 
-    final updatedHub = serverHub.copyWith(
-      remoteEndpoint: remoteEndpoint,
+    final updatedHub = provisionedHub.copyWith(
       serverInstanceId: stableServerInstanceId,
       updatedAt: DateTime.now(),
       pendingSync: true,
     );
     if (requireSupportGrant) {
       await _supportGrant(updatedHub).timeout(_supportGrantTimeout);
-    } else {
-      unawaited(_grantSupportAccessForHub(updatedHub));
     }
 
     return RemoteAccessEnableResult(

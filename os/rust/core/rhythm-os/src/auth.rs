@@ -406,6 +406,7 @@ pub fn handle_get_auth_status(
                     s.api_auth.tokens.len(),
                     request_info.claim_available,
                     request_info.via_remote_access,
+                    request_info.role,
                 )
                 .to_string(),
             )
@@ -562,6 +563,7 @@ pub fn handle_put_auth_settings(state: &SharedState, body: &Value) -> ApiRespons
                 update.token_count,
                 !update.require_api_auth || !update.owner_configured,
                 false,
+                None,
             );
             if let Some(object) = body.as_object_mut() {
                 object.insert("status".to_string(), json!("ok"));
@@ -638,6 +640,7 @@ fn auth_status_payload(
     token_count: usize,
     claim_available: bool,
     via_remote_access: bool,
+    authenticated_role: Option<ApiTokenRole>,
 ) -> Value {
     json!({
         "requires_auth": require_api_auth,
@@ -645,6 +648,10 @@ fn auth_status_payload(
         "token_count": token_count,
         "claim_available": claim_available,
         "via_remote_access": via_remote_access,
+        "authenticated_role": authenticated_role.map(|role| match role {
+            ApiTokenRole::Owner => "owner",
+            ApiTokenRole::Support => "support",
+        }),
     })
 }
 
@@ -1170,6 +1177,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn appliance_lan_auth_status_reports_whether_the_bearer_is_an_owner() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let owner = issue_local_owner_token(&state, Some("BLE Wi-Fi".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let invalid = app
+            .clone()
+            .oneshot({
+                let mut request = request_with_peer(
+                    Method::GET,
+                    "/api/auth/status",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::empty(),
+                );
+                request
+                    .headers_mut()
+                    .insert(AUTHORIZATION, "Bearer rhythm_owner_wrong".parse().unwrap());
+                request
+            })
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::OK);
+        let invalid_body = serde_json::from_slice::<Value>(
+            &to_bytes(invalid.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(invalid_body["authenticated_role"], Value::Null);
+
+        let valid = app
+            .oneshot({
+                let mut request = request_with_peer(
+                    Method::GET,
+                    "/api/auth/status",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::empty(),
+                );
+                request.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", owner.token).parse().unwrap(),
+                );
+                request
+            })
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+        let valid_body = serde_json::from_slice::<Value>(
+            &to_bytes(valid.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(valid_body["authenticated_role"], "owner");
     }
 
     #[tokio::test]

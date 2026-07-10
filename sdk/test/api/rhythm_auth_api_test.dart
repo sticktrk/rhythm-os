@@ -18,6 +18,76 @@ void main() {
     );
   });
 
+  group('getStatus', () {
+    test('reports whether the supplied bearer authenticated as owner',
+        () async {
+      when(() => dio.get<Map<String, dynamic>>(any())).thenAnswer(
+        (_) async => Response<Map<String, dynamic>>(
+          requestOptions: RequestOptions(path: 'api/auth/status'),
+          statusCode: 200,
+          data: {
+            'requires_auth': false,
+            'owner_configured': true,
+            'token_count': 1,
+            'claim_available': true,
+            'via_remote_access': false,
+            'authenticated_role': 'owner',
+          },
+        ),
+      );
+
+      final result = await api.getStatus();
+
+      expect(result.authenticatedRole, 'owner');
+      expect(result.reportsAuthenticatedRole, isTrue);
+      expect(result.hasAuthenticatedOwner, isTrue);
+    });
+
+    test('leaves the authenticated role empty for an invalid bearer', () async {
+      when(() => dio.get<Map<String, dynamic>>(any())).thenAnswer(
+        (_) async => Response<Map<String, dynamic>>(
+          requestOptions: RequestOptions(path: 'api/auth/status'),
+          statusCode: 200,
+          data: {
+            'requires_auth': false,
+            'owner_configured': true,
+            'token_count': 1,
+            'claim_available': true,
+            'via_remote_access': false,
+            'authenticated_role': null,
+          },
+        ),
+      );
+
+      final result = await api.getStatus();
+
+      expect(result.authenticatedRole, isNull);
+      expect(result.reportsAuthenticatedRole, isTrue);
+      expect(result.hasAuthenticatedOwner, isFalse);
+    });
+
+    test('detects legacy servers that cannot report bearer authentication',
+        () async {
+      when(() => dio.get<Map<String, dynamic>>(any())).thenAnswer(
+        (_) async => Response<Map<String, dynamic>>(
+          requestOptions: RequestOptions(path: 'api/auth/status'),
+          statusCode: 200,
+          data: {
+            'requires_auth': false,
+            'owner_configured': true,
+            'token_count': 1,
+            'claim_available': true,
+          },
+        ),
+      );
+
+      final result = await api.getStatus();
+
+      expect(result.reportsAuthenticatedRole, isFalse);
+      expect(result.hasAuthenticatedOwner, isFalse);
+    });
+  });
+
   group('issueSupportToken', () {
     test('posts support token request and parses issued token', () async {
       when(() => dio.post<Map<String, dynamic>>(
@@ -73,6 +143,40 @@ void main() {
             data: captureAny(named: 'data'),
           )).captured.single as Map<String, dynamic>;
       expect(captured, isEmpty);
+    });
+
+    test('preserves the device reason when support token issuance is denied',
+        () async {
+      when(() => dio.post<Map<String, dynamic>>(
+            any(),
+            data: any(named: 'data'),
+          )).thenThrow(
+        DioException(
+          requestOptions: RequestOptions(path: 'api/auth/support-token'),
+          response: Response<Map<String, dynamic>>(
+            requestOptions: RequestOptions(path: 'api/auth/support-token'),
+            statusCode: 403,
+            data: const {
+              'status': 'error',
+              'message': 'Support tokens require an owner token',
+            },
+          ),
+          type: DioExceptionType.badResponse,
+        ),
+      );
+
+      await expectLater(
+        api.issueSupportToken(),
+        throwsA(
+          isA<RhythmApiException>()
+              .having((error) => error.statusCode, 'statusCode', 403)
+              .having(
+                (error) => error.serverMessage,
+                'serverMessage',
+                'Support tokens require an owner token',
+              ),
+        ),
+      );
     });
   });
 
