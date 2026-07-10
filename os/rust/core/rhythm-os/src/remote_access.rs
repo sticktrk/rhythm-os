@@ -32,6 +32,7 @@ const DEFAULT_CLOUDFLARED_PROTOCOL: &str = "http2";
 const DEFAULT_CLOUDFLARED_LOGLEVEL: &str = "warn";
 const DEFAULT_CLOUDFLARED_HA_CONNECTIONS: u16 = 1;
 const DEFAULT_CLOUDFLARED_BIN: &str = "cloudflared";
+const REMOTE_ACCESS_STARTUP_HEALTH_GRACE: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRemoteAccessConfig {
@@ -340,8 +341,9 @@ pub fn reconcile_remote_access_runtime(state: &SharedState) -> anyhow::Result<()
     }
 }
 
-/// Repair remote-access process state without restarting an already-running
-/// connector. This is safe to call periodically from the appliance watchdog.
+/// Repair missing or unhealthy remote-access process state. A newly started
+/// connector gets a grace period to establish its first edge connection.
+/// This is safe to call periodically from the appliance watchdog.
 pub fn ensure_remote_access_runtime(state: &SharedState) -> anyhow::Result<bool> {
     let config = load_config(state)?;
     let controller = controller_for_state(state)
@@ -350,7 +352,7 @@ pub fn ensure_remote_access_runtime(state: &SharedState) -> anyhow::Result<bool>
         Some(config) if config.enabled => {
             sync_runtime_files(state, Some(config))?;
             let runtime = controller.status(&runtime_dir(state)?);
-            if runtime.service_running {
+            if !enabled_runtime_needs_restart(&runtime, current_epoch_secs()) {
                 return Ok(false);
             }
             controller.start(&runtime_dir(state)?, config)?;
@@ -366,6 +368,18 @@ pub fn ensure_remote_access_runtime(state: &SharedState) -> anyhow::Result<bool>
             Ok(true)
         }
     }
+}
+
+fn enabled_runtime_needs_restart(runtime: &RemoteAccessRuntimeStatus, now_epoch_secs: u64) -> bool {
+    if !runtime.service_running {
+        return true;
+    }
+    if runtime.connector_healthy || runtime.supervisor_state.as_deref() != Some("running") {
+        return false;
+    }
+    runtime.last_started_epoch_secs.is_some_and(|started| {
+        now_epoch_secs.saturating_sub(started) >= REMOTE_ACCESS_STARTUP_HEALTH_GRACE.as_secs()
+    })
 }
 
 fn controller_for_state(state: &SharedState) -> Option<Arc<dyn RemoteAccessController>> {
@@ -670,44 +684,85 @@ struct MetricsStatus {
 
 fn read_metrics_status(addr: &str) -> MetricsStatus {
     let mut status = MetricsStatus::default();
-    let Ok(mut addrs) = addr.to_socket_addrs() else {
-        status.error = Some(format!("invalid metrics address {addr}"));
-        return status;
+    let readiness = match read_metrics_endpoint(addr, "/ready") {
+        Ok(response) => response,
+        Err(error) => {
+            status.error = Some(error);
+            String::new()
+        }
     };
-    let Some(socket_addr) = addrs.next() else {
-        status.error = Some(format!("invalid metrics address {addr}"));
-        return status;
-    };
+    if let Some(readiness_status) = metrics_status_from_readiness(&readiness) {
+        return readiness_status;
+    }
 
-    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(300));
-    let Ok(mut stream) = stream else {
-        status.error = Some("metrics endpoint unavailable".to_string());
-        return status;
+    // Older cloudflared builds did not expose /ready. Retain the Prometheus
+    // fallback for those builds, but prefer /ready because its connection
+    // tracker is updated on disconnect. The server-location gauges retain old
+    // labels, so they can report a connection after the tunnel has gone down.
+    let response = match read_metrics_endpoint(addr, "/metrics") {
+        Ok(response) => response,
+        Err(error) => {
+            status.error = Some(error);
+            return status;
+        }
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let request = format!("GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    if let Err(e) = stream.write_all(request.as_bytes()) {
-        status.error = Some(format!("metrics request failed: {e}"));
-        return status;
-    }
-    let mut response = String::new();
-    if let Err(e) = stream.read_to_string(&mut response) {
-        status.error = Some(format!("metrics read failed: {e}"));
-        return status;
-    }
     if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
         status.error = Some("metrics endpoint returned non-200 status".to_string());
         return status;
     }
     status.available = true;
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body)
-        .unwrap_or(response.as_str());
+    let body = http_response_body(&response);
     status.registered_connections = parse_registered_connections(body);
     status.healthy = status.registered_connections.unwrap_or(0) > 0;
+    status.error = None;
     status
+}
+
+fn read_metrics_endpoint(addr: &str, path: &str) -> Result<String, String> {
+    let Ok(mut addrs) = addr.to_socket_addrs() else {
+        return Err(format!("invalid metrics address {addr}"));
+    };
+    let Some(socket_addr) = addrs.next() else {
+        return Err(format!("invalid metrics address {addr}"));
+    };
+
+    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(300));
+    let Ok(mut stream) = stream else {
+        return Err("metrics endpoint unavailable".to_string());
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        return Err(format!("metrics request failed: {e}"));
+    }
+    let mut response = String::new();
+    if let Err(e) = stream.read_to_string(&mut response) {
+        return Err(format!("metrics read failed: {e}"));
+    }
+    Ok(response)
+}
+
+fn http_response_body(response: &str) -> &str {
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or(response)
+}
+
+fn parse_ready_connections(response: &str) -> Option<u64> {
+    let body: serde_json::Value = serde_json::from_str(http_response_body(response)).ok()?;
+    body.get("readyConnections")?.as_u64()
+}
+
+fn metrics_status_from_readiness(response: &str) -> Option<MetricsStatus> {
+    let ready_connections = parse_ready_connections(response)?;
+    Some(MetricsStatus {
+        available: true,
+        healthy: ready_connections > 0,
+        registered_connections: Some(ready_connections),
+        error: None,
+    })
 }
 
 fn parse_registered_connections(metrics: &str) -> Option<u64> {
@@ -1562,6 +1617,51 @@ cloudflared_tunnel_server_locations{edge_location=\"ewr01\"} 1\n";
     }
 
     #[test]
+    fn readiness_endpoint_detects_dead_tunnel_despite_stale_connection_gauge() {
+        let readiness = "HTTP/1.1 503 Service Unavailable\r\n\
+Content-Type: application/json\r\n\r\n\
+{\"status\":503,\"readyConnections\":0,\"connectorId\":\"connector-id\"}";
+        let stale_metrics = "cloudflared_tunnel_ha_connections 1\n";
+
+        let status = metrics_status_from_readiness(readiness).unwrap();
+        assert!(status.available);
+        assert!(!status.healthy);
+        assert_eq!(status.registered_connections, Some(0));
+        assert_eq!(parse_registered_connections(stale_metrics), Some(1));
+
+        let now = 10_000;
+        let runtime = RemoteAccessRuntimeStatus {
+            service_running: true,
+            supervisor_state: Some("running".into()),
+            last_started_epoch_secs: Some(now - REMOTE_ACCESS_STARTUP_HEALTH_GRACE.as_secs() - 1),
+            connector_healthy: status.healthy,
+            ..RemoteAccessRuntimeStatus::default()
+        };
+        assert!(enabled_runtime_needs_restart(&runtime, now));
+    }
+
+    #[test]
+    fn watchdog_gives_new_connector_time_to_establish_before_restart() {
+        let now = 10_000;
+        let mut runtime = RemoteAccessRuntimeStatus {
+            service_running: true,
+            supervisor_state: Some("running".into()),
+            last_started_epoch_secs: Some(now - REMOTE_ACCESS_STARTUP_HEALTH_GRACE.as_secs() + 1),
+            ..RemoteAccessRuntimeStatus::default()
+        };
+
+        assert!(!enabled_runtime_needs_restart(&runtime, now));
+
+        runtime.connector_healthy = true;
+        runtime.last_started_epoch_secs = Some(1);
+        assert!(!enabled_runtime_needs_restart(&runtime, now));
+
+        runtime.connector_healthy = false;
+        runtime.supervisor_state = Some("backoff".into());
+        assert!(!enabled_runtime_needs_restart(&runtime, now));
+    }
+
+    #[test]
     fn watchdog_starts_configured_connector_only_when_not_running() {
         for (service_running, expected_repair) in [(false, true), (true, false)] {
             let root = temp_root(if service_running {
@@ -1602,6 +1702,46 @@ cloudflared_tunnel_server_locations{edge_location=\"ewr01\"} 1\n";
             assert_eq!(controller.stops.load(Ordering::SeqCst), 0);
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn watchdog_restarts_configured_connector_after_sustained_unhealthy_state() {
+        let root = temp_root("watchdog-unhealthy");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        storage
+            .save_remote_access_config(&StoredRemoteAccessConfig {
+                schema_version: 1,
+                enabled: true,
+                hostname: "hub.rhythm.lighting".into(),
+                connector_token: "secret".into(),
+                tunnel_id: Some("tunnel-id".into()),
+                tunnel_name: Some("tunnel-name".into()),
+                updated_at_epoch_ms: current_epoch_ms(),
+            })
+            .unwrap();
+        let controller = Arc::new(TestRemoteAccessController::new(true));
+        {
+            let mut status = controller.status.lock().unwrap();
+            status.supervisor_state = Some("running".into());
+            status.last_started_epoch_secs =
+                Some(current_epoch_secs() - REMOTE_ACCESS_STARTUP_HEALTH_GRACE.as_secs() - 1);
+            status.metrics_available = true;
+            status.connector_healthy = false;
+            status.registered_connections = Some(0);
+        }
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = root.to_string_lossy().to_string();
+            app.storage = Some(Arc::new(storage));
+            app.remote_access_controller = Some(controller.clone());
+        }
+
+        assert!(ensure_remote_access_runtime(&state).unwrap());
+        assert_eq!(controller.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
