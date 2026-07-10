@@ -778,6 +778,9 @@ pub fn ensure_composite_runtime(
             runtime.add_room(&room.id, &room.name);
         }
         for node in s.topology.device_nodes() {
+            if crate::commands::canonical_device_is_quarantined(&s, &node.canonical_device_id) {
+                continue;
+            }
             if let Some(device) = s.canonical_registry.get(&node.canonical_device_id) {
                 runtime.add_node(
                     &node.id,

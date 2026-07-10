@@ -62,6 +62,33 @@ fn scenario_sync_imports_roomless_commissioned_device() {
     );
     drop(state);
 
+    let pending_snapshot: serde_json::Value =
+        serde_json::from_str(&commands::build_state_snapshot(&rig.state).unwrap()).unwrap();
+    assert!(
+        !pending_snapshot["nodes"]
+            .as_array()
+            .expect("state nodes should be an array")
+            .iter()
+            .any(|node| node["id"].as_str() == Some(canonical_id.as_str())),
+        "pending roomless Matter devices must not appear as controllable state nodes"
+    );
+    assert_eq!(pending_snapshot["review"]["pending"]["unassigned"], 1);
+
+    commands::try_ensure_runtime(&rig.state)
+        .expect("an unrelated runtime bootstrap should still succeed");
+    let pending_runtime = rig
+        .state
+        .lock()
+        .unwrap()
+        .hub_runtime()
+        .expect("explicit runtime bootstrap should install a runtime");
+    assert!(
+        pending_runtime
+            .engine_node_snapshot(&canonical_id)
+            .is_none(),
+        "runtime bootstrap must preserve pending unassigned-device quarantine"
+    );
+
     let result = commands::do_triage_new_device(&rig.state, &triage_id)
         .expect("explicit standalone confirmation should succeed");
     assert!(result.contains(r#""status":"standalone""#));
