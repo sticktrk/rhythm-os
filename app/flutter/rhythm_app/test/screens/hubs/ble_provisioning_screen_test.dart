@@ -304,6 +304,60 @@ void main() {
     });
   });
 
+  group('bleProvisioningResolveVerifiedOwnerTokenForTesting', () {
+    test('keeps a BLE-delivered token only after owner authentication',
+        () async {
+      var claims = 0;
+
+      final token = await bleProvisioningResolveVerifiedOwnerTokenForTesting(
+        candidates: const ['ble-owner-token'],
+        verifyToken: (candidate) async => candidate == 'ble-owner-token',
+        claimToken: () async {
+          claims += 1;
+          return 'claimed-owner-token';
+        },
+      );
+
+      expect(token, 'ble-owner-token');
+      expect(claims, 0);
+    });
+
+    test('reclaims and verifies when the BLE-delivered token is invalid',
+        () async {
+      final verified = <String>[];
+
+      final token = await bleProvisioningResolveVerifiedOwnerTokenForTesting(
+        candidates: const ['truncated-ble-token'],
+        verifyToken: (candidate) async {
+          verified.add(candidate);
+          return candidate == 'claimed-owner-token';
+        },
+        claimToken: () async => 'claimed-owner-token',
+      );
+
+      expect(token, 'claimed-owner-token');
+      expect(verified, ['truncated-ble-token', 'claimed-owner-token']);
+    });
+
+    test('rejects an unverified replacement instead of persisting it',
+        () async {
+      await expectLater(
+        bleProvisioningResolveVerifiedOwnerTokenForTesting(
+          candidates: const ['invalid-ble-token'],
+          verifyToken: (_) async => false,
+          claimToken: () async => 'invalid-replacement-token',
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('could not be authenticated'),
+          ),
+        ),
+      );
+    });
+  });
+
   testWidgets('unsupported desktop build shows the recoverable error UI',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;

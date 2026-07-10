@@ -221,6 +221,54 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 5));
     });
 
+    test('starts the support grant before waiting on Cloudflare propagation',
+        () async {
+      final grantStarted = Completer<void>();
+      final releaseRemoteRoute = Completer<void>();
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) =>
+            _FakeRemoteAccessApi(baseUrl: baseUrl),
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          if (!endpoint.useSsl) {
+            return RhythmHello.fromJson({
+              'server_instance_id': 'srv-test-instance',
+            });
+          }
+          await releaseRemoteRoute.future;
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {
+          grantStarted.complete();
+        },
+        canUseRemoteAccessOverride: true,
+      );
+
+      final enable = service.enableForHub(
+        _serverHub(serverInstanceId: 'srv-test-instance'),
+      );
+      await grantStarted.future.timeout(const Duration(seconds: 1));
+      releaseRemoteRoute.complete();
+      final result = await enable;
+
+      expect(result.routeVerified, isTrue);
+    });
+
     test('enable waits for the public remote hostname to route', () async {
       final stateLoads = <String>[];
       var remoteRouteAttempts = 0;

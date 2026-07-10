@@ -95,6 +95,42 @@ Future<bool> bleProvisioningWaitForServerRestartAndHealthForTesting({
   );
 }
 
+@visibleForTesting
+Future<String> bleProvisioningResolveVerifiedOwnerTokenForTesting({
+  required Iterable<String?> candidates,
+  required Future<bool> Function(String token) verifyToken,
+  required Future<String> Function() claimToken,
+}) async {
+  final seen = <String>{};
+  Object? lastVerificationError;
+  for (final candidate in candidates) {
+    final token = candidate?.trim();
+    if (token == null || token.isEmpty || !seen.add(token)) continue;
+    try {
+      if (await verifyToken(token)) return token;
+    } catch (error) {
+      lastVerificationError = error;
+    }
+  }
+
+  final claimed = (await claimToken()).trim();
+  if (claimed.isEmpty) {
+    throw StateError('Server returned an empty owner token.');
+  }
+  try {
+    if (await verifyToken(claimed)) return claimed;
+  } catch (error) {
+    lastVerificationError = error;
+  }
+
+  final suffix = lastVerificationError == null
+      ? ''
+      : ' Last verification error: $lastVerificationError';
+  throw StateError(
+    'The owner token issued by the server could not be authenticated.$suffix',
+  );
+}
+
 _KnownBleHome? _knownHomeForBleDeviceName({
   required String deviceName,
   required Iterable<AccountHomeServerHubs> homeEntries,
@@ -945,46 +981,43 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     String ip,
     String? provisionedOwnerToken,
   ) async {
-    final provisioned = provisionedOwnerToken?.trim();
-    if (provisioned != null && provisioned.isNotEmpty) return provisioned;
-
-    final storedToken = await _storedOwnerTokenForProvisionedServer(ip);
-    if (storedToken != null) return storedToken;
-
-    final authApi = RhythmAuthApi(baseUrl: 'http://$ip:54448');
+    final storedTokens = _storedOwnerTokensForProvisionedServer(ip);
     final deadline = DateTime.now().add(const Duration(seconds: 12));
     Object? lastLanAuthError;
 
     while (true) {
       try {
-        final status =
-            await authApi.getStatus().timeout(const Duration(seconds: 3));
-        var claimFailed = false;
-        if (status.claimAvailable) {
-          try {
+        return await bleProvisioningResolveVerifiedOwnerTokenForTesting(
+          candidates: [provisionedOwnerToken, ...storedTokens],
+          verifyToken: (token) async {
+            final status = await RhythmAuthApi(
+              baseUrl: 'http://$ip:54448',
+              authToken: token,
+            ).getStatus().timeout(const Duration(seconds: 3));
+            // Older appliance builds do not report the authenticated role.
+            // Preserve their setup behavior until the firmware half of this
+            // contract is installed; new builds can positively verify owner.
+            return !status.reportsAuthenticatedRole ||
+                status.hasAuthenticatedOwner;
+          },
+          claimToken: () async {
+            final authApi = RhythmAuthApi(baseUrl: 'http://$ip:54448');
+            final status =
+                await authApi.getStatus().timeout(const Duration(seconds: 3));
+            if (!status.claimAvailable) {
+              throw StateError(
+                'Server is already owner-configured and local claiming is unavailable.',
+              );
+            }
             final claim = await authApi
                 .claimOwnerToken()
                 .timeout(const Duration(seconds: 4));
             return claim.token;
-          } catch (error) {
-            claimFailed = true;
-            lastLanAuthError = error;
-            debugPrint(
-                '[BLE] LAN owner claim after provisioning failed: $error');
-            if (!status.requiresAuth) {
-              return null;
-            }
-          }
-        }
-        if (!status.requiresAuth) {
-          return null;
-        }
-        if (!claimFailed) {
-          lastLanAuthError = null;
-        }
+          },
+        );
       } catch (error) {
         lastLanAuthError = error;
-        debugPrint('[BLE] auth token resolution over LAN failed: $error');
+        debugPrint('[BLE] owner token verification over LAN failed: $error');
       }
 
       if (!DateTime.now().isBefore(deadline)) {
@@ -993,15 +1026,13 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       await Future<void>.delayed(const Duration(seconds: 1));
     }
 
-    final errorSuffix =
-        lastLanAuthError == null ? '' : ' Last error: $lastLanAuthError';
     throw StateError(
       'Server requires API auth, but owner token was not available over Wi-Fi.'
-      '$errorSuffix',
+      ' Last error: $lastLanAuthError',
     );
   }
 
-  Future<String?> _storedOwnerTokenForProvisionedServer(String ip) async {
+  List<String> _storedOwnerTokensForProvisionedServer(String ip) {
     final exactTokens = <String>[];
     final fallbackTokens = <String>[];
 
@@ -1037,20 +1068,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       );
     }
 
-    for (final token in [...exactTokens, ...fallbackTokens]) {
-      try {
-        await RhythmConfigApi(
-          baseUrl: 'http://$ip:54448/',
-          authToken: token,
-        ).getState().timeout(const Duration(seconds: 4));
-        return token;
-      } catch (error) {
-        debugPrint(
-            '[BLE] stored token probe after provisioning failed: $error');
-      }
-    }
-
-    return null;
+    return [...exactTokens, ...fallbackTokens];
   }
 
   Future<Hub> _persistServerHub(String ip, String? ownerToken) async {
