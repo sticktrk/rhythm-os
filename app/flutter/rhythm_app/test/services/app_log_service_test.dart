@@ -33,7 +33,7 @@ void main() {
     final snapshot = await AppLogService.instance.snapshotText();
 
     expect(snapshot.length, lessThanOrEqualTo(513000));
-    expect(snapshot, contains('0999'));
-    expect(snapshot, isNot(contains('0000')));
+    expect(snapshot, contains('[INFO] 0999 '));
+    expect(snapshot, isNot(contains('[INFO] 0000 ')));
   });
 }

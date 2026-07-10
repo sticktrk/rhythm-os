@@ -122,7 +122,11 @@ Future<String?> showRoomPickerSheet(
   final selection = await showModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: Colors.transparent,
+    backgroundColor: CelestialColors.backgroundCard,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    clipBehavior: Clip.antiAlias,
     builder: (sheetContext) {
       final mediaQuery = MediaQuery.of(sheetContext);
       return SafeArea(
@@ -130,11 +134,6 @@ Future<String?> showRoomPickerSheet(
         child: Container(
           constraints: BoxConstraints(
             maxHeight: mediaQuery.size.height * 0.75,
-          ),
-          clipBehavior: Clip.antiAlias,
-          decoration: const BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
           ),
           child: SingleChildScrollView(
             child: Column(
@@ -263,7 +262,11 @@ Future<Set<String>?> showMultiRoomPickerSheet(
   return showModalBottomSheet<Set<String>>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: Colors.transparent,
+    backgroundColor: CelestialColors.backgroundCard,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    clipBehavior: Clip.antiAlias,
     builder: (sheetContext) {
       final mediaQuery = MediaQuery.of(sheetContext);
       return StatefulBuilder(
@@ -272,11 +275,6 @@ Future<Set<String>?> showMultiRoomPickerSheet(
           child: Container(
             constraints: BoxConstraints(
               maxHeight: mediaQuery.size.height * 0.75,
-            ),
-            clipBehavior: Clip.antiAlias,
-            decoration: const BoxDecoration(
-              color: CelestialColors.backgroundCard,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
