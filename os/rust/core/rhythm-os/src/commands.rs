@@ -12637,6 +12637,26 @@ mod tests {
         }
     }
 
+    fn wait_for_topology_group_sync_idle(state: &SharedState) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let is_idle = state
+                .lock()
+                .map(|state| {
+                    !state.topology_group_sync_pending && !state.topology_group_sync_in_progress
+                })
+                .unwrap_or(false);
+            if is_idle {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "topology group sync worker did not become idle within 2 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Mock runtime that returns configurable room snapshots and tracks events.
     struct MockRuntime {
         snapshots: Mutex<Vec<RoomSnapshot>>,
@@ -23593,6 +23613,7 @@ mod tests {
         wait_for_sync_count(&sync_count, 1);
         do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
         wait_for_sync_count(&sync_count, 2);
+        wait_for_topology_group_sync_idle(&state);
         recording.clear_turn_on_calls();
 
         futures::executor::block_on(
@@ -23683,6 +23704,7 @@ mod tests {
         wait_for_sync_count(&sync_attempts, 1);
         do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
         wait_for_sync_count(&sync_attempts, 2);
+        wait_for_topology_group_sync_idle(&state);
         recording.clear_turn_on_calls();
 
         futures::executor::block_on(

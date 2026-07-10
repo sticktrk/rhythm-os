@@ -2221,10 +2221,19 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
 
         controller.stop(&root).unwrap();
         controller.start(&root, &config).unwrap();
-        for _ in 0..20 {
-            if marker.exists() {
-                break;
+        let marker_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::read_to_string(&marker) {
+                Ok(contents) if !contents.trim().is_empty() => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("failed to read init-script marker: {error}"),
             }
+
+            assert!(
+                std::time::Instant::now() < marker_deadline,
+                "restart action did not create its marker within 5 seconds"
+            );
             std::thread::sleep(Duration::from_millis(25));
         }
         std::thread::sleep(Duration::from_millis(150));
