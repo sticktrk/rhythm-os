@@ -500,10 +500,14 @@ fn normalize_hostname(value: Option<&str>) -> Result<String, &'static str> {
         return Err("Remote access hostname must not contain whitespace");
     }
 
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .unwrap_or(trimmed);
+    let lowercase = trimmed.to_ascii_lowercase();
+    let without_scheme = if lowercase.starts_with("https://") {
+        &trimmed["https://".len()..]
+    } else if lowercase.starts_with("http://") {
+        &trimmed["http://".len()..]
+    } else {
+        trimmed
+    };
     let host = without_scheme
         .split('/')
         .next()
@@ -1736,5 +1740,496 @@ printf '%s\n' "$1" > "$dir/marker"
         assert!(!status.cloudflared_available);
         assert!(!status.service_available);
         assert_eq!(status.supervisor_state.as_deref(), Some("stopped"));
+    }
+
+    #[test]
+    fn stored_config_redaction_covers_blank_and_populated_metadata() {
+        let blank = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: false,
+            hostname: "   ".into(),
+            connector_token: "   ".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 10,
+        }
+        .redacted_status();
+        assert!(!blank.enabled);
+        assert!(!blank.configured);
+        assert_eq!(blank.hostname, None);
+
+        let populated = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: Some("tunnel-id".into()),
+            tunnel_name: Some("Home".into()),
+            updated_at_epoch_ms: 11,
+        }
+        .redacted_status();
+        assert!(populated.enabled);
+        assert!(populated.configured);
+        assert_eq!(
+            populated.hostname.as_deref(),
+            Some("box.devices.rhythm.lighting")
+        );
+        assert_eq!(populated.tunnel_id.as_deref(), Some("tunnel-id"));
+        assert_eq!(populated.tunnel_name.as_deref(), Some("Home"));
+        assert_eq!(populated.updated_at_epoch_ms, 11);
+    }
+
+    #[test]
+    fn stored_config_serde_defaults_enabled_and_schema_version() {
+        let config: StoredRemoteAccessConfig = serde_json::from_value(json!({
+            "hostname": "box.devices.rhythm.lighting",
+            "connector_token": "secret",
+            "updated_at_epoch_ms": 12
+        }))
+        .unwrap();
+
+        assert_eq!(config.schema_version, 1);
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn status_body_maps_all_runtime_diagnostics() {
+        let body = RemoteAccessStatusBody::from_parts(
+            Some(RemoteAccessConfigStatus {
+                enabled: true,
+                configured: true,
+                hostname: Some("box.devices.rhythm.lighting".into()),
+                tunnel_id: Some("tunnel".into()),
+                tunnel_name: Some("Home".into()),
+                updated_at_epoch_ms: 20,
+            }),
+            RemoteAccessRuntimeStatus {
+                cloudflared_available: true,
+                cloudflared_version: Some("cloudflared 1.2.3".into()),
+                service_available: true,
+                service_running: true,
+                supervisor_state: Some("running".into()),
+                supervisor_pid: Some(101),
+                child_pid: Some(202),
+                restart_count: 3,
+                last_started_epoch_secs: Some(30),
+                last_exit_epoch_secs: Some(31),
+                last_exit_code: Some(1),
+                next_restart_epoch_secs: Some(32),
+                metrics_addr: Some("127.0.0.1:54449".into()),
+                metrics_available: true,
+                connector_healthy: true,
+                registered_connections: Some(2),
+                metrics_error: None,
+            },
+        );
+        let value = serde_json::to_value(body).unwrap();
+
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["configured"], true);
+        assert_eq!(value["cloudflared_version"], "cloudflared 1.2.3");
+        assert_eq!(value["supervisor_pid"], 101);
+        assert_eq!(value["child_pid"], 202);
+        assert_eq!(value["restart_count"], 3);
+        assert_eq!(value["registered_connections"], 2);
+        assert_eq!(value["connector_healthy"], true);
+    }
+
+    #[test]
+    fn optional_values_and_hostnames_are_normalized_at_boundaries() {
+        assert_eq!(
+            trim_optional(Some(" tunnel ".into())),
+            Some("tunnel".into())
+        );
+        assert_eq!(trim_optional(Some("  ".into())), None);
+        assert_eq!(trim_optional(None), None);
+        assert_eq!(
+            normalize_hostname(Some("HTTP://BOX.DEVICES.RHYTHM.LIGHTING/health")).unwrap(),
+            "box.devices.rhythm.lighting"
+        );
+        assert!(normalize_hostname(Some("https:///path")).is_err());
+    }
+
+    #[test]
+    fn status_snapshot_without_controller_reports_unsupported() {
+        let root = temp_root("unsupported-snapshot");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = root.to_string_lossy().to_string();
+            app.storage = Some(Arc::new(storage));
+        }
+
+        let snapshot = status_snapshot(&state);
+        assert_eq!(snapshot["status"], "ok");
+        assert_eq!(snapshot["configured"], false);
+        assert_eq!(snapshot["supervisor_state"], "unsupported");
+        assert_eq!(snapshot["metrics_addr"], DEFAULT_METRICS_ADDR);
+
+        let json = status_snapshot_json(&state);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            snapshot
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn get_status_reports_storage_errors_and_runtime_diagnostics() {
+        let missing_storage: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let response = get_status(State(missing_storage)).await;
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("storage not configured"));
+
+        let root = temp_root("get-status");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        storage
+            .save_remote_access_config(&StoredRemoteAccessConfig {
+                schema_version: 1,
+                enabled: true,
+                hostname: "box.devices.rhythm.lighting".into(),
+                connector_token: "secret".into(),
+                tunnel_id: None,
+                tunnel_name: None,
+                updated_at_epoch_ms: 42,
+            })
+            .unwrap();
+        let controller = Arc::new(TestRemoteAccessController::new(true));
+        controller.status.lock().unwrap().connector_healthy = true;
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = root.to_string_lossy().to_string();
+            app.storage = Some(Arc::new(storage));
+            app.remote_access_controller = Some(controller);
+        }
+
+        let response = get_status(State(state)).await;
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["configured"], true);
+        assert_eq!(body["service_running"], true);
+        assert_eq!(body["connector_healthy"], true);
+        assert!(!response.body.contains("secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn put_config_validates_required_fields_before_blocking_work() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let missing_host = put_config(
+            State(state.clone()),
+            Json(PutRemoteAccessConfig {
+                enabled: true,
+                hostname: None,
+                remote_url: None,
+                connector_token: Some("secret".into()),
+                tunnel_id: None,
+                tunnel_name: None,
+            }),
+        )
+        .await;
+        assert_eq!(missing_host.status, 400);
+        assert!(missing_host.body.contains("Missing hostname"));
+
+        let missing_token = put_config(
+            State(state),
+            Json(PutRemoteAccessConfig {
+                enabled: true,
+                hostname: Some("box.devices.rhythm.lighting".into()),
+                remote_url: None,
+                connector_token: Some("  ".into()),
+                tunnel_id: None,
+                tunnel_name: None,
+            }),
+        )
+        .await;
+        assert_eq!(missing_token.status, 400);
+        assert!(missing_token.body.contains("Missing connector_token"));
+    }
+
+    #[tokio::test]
+    async fn disabled_put_uses_remote_url_stops_runtime_and_removes_secrets() {
+        let root = temp_root("put-disabled");
+        std::fs::create_dir_all(root.join(RUNTIME_DIR)).unwrap();
+        std::fs::write(root.join(RUNTIME_DIR).join(CONNECTOR_TOKEN_FILE), "old").unwrap();
+        std::fs::write(root.join(RUNTIME_DIR).join(HOSTNAME_FILE), "old").unwrap();
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        let controller = Arc::new(TestRemoteAccessController::new(true));
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = root.to_string_lossy().to_string();
+            app.storage = Some(Arc::new(storage));
+            app.remote_access_controller = Some(controller.clone());
+        }
+
+        let response = put_config(
+            State(state),
+            Json(PutRemoteAccessConfig {
+                enabled: false,
+                hostname: None,
+                remote_url: Some("https://BOX.devices.rhythm.lighting/path".into()),
+                connector_token: Some(" new-secret ".into()),
+                tunnel_id: Some("  ".into()),
+                tunnel_name: Some(" Home ".into()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, 200);
+        assert_eq!(controller.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        assert!(!root.join(RUNTIME_DIR).join(CONNECTOR_TOKEN_FILE).exists());
+        assert!(!root.join(RUNTIME_DIR).join(HOSTNAME_FILE).exists());
+        let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(body["hostname"], "box.devices.rhythm.lighting");
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["tunnel_name"], "Home");
+        assert!(body["tunnel_id"].is_null());
+        assert!(!response.body.contains("new-secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn delete_config_clears_persistence_files_and_stops_runtime() {
+        let root = temp_root("delete");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        let config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 50,
+        };
+        storage.save_remote_access_config(&config).unwrap();
+        let controller = Arc::new(TestRemoteAccessController::new(true));
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = root.to_string_lossy().to_string();
+            app.storage = Some(Arc::new(storage));
+            app.remote_access_controller = Some(controller.clone());
+        }
+        sync_runtime_files(&state, Some(&config)).unwrap();
+
+        let response = delete_config(State(state.clone())).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        assert!(load_config(&state).unwrap().is_none());
+        assert!(!root.join(RUNTIME_DIR).join(CONNECTOR_TOKEN_FILE).exists());
+        assert!(!root.join(RUNTIME_DIR).join(HOSTNAME_FILE).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reconcile_runtime_covers_enabled_disabled_and_missing_controller_paths() {
+        let root = temp_root("reconcile");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = FileStorage::new(root.to_str().unwrap()).unwrap();
+        let mut config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 60,
+        };
+        storage.save_remote_access_config(&config).unwrap();
+        let controller = Arc::new(TestRemoteAccessController::new(false));
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app = state.lock().unwrap();
+            app.data_dir = root.to_string_lossy().to_string();
+            app.storage = Some(Arc::new(storage));
+            app.remote_access_controller = Some(controller.clone());
+        }
+
+        reconcile_remote_access_runtime(&state).unwrap();
+        assert_eq!(controller.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join(RUNTIME_DIR).join(CONNECTOR_TOKEN_FILE))
+                .unwrap()
+                .trim(),
+            "secret"
+        );
+
+        config.enabled = false;
+        save_config(&state, &config).unwrap();
+        reconcile_remote_access_runtime(&state).unwrap();
+        assert_eq!(controller.stops.load(Ordering::SeqCst), 1);
+        assert!(!root.join(RUNTIME_DIR).join(CONNECTOR_TOKEN_FILE).exists());
+
+        state.lock().unwrap().remote_access_controller = None;
+        config.enabled = true;
+        save_config(&state, &config).unwrap();
+        let error = reconcile_remote_access_runtime(&state).unwrap_err();
+        assert!(error.to_string().contains("controller not configured"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_env_and_connection_metrics_parsers_ignore_noise() {
+        let values =
+            parse_status_env("# comment\ninvalid\n state = starting \nstate=running\nempty=\n");
+        assert_eq!(values.get("state").map(String::as_str), Some("running"));
+        assert_eq!(values.get("empty").map(String::as_str), Some(""));
+        assert_eq!(values.len(), 2);
+
+        let metrics = "\
+cloudflared_tunnel_ha_connections -2\n\
+cloudflared_tunnel_ha_connections 1.6\n\
+cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
+        assert_eq!(parse_registered_connections(metrics), Some(2));
+        assert_eq!(parse_registered_connections("unrelated_metric 1\n"), None);
+    }
+
+    #[test]
+    fn pid_and_supervisor_file_helpers_cover_missing_and_invalid_data() {
+        let root = temp_root("pid-status");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(read_supervisor_status(&root).unwrap().is_empty());
+        assert_eq!(parse_pid("0"), None);
+        assert_eq!(parse_pid("nope"), None);
+        assert_eq!(parse_pid("42"), Some(42));
+
+        let pid_file = root.join("pid");
+        std::fs::write(&pid_file, " 73 \n").unwrap();
+        assert_eq!(read_pid_file(&pid_file), Some(73));
+        std::fs::write(&pid_file, "invalid").unwrap();
+        assert_eq!(read_pid_file(&pid_file), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cloudflared_version_probe_is_cached_and_rejects_failures() {
+        let root = temp_root("version");
+        std::fs::create_dir_all(&root).unwrap();
+        let good = root.join("cloudflared-good");
+        write_executable(&good, "#!/bin/sh\nprintf 'cloudflared test 1.0\\n'\n");
+        assert_eq!(
+            cloudflared_version_for(&good).as_deref(),
+            Some("cloudflared test 1.0")
+        );
+        assert_eq!(
+            cloudflared_version_for(&good).as_deref(),
+            Some("cloudflared test 1.0")
+        );
+
+        let empty = root.join("cloudflared-empty");
+        write_executable(&empty, "#!/bin/sh\nexit 0\n");
+        assert_eq!(probe_cloudflared_version(&empty), None);
+        let failed = root.join("cloudflared-failed");
+        write_executable(&failed, "#!/bin/sh\nexit 1\n");
+        assert_eq!(probe_cloudflared_version(&failed), None);
+        assert_eq!(probe_cloudflared_version(&root.join("missing")), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn child_status_file_round_trips_supervisor_fields() {
+        let root = temp_root("child-status");
+        let controller = ChildProcessRemoteAccessController::new("/missing")
+            .with_metrics_addr("127.0.0.1:60000")
+            .with_protocol("quic")
+            .with_loglevel("info")
+            .with_ha_connections(2);
+        let status = ChildSupervisorStatus {
+            state: "backoff".into(),
+            supervisor_pid: Some(11),
+            child_pid: Some(12),
+            restart_count: 4,
+            last_started_epoch_secs: Some(100),
+            last_exit_epoch_secs: Some(101),
+            last_exit_code: Some(1),
+            next_restart_epoch_secs: Some(102),
+        };
+
+        write_child_status_env(&root, &controller.inner, &status).unwrap();
+        let values = read_supervisor_status(&root).unwrap();
+        assert_eq!(values.get("state").map(String::as_str), Some("backoff"));
+        assert_eq!(values.get("supervisor_pid").map(String::as_str), Some("11"));
+        assert_eq!(values.get("child_pid").map(String::as_str), Some("12"));
+        assert_eq!(values.get("restart_count").map(String::as_str), Some("4"));
+        assert_eq!(values.get("protocol").map(String::as_str), Some("quic"));
+        assert_eq!(values.get("loglevel").map(String::as_str), Some("info"));
+        assert_eq!(values.get("ha_connections").map(String::as_str), Some("2"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn child_controller_start_rejects_missing_binary_and_stop_is_idempotent() {
+        let root = temp_root("child-missing-start");
+        let controller = ChildProcessRemoteAccessController::new(root.join("missing"));
+        let config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 70,
+        };
+
+        let error = controller.start(&root, &config).unwrap_err();
+        assert!(error.to_string().contains("cloudflared unavailable"));
+        controller.stop(&root).unwrap();
+        controller.stop(&root).unwrap();
+        std::thread::sleep(Duration::from_millis(850));
+        let status = controller.status(&root);
+        assert_eq!(status.supervisor_state.as_deref(), Some("stopped"));
+        assert!(!status.service_running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newer_init_script_start_supersedes_a_delayed_stop() {
+        let root = temp_root("init-script-generation");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("cloudflared-service");
+        let marker = root.join("marker");
+        write_executable(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$(dirname \"$0\")/marker\"\n",
+        );
+        let mut controller = InitScriptRemoteAccessController::new(
+            "/bin/true",
+            &script,
+            "/tmp/missing-supervisor.pid",
+            "/tmp/missing-child.pid",
+        );
+        controller.stop_delay = Duration::from_millis(100);
+        let config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 80,
+        };
+
+        controller.stop(&root).unwrap();
+        controller.start(&root, &config).unwrap();
+        for _ in 0..20 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        let actions = std::fs::read_to_string(marker).unwrap();
+        assert_eq!(actions.lines().collect::<Vec<_>>(), vec!["restart"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
