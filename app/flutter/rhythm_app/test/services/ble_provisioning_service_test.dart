@@ -228,6 +228,27 @@ void main() {
       );
     });
 
+    test('fails a nonterminal status that stops making progress', () async {
+      final updates = StreamController<ProvisioningStatusMessage>();
+      addTearDown(updates.close);
+
+      final status =
+          await BleProvisioningService.waitForTerminalProvisioningStatus(
+        enableNotifications: () async {},
+        writePayload: () async {},
+        statusUpdates: updates.stream,
+        readStatus: () async =>
+            const ProvisioningStatusMessage(status: 'connecting'),
+        timeout: const Duration(seconds: 1),
+        pollInterval: const Duration(milliseconds: 5),
+        staleProgressTimeout: const Duration(milliseconds: 5),
+        stalledStatusTimeout: const Duration(milliseconds: 30),
+      );
+
+      expect(status.status, 'failed');
+      expect(status.error, contains('stopped making progress'));
+    });
+
     test('does not surface BLE disconnect after Wi-Fi handoff', () async {
       final seen = <String>[];
 

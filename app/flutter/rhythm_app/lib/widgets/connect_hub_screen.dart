@@ -491,6 +491,9 @@ class _HomeNameCancelledException implements Exception {
 
 const _mdnsProbeTimeout = Duration(milliseconds: 900);
 const _mdnsProbeSettleTimeout = Duration(seconds: 2);
+const _mdnsLifecycleOperationTimeout = Duration(seconds: 3);
+const _accountHomesLoadTimeout = Duration(seconds: 12);
+const _recentServerProbeTimeout = Duration(seconds: 2);
 const _subnetProbeTimeout = Duration(milliseconds: 250);
 const _subnetScanBatchSize = 32;
 
@@ -678,6 +681,9 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   String? _connectErrorMessage;
   String? _bleScanError;
   BonsoirDiscovery? _bonsoirDiscovery;
+  Future<void>? _discoverySweep;
+  final Set<VoidCallback> _cancelPendingDeadlines = {};
+  bool _isDisposed = false;
   final _bleService = BleProvisioningService();
   StreamSubscription<BleDevice>? _bleScanSubscription;
 
@@ -792,6 +798,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   @override
   void dispose() {
+    _isDisposed = true;
+    for (final cancel in List<VoidCallback>.of(_cancelPendingDeadlines)) {
+      cancel();
+    }
+    _cancelPendingDeadlines.clear();
     if (widget.mode == ConnectHubMode.rhythmServer) {
       RecentServersService.instance.removeListener(_onRecentServersChanged);
     }
@@ -809,6 +820,67 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   bool get _canUseAccountHomes =>
       AccountCloudSyncService.instance.canUseSignedInCloudFeatures;
+
+  Future<T> _withCancelableDeadline<T>(
+    Future<T> operation,
+    Duration timeout,
+  ) {
+    if (_isDisposed) {
+      return Future<T>.error(StateError('Discovery screen was closed'));
+    }
+
+    final completer = Completer<T>();
+    late final VoidCallback cancel;
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) {
+        completer.completeError(TimeoutException('Operation timed out'));
+      }
+    });
+    cancel = () {
+      timer.cancel();
+      if (!completer.isCompleted) {
+        completer.completeError(StateError('Discovery screen was closed'));
+      }
+    };
+    _cancelPendingDeadlines.add(cancel);
+
+    operation.then(
+      (value) {
+        if (!completer.isCompleted) completer.complete(value);
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      },
+    );
+
+    return completer.future.whenComplete(() {
+      timer.cancel();
+      _cancelPendingDeadlines.remove(cancel);
+    });
+  }
+
+  Future<void> _cancelableDelay(Duration duration) {
+    if (_isDisposed) {
+      return Future<void>.error(StateError('Discovery screen was closed'));
+    }
+
+    final completer = Completer<void>();
+    late final VoidCallback cancel;
+    final timer = Timer(duration, completer.complete);
+    cancel = () {
+      timer.cancel();
+      if (!completer.isCompleted) {
+        completer.completeError(StateError('Discovery screen was closed'));
+      }
+    };
+    _cancelPendingDeadlines.add(cancel);
+    return completer.future.whenComplete(() {
+      timer.cancel();
+      _cancelPendingDeadlines.remove(cancel);
+    });
+  }
 
   Future<void> _refreshAccountHomes() async {
     if (widget.mode != ConnectHubMode.rhythmServer) return;
@@ -829,7 +901,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     });
 
     try {
-      final homes = await context.read<HomeProvider>().loadAccountHomes();
+      final homes = await _withCancelableDeadline(
+        context.read<HomeProvider>().loadAccountHomes(),
+        _accountHomesLoadTimeout,
+      );
       if (!mounted) return;
       setState(() {
         _accountHomes = homes;
@@ -845,9 +920,14 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
   }
 
-  Future<void> _scanForAllDevices() async {
-    if (widget.mode != ConnectHubMode.rhythmServer) return;
-    await Future.wait([
+  Future<void> _scanForAllDevices() {
+    if (widget.mode != ConnectHubMode.rhythmServer) {
+      return Future<void>.value();
+    }
+    final activeSweep = _discoverySweep;
+    if (activeSweep != null) return activeSweep;
+
+    final Future<void> sweep = Future.wait([
       _scanForDevices().catchError((Object error, StackTrace stackTrace) {
         debugPrint('mDNS scan failed: $error');
       }),
@@ -860,7 +940,14 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       _probeRecentServers().catchError((Object error, StackTrace stackTrace) {
         debugPrint('Recent probe failed: $error');
       }),
-    ]);
+    ]).then<void>((_) {});
+    _discoverySweep = sweep;
+    unawaited(sweep.whenComplete(() {
+      if (identical(_discoverySweep, sweep)) {
+        _discoverySweep = null;
+      }
+    }));
+    return sweep;
   }
 
   Future<void> _probeRecentServers() async {
@@ -885,7 +972,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
   Future<bool> _probeRecentServerHealth(String host, int port) async {
     try {
-      return await RhythmDiagnosticsApi(host: host, port: port).healthCheck();
+      return await _withCancelableDeadline(
+        RhythmDiagnosticsApi(host: host, port: port).healthCheck(),
+        _recentServerProbeTimeout,
+      );
     } catch (_) {
       return false;
     }
@@ -1050,10 +1140,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Future<void> _scanViaBonsoir(List<DiscoveredHub> found) async {
     final seen = <String>{};
     final pendingProbes = <Future<void>>{};
+    final discovery = BonsoirDiscovery(type: '_http._tcp');
+    StreamSubscription<dynamic>? discoverySubscription;
+    var discoveryStopped = false;
     try {
-      final discovery = BonsoirDiscovery(type: '_http._tcp');
       _bonsoirDiscovery = discovery;
-      await discovery.initialize();
+      await _withCancelableDeadline(
+        discovery.initialize(),
+        _mdnsLifecycleOperationTimeout,
+      );
 
       void queueProbe(BonsoirService service) {
         final probe = _handleResolvedService(service, seen, found)
@@ -1064,7 +1159,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         unawaited(probe.whenComplete(() => pendingProbes.remove(probe)));
       }
 
-      discovery.eventStream?.listen((event) {
+      discoverySubscription = discovery.eventStream?.listen((event) {
         switch (event) {
           case BonsoirDiscoveryServiceFoundEvent():
             event.service.resolve(discovery.serviceResolver).catchError((e) {
@@ -1085,23 +1180,50 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         debugPrint('mDNS: discovery stream error: $e');
       });
 
-      await discovery.start();
-      await Future.delayed(const Duration(seconds: 5));
-      await discovery.stop();
+      await _withCancelableDeadline(
+        discovery.start(),
+        _mdnsLifecycleOperationTimeout,
+      );
+      await _cancelableDelay(const Duration(seconds: 5));
+      await _withCancelableDeadline(
+        discovery.stop(),
+        _mdnsLifecycleOperationTimeout,
+      );
+      discoveryStopped = true;
+      await discoverySubscription?.cancel();
+      discoverySubscription = null;
       final probes = List<Future<void>>.of(pendingProbes);
       if (probes.isNotEmpty) {
         try {
-          await Future.wait(probes).timeout(_mdnsProbeSettleTimeout);
+          await _withCancelableDeadline(
+            Future.wait(probes),
+            _mdnsProbeSettleTimeout,
+          );
         } on TimeoutException {
           debugPrint('mDNS: timed out waiting for health probes');
         }
       }
-      if (Platform.isAndroid && found.isEmpty) {
-        await _scanLocalSubnetForRhythmServers(found, seen);
-      }
-      _bonsoirDiscovery = null;
     } catch (e) {
       debugPrint('mDNS scan error: $e');
+    } finally {
+      await discoverySubscription?.cancel();
+      if (!discoveryStopped) {
+        try {
+          await _withCancelableDeadline(
+            discovery.stop(),
+            _mdnsLifecycleOperationTimeout,
+          );
+        } catch (error) {
+          debugPrint('mDNS stop failed: $error');
+        }
+      }
+      if (identical(_bonsoirDiscovery, discovery)) {
+        _bonsoirDiscovery = null;
+      }
+    }
+
+    if (Platform.isAndroid && found.isEmpty && mounted) {
+      await _scanLocalSubnetForRhythmServers(found, seen);
     }
   }
 
@@ -1212,7 +1334,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         timeout: _mdnsProbeTimeout,
       );
     }
-    return RhythmDiagnosticsApi(host: host, port: port).healthCheck();
+    return _withCancelableDeadline(
+      RhythmDiagnosticsApi(host: host, port: port).healthCheck(),
+      _mdnsProbeTimeout,
+    ).catchError((_) => false);
   }
 
   Future<List<String>> _localIpv4Addresses() async {
@@ -1238,16 +1363,23 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   }) async {
     final client = HttpClient()..connectionTimeout = timeout;
     try {
-      final request = await client
-          .getUrl(Uri.parse('http://$host:$port/health'))
-          .timeout(timeout);
-      final response = await request.close().timeout(timeout);
+      final request = await _withCancelableDeadline(
+        client.getUrl(Uri.parse('http://$host:$port/health')),
+        timeout,
+      );
+      final response = await _withCancelableDeadline(
+        request.close(),
+        timeout,
+      );
       if (response.statusCode != HttpStatus.ok) {
         await response.drain();
         return false;
       }
 
-      final body = await utf8.decoder.bind(response).join().timeout(timeout);
+      final body = await _withCancelableDeadline(
+        utf8.decoder.bind(response).join(),
+        timeout,
+      );
       final payload = jsonDecode(body);
       return payload is Map && payload['status'] == 'healthy';
     } catch (_) {
@@ -1262,7 +1394,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     if (literalAddress != null) return literalAddress.address;
 
     try {
-      final addresses = await InternetAddress.lookup(host);
+      final addresses = await _withCancelableDeadline(
+        InternetAddress.lookup(host),
+        _mdnsLifecycleOperationTimeout,
+      );
       for (final address in addresses) {
         if (address.type == InternetAddressType.IPv4) {
           return address.address;

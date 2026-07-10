@@ -42,6 +42,17 @@ class _KnownBleHome {
 }
 
 @visibleForTesting
+bool bleProvisioningSupportsPlatformForTesting({
+  required TargetPlatform platform,
+  bool isWeb = false,
+}) {
+  if (isWeb) return false;
+  return platform == TargetPlatform.android ||
+      platform == TargetPlatform.iOS ||
+      platform == TargetPlatform.macOS;
+}
+
+@visibleForTesting
 String? bleProvisioningKnownHomeNameForTesting({
   required String deviceName,
   required Iterable<AccountHomeServerHubs> homeEntries,
@@ -277,18 +288,19 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   String? _wifiErrorMessage;
   String? _wifiScanErrorMessage;
   final List<WifiNetwork> _wifiNetworks = <WifiNetwork>[];
+  String? _pendingPersistenceIp;
+  String? _pendingPersistenceOwnerToken;
   bool _obscurePassword = true;
   bool _hasAttemptedScan = false;
   bool _wifiScanInProgress = false;
   bool _manualSsidEntry = false;
   bool _wifiScanUnsupported = false;
 
-  bool get _supportsBleProvisioning {
-    if (kIsWeb) return false;
-    return defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS ||
-        defaultTargetPlatform == TargetPlatform.macOS;
-  }
+  bool get _supportsBleProvisioning =>
+      bleProvisioningSupportsPlatformForTesting(
+        platform: defaultTargetPlatform,
+        isWeb: kIsWeb,
+      );
 
   String get _selectedDeviceName =>
       _selectedDevice?.name ?? _deviceInfo?.name ?? 'Rhythm Box';
@@ -337,6 +349,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         _deviceInfo = null;
         _provisionedIp = null;
         _provisioningStatusMessage = null;
+        _pendingPersistenceIp = null;
+        _pendingPersistenceOwnerToken = null;
         _hasAttemptedScan = false;
         _wifiScanInProgress = false;
         _manualSsidEntry = false;
@@ -765,13 +779,6 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       AnalyticsService().logEvent('ble_provisioning_failed', {
         'stage': 'runtime',
       });
-      if (error is _HomeNameCancelledException) {
-        setState(() {
-          _phase = _ProvisioningPhase.error;
-          _errorMessage = 'Name the Home to finish setup.';
-        });
-        return;
-      }
       if (_bleService.isConnected) {
         _passwordController.clear();
         setState(() {
@@ -846,9 +853,41 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     );
     if (!mounted) return;
 
-    await _persistServerHub(ip, ownerToken);
+    _pendingPersistenceIp = ip;
+    _pendingPersistenceOwnerToken = ownerToken;
+    await _completePendingPersistence();
+  }
+
+  Future<void> _completePendingPersistence() async {
+    final ip = _pendingPersistenceIp;
+    if (ip == null || ip.isEmpty || !mounted) return;
+    final ownerToken = _pendingPersistenceOwnerToken;
+
+    setState(() {
+      _phase = _ProvisioningPhase.provisioning;
+      _provisionedIp = ip;
+      _errorMessage = null;
+    });
+
+    try {
+      await _persistServerHub(ip, ownerToken);
+    } catch (error) {
+      if (!mounted) return;
+      AnalyticsService().logEvent('ble_provisioning_failed', {
+        'stage': 'home_persistence',
+      });
+      setState(() {
+        _phase = _ProvisioningPhase.error;
+        _errorMessage = error is _HomeNameCancelledException
+            ? 'Your Rhythm Box is online at $ip. Name the Home to finish setup.'
+            : 'Your Rhythm Box is online at $ip, but the Home could not be saved. Try finishing setup again. ($error)';
+      });
+      return;
+    }
     if (!mounted) return;
 
+    _pendingPersistenceIp = null;
+    _pendingPersistenceOwnerToken = null;
     AnalyticsService().logEvent('ble_provisioning_completed');
     HapticFeedback.heavyImpact();
     setState(() {
@@ -1014,7 +1053,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     return null;
   }
 
-  Future<void> _persistServerHub(String ip, String? ownerToken) async {
+  Future<Hub> _persistServerHub(String ip, String? ownerToken) async {
     final homeProvider = context.read<HomeProvider>();
     final displayName = _provisionedBoxName;
     final serverInstanceId = await _serverInstanceIdFor(
@@ -1029,14 +1068,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
     );
     if (existingHome != null) {
       final hub = await homeProvider.enterHome(existingHome);
+      if (hub == null) {
+        throw StateError('The saved Home could not be opened.');
+      }
       await RecentServersService.instance.record(
-        name: hub?.name ?? displayName,
+        name: hub.name,
         host: ip,
         port: 54448,
-        token: ownerToken ?? hub?.token,
-        serverInstanceId: serverInstanceId ?? hub?.serverInstanceId,
+        token: ownerToken ?? hub.token,
+        serverInstanceId: serverInstanceId ?? hub.serverInstanceId,
       );
-      return;
+      return hub;
     }
 
     if (!mounted) throw const _HomeNameCancelledException();
@@ -1053,13 +1095,17 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       location: home.location,
       timezone: home.timezone,
     );
+    if (hub == null) {
+      throw StateError('The new Home could not be saved.');
+    }
     await RecentServersService.instance.record(
-      name: hub?.name ?? displayName,
+      name: hub.name,
       host: ip,
       port: 54448,
-      token: ownerToken ?? hub?.token,
-      serverInstanceId: serverInstanceId ?? hub?.serverInstanceId,
+      token: ownerToken ?? hub.token,
+      serverInstanceId: serverInstanceId ?? hub.serverInstanceId,
     );
+    return hub;
   }
 
   Future<String?> _serverInstanceIdFor({
@@ -1164,6 +1210,8 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
       _deviceInfo = null;
       _provisionedIp = null;
       _provisioningStatusMessage = null;
+      _pendingPersistenceIp = null;
+      _pendingPersistenceOwnerToken = null;
       _hasAttemptedScan = false;
       _wifiScanInProgress = false;
       _manualSsidEntry = false;
@@ -1484,6 +1532,7 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
   }
 
   Widget _buildErrorBody() {
+    final canFinishPersistence = _pendingPersistenceIp != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1494,9 +1543,11 @@ class _BleProvisioningScreenState extends State<BleProvisioningScreen>
         ),
         const SizedBox(height: 16),
         _buildActionButton(
-          onTap: _startOver,
-          icon: Icons.refresh_rounded,
-          label: 'Try Again',
+          onTap:
+              canFinishPersistence ? _completePendingPersistence : _startOver,
+          icon:
+              canFinishPersistence ? Icons.home_rounded : Icons.refresh_rounded,
+          label: canFinishPersistence ? 'Finish Setup' : 'Try Again',
           isPrimary: true,
         ),
         const SizedBox(height: 12),
