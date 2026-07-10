@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/ble_provisioning_screen.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
+import 'package:rhythm_app/services/ble_provisioning_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
@@ -51,6 +52,34 @@ void main() {
       expect(
         bleProvisioningSupportsPlatformForTesting(
           platform: TargetPlatform.windows,
+        ),
+        isFalse,
+      );
+    });
+  });
+
+  group('bleProvisioningShowsUpdateStatusForTesting', () {
+    test('keeps update UI visible after Wi-Fi handoff', () {
+      expect(
+        bleProvisioningShowsUpdateStatusForTesting(
+          const ProvisioningStatusMessage(
+            status: 'updating',
+            ip: '192.168.1.155',
+            otaStage: 'checking',
+            message: 'Checking for stable update',
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('uses normal provisioning UI for a connected status', () {
+      expect(
+        bleProvisioningShowsUpdateStatusForTesting(
+          const ProvisioningStatusMessage(
+            status: 'connected',
+            ip: '192.168.1.155',
+          ),
         ),
         isFalse,
       );
