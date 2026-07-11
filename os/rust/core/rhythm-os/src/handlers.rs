@@ -2420,6 +2420,106 @@ pub fn handle_put_room_preferences(
     ApiResponse::json_ok(format!(r#"{{"rooms":[{}]}}"#, results.join(",")))
 }
 
+/// Apply the per-node motion admission preference synchronously.
+///
+/// Unlike the general preference endpoint, this mutation has no integration
+/// light command to pace. Returning the post-apply node state gives clients an
+/// authoritative acknowledgement instead of treating queue acceptance as
+/// success.
+pub fn handle_put_node_motion_activation(
+    state: &SharedState,
+    body: &Value,
+    persist: bool,
+) -> ApiResponse {
+    let Some(raw_node_id) = body.get("node_id").and_then(Value::as_str) else {
+        return ApiResponse::bad_request("Missing node_id");
+    };
+    let Some(enabled) = body.get("enabled").and_then(Value::as_bool) else {
+        return ApiResponse::bad_request("enabled must be a boolean");
+    };
+    let node_id = commands::resolve_node_id(state, raw_node_id);
+    let correlation_id = body
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::logging::next_command_id("motion-activation"));
+
+    let before = state
+        .lock()
+        .ok()
+        .and_then(|locked| locked.hub_runtime())
+        .and_then(|runtime| runtime.engine_node_snapshot(&node_id))
+        .map(|snapshot| snapshot.profile_settings.motion_activation_enabled());
+    let patch = commands::RoomProfileSettingsPatch {
+        motion_activation_enabled: Some(Some(enabled)),
+        ..Default::default()
+    };
+
+    let result = commands::do_node_preferences_set(
+        state,
+        &node_id,
+        None,
+        None,
+        None,
+        None,
+        Some(&patch),
+        persist,
+    );
+
+    let mut record = crate::activity::LightActivityRecord::app(&node_id, "set_motion_activation");
+    record.correlation_id = Some(correlation_id.clone());
+    record.change = Some(crate::activity::LightValueChange {
+        axis: Some("motion_activation_enabled".to_string()),
+        before: before.map(Value::Bool),
+        after: result.as_ref().ok().map(|_| Value::Bool(enabled)),
+    });
+    record.payload = Some(json!({
+        "requested_enabled": enabled,
+        "status": if result.is_ok() { "applied" } else { "failed" },
+        "error": result.as_ref().err().map(ToString::to_string),
+    }));
+    crate::activity::record_light_activity(state, record);
+
+    match result {
+        Ok(_) => {
+            tracing::info!(
+                target: "cmd",
+                event = "motion_activation_set",
+                node_id = %node_id,
+                correlation_id = %correlation_id,
+                enabled,
+                status = "applied",
+                "Motion activation preference applied"
+            );
+            match commands::build_node_state(state, &node_id) {
+                Ok(node) => nodes_response(vec![node], false, Duration::ZERO),
+                Err(error) => ApiResponse::server_error(error),
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "cmd",
+                event = "motion_activation_set",
+                node_id = %node_id,
+                correlation_id = %correlation_id,
+                enabled,
+                status = "failed",
+                error = %error,
+                "Motion activation preference failed"
+            );
+            ApiResponse::server_error(error)
+        }
+    }
+}
+
 /// Update node preferences. All preference changes are queued and paced on
 /// the background dispatch worker so HTTP requests return without waiting
 /// for hub commands to complete.
@@ -4290,6 +4390,60 @@ mod tests {
         assert_eq!(activity_nodes, vec!["room1", "room2"]);
     }
 
+    #[test]
+    fn motion_activation_returns_authoritative_state_and_correlated_activity() {
+        let state = handler_state_with_runtime();
+        let response = handle_put_node_motion_activation(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "enabled": false,
+                "request_id": "motion-request-123"
+            }),
+            false,
+        );
+
+        assert_eq!(response.status, 200);
+        let parsed: Value = serde_json::from_str(&response.body).unwrap();
+        assert!(parsed.get("queued").is_none());
+        assert_eq!(
+            parsed["nodes"][0]["profile_settings"]["motion_activation_enabled"],
+            false
+        );
+
+        let state = state.lock().unwrap();
+        let activity = state.light_activity.first().unwrap();
+        assert_eq!(activity.action_id, "set_motion_activation");
+        assert_eq!(
+            activity.correlation_id.as_deref(),
+            Some("motion-request-123")
+        );
+        assert_eq!(activity.change.as_ref().unwrap().before, Some(json!(true)));
+        assert_eq!(activity.change.as_ref().unwrap().after, Some(json!(false)));
+        assert_eq!(
+            activity.payload.as_ref().unwrap()["requested_enabled"],
+            false
+        );
+        assert_eq!(activity.payload.as_ref().unwrap()["status"], "applied");
+    }
+
+    #[test]
+    fn motion_activation_rejects_missing_or_invalid_values() {
+        let state = handler_state_with_runtime();
+        let missing =
+            handle_put_node_motion_activation(&state, &json!({"node_id": "room1"}), false);
+        assert_eq!(missing.status, 400);
+        assert!(missing.body.contains("enabled must be a boolean"));
+
+        let invalid = handle_put_node_motion_activation(
+            &state,
+            &json!({"node_id": "room1", "enabled": "no"}),
+            false,
+        );
+        assert_eq!(invalid.status, 400);
+        assert!(invalid.body.contains("enabled must be a boolean"));
+    }
+
     /// Regression test for issue #36: rapid single-item preference taps must
     /// not block the HTTP handler on hub dispatch. The single-item path was
     /// previously synchronous, so a slow Matter device could stall up to ~30s
@@ -4603,7 +4757,7 @@ mod tests {
         };
 
         struct HandlerMockRuntime {
-            snapshots: Vec<RoomSnapshot>,
+            snapshots: std::sync::Mutex<Vec<RoomSnapshot>>,
         }
         impl RuntimeHandle for HandlerMockRuntime {
             fn handle_event(&self, event: &InputEvent) -> anyhow::Result<bool> {
@@ -4628,12 +4782,35 @@ mod tests {
                 Ok(())
             }
             fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
-                self.snapshots.iter().find(|s| s.id == room_id).cloned()
+                self.snapshots
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == room_id)
+                    .cloned()
             }
             fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
-                self.snapshots.clone()
+                self.snapshots.lock().unwrap().clone()
             }
-            fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+            fn restore_room_state(&self, room_id: &str, restored: rhythm_core::RestoredRoomState) {
+                if let Some(snapshot) = self
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|snapshot| snapshot.id == room_id)
+                {
+                    snapshot.rhythm_enabled = restored.rhythm_enabled;
+                    snapshot.disabled = restored.disabled;
+                    snapshot.time_offset_minutes = restored.time_offset_minutes;
+                    snapshot.brightness_offset = restored.brightness_offset;
+                    snapshot.soft_off = restored.soft_off;
+                    snapshot.mood_active = restored.mood_active;
+                    snapshot.standby_enabled = restored.standby_enabled;
+                    snapshot.hard_off = restored.hard_off;
+                    snapshot.profile_settings = restored.profile_settings;
+                }
+            }
             fn add_room(&self, _: &str, _: &str) {}
             fn remove_room(&self, _: &str) {}
             fn dim_room(&self, _: &str, _: f32) -> anyhow::Result<()> {
@@ -4691,7 +4868,7 @@ mod tests {
         }
 
         let runtime = std::sync::Arc::new(HandlerMockRuntime {
-            snapshots: vec![
+            snapshots: std::sync::Mutex::new(vec![
                 RoomSnapshot {
                     id: "room1".into(),
                     name: "Room 1".into(),
@@ -4737,7 +4914,7 @@ mod tests {
                     hard_off: false,
                     profile_settings: rhythm_core::RoomProfileSettings::default(),
                 },
-            ],
+            ]),
         });
         let mut app = AppState::default();
         install_test_light_runtime_modules(&mut app);

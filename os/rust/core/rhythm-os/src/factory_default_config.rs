@@ -15,7 +15,7 @@ use rhythm_core::{
     RhythmMode, DAY_IDLE_PROFILE_ID, RHYTHM_PROFILE_ID, SLEEP_IDLE_PROFILE_ID, SLEEP_PROFILE_ID,
 };
 
-use crate::bundle::{BundleKind, ProfileBundle, BUNDLE_SCHEMA_VERSION};
+use crate::bundle::{BundleKind, ProfileBundle, PROFILE_BUNDLE_SCHEMA_VERSION};
 use crate::scenes::SceneDefinition;
 
 const FACTORY_DEFAULT_PROFILE_BUNDLE_JSON: &str =
@@ -32,11 +32,11 @@ fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
     let mut bundle: ProfileBundle = serde_json::from_str(FACTORY_DEFAULT_PROFILE_BUNDLE_JSON)
         .context("failed to parse factory-default profile bundle JSON")?;
 
-    if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
+    if bundle.schema_version != PROFILE_BUNDLE_SCHEMA_VERSION {
         return Err(anyhow!(
             "factory-default profile bundle schema_version {} does not match supported schema {}",
             bundle.schema_version,
-            BUNDLE_SCHEMA_VERSION
+            PROFILE_BUNDLE_SCHEMA_VERSION
         ));
     }
 

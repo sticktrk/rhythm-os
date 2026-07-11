@@ -18,10 +18,19 @@ use crate::scenes::SceneDefinition;
 use crate::storage::StoredLocation;
 use crate::topology::RoomTopologyStore;
 
-pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
+pub const PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 1;
+pub const LEGACY_BACKUP_SCHEMA_VERSION: u32 = 1;
+/// Backup v2 adds explicit per-room motion admission state. Exporting a new
+/// schema makes older appliances reject the backup instead of accepting it and
+/// silently dropping that preference during a downgrade restore.
+pub const BACKUP_BUNDLE_SCHEMA_VERSION: u32 = 2;
 
-fn default_schema_version() -> u32 {
-    BUNDLE_SCHEMA_VERSION
+fn default_profile_schema_version() -> u32 {
+    PROFILE_BUNDLE_SCHEMA_VERSION
+}
+
+fn default_backup_schema_version() -> u32 {
+    LEGACY_BACKUP_SCHEMA_VERSION
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +65,7 @@ pub struct ProfileBundleData {
 /// Portable top-level profile bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileBundle {
-    #[serde(default = "default_schema_version")]
+    #[serde(default = "default_profile_schema_version")]
     pub schema_version: u32,
     #[serde(default = "default_profile_bundle_kind")]
     pub kind: BundleKind,
@@ -81,7 +90,7 @@ impl ProfileBundleImportPayload {
         match self {
             Self::Bundle(bundle) => bundle,
             Self::Profile(profile) => ProfileBundle {
-                schema_version: BUNDLE_SCHEMA_VERSION,
+                schema_version: PROFILE_BUNDLE_SCHEMA_VERSION,
                 kind: BundleKind::ProfileBundle,
                 name: None,
                 description: None,
@@ -226,7 +235,7 @@ pub struct BackupRuntimeState {
 /// Full installation backup.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackupBundle {
-    #[serde(default = "default_schema_version")]
+    #[serde(default = "default_backup_schema_version")]
     pub schema_version: u32,
     #[serde(default = "default_backup_bundle_kind")]
     pub kind: BundleKind,

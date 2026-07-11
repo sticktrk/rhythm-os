@@ -385,6 +385,63 @@ void main() {
           )).called(1);
     });
 
+    test('nodeMotionActivationSet returns authoritative state and correlation',
+        () async {
+      when(() => dio.put(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/nodes/motion-activation'),
+          statusCode: 200,
+          data: {
+            'nodes': [
+              {
+                'node_id': 'node-1',
+                'rhythm_enabled': true,
+                'time_offset': 0.0,
+                'brightness_offset': 0.0,
+                'state': 'active',
+                'profile_settings': {'motion_activation_enabled': false},
+              },
+            ],
+          },
+        ),
+      );
+
+      final state = await api.nodeMotionActivationSet(
+        nodeId: 'node-1',
+        enabled: false,
+        requestId: 'motion-request-123',
+      );
+
+      expect(state, isNotNull);
+      expect(state!.profileSettings?.motionActivationEnabled, isFalse);
+      expect(cacheUpdates, hasLength(1));
+      verify(() => dio.put(
+            'api/nodes/motion-activation',
+            data: {
+              'node_id': 'node-1',
+              'enabled': false,
+              'request_id': 'motion-request-123',
+            },
+          )).called(1);
+    });
+
+    test('nodeMotionActivationSet returns null on rejected write', () async {
+      when(() => dio.put(any(), data: any(named: 'data'))).thenThrow(
+        DioException(
+          requestOptions: RequestOptions(path: 'api/nodes/motion-activation'),
+        ),
+      );
+
+      final state = await api.nodeMotionActivationSet(
+        nodeId: 'node-1',
+        enabled: false,
+        requestId: 'motion-request-fail',
+      );
+
+      expect(state, isNull);
+      expect(cacheUpdates, isEmpty);
+    });
+
     test('nodeProfileOverridesSet sends profile override patch endpoint',
         () async {
       when(() => dio.put(
@@ -1881,8 +1938,7 @@ void main() {
   // unpairDevice
   // ---------------------------------------------------------------------------
   group('unpairDevice', () {
-    test('posts the unpair request with an extended receive timeout',
-        () async {
+    test('posts the unpair request with an extended receive timeout', () async {
       when(() => dio.post(
             any(),
             data: any(named: 'data'),
@@ -1914,8 +1970,7 @@ void main() {
       expect(options.sendTimeout, const Duration(seconds: 90));
     });
 
-    test('passes force and a custom timeout through to the request',
-        () async {
+    test('passes force and a custom timeout through to the request', () async {
       when(() => dio.post(
             any(),
             data: any(named: 'data'),
@@ -1942,8 +1997,8 @@ void main() {
         (captured[0] as Map<String, dynamic>)['params'],
         {'device_id': 'matter-100', 'force': true},
       );
-      expect((captured[1] as Options).receiveTimeout,
-          const Duration(seconds: 5));
+      expect(
+          (captured[1] as Options).receiveTimeout, const Duration(seconds: 5));
     });
 
     test('returns null on DioException', () async {

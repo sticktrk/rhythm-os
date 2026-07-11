@@ -1617,6 +1617,26 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn legacy_room_profile_settings_default_motion_activation_to_enabled() {
+        let legacy: RoomProfileSettings = serde_json::from_value(serde_json::json!({
+            "motion_timeout_secs": {"mode": "fixed", "value": 300}
+        }))
+        .unwrap();
+        assert_eq!(legacy.motion_activation_enabled, None);
+        assert!(legacy.motion_activation_enabled());
+
+        let disabled: RoomProfileSettings = serde_json::from_value(serde_json::json!({
+            "motion_activation_enabled": false
+        }))
+        .unwrap();
+        assert!(!disabled.motion_activation_enabled());
+
+        let serialized = serde_json::to_value(RoomProfileSettings::default()).unwrap();
+        assert!(serialized.get("motion_activation_enabled").is_none());
+    }
+
     #[test]
     fn test_room_profile_settings_apply_profile_motion_timeout_to_config() {
         let mut settings = RoomProfileSettings {

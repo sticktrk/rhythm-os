@@ -257,6 +257,18 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<RhythmRoomState?> nodeMotionActivationSet({
+    required String nodeId,
+    required bool enabled,
+    required String requestId,
+  }) {
+    return _delegate.nodeMotionActivationSet(
+      nodeId: nodeId,
+      enabled: enabled,
+      requestId: requestId,
+    );
+  }
+
   Future<void> nodeProfileOverridesSet({
     required String nodeId,
     required Map<String, dynamic>? profileOverrides,

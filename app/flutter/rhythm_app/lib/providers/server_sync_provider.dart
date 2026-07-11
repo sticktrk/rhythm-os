@@ -15,6 +15,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:uuid/uuid.dart';
 
 import '../backend/backend.dart' show AuthUser;
 import '../config/feature_flags.dart';
@@ -184,6 +185,12 @@ class ServerSyncProvider extends ChangeNotifier {
   final Map<String, bool> _suppressedStandbyEnabled = {};
   final Map<String, Timer> _standbyEnabledLockTimers = {};
   static const Duration _standbyEnabledLockDuration = Duration(seconds: 3);
+
+  /// Motion admission uses a synchronous authoritative server mutation. Keep
+  /// one request in flight per node so rapid taps cannot reorder the final
+  /// persisted value.
+  final Set<String> _motionActivationPending = {};
+  static const Uuid _uuid = Uuid();
 
   /// Raw topology graph from `/api/topology/nodes`.
   List<RhythmTopologyNode> _topologyNodes = [];
@@ -710,38 +717,93 @@ class ServerSyncProvider extends ChangeNotifier {
   bool motionActivationEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.profileSettings?.isMotionActivationEnabled ?? true;
 
-  Future<void> setNodeMotionActivationEnabled(
+  bool motionActivationSupportedForNode(String nodeId) {
+    if (HueServiceLocator.isDemoMode) return true;
+    final node = nodeById(nodeId);
+    return _capabilities?.supportsFeature(
+              RhythmFeature.motionActivationToggle,
+            ) ==
+            true ||
+        node?.profileSettings?.motionActivationEnabled != null;
+  }
+
+  bool motionActivationPendingForNode(String nodeId) =>
+      _motionActivationPending.contains(nodeId);
+
+  Future<bool> setNodeMotionActivationEnabled(
     String nodeId,
     bool enabled,
   ) async {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
-    if (index == -1) {
-      if (!enabled) {
-        _roomProvider.clearNodeMotionTimer(nodeId);
-      }
-      await pushNodePreferences(
-        nodeId,
-        profileSettings: {'motion_activation_enabled': enabled},
-      );
-      return;
+    if (index == -1 ||
+        !motionActivationSupportedForNode(nodeId) ||
+        _motionActivationPending.contains(nodeId) ||
+        (!HueServiceLocator.isDemoMode &&
+            (!_connection.connected || _receivingFromServer))) {
+      return false;
+    }
+    final previous = _helloNodes[index];
+    final previousTimer = _roomProvider.getMotionTimer(nodeId);
+    final requestId = _uuid.v4();
+    _motionActivationPending.add(nodeId);
+    _helloNodes[index] = _copyNodeWithMotionActivationEnabled(
+      previous,
+      enabled,
+    );
+    _helloRooms = _buildRoomSummaries();
+    if (!enabled) {
+      _roomProvider.clearNodeMotionTimer(nodeId);
+    }
+    notifyListeners();
+
+    if (HueServiceLocator.isDemoMode) {
+      _motionActivationPending.remove(nodeId);
+      notifyListeners();
+      return true;
     }
 
-    final previous = _helloNodes[index];
+    debugPrint(
+      'ServerSync: setNodeMotionActivationEnabled $nodeId enabled=$enabled requestId=$requestId',
+    );
+    RhythmRoomState? authoritative;
+    try {
+      authoritative = await api.nodeMotionActivationSet(
+        nodeId: nodeId,
+        enabled: enabled,
+        requestId: requestId,
+      );
+    } catch (error) {
+      debugPrint(
+        'ServerSync: motion activation request failed requestId=$requestId error=$error',
+      );
+    }
+    final applied =
+        authoritative?.profileSettings?.motionActivationEnabled == enabled;
+    final currentIndex = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (currentIndex != -1) {
+      _helloNodes[currentIndex] = applied
+          ? _copyNodeWithMotionActivationEnabled(
+              _helloNodes[currentIndex],
+              enabled,
+            )
+          : previous;
+      _helloRooms = _buildRoomSummaries();
+    }
+    if (!applied && previousTimer != null) {
+      _roomProvider.updateNodeMotionTimer(nodeId, previousTimer);
+    }
+    _motionActivationPending.remove(nodeId);
+    notifyListeners();
+    return applied;
+  }
+
+  RhythmRoom _copyNodeWithMotionActivationEnabled(
+    RhythmRoom previous,
+    bool enabled,
+  ) {
     final previousSettings =
         previous.profileSettings ?? const RhythmNodeProfileSettings();
-    final updatedSettings = RhythmNodeProfileSettings(
-      profileId: previousSettings.profileId,
-      moodEnabled: previousSettings.moodEnabled,
-      moodProfileId: previousSettings.moodProfileId,
-      moodSceneId: previousSettings.moodSceneId,
-      fadeSetting: previousSettings.fadeSetting,
-      motionTimeoutSetting: previousSettings.motionTimeoutSetting,
-      motionActivationEnabled: enabled,
-      profileOverrides: previousSettings.profileOverrides,
-      raw: previousSettings.raw,
-    );
-
-    _helloNodes[index] = RhythmRoom(
+    return RhythmRoom(
       id: previous.id,
       name: previous.name,
       kind: previous.kind,
@@ -760,7 +822,17 @@ class ServerSyncProvider extends ChangeNotifier {
       model: previous.model,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
-      profileSettings: updatedSettings,
+      profileSettings: RhythmNodeProfileSettings(
+        profileId: previousSettings.profileId,
+        moodEnabled: previousSettings.moodEnabled,
+        moodProfileId: previousSettings.moodProfileId,
+        moodSceneId: previousSettings.moodSceneId,
+        fadeSetting: previousSettings.fadeSetting,
+        motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+        motionActivationEnabled: enabled,
+        profileOverrides: previousSettings.profileOverrides,
+        raw: previousSettings.raw,
+      ),
       observedPower: previous.observedPower,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
@@ -774,16 +846,6 @@ class ServerSyncProvider extends ChangeNotifier {
       remainingSecs: previous.remainingSecs,
       timeoutSecs: previous.timeoutSecs,
       warningActive: previous.warningActive,
-    );
-    _helloRooms = _buildRoomSummaries();
-    if (!enabled) {
-      _roomProvider.clearNodeMotionTimer(nodeId);
-    }
-    notifyListeners();
-
-    await pushNodePreferences(
-      nodeId,
-      profileSettings: {'motion_activation_enabled': enabled},
     );
   }
 

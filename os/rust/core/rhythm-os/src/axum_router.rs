@@ -179,6 +179,10 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/hub/retry", post(post_hub_retry))
         .route("/api/nodes/preferences", put(put_node_preferences))
         .route(
+            "/api/nodes/motion-activation",
+            put(put_node_motion_activation),
+        )
+        .route(
             "/api/nodes/profile-overrides",
             put(put_node_profile_overrides),
         )
@@ -731,6 +735,13 @@ async fn put_node_preferences(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_put_node_preferences(&state, &body, true)).await
+}
+
+async fn put_node_motion_activation(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_node_motion_activation(&state, &body, true)).await
 }
 
 async fn put_node_profile_overrides(

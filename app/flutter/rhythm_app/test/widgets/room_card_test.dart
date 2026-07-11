@@ -37,6 +37,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         Map<String, dynamic>? profileSettings,
       })> nodePreferenceCalls = [];
   final List<({String nodeId, int brightness})> nodeBrightnessCalls = [];
+  final List<({String nodeId, bool enabled, String requestId})>
+      motionActivationCalls = [];
+  Completer<RhythmRoomState?>? motionActivationCompleter;
+  bool motionActivationSucceeds = true;
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<
       ({
@@ -133,6 +137,30 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     ));
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeMotionActivationSet({
+    required String nodeId,
+    required bool enabled,
+    required String requestId,
+  }) async {
+    motionActivationCalls.add((
+      nodeId: nodeId,
+      enabled: enabled,
+      requestId: requestId,
+    ));
+    final pending = motionActivationCompleter;
+    if (pending != null) return pending.future;
+    if (!motionActivationSucceeds) return null;
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'rhythm_enabled': true,
+      'time_offset': 0.0,
+      'brightness_offset': 0.0,
+      'state': 'active',
+      'profile_settings': {'motion_activation_enabled': enabled},
+    });
   }
 }
 
@@ -331,7 +359,10 @@ void main() {
     final title = find.byKey(const ValueKey('room-card-title-room-1'));
     final activity = find.byKey(const ValueKey('room-card-activity-room-1'));
     final motion = find.byKey(const ValueKey('room-card-motion-room-1'));
-    expect(tester.getCenter(title).dx, lessThan(tester.getCenter(activity).dx));
+    expect(
+      tester.getCenter(title).dx,
+      lessThan(tester.getCenter(activity).dx),
+    );
     expect(
       tester.getCenter(activity).dx,
       lessThan(tester.getCenter(motion).dx),
@@ -347,23 +378,39 @@ void main() {
       lightsOn: true,
     );
     await tester.pump();
+    final pendingResponse = Completer<RhythmRoomState?>();
+    connection.api.motionActivationCompleter = pendingResponse;
     await tester.tap(motion);
     await tester.pump();
 
-    expect(
-      roomProvider.getDisplayRoomState('room-1'),
-      RoomModeState.active,
+    final pending = find.byKey(
+      const ValueKey('room-card-motion-pending-room-1'),
     );
+    expect(pending, findsOneWidget);
+    await tester.tap(pending);
+    await tester.pump();
+    expect(connection.api.motionActivationCalls, hasLength(1));
+
+    pendingResponse.complete(
+      RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'rhythm_enabled': true,
+        'time_offset': 0.0,
+        'brightness_offset': 0.0,
+        'state': 'active',
+        'profile_settings': {'motion_activation_enabled': false},
+      }),
+    );
+    connection.api.motionActivationCompleter = null;
+    await tester.pump();
+
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
     expect(roomProvider.isLightsOn('room-1'), isTrue);
     expect(serverSync.motionActivationEnabledForNode('room-1'), isFalse);
     expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
-    expect(connection.api.nodePreferenceCalls, hasLength(1));
-    final preferenceCall = connection.api.nodePreferenceCalls.single;
-    expect(preferenceCall.state, isNull);
-    expect(
-      preferenceCall.profileSettings,
-      {'motion_activation_enabled': false},
-    );
+    expect(connection.api.motionActivationCalls, hasLength(1));
+    expect(connection.api.motionActivationCalls.single.enabled, isFalse);
+    expect(connection.api.motionActivationCalls.single.requestId, isNotEmpty);
 
     await tester.tap(motion);
     await tester.pump();
@@ -371,11 +418,8 @@ void main() {
     expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
     expect(roomProvider.isLightsOn('room-1'), isTrue);
-    expect(connection.api.nodePreferenceCalls, hasLength(2));
-    expect(
-      connection.api.nodePreferenceCalls.last.profileSettings,
-      {'motion_activation_enabled': true},
-    );
+    expect(connection.api.motionActivationCalls, hasLength(2));
+    expect(connection.api.motionActivationCalls.last.enabled, isTrue);
   });
 
   testWidgets('motion countdown tap does nothing', (tester) async {

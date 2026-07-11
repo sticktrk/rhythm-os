@@ -268,8 +268,14 @@ pub struct HubStartupRetryDto {
 }
 
 /// API capability metadata in state snapshot.
+pub const API_SCHEMA_VERSION: u32 = 1;
+pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ApiCapabilitiesDto {
+    pub api_schema_version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
     pub hubs: Vec<HubCapabilityDto>,
 }
 
@@ -1196,7 +1202,11 @@ mod tests {
             context: "server".into(),
             listen_port: None,
             hubs: vec![],
-            capabilities: ApiCapabilitiesDto { hubs: vec![] },
+            capabilities: ApiCapabilitiesDto {
+                api_schema_version: API_SCHEMA_VERSION,
+                features: vec![FEATURE_MOTION_ACTIVATION_TOGGLE.to_string()],
+                hubs: vec![],
+            },
             active_profile: ActiveProfileDto {
                 config: rhythm_core::default_rhythm_profile(),
                 effective: ActiveProfileEffectiveDto {
@@ -1285,6 +1295,8 @@ mod tests {
                 startup_retry: None,
             }],
             capabilities: ApiCapabilitiesDto {
+                api_schema_version: API_SCHEMA_VERSION,
+                features: vec![FEATURE_MOTION_ACTIVATION_TOGGLE.to_string()],
                 hubs: vec![HubCapabilityDto {
                     hub_type: "matter".into(),
                     configurable: true,
@@ -1364,6 +1376,14 @@ mod tests {
         assert_eq!(json["nodes"][0]["name"], "Office");
         assert_eq!(json["hubs"][0]["type"], "hue");
         assert_eq!(json["capabilities"]["hubs"][0]["type"], "matter");
+        assert_eq!(
+            json["capabilities"]["api_schema_version"],
+            API_SCHEMA_VERSION
+        );
+        assert_eq!(
+            json["capabilities"]["features"][0],
+            FEATURE_MOTION_ACTIVATION_TOGGLE
+        );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
             "matter_on_network_setup_code"

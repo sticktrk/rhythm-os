@@ -353,11 +353,12 @@ class _RoomCardState extends State<RoomCard> {
         );
   }
 
-  Future<void> _setMotionActivationEnabled(bool enabled) {
+  Future<void> _setMotionActivationEnabled(bool enabled) async {
     HapticFeedback.lightImpact();
-    return context
-        .read<ServerSyncProvider>()
-        .setNodeMotionActivationEnabled(widget.roomId, enabled);
+    await context.read<ServerSyncProvider>().setNodeMotionActivationEnabled(
+          widget.roomId,
+          enabled,
+        );
   }
 
   double _effectiveCurveHour(RoomDto room) {
@@ -422,6 +423,14 @@ class _RoomCardState extends State<RoomCard> {
         final motionActivationEnabled =
             context.select<ServerSyncProvider, bool>(
           (p) => p.motionActivationEnabledForNode(widget.roomId),
+        );
+        final motionActivationSupported =
+            context.select<ServerSyncProvider, bool>(
+          (p) => p.motionActivationSupportedForNode(widget.roomId),
+        );
+        final motionActivationPending =
+            context.select<ServerSyncProvider, bool>(
+          (p) => p.motionActivationPendingForNode(widget.roomId),
         );
         // A recent light command that failed to physically reach its target.
         // Shown in the spinner slot once the in-flight state clears.
@@ -722,7 +731,33 @@ class _RoomCardState extends State<RoomCard> {
                                   ],
                                 ),
                               ),
-                              if (motionTimer != null)
+                              if (motionActivationPending)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 8),
+                                  child: Semantics(
+                                    liveRegion: true,
+                                    label:
+                                        'Updating motion activation for ${room.name}',
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () {},
+                                      child: SizedBox(
+                                        key: ValueKey(
+                                          'room-card-motion-pending-${widget.roomId}',
+                                        ),
+                                        width: 28,
+                                        height: 28,
+                                        child: const Padding(
+                                          padding: EdgeInsets.all(6),
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              else if (motionTimer != null)
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: _MotionIndicator(
@@ -733,10 +768,10 @@ class _RoomCardState extends State<RoomCard> {
                                     color: iconColor,
                                     roomName: room.name,
                                     onTap: motionTimer.remainingSecs == null &&
-                                            motionActivationEnabled
-                                        ? () => _setMotionActivationEnabled(
-                                              false,
-                                            )
+                                            motionActivationEnabled &&
+                                            motionActivationSupported
+                                        ? () =>
+                                            _setMotionActivationEnabled(false)
                                         : null,
                                     onExpired: () => context
                                         .read<RoomProvider>()
@@ -747,18 +782,22 @@ class _RoomCardState extends State<RoomCard> {
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: Semantics(
-                                    button: true,
-                                    label: motionActivationEnabled
-                                        ? 'Turn off motion activation for ${room.name}'
-                                        : 'Turn on motion activation for ${room.name}',
+                                    button: motionActivationSupported,
+                                    label: motionActivationSupported
+                                        ? motionActivationEnabled
+                                            ? 'Turn off motion activation for ${room.name}'
+                                            : 'Turn on motion activation for ${room.name}'
+                                        : 'Motion sensor for ${room.name}',
                                     child: GestureDetector(
                                       key: ValueKey(
                                         'room-card-motion-${widget.roomId}',
                                       ),
                                       behavior: HitTestBehavior.opaque,
-                                      onTap: () => _setMotionActivationEnabled(
-                                        !motionActivationEnabled,
-                                      ),
+                                      onTap: motionActivationSupported
+                                          ? () => _setMotionActivationEnabled(
+                                                !motionActivationEnabled,
+                                              )
+                                          : null,
                                       child: SizedBox(
                                         width: 28,
                                         height: 28,

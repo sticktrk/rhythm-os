@@ -7,6 +7,11 @@ abstract final class RhythmDeviceOnboardingMethod {
       'matter_ble_wifi_commissioning';
 }
 
+/// Stable feature IDs advertised by `/api/state.capabilities.features`.
+abstract final class RhythmFeature {
+  static const String motionActivationToggle = 'motion_activation_toggle';
+}
+
 /// Host capabilities advertised by the Rhythm server.
 class RhythmCapabilities {
   final int? apiSchemaVersion;

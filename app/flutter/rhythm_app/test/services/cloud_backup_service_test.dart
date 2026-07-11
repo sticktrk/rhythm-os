@@ -10,6 +10,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   int configSetCalls = 0;
   int getSettingsCalls = 0;
+  int nodeMotionActivationSetCalls = 0;
   int triggerSyncCalls = 0;
 
   @override
@@ -26,6 +27,23 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<RhythmSettings?> getSettings() async {
     getSettingsCalls++;
     return const RhythmSettings(powerSave: false);
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeMotionActivationSet({
+    required String nodeId,
+    required bool enabled,
+    required String requestId,
+  }) async {
+    nodeMotionActivationSetCalls++;
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'state': 'active',
+      'rhythm_enabled': true,
+      'time_offset': 0.0,
+      'brightness_offset': 0.0,
+      'profile_settings': {'motion_activation_enabled': enabled},
+    });
   }
 
   @override
@@ -132,6 +150,18 @@ void main() {
 
       expect(settings?.powerSave, isFalse);
       expect(delegate.getSettingsCalls, 1);
+    });
+
+    test('forwards authoritative motion activation writes', () async {
+      final state = await api.nodeMotionActivationSet(
+        nodeId: 'room-1',
+        enabled: false,
+        requestId: 'request-1',
+      );
+
+      expect(delegate.nodeMotionActivationSetCalls, 1);
+      expect(state?.nodeId, 'room-1');
+      expect(state?.profileSettings?.motionActivationEnabled, isFalse);
     });
 
     test('does not auto-capture after sync operations', () async {
