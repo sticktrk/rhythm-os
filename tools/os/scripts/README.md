@@ -10,7 +10,7 @@ This directory contains all build and deployment scripts for Rhythm OS.
 
 # Triage
 ./tools/triage-bug.sh [issue-number]             # Download and summarize app bug-report debug bundle
-./tools/triage-features.sh [issue-number]        # Summarize a feature issue for implementation
+./tools/triage-features.sh [issue-number]        # Scaffold a product brief for feature delivery
 
 # Build individual components
 ./tools/os/scripts/build-server.sh               # Build the server
