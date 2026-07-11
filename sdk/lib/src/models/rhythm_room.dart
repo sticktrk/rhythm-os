@@ -186,6 +186,7 @@ class RhythmNodeProfileSettings {
   final String? moodSceneId;
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
+  final bool? motionActivationEnabled;
   final Map<String, RhythmLightProfileNodeOverride> profileOverrides;
   final Map<String, dynamic> raw;
 
@@ -196,12 +197,14 @@ class RhythmNodeProfileSettings {
     this.moodSceneId,
     this.fadeSetting,
     this.motionTimeoutSetting,
+    this.motionActivationEnabled,
     this.profileOverrides = const {},
     this.raw = const <String, dynamic>{},
   });
 
   int? get fadeMs => fadeSetting?.fixedValue;
   int? get motionTimeoutSecs => motionTimeoutSetting?.fixedValue;
+  bool get isMotionActivationEnabled => motionActivationEnabled ?? true;
 
   bool get isEmpty =>
       profileId == null &&
@@ -210,6 +213,7 @@ class RhythmNodeProfileSettings {
       moodSceneId == null &&
       fadeSetting == null &&
       motionTimeoutSetting == null &&
+      motionActivationEnabled == null &&
       profileOverrides.isEmpty &&
       raw.isEmpty;
 
@@ -223,6 +227,7 @@ class RhythmNodeProfileSettings {
       ..remove('idle_profile_id')
       ..remove('fade_ms')
       ..remove('motion_timeout_secs')
+      ..remove('motion_activation_enabled')
       ..remove('profile_overrides');
     final moodProfileId = json['mood_profile_id'] as String? ??
         json['idle_profile_id'] as String?;
@@ -237,6 +242,7 @@ class RhythmNodeProfileSettings {
           moodSceneId == null || moodSceneId.isEmpty ? null : moodSceneId,
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
+      motionActivationEnabled: json['motion_activation_enabled'] as bool?,
       profileOverrides: _profileOverridesFromJson(json['profile_overrides']),
       raw: raw,
     );
@@ -251,6 +257,8 @@ class RhythmNodeProfileSettings {
         if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
         if (motionTimeoutSetting != null)
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),
+        if (motionActivationEnabled != null)
+          'motion_activation_enabled': motionActivationEnabled,
         if (profileOverrides.isNotEmpty)
           'profile_overrides': {
             for (final entry in profileOverrides.entries)

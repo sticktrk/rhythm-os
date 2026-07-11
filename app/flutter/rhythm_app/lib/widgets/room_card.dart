@@ -353,30 +353,11 @@ class _RoomCardState extends State<RoomCard> {
         );
   }
 
-  Future<void> _turnOffMotionActivity() {
-    final roomProvider = context.read<RoomProvider>();
-    final previousMode =
-        _analyticsModeForState(roomProvider.getDisplayRoomState(widget.roomId));
-
-    HapticFeedback.heavyImpact();
-    roomProvider.setRoomLightsOnLocal(widget.roomId, false);
-    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.hardOff);
-
-    setState(() {
-      _sliderBrightness = null;
-      _cctMode = false;
-      _sliderKelvin = null;
-    });
-    AnalyticsService().logRoomModeChanged(
-      roomId: widget.roomId,
-      previousMode: previousMode,
-      nextMode: RoomMode.off.name,
-    );
-
-    return context.read<ServerSyncProvider>().pushNodePreferences(
-          widget.roomId,
-          state: RoomModeState.hardOff,
-        );
+  Future<void> _setMotionActivationEnabled(bool enabled) {
+    HapticFeedback.lightImpact();
+    return context
+        .read<ServerSyncProvider>()
+        .setNodeMotionActivationEnabled(widget.roomId, enabled);
   }
 
   double _effectiveCurveHour(RoomDto room) {
@@ -438,6 +419,10 @@ class _RoomCardState extends State<RoomCard> {
         // Check if this room's hub is reachable.
         final hubConnected = context.select<ServerSyncProvider, bool>(
             (p) => p.isRoomHubConnected(room.source));
+        final motionActivationEnabled =
+            context.select<ServerSyncProvider, bool>(
+          (p) => p.motionActivationEnabledForNode(widget.roomId),
+        );
         // A recent light command that failed to physically reach its target.
         // Shown in the spinner slot once the in-flight state clears.
         final dispatchFailure =
@@ -747,8 +732,11 @@ class _RoomCardState extends State<RoomCard> {
                                     info: motionTimer,
                                     color: iconColor,
                                     roomName: room.name,
-                                    onTap: motionTimer.remainingSecs == null
-                                        ? _turnOffMotionActivity
+                                    onTap: motionTimer.remainingSecs == null &&
+                                            motionActivationEnabled
+                                        ? () => _setMotionActivationEnabled(
+                                              false,
+                                            )
                                         : null,
                                     onExpired: () => context
                                         .read<RoomProvider>()
@@ -760,21 +748,29 @@ class _RoomCardState extends State<RoomCard> {
                                   padding: const EdgeInsets.only(left: 8),
                                   child: Semantics(
                                     button: true,
-                                    label: 'Turn off motion for ${room.name}',
+                                    label: motionActivationEnabled
+                                        ? 'Turn off motion activation for ${room.name}'
+                                        : 'Turn on motion activation for ${room.name}',
                                     child: GestureDetector(
                                       key: ValueKey(
                                         'room-card-motion-${widget.roomId}',
                                       ),
                                       behavior: HitTestBehavior.opaque,
-                                      onTap: _turnOffMotionActivity,
+                                      onTap: () => _setMotionActivationEnabled(
+                                        !motionActivationEnabled,
+                                      ),
                                       child: SizedBox(
                                         width: 28,
                                         height: 28,
                                         child: Icon(
-                                          Icons.sensors_rounded,
+                                          motionActivationEnabled
+                                              ? Icons.sensors_rounded
+                                              : Icons.sensors_off_rounded,
                                           size: 18,
                                           color: iconColor.withValues(
-                                            alpha: 0.45,
+                                            alpha: motionActivationEnabled
+                                                ? 0.45
+                                                : 0.30,
                                           ),
                                         ),
                                       ),
@@ -2152,7 +2148,7 @@ class _MotionIndicatorState extends State<_MotionIndicator>
     return Semantics(
       button: isTappable,
       label: isTappable
-          ? 'Turn off motion for ${widget.roomName}'
+          ? 'Turn off motion activation for ${widget.roomName}'
           : 'Motion timer for ${widget.roomName}',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,

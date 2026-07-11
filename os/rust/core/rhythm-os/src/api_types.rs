@@ -47,6 +47,7 @@ pub struct RoomProfileSettingsDto {
     pub fade_ms: Option<TimerSetting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_timeout_secs: Option<TimerSetting>,
+    pub motion_activation_enabled: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profile_overrides: BTreeMap<String, LightProfileNodeOverride>,
 }
@@ -60,6 +61,7 @@ impl RoomProfileSettingsDto {
             mood_scene_id: settings.mood_scene_id.clone(),
             fade_ms: settings.fade_ms.clone(),
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
+            motion_activation_enabled: settings.motion_activation_enabled(),
             profile_overrides: settings.profile_overrides.clone(),
         }
     }

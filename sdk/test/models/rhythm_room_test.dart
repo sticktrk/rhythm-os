@@ -254,6 +254,7 @@ void main() {
             'mood_scene_id': 'sleep-scene',
             'fade_ms': {'mode': 'fixed', 'value': 1200},
             'motion_timeout_secs': {'mode': 'fixed', 'value': 300},
+            'motion_activation_enabled': false,
             'profile_overrides': {
               'rhythm': {
                 'motion_timeout_secs': {'mode': 'fixed', 'value': 450},
@@ -271,6 +272,11 @@ void main() {
         expect(room.profileSettings?.moodSceneId, 'sleep-scene');
         expect(room.profileSettings?.fadeMs, 1200);
         expect(room.profileSettings?.motionTimeoutSecs, 300);
+        expect(room.profileSettings?.isMotionActivationEnabled, isFalse);
+        expect(
+          room.profileSettings?.toJson()['motion_activation_enabled'],
+          isFalse,
+        );
         expect(
           room.profileSettings?.profileOverrides['rhythm']?.motionTimeoutSecs,
           450,

@@ -247,8 +247,7 @@ void main() {
     FirstRunExplainer.seenWriter = (_) async {};
   });
 
-  testWidgets(
-      'header docks motion right and neutral motion tap hard-offs the room',
+  testWidgets('header docks motion right and neutral tap disables motion only',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -276,6 +275,30 @@ void main() {
     addTearDown(roomProvider.dispose);
     addTearDown(serverSync.dispose);
     addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'device_ids': ['light-1', 'motion-1'],
+            'devices': [
+              {'id': 'motion-1', 'type': 'motion'},
+            ],
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0,
+            'brightness_offset': 0,
+            'state': 'active',
+            'profile_settings': {'motion_activation_enabled': true},
+          },
+        ],
+      }),
+    );
 
     await tester.pumpWidget(
       MultiProvider(
@@ -329,12 +352,29 @@ void main() {
 
     expect(
       roomProvider.getDisplayRoomState('room-1'),
-      RoomModeState.hardOff,
+      RoomModeState.active,
     );
+    expect(roomProvider.isLightsOn('room-1'), isTrue);
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isFalse);
+    expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, hasLength(1));
+    final preferenceCall = connection.api.nodePreferenceCalls.single;
+    expect(preferenceCall.state, isNull);
     expect(
-      connection.api.nodePreferenceCalls.single.state,
-      RoomModeState.hardOff,
+      preferenceCall.profileSettings,
+      {'motion_activation_enabled': false},
+    );
+
+    await tester.tap(motion);
+    await tester.pump();
+
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(roomProvider.isLightsOn('room-1'), isTrue);
+    expect(connection.api.nodePreferenceCalls, hasLength(2));
+    expect(
+      connection.api.nodePreferenceCalls.last.profileSettings,
+      {'motion_activation_enabled': true},
     );
   });
 

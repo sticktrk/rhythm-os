@@ -1518,6 +1518,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     );
                     continue;
                 }
+                if !motion_activation_enabled_for_target(state, &target_node_id) {
+                    tracing::info!(
+                        target: "evt",
+                        event = "motion_node_control_suppressed",
+                        source_node_id = %source_node_id,
+                        target_node_id = %target_node_id,
+                        source_room_id = %room_id,
+                        native_sensor_id = %sensor_id,
+                        detected,
+                        reason = "motion_activation_disabled",
+                        "Motion node control suppressed for disabled target"
+                    );
+                    continue;
+                }
 
                 let source_key =
                     motion_source_tracking_key(&source_node_id, &target_node_id, multi_target);
@@ -2382,6 +2396,7 @@ pub fn apply_pending_motion_seeds(
     let mut live_count = 0usize;
     let mut hard_off_dropped = 0usize;
     let mut soft_off_dropped = 0usize;
+    let mut motion_disabled_dropped = 0usize;
     let mut deferred = Vec::new();
     let mut turn_on_targets = Vec::new();
 
@@ -2455,6 +2470,10 @@ pub fn apply_pending_motion_seeds(
         );
         if motion.sensors.contains_key(&source_key) {
             live_count += 1;
+            continue;
+        }
+        if !motion_activation_enabled_for_target(state, &target_node_id) {
+            motion_disabled_dropped += 1;
             continue;
         }
         let should_turn_on = is_active && !motion.has_active_sources_for_target(&target_node_id);
@@ -2552,11 +2571,16 @@ pub fn apply_pending_motion_seeds(
     }
 
     let applied_count = active_count + owned_inactive_count + idle_count;
-    if applied_count > 0 || live_count > 0 || hard_off_dropped > 0 || soft_off_dropped > 0 {
+    if applied_count > 0
+        || live_count > 0
+        || hard_off_dropped > 0
+        || soft_off_dropped > 0
+        || motion_disabled_dropped > 0
+    {
         info!(
             target: "evt",
-            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept, {} hard_off dropped, {} soft_off dropped)",
-            active_count, owned_inactive_count, idle_count, live_count, hard_off_dropped, soft_off_dropped
+            "Motion: seeded {} active, {} cleared-but-owned, {} idle from startup prefetch ({} live sources kept, {} hard_off dropped, {} soft_off dropped, {} motion-disabled dropped)",
+            active_count, owned_inactive_count, idle_count, live_count, hard_off_dropped, soft_off_dropped, motion_disabled_dropped
         );
     }
     applied_count > 0
@@ -2591,6 +2615,16 @@ fn motion_timeout_secs_for_target(state: &SharedState, target_node_id: &str) -> 
             .map(|s| s.default_motion_timeout_secs)
             .unwrap_or(0)
     })
+}
+
+fn motion_activation_enabled_for_target(state: &SharedState, target_node_id: &str) -> bool {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_runtime())
+        .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
+        .map(|snapshot| snapshot.profile_settings.motion_activation_enabled())
+        .unwrap_or(true)
 }
 
 fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<bool> {
@@ -6232,6 +6266,33 @@ mod tests {
     }
 
     #[test]
+    fn disabled_motion_activation_does_not_claim_or_turn_on_target() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.profile_settings.motion_activation_enabled = Some(false);
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let turn_on_calls = runtime.turn_on_calls.clone();
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        assert!(motion.sensors.is_empty());
+        assert!(motion.motion_owned.is_empty());
+        assert!(turn_on_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn motion_event_fans_out_to_multiple_control_targets() {
         let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
@@ -8252,6 +8313,12 @@ mod tests {
         room_snapshot_with_flags(id, true, false)
     }
 
+    fn motion_disabled_room_snapshot(id: &str) -> RoomSnapshot {
+        let mut snapshot = room_snapshot_with_flags(id, false, false);
+        snapshot.profile_settings.motion_activation_enabled = Some(false);
+        snapshot
+    }
+
     /// Boot-time motion seeding must skip rooms persisted as hard_off.
     /// Otherwise a motion timer starts for a room the user has explicitly
     /// switched off, and the timer survives across power cycles even though
@@ -8283,6 +8350,20 @@ mod tests {
             state.lock().unwrap().pending_motion_seed.is_empty(),
             "hard_off seeds must be dropped, not deferred"
         );
+    }
+
+    #[test]
+    fn apply_seeds_skips_motion_disabled_room() {
+        let state = make_state_with_room_snapshot(motion_disabled_room_snapshot("room_a"));
+        push_seed(&state, "sensor_1", "room_a", true);
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(!dirty);
+        assert!(motion.sensors.is_empty());
+        assert!(motion.motion_owned.is_empty());
+        assert!(state.lock().unwrap().pending_motion_seed.is_empty());
     }
 
     /// Inactive startup motion prefetch must not turn a persisted Idle room

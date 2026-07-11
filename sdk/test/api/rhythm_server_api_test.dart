@@ -364,6 +364,7 @@ void main() {
         rhythmEnabled: true,
         profileSettings: {
           'motion_timeout_secs': 60,
+          'motion_activation_enabled': false,
         },
       );
 
@@ -377,6 +378,7 @@ void main() {
                   'mode': 'fixed',
                   'value': 60,
                 },
+                'motion_activation_enabled': false,
               },
             },
             queryParameters: null,

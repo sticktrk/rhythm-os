@@ -894,6 +894,14 @@ fn parse_profile_settings_patch(
         )),
     };
 
+    let motion_activation_enabled = match body.get("motion_activation_enabled") {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => Some(Some(v.as_bool().ok_or_else(|| {
+            format!("{field_name}.motion_activation_enabled must be a boolean or null")
+        })?)),
+    };
+
     Ok(Some(commands::RoomProfileSettingsPatch {
         clear_all: false,
         profile_id,
@@ -902,6 +910,7 @@ fn parse_profile_settings_patch(
         mood_scene_id,
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
+        motion_activation_enabled,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
     }))
 }
@@ -3586,6 +3595,7 @@ mod tests {
                 "active_light_scene_id": "scene-1",
                 "fade_ms": {"mode": "fixed", "value": 250},
                 "motion_timeout_secs": null,
+                "motion_activation_enabled": false,
                 "profile_overrides": {
                     "rhythm": {
                         "motion_timeout_secs": {"mode": "fixed", "value": 300}
@@ -3606,6 +3616,7 @@ mod tests {
             Some(Some(rhythm_core::TimerSetting::Fixed { value: 250 }))
         );
         assert_eq!(patch.motion_timeout_secs, Some(None));
+        assert_eq!(patch.motion_activation_enabled, Some(Some(false)));
         let profile_overrides = patch.profile_overrides.unwrap().unwrap();
         assert_eq!(
             profile_overrides
@@ -3639,6 +3650,14 @@ mod tests {
             parse_profile_settings_patch(Some(&json!({"mood_scene_id": false})), "room_profile")
                 .unwrap_err(),
             "room_profile.mood_scene_id must be a string or null"
+        );
+        assert_eq!(
+            parse_profile_settings_patch(
+                Some(&json!({"motion_activation_enabled": "no"})),
+                "room_profile"
+            )
+            .unwrap_err(),
+            "room_profile.motion_activation_enabled must be a boolean or null"
         );
         assert!(parse_profile_settings_patch(
             Some(&json!({"fade_ms": {"mode": "fixed", "value": "fast"}})),

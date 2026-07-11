@@ -707,6 +707,86 @@ class ServerSyncProvider extends ChangeNotifier {
   bool standbyEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.standbyEnabled ?? false;
 
+  bool motionActivationEnabledForNode(String nodeId) =>
+      nodeById(nodeId)?.profileSettings?.isMotionActivationEnabled ?? true;
+
+  Future<void> setNodeMotionActivationEnabled(
+    String nodeId,
+    bool enabled,
+  ) async {
+    final index = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (index == -1) {
+      if (!enabled) {
+        _roomProvider.clearNodeMotionTimer(nodeId);
+      }
+      await pushNodePreferences(
+        nodeId,
+        profileSettings: {'motion_activation_enabled': enabled},
+      );
+      return;
+    }
+
+    final previous = _helloNodes[index];
+    final previousSettings =
+        previous.profileSettings ?? const RhythmNodeProfileSettings();
+    final updatedSettings = RhythmNodeProfileSettings(
+      profileId: previousSettings.profileId,
+      moodEnabled: previousSettings.moodEnabled,
+      moodProfileId: previousSettings.moodProfileId,
+      moodSceneId: previousSettings.moodSceneId,
+      fadeSetting: previousSettings.fadeSetting,
+      motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+      motionActivationEnabled: enabled,
+      profileOverrides: previousSettings.profileOverrides,
+      raw: previousSettings.raw,
+    );
+
+    _helloNodes[index] = RhythmRoom(
+      id: previous.id,
+      name: previous.name,
+      kind: previous.kind,
+      parentId: previous.parentId,
+      placement: previous.placement,
+      groupedLightId: previous.groupedLightId,
+      state: previous.state,
+      transitioning: previous.transitioning,
+      pendingDispatch: previous.pendingDispatch,
+      rhythmEnabled: previous.rhythmEnabled,
+      disabled: previous.disabled,
+      timeOffset: previous.timeOffset,
+      brightnessOffset: previous.brightnessOffset,
+      hubTypes: previous.hubTypes,
+      manufacturer: previous.manufacturer,
+      model: previous.model,
+      deviceIds: previous.deviceIds,
+      devices: previous.devices,
+      profileSettings: updatedSettings,
+      observedPower: previous.observedPower,
+      moodEnabled: previous.moodEnabled,
+      moodActive: previous.moodActive,
+      standbyEnabled: previous.standbyEnabled,
+      standbyActive: previous.standbyActive,
+      lightsOn: previous.lightsOn,
+      brightness: previous.brightness,
+      kelvin: previous.kelvin,
+      motionActive: previous.motionActive,
+      motionOwned: previous.motionOwned,
+      remainingSecs: previous.remainingSecs,
+      timeoutSecs: previous.timeoutSecs,
+      warningActive: previous.warningActive,
+    );
+    _helloRooms = _buildRoomSummaries();
+    if (!enabled) {
+      _roomProvider.clearNodeMotionTimer(nodeId);
+    }
+    notifyListeners();
+
+    await pushNodePreferences(
+      nodeId,
+      profileSettings: {'motion_activation_enabled': enabled},
+    );
+  }
+
   void setNodeProfileMotionTimeoutLocal(
     String nodeId, {
     required RhythmMode mode,
@@ -726,6 +806,7 @@ class ServerSyncProvider extends ChangeNotifier {
       moodSceneId: previousSettings.moodSceneId,
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+      motionActivationEnabled: previousSettings.motionActivationEnabled,
       profileOverrides: _withMotionTimeoutProfileOverride(
         previousSettings.profileOverrides,
         profileId: profileId,
