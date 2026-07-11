@@ -4,6 +4,7 @@
 //! and transport abstraction for Home Assistant. No platform-specific
 //! dependencies — concrete transport implementations live in the platform crate.
 
+pub mod area_membership;
 pub mod controller;
 pub mod events;
 pub mod ha_lifecycle;
