@@ -18,7 +18,10 @@ use crate::reqwest_transport::ReqwestHueTransport;
 use crate::sse::HueSseConfig;
 
 use rhythm_os::canonical::identity::HubKey;
-use rhythm_os::hub::{ActiveHub, ExternalLightHubIntegration, HubEvent, HubProvider, HubType};
+use rhythm_os::hub::{
+    ActiveHub, ExternalLightHubIntegration, HubDeviceRoomAssignment,
+    HubDeviceRoomAssignmentOutcome, HubEvent, HubProvider, HubType,
+};
 use rhythm_os::state::SharedState;
 
 // ============================================================================
@@ -195,6 +198,55 @@ impl ExternalLightHubIntegration for HueIntegration {
         key: &HubKey,
     ) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
         create_hue_controller(state, key)
+    }
+
+    fn prepare_device_room_assignment(
+        &self,
+        state: &SharedState,
+        assignment: &HubDeviceRoomAssignment,
+    ) -> Result<HubDeviceRoomAssignmentOutcome> {
+        if assignment.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light {
+            return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
+        }
+
+        let target_hub_room_id = match assignment.target_rhythm_room_id.as_deref() {
+            Some(target_room_id) => match assignment.target_hub_room_ids.as_slice() {
+                [target_hub_room_id] => Some(target_hub_room_id.as_str()),
+                [] => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot move Hue light to Rhythm room '{}': that room is not backed by this Hue bridge",
+                        target_room_id
+                    ));
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot move Hue light to Rhythm room '{}': it maps to multiple rooms on this Hue bridge",
+                        target_room_id
+                    ));
+                }
+            },
+            None => None,
+        };
+
+        let (bridge_ip, username) = {
+            let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let hue = state
+                .hubs
+                .get(&assignment.hub_key)
+                .and_then(|hub| hub.data::<HueHubData>())
+                .ok_or_else(|| anyhow::anyhow!("Hue hub is not active: {}", assignment.hub_key))?;
+            (hue.bridge_ip.clone(), hue.username.clone())
+        };
+        let transport = ReqwestHueTransport::new(&bridge_ip)?;
+        crate::room_membership::reassign_device_room(
+            &transport,
+            &username,
+            &assignment.native_device_id,
+            target_hub_room_id,
+        )?;
+        Ok(HubDeviceRoomAssignmentOutcome::Reassigned {
+            target_hub_room_id: target_hub_room_id.map(str::to_string),
+        })
     }
 }
 
@@ -411,6 +463,29 @@ mod tests {
         let caps = INTEGRATION.api_capabilities();
         assert_eq!(caps.hub_type, HubType::HUE);
         assert!(caps.configurable);
+    }
+
+    #[test]
+    fn hue_light_move_requires_exactly_one_native_target_room() {
+        let state = shared_state();
+        let assignment = |target_hub_room_ids: Vec<String>| HubDeviceRoomAssignment {
+            hub_key: hue_key("192.0.2.10"),
+            native_device_id: "light-device".to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            target_rhythm_room_id: Some("office".to_string()),
+            target_hub_room_ids,
+        };
+
+        let missing = string_error(
+            INTEGRATION.prepare_device_room_assignment(&state, &assignment(Vec::new())),
+        );
+        assert!(missing.contains("not backed by this Hue bridge"));
+
+        let ambiguous = string_error(INTEGRATION.prepare_device_room_assignment(
+            &state,
+            &assignment(vec!["hue-office-a".to_string(), "hue-office-b".to_string()]),
+        ));
+        assert!(ambiguous.contains("maps to multiple rooms"));
     }
 
     #[test]

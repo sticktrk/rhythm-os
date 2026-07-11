@@ -18,7 +18,10 @@ use crate::ws_client::start_ha_ws;
 
 use rhythm_os::button_resolve::RawButtonEvent;
 use rhythm_os::canonical::identity::HubKey;
-use rhythm_os::hub::{ActiveHub, ExternalLightHubIntegration, HubEvent, HubProvider, HubType};
+use rhythm_os::hub::{
+    ActiveHub, ExternalLightHubIntegration, HubDeviceRoomAssignment,
+    HubDeviceRoomAssignmentOutcome, HubEvent, HubProvider, HubType,
+};
 use rhythm_os::state::SharedState;
 
 // ============================================================================
@@ -174,6 +177,55 @@ impl ExternalLightHubIntegration for HaIntegration {
         key: &HubKey,
     ) -> Result<std::sync::Arc<dyn rhythm_core::HubLightController>> {
         create_ha_controller(state, key)
+    }
+
+    fn prepare_device_room_assignment(
+        &self,
+        state: &SharedState,
+        assignment: &HubDeviceRoomAssignment,
+    ) -> Result<HubDeviceRoomAssignmentOutcome> {
+        if assignment.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light {
+            return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
+        }
+
+        let target_area_id = match assignment.target_rhythm_room_id.as_deref() {
+            Some(target_room_id) => match assignment.target_hub_room_ids.as_slice() {
+                [target_area_id] => Some(target_area_id.as_str()),
+                [] => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot move Home Assistant light to Rhythm room '{}': that room is not backed by this Home Assistant instance",
+                        target_room_id
+                    ));
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot move Home Assistant light to Rhythm room '{}': it maps to multiple areas in this Home Assistant instance",
+                        target_room_id
+                    ));
+                }
+            },
+            None => None,
+        };
+
+        let config = {
+            let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state
+                .hubs
+                .get(&assignment.hub_key)
+                .and_then(|hub| hub.data::<crate::hub_state::HaHubData>())
+                .map(|ha| ha.config.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Home Assistant hub is not active: {}", assignment.hub_key)
+                })?
+        };
+        crate::area_membership::reassign_entity_area(
+            &config,
+            &assignment.native_device_id,
+            target_area_id,
+        )?;
+        Ok(HubDeviceRoomAssignmentOutcome::Reassigned {
+            target_hub_room_id: target_area_id.map(str::to_string),
+        })
     }
 
     fn post_connect(&self, state: &SharedState, _key: &HubKey) {
@@ -631,6 +683,29 @@ mod tests {
         } else {
             std::env::remove_var("SUPERVISOR_TOKEN");
         }
+    }
+
+    #[test]
+    fn ha_light_move_requires_exactly_one_native_target_area() {
+        let state = state();
+        let assignment = |target_hub_room_ids: Vec<String>| HubDeviceRoomAssignment {
+            hub_key: ha_key("ha.local:8123"),
+            native_device_id: "light.desk".to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            target_rhythm_room_id: Some("office".to_string()),
+            target_hub_room_ids,
+        };
+
+        let missing = string_error(
+            INTEGRATION.prepare_device_room_assignment(&state, &assignment(Vec::new())),
+        );
+        assert!(missing.contains("not backed by this Home Assistant instance"));
+
+        let ambiguous = string_error(INTEGRATION.prepare_device_room_assignment(
+            &state,
+            &assignment(vec!["office-a".to_string(), "office-b".to_string()]),
+        ));
+        assert!(ambiguous.contains("maps to multiple areas"));
     }
 
     #[test]

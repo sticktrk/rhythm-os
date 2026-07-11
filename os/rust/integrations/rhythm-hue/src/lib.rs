@@ -17,6 +17,7 @@ pub mod registry;
 pub mod reqwest_lifecycle;
 pub mod reqwest_sse;
 pub mod reqwest_transport;
+pub mod room_membership;
 pub mod sse;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

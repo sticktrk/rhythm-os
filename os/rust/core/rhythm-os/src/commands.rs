@@ -11390,6 +11390,70 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
+    let (assignments, prepare_hub_device_room_assignment_fn) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let device = s
+            .canonical_registry
+            .get(device_id)
+            .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
+
+        if let Some(target_room_id) = room_id {
+            if s.topology.get(target_room_id).is_none() {
+                return Err(anyhow::anyhow!("Room not found: {}", target_room_id));
+            }
+        }
+
+        let assignments = device
+            .active_endpoints()
+            .map(|endpoint| {
+                let mut target_hub_room_ids = room_id
+                    .and_then(|target_room_id| s.topology.get(target_room_id))
+                    .map(|target_room| {
+                        target_room
+                            .hub_room_bindings
+                            .iter()
+                            .filter(|binding| binding.hub_key == endpoint.hub_key)
+                            .map(|binding| binding.hub_room_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                target_hub_room_ids.sort();
+                target_hub_room_ids.dedup();
+                crate::hub::HubDeviceRoomAssignment {
+                    hub_key: endpoint.hub_key.clone(),
+                    native_device_id: endpoint.native_id.clone(),
+                    device_type: device.device_type.clone(),
+                    target_rhythm_room_id: room_id.map(str::to_string),
+                    target_hub_room_ids,
+                }
+            })
+            .collect::<Vec<_>>();
+        (assignments, s.prepare_hub_device_room_assignment_fn.clone())
+    };
+
+    let mut prepared_assignments = Vec::new();
+    if let Some(prepare) = prepare_hub_device_room_assignment_fn {
+        for assignment in assignments {
+            let outcome = prepare(state, &assignment)?;
+            if let crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned { target_hub_room_id } =
+                &outcome
+            {
+                let valid_target = match assignment.target_rhythm_room_id.as_deref() {
+                    Some(_) => target_hub_room_id
+                        .as_ref()
+                        .is_some_and(|target| assignment.target_hub_room_ids.contains(target)),
+                    None => target_hub_room_id.is_none(),
+                };
+                if !valid_target {
+                    return Err(anyhow::anyhow!(
+                        "Integration returned a native room outside the requested Rhythm target"
+                    ));
+                }
+            }
+            prepared_assignments.push((assignment, outcome));
+        }
+    }
+
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
     // Snapshot endpoints and old room before mutating.
@@ -11431,6 +11495,26 @@ pub fn do_canonical_assign_room(
     if let Some(target_room_id) = room_id {
         if s.topology.get(target_room_id).is_none() {
             return Err(anyhow::anyhow!("Room not found: {}", target_room_id));
+        }
+    }
+
+    for (assignment, outcome) in &prepared_assignments {
+        if !matches!(assignment.device_type, DeviceType::Light) {
+            continue;
+        }
+        if let crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned { target_hub_room_id } =
+            outcome
+        {
+            if !s.topology.reassign_hub_light_device(
+                &assignment.hub_key,
+                &assignment.native_device_id,
+                target_hub_room_id.as_deref(),
+            ) && target_hub_room_id.is_some()
+            {
+                return Err(anyhow::anyhow!(
+                    "Native room reassignment succeeded but the matching source-room binding was not found"
+                ));
+            }
         }
     }
 
@@ -12224,20 +12308,15 @@ pub fn do_topology_move_device(
     from_room: &str,
     to_room: &str,
 ) -> Result<()> {
-    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    if s.topology.move_device(device_id, from_room, to_room) {
-        persist_topology(&s);
-        drop(s);
-        reconcile_runtime_from_state(state)?;
-
-        {
-            crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.topology.device_parent_room_id(device_id) != Some(from_room) {
+            return Err(anyhow::anyhow!(
+                "Failed to move device: source room mismatch"
+            ));
         }
-
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("Failed to move device"))
     }
+    do_canonical_assign_room(state, device_id, Some(to_room))
 }
 
 // ============================================================================
@@ -22333,6 +22412,120 @@ mod tests {
                 .unwrap()
                 .room_id,
             None
+        );
+    }
+
+    fn setup_native_room_move() -> (SharedState, String, String, String, HubKey) {
+        let (state, _runtime) = setup_state(vec![]);
+        let hub_key = HubKey::new(HubType::new("room_authoritative"), "bridge");
+        let source_room_id = "nook".to_string();
+        let target_room_id = "office".to_string();
+        let native_device_id = "hub-device-1";
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            native_device_id,
+            "Hub Lamp",
+            "hub-nook",
+            "Nook",
+        );
+
+        {
+            let mut state = state.lock().unwrap();
+            let mut source = crate::topology::TopologyRoom::new(&source_room_id, "Nook");
+            source.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hub-nook".to_string(),
+                control_id: "grouped-nook".to_string(),
+                light_device_ids: vec![native_device_id.to_string()],
+            });
+            let mut target = crate::topology::TopologyRoom::new(&target_room_id, "Office");
+            target.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hub-office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+            });
+            state.topology.insert_room(source);
+            state.topology.insert_room(target);
+            state
+                .canonical_registry
+                .assign_room(&device_id, Some(&source_room_id));
+            assert!(state
+                .topology
+                .attach_device_user_override(&source_room_id, &device_id));
+        }
+
+        (state, device_id, source_room_id, target_room_id, hub_key)
+    }
+
+    #[test]
+    fn canonical_native_room_move_failure_leaves_local_topology_unchanged() {
+        let (state, device_id, source_room_id, target_room_id, _hub_key) = setup_native_room_move();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn = Some(Arc::new(|_, _| {
+            Err(anyhow::anyhow!("Hub rejected room update"))
+        }));
+
+        let error =
+            do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap_err();
+
+        assert!(error.to_string().contains("Hub rejected room update"));
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(source_room_id.as_str())
+        );
+        assert_eq!(
+            state.canonical_registry.get(&device_id).unwrap().room_id,
+            Some(source_room_id)
+        );
+        assert_eq!(
+            state.topology.get("nook").unwrap().hub_room_bindings[0].light_device_ids,
+            vec!["hub-device-1".to_string()]
+        );
+        assert!(state.topology.get("office").unwrap().hub_room_bindings[0]
+            .light_device_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn canonical_native_room_move_runs_integration_before_local_topology() {
+        let (state, device_id, _source_room_id, target_room_id, hub_key) = setup_native_room_move();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls_for_callback = calls.clone();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                calls_for_callback.lock().unwrap().push((
+                    assignment.hub_key.clone(),
+                    assignment.native_device_id.clone(),
+                    assignment.target_hub_room_ids.clone(),
+                ));
+                Ok(crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
+                    target_hub_room_id: assignment.target_hub_room_ids.first().cloned(),
+                })
+            }));
+
+        do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(
+                hub_key,
+                "hub-device-1".to_string(),
+                vec!["hub-office".to_string()]
+            )]
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(target_room_id.as_str())
+        );
+        assert!(state.topology.get("nook").unwrap().hub_room_bindings[0]
+            .light_device_ids
+            .is_empty());
+        assert_eq!(
+            state.topology.get("office").unwrap().hub_room_bindings[0].light_device_ids,
+            vec!["hub-device-1".to_string()]
         );
     }
 

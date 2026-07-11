@@ -72,6 +72,20 @@ pub trait HueTransport: Send + Sync {
         resource_type: &str,
     ) -> anyhow::Result<serde_json::Value>;
 
+    /// Replace the device children of a Hue V2 room.
+    ///
+    /// Hue room membership is authoritative for grouped-light dispatch, so
+    /// logical device moves must update this resource before local topology is
+    /// committed.
+    fn update_room_children(
+        &self,
+        _username: &str,
+        _room_id: &str,
+        _device_ids: &[String],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Hue room membership updates are not supported by this transport")
+    }
+
     /// Drop cached TLS/HTTP connections to free memory.
     ///
     /// Called after bulk discovery is complete to release heap before
