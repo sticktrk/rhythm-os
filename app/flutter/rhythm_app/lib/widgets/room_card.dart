@@ -353,6 +353,32 @@ class _RoomCardState extends State<RoomCard> {
         );
   }
 
+  Future<void> _turnOffMotionActivity() {
+    final roomProvider = context.read<RoomProvider>();
+    final previousMode =
+        _analyticsModeForState(roomProvider.getDisplayRoomState(widget.roomId));
+
+    HapticFeedback.heavyImpact();
+    roomProvider.setRoomLightsOnLocal(widget.roomId, false);
+    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.hardOff);
+
+    setState(() {
+      _sliderBrightness = null;
+      _cctMode = false;
+      _sliderKelvin = null;
+    });
+    AnalyticsService().logRoomModeChanged(
+      roomId: widget.roomId,
+      previousMode: previousMode,
+      nextMode: RoomMode.off.name,
+    );
+
+    return context.read<ServerSyncProvider>().pushNodePreferences(
+          widget.roomId,
+          state: RoomModeState.hardOff,
+        );
+  }
+
   double _effectiveCurveHour(RoomDto room) {
     final now = DateTime.now();
     final hour =
@@ -643,31 +669,11 @@ class _RoomCardState extends State<RoomCard> {
                     Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Top row: motion/sensor + room name
+                        // Top row: room name + activity, with motion docked right.
                         Padding(
                           padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
                           child: Row(
                             children: [
-                              if (motionTimer != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: _MotionIndicator(
-                                    info: motionTimer,
-                                    color: iconColor,
-                                    onExpired: () => context
-                                        .read<RoomProvider>()
-                                        .clearMotionTimer(widget.roomId),
-                                  ),
-                                )
-                              else if (hasSensor)
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: Icon(
-                                    Icons.sensors_rounded,
-                                    size: 18,
-                                    color: iconColor.withValues(alpha: 0.45),
-                                  ),
-                                ),
                               if (titleIcon != null)
                                 Padding(
                                   padding: const EdgeInsets.only(right: 8),
@@ -678,45 +684,103 @@ class _RoomCardState extends State<RoomCard> {
                                   ),
                                 ),
                               Expanded(
-                                child: Text(
-                                  room.name,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: textColor,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w600,
+                                child: Row(
+                                  children: [
+                                    Flexible(
+                                      fit: FlexFit.loose,
+                                      child: Text(
+                                        room.name,
+                                        key: ValueKey(
+                                          'room-card-title-${widget.roomId}',
+                                        ),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: textColor,
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    SizedBox(
+                                      key: ValueKey(
+                                        'room-card-activity-${widget.roomId}',
+                                      ),
+                                      width: 18,
+                                      height: 18,
+                                      child: AnimatedSwitcher(
+                                        duration:
+                                            const Duration(milliseconds: 160),
+                                        child: showActivitySpinner
+                                            ? _RoomTransitionSpinner(
+                                                key: const ValueKey(
+                                                  'room_transition_spinner',
+                                                ),
+                                                color: iconColor,
+                                              )
+                                            : dispatchFailure != null
+                                                ? _DispatchFailureBadge(
+                                                    key: const ValueKey(
+                                                      'room_dispatch_failure_badge',
+                                                    ),
+                                                    failure: dispatchFailure,
+                                                    roomName: room.name,
+                                                  )
+                                                : const SizedBox.shrink(
+                                                    key: ValueKey(
+                                                      'room_transition_idle',
+                                                    ),
+                                                  ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (motionTimer != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 8),
+                                  child: _MotionIndicator(
+                                    key: ValueKey(
+                                      'room-card-motion-${widget.roomId}',
+                                    ),
+                                    info: motionTimer,
+                                    color: iconColor,
+                                    roomName: room.name,
+                                    onTap: motionTimer.remainingSecs == null
+                                        ? _turnOffMotionActivity
+                                        : null,
+                                    onExpired: () => context
+                                        .read<RoomProvider>()
+                                        .clearMotionTimer(widget.roomId),
+                                  ),
+                                )
+                              else if (hasSensor)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 8),
+                                  child: Semantics(
+                                    button: true,
+                                    label: 'Turn off motion for ${room.name}',
+                                    child: GestureDetector(
+                                      key: ValueKey(
+                                        'room-card-motion-${widget.roomId}',
+                                      ),
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: _turnOffMotionActivity,
+                                      child: SizedBox(
+                                        width: 28,
+                                        height: 28,
+                                        child: Icon(
+                                          Icons.sensors_rounded,
+                                          size: 18,
+                                          color: iconColor.withValues(
+                                            alpha: 0.45,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 160),
-                                  child: showActivitySpinner
-                                      ? _RoomTransitionSpinner(
-                                          key: const ValueKey(
-                                            'room_transition_spinner',
-                                          ),
-                                          color: iconColor,
-                                        )
-                                      : dispatchFailure != null
-                                          ? _DispatchFailureBadge(
-                                              key: const ValueKey(
-                                                'room_dispatch_failure_badge',
-                                              ),
-                                              failure: dispatchFailure,
-                                              roomName: room.name,
-                                            )
-                                          : const SizedBox.shrink(
-                                              key: ValueKey(
-                                                'room_transition_idle',
-                                              ),
-                                            ),
-                                ),
-                              ),
                             ],
                           ),
                         ),
@@ -1951,10 +2015,18 @@ class _SegmentGroupTrackState extends State<_SegmentGroupTrack> {
 class _MotionIndicator extends StatefulWidget {
   final MotionTimerInfo info;
   final Color color;
+  final String roomName;
+  final VoidCallback? onTap;
   final VoidCallback? onExpired;
 
-  const _MotionIndicator(
-      {required this.info, required this.color, this.onExpired});
+  const _MotionIndicator({
+    super.key,
+    required this.info,
+    required this.color,
+    required this.roomName,
+    this.onTap,
+    this.onExpired,
+  });
 
   @override
   State<_MotionIndicator> createState() => _MotionIndicatorState();
@@ -2039,44 +2111,57 @@ class _MotionIndicatorState extends State<_MotionIndicator>
 
   @override
   Widget build(BuildContext context) {
-    if (widget.info.motionActive) {
-      return AnimatedBuilder(
-        animation: _pulseController,
-        builder: (context, child) {
-          final scale = 1.0 + _pulseController.value * 0.1;
-          return Transform.scale(scale: scale, child: child);
-        },
-        child: Icon(
-          Icons.directions_walk_rounded,
-          size: 20,
-          color: widget.color,
-        ),
-      );
-    }
-
-    // Countdown mode: icon + remaining time
-    final progress = widget.info.timeoutSecs > 0
-        ? _interpolatedRemaining / widget.info.timeoutSecs
-        : 0.0;
-
-    return SizedBox(
-      width: 28,
-      height: 28,
-      child: CustomPaint(
-        painter: _MiniCountdownPainter(
-          progress: progress,
-          color: widget.color,
-        ),
-        child: Center(
-          child: Text(
-            _formatTime(_interpolatedRemaining),
-            style: TextStyle(
+    final indicator = widget.info.motionActive
+        ? AnimatedBuilder(
+            animation: _pulseController,
+            builder: (context, child) {
+              final scale = 1.0 + _pulseController.value * 0.1;
+              return Transform.scale(scale: scale, child: child);
+            },
+            child: Icon(
+              Icons.directions_walk_rounded,
+              size: 20,
               color: widget.color,
-              fontSize: 9,
-              fontWeight: FontWeight.w700,
-              height: 1,
             ),
-          ),
+          )
+        : SizedBox(
+            width: 28,
+            height: 28,
+            child: CustomPaint(
+              painter: _MiniCountdownPainter(
+                progress: widget.info.timeoutSecs > 0
+                    ? _interpolatedRemaining / widget.info.timeoutSecs
+                    : 0.0,
+                color: widget.color,
+              ),
+              child: Center(
+                child: Text(
+                  _formatTime(_interpolatedRemaining),
+                  style: TextStyle(
+                    color: widget.color,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                    height: 1,
+                  ),
+                ),
+              ),
+            ),
+          );
+
+    final isTappable = widget.onTap != null;
+    return Semantics(
+      button: isTappable,
+      label: isTappable
+          ? 'Turn off motion for ${widget.roomName}'
+          : 'Motion timer for ${widget.roomName}',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        // Consume countdown taps so they do not open the room settings sheet.
+        onTap: widget.onTap ?? () {},
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: Center(child: indicator),
         ),
       ),
     );
