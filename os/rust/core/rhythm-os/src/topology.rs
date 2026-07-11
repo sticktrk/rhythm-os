@@ -1725,35 +1725,37 @@ impl RoomTopologyStore {
         &mut self,
         hub_key: &HubKey,
         native_device_id: &str,
+        target_rhythm_room_id: Option<&str>,
         target_hub_room_id: Option<&str>,
     ) -> bool {
-        let target_room_id = match target_hub_room_id {
-            Some(hub_room_id) => match self
-                .hub_room_index
-                .get(&(hub_key.to_string(), hub_room_id.to_string()))
-                .cloned()
-            {
-                Some(room_id) => Some(room_id),
-                None => return false,
-            },
-            None => None,
+        let target = match (target_rhythm_room_id, target_hub_room_id) {
+            (Some(room_id), Some(hub_room_id)) => {
+                let valid = self.rooms.get(room_id).is_some_and(|room| {
+                    room.hub_room_bindings.iter().any(|binding| {
+                        binding.hub_key == *hub_key && binding.hub_room_id == hub_room_id
+                    })
+                });
+                if !valid {
+                    return false;
+                }
+                Some((room_id.to_string(), hub_room_id.to_string()))
+            }
+            (None, None) => None,
+            _ => return false,
         };
 
-        let mut changed = false;
         for room in self.rooms.values_mut() {
             for binding in &mut room.hub_room_bindings {
                 if binding.hub_key != *hub_key {
                     continue;
                 }
-                let before = binding.light_device_ids.len();
                 binding
                     .light_device_ids
                     .retain(|device_id| device_id != native_device_id);
-                changed |= binding.light_device_ids.len() != before;
             }
         }
 
-        if let (Some(room_id), Some(hub_room_id)) = (target_room_id, target_hub_room_id) {
+        if let Some((room_id, hub_room_id)) = target {
             let Some(binding) = self.rooms.get_mut(&room_id).and_then(|room| {
                 room.hub_room_bindings.iter_mut().find(|binding| {
                     binding.hub_key == *hub_key && binding.hub_room_id == hub_room_id
@@ -1769,11 +1771,10 @@ impl RoomTopologyStore {
                 binding.light_device_ids.push(native_device_id.to_string());
                 binding.light_device_ids.sort();
                 binding.light_device_ids.dedup();
-                changed = true;
             }
         }
 
-        changed
+        true
     }
 
     // ---- Room management operations ----

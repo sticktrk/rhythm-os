@@ -77,6 +77,29 @@ fn moved_bulb_is_removed_from_source_room_and_added_to_target_room() {
 }
 
 #[test]
+fn successful_move_receipt_restores_the_original_hue_room() {
+    let transport = Arc::new(SpyHueTransport::new());
+    transport.set_resource_response(
+        "room",
+        serde_json::json!({
+            "data": [
+                {
+                    "id": "nook",
+                    "children": [{"rid": "moved", "rtype": "device"}]
+                },
+                {"id": "office", "children": []}
+            ]
+        }),
+    );
+
+    let rollback = reassign_device_room(&transport, "user", "moved", Some("office")).unwrap();
+    rollback.rollback(&transport, "user").unwrap();
+
+    let rooms = transport.get_resources("user", "room").unwrap();
+    assert_eq!(room_memberships(rooms, "moved"), vec!["nook"]);
+}
+
+#[test]
 fn target_failure_rolls_bulb_back_into_source_room() {
     let transport = Arc::new(SpyHueTransport::new());
     transport.set_resource_response(
