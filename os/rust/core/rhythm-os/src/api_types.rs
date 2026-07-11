@@ -9,6 +9,7 @@ use rhythm_core::{
     ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState,
     RoomProfileSettings, TimerSetting,
 };
+use serde::ser::SerializeStruct;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -271,12 +272,22 @@ pub struct HubStartupRetryDto {
 pub const API_SCHEMA_VERSION: u32 = 1;
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
-    pub api_schema_version: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub features: Vec<String>,
     pub hubs: Vec<HubCapabilityDto>,
+}
+
+impl Serialize for ApiCapabilitiesDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("ApiCapabilitiesDto", 3)?;
+        state.serialize_field("api_schema_version", &API_SCHEMA_VERSION)?;
+        state.serialize_field("features", &[FEATURE_MOTION_ACTIVATION_TOGGLE])?;
+        state.serialize_field("hubs", &self.hubs)?;
+        state.end()
+    }
 }
 
 /// Capabilities for one available hub integration.
@@ -1202,11 +1213,7 @@ mod tests {
             context: "server".into(),
             listen_port: None,
             hubs: vec![],
-            capabilities: ApiCapabilitiesDto {
-                api_schema_version: API_SCHEMA_VERSION,
-                features: vec![FEATURE_MOTION_ACTIVATION_TOGGLE.to_string()],
-                hubs: vec![],
-            },
+            capabilities: ApiCapabilitiesDto { hubs: vec![] },
             active_profile: ActiveProfileDto {
                 config: rhythm_core::default_rhythm_profile(),
                 effective: ActiveProfileEffectiveDto {
@@ -1295,8 +1302,6 @@ mod tests {
                 startup_retry: None,
             }],
             capabilities: ApiCapabilitiesDto {
-                api_schema_version: API_SCHEMA_VERSION,
-                features: vec![FEATURE_MOTION_ACTIVATION_TOGGLE.to_string()],
                 hubs: vec![HubCapabilityDto {
                     hub_type: "matter".into(),
                     configurable: true,

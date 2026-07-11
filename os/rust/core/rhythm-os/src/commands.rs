@@ -2653,8 +2653,6 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             })
             .collect();
         let capabilities_dto = ApiCapabilitiesDto {
-            api_schema_version: crate::api_types::API_SCHEMA_VERSION,
-            features: vec![crate::api_types::FEATURE_MOTION_ACTIVATION_TOGGLE.to_string()],
             hubs: s
                 .hub_capabilities
                 .iter()
