@@ -39,13 +39,35 @@ class RoomCard extends StatefulWidget {
 }
 
 class _RoomCardState extends State<RoomCard> {
+  static const _minimumActionFeedbackDuration = Duration(milliseconds: 400);
+
   /// Non-null when the user is dragging the slider (local override).
   int? _sliderBrightness;
   int _lastResetGen = 0;
   bool _cctMode = false;
   int? _sliderKelvin;
+  bool _localActionPending = false;
+  Timer? _localActionFeedbackTimer;
   static const int _minKelvin = 2000;
   static const int _maxKelvin = 6500;
+
+  void _beginActionFeedback() {
+    _localActionFeedbackTimer?.cancel();
+    if (!_localActionPending) {
+      setState(() => _localActionPending = true);
+    }
+    _localActionFeedbackTimer = Timer(_minimumActionFeedbackDuration, () {
+      _localActionFeedbackTimer = null;
+      if (!mounted || !_localActionPending) return;
+      setState(() => _localActionPending = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _localActionFeedbackTimer?.cancel();
+    super.dispose();
+  }
 
   String _analyticsModeForState(RoomModeState state) {
     final mode = switch (state) {
@@ -327,7 +349,9 @@ class _RoomCardState extends State<RoomCard> {
     roomProvider.setRoomLightsOnLocal(widget.roomId, true);
     roomProvider.setRoomRhythmEnabled(widget.roomId, true);
     roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
-    serverSync.dispatchResetNode(widget.roomId);
+    if (serverSync.dispatchResetNode(widget.roomId)) {
+      _beginActionFeedback();
+    }
     AnalyticsService().logRoomModeChanged(
       roomId: widget.roomId,
       previousMode: previousMode,
@@ -344,7 +368,9 @@ class _RoomCardState extends State<RoomCard> {
   void _resetRoom() {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchResetNode(widget.roomId);
+    if (serverSync.dispatchResetNode(widget.roomId)) {
+      _beginActionFeedback();
+    }
     AnalyticsService().logRoomResetToCurve(roomId: widget.roomId);
     setState(() {
       _sliderBrightness = null;
@@ -522,7 +548,8 @@ class _RoomCardState extends State<RoomCard> {
         final moodSecondary =
             moodPalette.length > 1 ? moodPalette[1] : moodPrimary;
 
-        final showActivitySpinner = isTransitioning || isDispatchPending;
+        final showActivitySpinner =
+            _localActionPending || isTransitioning || isDispatchPending;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.

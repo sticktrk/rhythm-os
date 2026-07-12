@@ -3047,7 +3047,7 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   /// Reset a single node to its current adaptive curve position.
-  void dispatchResetNode(String nodeId) {
+  bool dispatchResetNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) {
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
@@ -3066,9 +3066,9 @@ class ServerSyncProvider extends ChangeNotifier {
         kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
       );
       _roomProvider.bumpResetGeneration();
-      return;
+      return true;
     }
-    if (!_connection.connected) return;
+    if (!_connection.connected) return false;
     _clearRecentDispatchFailure(nodeId);
     _connection.api
         .nodeAction(nodeId: nodeId, action: 'reset')
@@ -3083,9 +3083,10 @@ class ServerSyncProvider extends ChangeNotifier {
       );
       _roomProvider.bumpResetGeneration();
     });
+    return true;
   }
 
-  void dispatchResetRoom(String roomId) => dispatchResetNode(roomId);
+  bool dispatchResetRoom(String roomId) => dispatchResetNode(roomId);
 
   /// Set the active global mode on the server.
   Future<void> dispatchSetActiveMode(RhythmMode mode) async {
