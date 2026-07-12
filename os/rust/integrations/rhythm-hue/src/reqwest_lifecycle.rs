@@ -238,7 +238,7 @@ impl ExternalLightHubIntegration for HueIntegration {
             (hue.bridge_ip.clone(), hue.username.clone())
         };
         let transport = ReqwestHueTransport::new(&bridge_ip)?;
-        crate::room_membership::reassign_device_room(
+        let rollback = crate::room_membership::reassign_device_room(
             &transport,
             &username,
             &assignment.native_device_id,
@@ -246,6 +246,7 @@ impl ExternalLightHubIntegration for HueIntegration {
         )?;
         Ok(HubDeviceRoomAssignmentOutcome::Reassigned {
             target_hub_room_id: target_hub_room_id.map(str::to_string),
+            rollback: Box::new(move || rollback.rollback(&transport, &username)),
         })
     }
 }

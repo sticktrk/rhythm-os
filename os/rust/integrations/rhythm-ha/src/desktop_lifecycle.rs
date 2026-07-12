@@ -218,13 +218,16 @@ impl ExternalLightHubIntegration for HaIntegration {
                     anyhow::anyhow!("Home Assistant hub is not active: {}", assignment.hub_key)
                 })?
         };
-        crate::area_membership::reassign_entity_area(
+        let rollback = crate::area_membership::reassign_entity_area(
             &config,
             &assignment.native_device_id,
             target_area_id,
         )?;
         Ok(HubDeviceRoomAssignmentOutcome::Reassigned {
             target_hub_room_id: target_area_id.map(str::to_string),
+            rollback: Box::new(move || {
+                crate::area_membership::rollback_entity_area(&config, rollback)
+            }),
         })
     }
 

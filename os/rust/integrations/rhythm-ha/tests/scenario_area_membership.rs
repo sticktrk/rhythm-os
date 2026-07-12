@@ -72,6 +72,29 @@ fn moved_light_is_assigned_to_target_ha_area_before_success() {
 }
 
 #[test]
+fn successful_move_receipt_restores_the_original_direct_area() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut client = FakeRegistryClient::new(true);
+
+    let rollback = runtime
+        .block_on(reassign_entity_area_with_client(
+            &mut client,
+            "light.desk",
+            Some("office"),
+        ))
+        .unwrap();
+    runtime
+        .block_on(rollback.rollback_with_client(&mut client))
+        .unwrap();
+
+    assert_eq!(client.entity.area_id.as_deref(), Some("nook"));
+    assert_eq!(
+        client.updates,
+        vec![Some("office".to_string()), Some("nook".to_string())]
+    );
+}
+
+#[test]
 fn verification_failure_restores_original_ha_area() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut client = FakeRegistryClient::new(false);

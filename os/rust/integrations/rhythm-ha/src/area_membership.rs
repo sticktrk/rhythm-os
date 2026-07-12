@@ -1,5 +1,6 @@
 //! Transactional Home Assistant entity-area assignment.
 
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -31,6 +32,31 @@ pub struct HaDeviceAreaEntry {
     pub id: String,
     #[serde(default)]
     pub area_id: Option<String>,
+}
+
+/// Exact entity-registry state needed to undo a successful area change.
+#[derive(Debug)]
+pub struct HaAreaAssignmentRollback {
+    entity_id: String,
+    original_area_id: Option<String>,
+    changed: bool,
+}
+
+impl HaAreaAssignmentRollback {
+    pub async fn rollback_with_client<C: HaAreaRegistryClient + ?Sized>(
+        self,
+        client: &mut C,
+    ) -> Result<()> {
+        if self.changed {
+            client
+                .update_entity_area(&self.entity_id, self.original_area_id.as_deref())
+                .await
+                .with_context(|| {
+                    format!("Failed to restore HA area for entity {}", self.entity_id)
+                })?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -213,7 +239,7 @@ fn effective_area(entity: &HaEntityAreaEntry, devices: &[HaDeviceAreaEntry]) -> 
     })
 }
 
-async fn rollback_entity_area<C: HaAreaRegistryClient + ?Sized>(
+async fn rollback_entity_area_best_effort<C: HaAreaRegistryClient + ?Sized>(
     client: &mut C,
     entity_id: &str,
     original_area_id: Option<&str>,
@@ -233,7 +259,7 @@ pub async fn reassign_entity_area_with_client<C: HaAreaRegistryClient + ?Sized>(
     client: &mut C,
     entity_id: &str,
     target_area_id: Option<&str>,
-) -> Result<()> {
+) -> Result<HaAreaAssignmentRollback> {
     if let Some(target) = target_area_id {
         if !client.area_exists(target).await? {
             anyhow::bail!("Home Assistant target area not found: {target}");
@@ -250,7 +276,11 @@ pub async fn reassign_entity_area_with_client<C: HaAreaRegistryClient + ?Sized>(
     }
     let original_devices = client.list_devices().await?;
     if effective_area(&original, &original_devices).as_deref() == target_area_id {
-        return Ok(());
+        return Ok(HaAreaAssignmentRollback {
+            entity_id: entity_id.to_string(),
+            original_area_id: original.area_id,
+            changed: false,
+        });
     }
 
     let original_direct_area = original.area_id.clone();
@@ -267,9 +297,14 @@ pub async fn reassign_entity_area_with_client<C: HaAreaRegistryClient + ?Sized>(
     .await;
 
     match verified {
-        Ok(area_id) if area_id.as_deref() == target_area_id => Ok(()),
+        Ok(area_id) if area_id.as_deref() == target_area_id => Ok(HaAreaAssignmentRollback {
+            entity_id: entity_id.to_string(),
+            original_area_id: original_direct_area,
+            changed: true,
+        }),
         Ok(area_id) => {
-            rollback_entity_area(client, entity_id, original_direct_area.as_deref()).await;
+            rollback_entity_area_best_effort(client, entity_id, original_direct_area.as_deref())
+                .await;
             Err(anyhow::anyhow!(
                 "Home Assistant did not persist area {:?} for entity {}; effective area is {:?}",
                 target_area_id,
@@ -278,12 +313,33 @@ pub async fn reassign_entity_area_with_client<C: HaAreaRegistryClient + ?Sized>(
             ))
         }
         Err(error) => {
-            rollback_entity_area(client, entity_id, original_direct_area.as_deref()).await;
+            rollback_entity_area_best_effort(client, entity_id, original_direct_area.as_deref())
+                .await;
             Err(error.context(format!(
                 "Failed to verify HA area membership for entity {entity_id}"
             )))
         }
     }
+}
+
+fn run_registry_task<T, F, Fut>(task: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("ha-area-registry".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("Failed to build runtime for HA entity-area update")?;
+            runtime.block_on(task())
+        })
+        .context("Failed to spawn HA entity-area worker")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("HA entity-area worker panicked"))?
 }
 
 /// Move an HA entity to an area, or remove its entity-level area override.
@@ -295,15 +351,47 @@ pub fn reassign_entity_area(
     config: &HaConnectionConfig,
     entity_id: &str,
     target_area_id: Option<&str>,
-) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build runtime for HA entity-area update")?;
-    runtime.block_on(async {
-        let mut client = RegistryWebSocket::connect(config).await?;
-        let result = reassign_entity_area_with_client(&mut client, entity_id, target_area_id).await;
+) -> Result<HaAreaAssignmentRollback> {
+    let config = config.clone();
+    let entity_id = entity_id.to_string();
+    let target_area_id = target_area_id.map(str::to_string);
+    run_registry_task(move || async move {
+        let mut client = RegistryWebSocket::connect(&config).await?;
+        let result =
+            reassign_entity_area_with_client(&mut client, &entity_id, target_area_id.as_deref())
+                .await;
         client.close().await;
         result
     })
+}
+
+/// Undo a successful entity-area change using the exact direct area override
+/// captured before the move.
+pub fn rollback_entity_area(
+    config: &HaConnectionConfig,
+    rollback: HaAreaAssignmentRollback,
+) -> Result<()> {
+    let config = config.clone();
+    run_registry_task(move || async move {
+        let mut client = RegistryWebSocket::connect(&config).await?;
+        let result = rollback.rollback_with_client(&mut client).await;
+        client.close().await;
+        result
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_registry_task;
+
+    #[test]
+    fn registry_worker_can_be_called_from_an_existing_tokio_runtime() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let value = runtime
+            .block_on(async { run_registry_task(|| async { Ok::<_, anyhow::Error>(42) }) })
+            .unwrap();
+
+        assert_eq!(value, 42);
+    }
 }

@@ -10,6 +10,20 @@ struct HueRoomMembership {
     device_ids: Vec<String>,
 }
 
+/// Exact bridge state needed to undo a successful room membership change.
+#[derive(Debug)]
+pub struct HueRoomAssignmentRollback {
+    original: Vec<HueRoomMembership>,
+    updated_room_ids: Vec<String>,
+}
+
+impl HueRoomAssignmentRollback {
+    /// Restore every room changed by the corresponding assignment.
+    pub fn rollback<H: HueTransport>(self, transport: &H, username: &str) -> Result<()> {
+        rollback_room_updates(transport, username, &self.original, &self.updated_room_ids)
+    }
+}
+
 fn fetch_room_memberships<H: HueTransport>(
     transport: &H,
     username: &str,
@@ -78,7 +92,8 @@ fn rollback_room_updates<H: HueTransport>(
     username: &str,
     original: &[HueRoomMembership],
     updated_room_ids: &[String],
-) {
+) -> Result<()> {
+    let mut failures = Vec::new();
     for room_id in updated_room_ids.iter().rev() {
         let Some(room) = original.iter().find(|room| &room.room_id == room_id) else {
             continue;
@@ -90,7 +105,16 @@ fn rollback_room_updates<H: HueTransport>(
                 room_id,
                 error
             );
+            failures.push(format!("{room_id}: {error:#}"));
         }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Failed to restore Hue room membership: {}",
+            failures.join("; ")
+        )
     }
 }
 
@@ -104,7 +128,7 @@ pub fn reassign_device_room<H: HueTransport>(
     username: &str,
     native_device_id: &str,
     target_hub_room_id: Option<&str>,
-) -> Result<()> {
+) -> Result<HueRoomAssignmentRollback> {
     let original = fetch_room_memberships(transport, username)?;
     if let Some(target) = target_hub_room_id {
         if !original.iter().any(|room| room.room_id == target) {
@@ -112,7 +136,10 @@ pub fn reassign_device_room<H: HueTransport>(
         }
     }
     if membership_matches(&original, native_device_id, target_hub_room_id) {
-        return Ok(());
+        return Ok(HueRoomAssignmentRollback {
+            original,
+            updated_room_ids: Vec::new(),
+        });
     }
 
     let mut desired = original.clone();
@@ -149,7 +176,7 @@ pub fn reassign_device_room<H: HueTransport>(
         if let Err(error) =
             transport.update_room_children(username, &room.room_id, &room.device_ids)
         {
-            rollback_room_updates(transport, username, &original, &updated_room_ids);
+            let _ = rollback_room_updates(transport, username, &original, &updated_room_ids);
             return Err(error.context(format!(
                 "Failed to update Hue room {} while moving device {}",
                 room.room_id, native_device_id
@@ -160,16 +187,21 @@ pub fn reassign_device_room<H: HueTransport>(
 
     let verified = fetch_room_memberships(transport, username);
     match verified {
-        Ok(rooms) if membership_matches(&rooms, native_device_id, target_hub_room_id) => Ok(()),
+        Ok(rooms) if membership_matches(&rooms, native_device_id, target_hub_room_id) => {
+            Ok(HueRoomAssignmentRollback {
+                original,
+                updated_room_ids,
+            })
+        }
         Ok(_) => {
-            rollback_room_updates(transport, username, &original, &updated_room_ids);
+            let _ = rollback_room_updates(transport, username, &original, &updated_room_ids);
             Err(anyhow::anyhow!(
                 "Hue bridge did not persist the requested room membership for device {}",
                 native_device_id
             ))
         }
         Err(error) => {
-            rollback_room_updates(transport, username, &original, &updated_room_ids);
+            let _ = rollback_room_updates(transport, username, &original, &updated_room_ids);
             Err(error.context(format!(
                 "Failed to verify Hue room membership for device {}",
                 native_device_id

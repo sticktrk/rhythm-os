@@ -318,7 +318,7 @@ pub trait HubProvider: Send + Sync {
 // ============================================================================
 
 /// Integration-neutral context for a requested canonical device move.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HubDeviceRoomAssignment {
     pub hub_key: HubKey,
     pub native_device_id: String,
@@ -327,11 +327,16 @@ pub struct HubDeviceRoomAssignment {
     pub target_hub_room_ids: Vec<String>,
 }
 
+/// Roll back an integration-native room assignment after a later step fails.
+pub type HubDeviceRoomAssignmentRollback = Box<dyn FnOnce() -> Result<()> + Send>;
+
 /// Whether an integration changed its authoritative native room membership.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HubDeviceRoomAssignmentOutcome {
     Unchanged,
-    Reassigned { target_hub_room_id: Option<String> },
+    Reassigned {
+        target_hub_room_id: Option<String>,
+        rollback: HubDeviceRoomAssignmentRollback,
+    },
 }
 
 /// Bundles everything a platform crate needs from an integration.
