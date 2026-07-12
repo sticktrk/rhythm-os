@@ -73,6 +73,7 @@ pub fn adapt_lighting_command(
         ColorRequest::ColorTemperature {
             kelvin: clamped_kelvin,
             xy: (clamped_xy.x, clamped_xy.y),
+            hue_saturation: Some(rgb_to_matter_hue_saturation(command.rgb)),
         }
     };
 
@@ -277,6 +278,28 @@ mod tests {
         assert_eq!(adapted.kelvin, None);
         assert_eq!(adapted.xy, Some((expected_xy.x, expected_xy.y)));
         assert_eq!(adapted.hue_saturation, None);
+    }
+
+    #[test]
+    fn adapt_lighting_command_can_use_hue_saturation_for_adaptive_white() {
+        let caps = LightCapabilities {
+            color_modes: vec![
+                rhythm_devices::ColorMode::HueSaturation,
+                rhythm_devices::ColorMode::ColorTemperature,
+            ],
+            ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+        };
+        let command = LightingCommand::new(77, 1800);
+
+        let adapted = adapt_lighting_command(&caps, &command, ColorPreference::PreferHueSaturation);
+
+        assert_eq!(adapted.brightness, Some(77));
+        assert_eq!(adapted.kelvin, None);
+        assert_eq!(adapted.xy, None);
+        assert_eq!(
+            adapted.hue_saturation,
+            Some(rgb_to_matter_hue_saturation(command.rgb))
+        );
     }
 
     #[test]

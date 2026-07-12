@@ -28,7 +28,8 @@ const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
-const MATTER_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(15);
+const MATTER_FIRST_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+const MATTER_REPEATED_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 const MATTER_DEVICE_FANOUT_CONCURRENCY: usize = 8;
 
 fn env_flag_enabled(name: &str, default: bool) -> bool {
@@ -49,6 +50,7 @@ struct MatterOnOffReadBackoff {
     marked_at: Instant,
     suppress_until: Instant,
     command_retry_after: Instant,
+    consecutive_command_failures: u8,
     suppress_commands: bool,
 }
 
@@ -84,6 +86,7 @@ fn initial_connectivity_backoff(
                             marked_at,
                             suppress_until,
                             command_retry_after: marked_at,
+                            consecutive_command_failures: 0,
                             suppress_commands: false,
                         },
                     )
@@ -352,6 +355,11 @@ impl MatterLightController {
     fn color_preference(quirks: &[DeviceQuirk]) -> ColorPreference {
         if quirks
             .iter()
+            .any(|quirk| matches!(quirk, DeviceQuirk::NeedsHueSaturationNotCt))
+        {
+            ColorPreference::PreferHueSaturation
+        } else if quirks
+            .iter()
             .any(|quirk| matches!(quirk, DeviceQuirk::NeedsXyNotCt))
         {
             ColorPreference::PreferXy
@@ -382,12 +390,26 @@ impl MatterLightController {
     fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16, suppress_commands: bool) {
         let marked_at = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
+            let consecutive_command_failures = if suppress_commands {
+                backoff
+                    .get(&(node_id, endpoint))
+                    .map(|entry| entry.consecutive_command_failures.saturating_add(1))
+                    .unwrap_or(1)
+            } else {
+                0
+            };
+            let command_retry_backoff = if consecutive_command_failures <= 1 {
+                MATTER_FIRST_COMMAND_RETRY_BACKOFF
+            } else {
+                MATTER_REPEATED_COMMAND_RETRY_BACKOFF
+            };
             backoff.insert(
                 (node_id, endpoint),
                 MatterOnOffReadBackoff {
                     marked_at,
                     suppress_until: marked_at + MATTER_ON_OFF_READ_BACKOFF,
-                    command_retry_after: marked_at + MATTER_COMMAND_RETRY_BACKOFF,
+                    command_retry_after: marked_at + command_retry_backoff,
+                    consecutive_command_failures,
                     suppress_commands,
                 },
             );
@@ -532,7 +554,7 @@ impl MatterLightController {
                 event = "matter_command_backoff_skip",
                 node_id,
                 endpoint,
-                backoff_secs = MATTER_COMMAND_RETRY_BACKOFF.as_secs(),
+                backoff_max_secs = MATTER_REPEATED_COMMAND_RETRY_BACKOFF.as_secs(),
                 "Matter write skipped while endpoint is in connectivity backoff"
             );
             return MatterDeviceCommandOutcome {
@@ -1052,7 +1074,7 @@ impl MatterLightController {
                     event = "matter_command_backoff_skip",
                     node_id,
                     endpoint,
-                    backoff_secs = MATTER_COMMAND_RETRY_BACKOFF.as_secs(),
+                    backoff_max_secs = MATTER_REPEATED_COMMAND_RETRY_BACKOFF.as_secs(),
                     "Matter off skipped while endpoint is in connectivity backoff"
                 );
                 return false;
@@ -1920,6 +1942,11 @@ mod tests {
             crate::transport::MatterColorMode::HueSaturation,
             crate::transport::MatterColorMode::ColorTemperature,
         ];
+        let expected_sengled = rhythm_os::controller_helpers::adapt_lighting_command(
+            &crate::commissioning::build_device_capabilities(&sengled),
+            &LightingCommand::new(50, 1809),
+            ColorPreference::PreferHueSaturation,
+        );
         spy.set_probe_device(sengled);
 
         block_on(controller.turn_on("kitchen", LightingCommand::new(50, 1809))).unwrap();
@@ -1955,11 +1982,11 @@ mod tests {
                     endpoint: 1,
                     on: true,
                 },
-                RecordedOperation::SetXy {
+                RecordedOperation::SetHueSaturation {
                     node_id: 43,
                     endpoint: 1,
-                    x: rhythm_core::kelvin_to_xy(1809).x,
-                    y: rhythm_core::kelvin_to_xy(1809).y,
+                    hue: expected_sengled.hue_saturation.unwrap().0,
+                    saturation: expected_sengled.hue_saturation.unwrap().1,
                     transition_ms: None,
                 },
                 RecordedOperation::SetBrightness {
@@ -2568,6 +2595,39 @@ mod tests {
             write_count_for_node(&spy.operations(), 42),
             3,
             "a recovered session should be retried without waiting for the two-minute read backoff"
+        );
+    }
+
+    #[test]
+    fn first_command_timeout_retries_before_repeated_timeout_backoff() {
+        let (controller, _, _) = make_controller();
+
+        controller.mark_connectivity_failed(42, 1, true);
+        let first = controller
+            .on_off_read_backoff
+            .lock()
+            .unwrap()
+            .get(&(42, 1))
+            .copied()
+            .unwrap();
+        assert_eq!(first.consecutive_command_failures, 1);
+        assert!(
+            first.command_retry_after <= Instant::now() + MATTER_FIRST_COMMAND_RETRY_BACKOFF,
+            "the first cold-session timeout should get a quick recovery attempt"
+        );
+
+        controller.mark_connectivity_failed(42, 1, true);
+        let repeated = controller
+            .on_off_read_backoff
+            .lock()
+            .unwrap()
+            .get(&(42, 1))
+            .copied()
+            .unwrap();
+        assert_eq!(repeated.consecutive_command_failures, 2);
+        assert!(
+            repeated.command_retry_after > Instant::now() + MATTER_FIRST_COMMAND_RETRY_BACKOFF,
+            "repeated failures should retain the longer dead-device protection"
         );
     }
 

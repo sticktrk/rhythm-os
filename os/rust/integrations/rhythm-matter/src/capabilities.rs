@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn needs_xy_profile_restores_xy_when_matter_descriptor_omits_it() {
+    fn sengled_profile_uses_advertised_hue_saturation_instead_of_inventing_xy() {
         let device = CommissionedDevice {
             node_id: 104,
             vendor_name: "Sengled".to_string(),
@@ -319,10 +319,14 @@ mod tests {
 
         enrich_from_db(&mut caps, &device, rhythm_devices::builtin_db());
 
-        assert!(caps.supports_xy_color());
+        assert!(!caps.supports_xy_color());
+        assert!(caps.supports_hue_saturation());
         assert_eq!(
             quirks_from_db(&device, rhythm_devices::builtin_db()),
-            vec![DeviceQuirk::NeedsExplicitOn, DeviceQuirk::NeedsXyNotCt]
+            vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsHueSaturationNotCt,
+            ]
         );
     }
 

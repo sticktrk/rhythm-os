@@ -611,6 +611,31 @@ mod tests {
     }
 
     #[test]
+    fn fallback_initial_metadata_preserves_sengled_hue_saturation_profile() {
+        let state = shared_state("fallback-sengled-profile");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let info = MatterDeviceInfo {
+            node_id: 104,
+            vendor_name: "Sengled".to_string(),
+            product_name: "W41-N15A".to_string(),
+            reachable: false,
+        };
+
+        let metadata = fallback_initial_device_metadata(&state, &[info], &key);
+        let caps = metadata.device_caps.get("matter-104").unwrap();
+
+        assert!(caps.supports_hue_saturation());
+        assert!(!caps.supports_xy_color());
+        assert_eq!(
+            metadata.device_quirks.get("matter-104"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsHueSaturationNotCt,
+            ])
+        );
+    }
+
+    #[test]
     fn persisted_metadata_applies_local_overrides_after_builtin_and_cloud_profiles() {
         let state = shared_state("persisted-overrides");
         let key = HubKey::new(HubType::new("matter"), "local");
@@ -645,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_sengled_metadata_keeps_profile_xy_and_explicit_on() {
+    fn persisted_sengled_metadata_keeps_profile_hue_saturation_and_explicit_on() {
         let state = shared_state("persisted-sengled-profile");
         let key = HubKey::new(HubType::new("matter"), "local");
         let device = sengled_w41_device(104);
@@ -658,15 +683,14 @@ mod tests {
             &key,
         );
 
-        assert!(metadata
-            .device_caps
-            .get("matter-104")
-            .is_some_and(LightCapabilities::supports_xy_color));
+        let caps = metadata.device_caps.get("matter-104").unwrap();
+        assert!(caps.supports_hue_saturation());
+        assert!(!caps.supports_xy_color());
         assert_eq!(
             metadata.device_quirks.get("matter-104"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
-                DeviceQuirk::NeedsXyNotCt,
+                DeviceQuirk::NeedsHueSaturationNotCt,
             ])
         );
     }

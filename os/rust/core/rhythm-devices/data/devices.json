@@ -519,9 +519,9 @@
     "model": "W41-N15A",
     "name": "Sengled W41-N15A",
     "light_type": "extended_color",
-    "color_modes": ["xy", "color_temperature"],
+    "color_modes": ["hue_saturation", "color_temperature"],
     "matter": {
-      "quirks": ["needs_explicit_on", "needs_xy_not_ct"]
+      "quirks": ["needs_explicit_on", "needs_hue_saturation_not_ct"]
     }
   },
   {

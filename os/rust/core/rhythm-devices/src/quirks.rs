@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub enum DeviceQuirk {
     /// Device needs xy color commands instead of color_temperature/mirek.
     NeedsXyNotCt,
+    /// Device needs hue/saturation commands instead of color temperature.
+    NeedsHueSaturationNotCt,
     /// Device needs a delay between grouped_light commands.
     GroupedLightDelay,
     /// Device reports incorrect on/off state.
@@ -79,6 +81,10 @@ mod tests {
     fn test_quirk_equality() {
         assert_eq!(DeviceQuirk::NeedsXyNotCt, DeviceQuirk::NeedsXyNotCt);
         assert_ne!(DeviceQuirk::NeedsXyNotCt, DeviceQuirk::NeedsExplicitOn);
+        assert_ne!(
+            DeviceQuirk::NeedsXyNotCt,
+            DeviceQuirk::NeedsHueSaturationNotCt
+        );
         assert_eq!(
             DeviceQuirk::CommandThrottleMs(100),
             DeviceQuirk::CommandThrottleMs(100)
