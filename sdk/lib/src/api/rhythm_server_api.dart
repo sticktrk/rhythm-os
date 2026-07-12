@@ -639,6 +639,30 @@ class RhythmServerApi {
     });
   }
 
+  /// Set motion admission and return the authoritative post-apply node state.
+  ///
+  /// This endpoint is capability-gated because older appliances accept and
+  /// ignore unknown profile fields on the generic preferences endpoint.
+  Future<RhythmRoomState?> nodeMotionActivationSet({
+    required String nodeId,
+    required bool enabled,
+    required String requestId,
+  }) async {
+    try {
+      final response = await _dio.put(
+        'api/nodes/motion-activation',
+        data: {'node_id': nodeId, 'enabled': enabled, 'request_id': requestId},
+      );
+      return _parseAndCacheSingleState(response.data);
+    } catch (e) {
+      _log.warning(
+        'nodeMotionActivationSet failed node=$nodeId enabled=$enabled requestId=$requestId',
+        e,
+      );
+    }
+    return null;
+  }
+
   /// Patch per-profile node overrides.
   Future<void> nodeProfileOverridesSet({
     required String nodeId,

@@ -836,6 +836,7 @@ impl LightProfileNodeOverride {
 /// - `mood_enabled`: legacy compatibility field, currently not runtime-active
 /// - `mood_profile_id`: legacy compatibility field for stored profile payloads
 /// - timer fields: optionally override the selected profile's timer settings
+/// - `motion_activation_enabled`: room-level admission for motion automation
 /// - `profile_overrides`: optionally override timers for specific resolved profiles
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -890,6 +891,14 @@ pub struct RoomProfileSettings {
     )]
     pub motion_timeout_secs: Option<TimerSetting>,
 
+    /// Whether motion inputs may activate this room. Missing values preserve
+    /// the historical default of enabled.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub motion_activation_enabled: Option<bool>,
+
     /// Optional per-profile node overrides keyed by light profile ID.
     #[cfg_attr(
         feature = "serde",
@@ -907,7 +916,14 @@ impl RoomProfileSettings {
             && self.mood_scene_id.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
+            && self.motion_activation_enabled.is_none()
             && self.profile_overrides.is_empty()
+    }
+
+    /// Resolve motion admission while preserving compatibility with settings
+    /// persisted before the explicit toggle existed.
+    pub fn motion_activation_enabled(&self) -> bool {
+        self.motion_activation_enabled.unwrap_or(true)
     }
 
     /// Resolve legacy mood enablement for compatibility payloads.
@@ -960,6 +976,9 @@ impl RoomProfileSettings {
                 .motion_timeout_secs
                 .clone()
                 .or_else(|| parent.motion_timeout_secs.clone()),
+            motion_activation_enabled: self
+                .motion_activation_enabled
+                .or(parent.motion_activation_enabled),
             profile_overrides: {
                 let mut profile_overrides = parent.profile_overrides.clone();
                 profile_overrides.extend(self.profile_overrides.clone());
@@ -1582,6 +1601,7 @@ mod tests {
             mood_scene_id: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
+            motion_activation_enabled: Some(false),
             profile_overrides: BTreeMap::new(),
         };
         let mut config = crate::default_rhythm_profile();
@@ -1589,11 +1609,32 @@ mod tests {
         settings.apply_to_config(&mut config);
 
         assert_eq!(settings.resolved_profile_id("rhythm"), "sleep");
+        assert!(!settings.motion_activation_enabled());
         assert_eq!(config.fade_ms, TimerSetting::Fixed { value: 250 });
         assert_eq!(
             config.motion_timeout_secs,
             TimerSetting::Fixed { value: 42 }
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn legacy_room_profile_settings_default_motion_activation_to_enabled() {
+        let legacy: RoomProfileSettings = serde_json::from_value(serde_json::json!({
+            "motion_timeout_secs": {"mode": "fixed", "value": 300}
+        }))
+        .unwrap();
+        assert_eq!(legacy.motion_activation_enabled, None);
+        assert!(legacy.motion_activation_enabled());
+
+        let disabled: RoomProfileSettings = serde_json::from_value(serde_json::json!({
+            "motion_activation_enabled": false
+        }))
+        .unwrap();
+        assert!(!disabled.motion_activation_enabled());
+
+        let serialized = serde_json::to_value(RoomProfileSettings::default()).unwrap();
+        assert!(serialized.get("motion_activation_enabled").is_none());
     }
 
     #[test]

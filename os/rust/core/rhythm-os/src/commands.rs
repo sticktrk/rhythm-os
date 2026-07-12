@@ -34,7 +34,8 @@ use crate::api_types::{
 use crate::bundle::{
     BackupBundle, BackupConfiguration, BackupConfigurationRoom, BackupHubCredentials,
     BackupHubRegistry, BackupInstallation, BackupIntegrationFile, BackupRuntimeState,
-    ProfileBundle, ProfileBundleData, ProfileBundleImportPayload, BUNDLE_SCHEMA_VERSION,
+    ProfileBundle, ProfileBundleData, ProfileBundleImportPayload, BACKUP_BUNDLE_SCHEMA_VERSION,
+    LEGACY_BACKUP_SCHEMA_VERSION, PROFILE_BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
 use crate::factory_default_config::{
@@ -1014,6 +1015,7 @@ pub struct RoomProfileSettingsPatch {
     pub mood_scene_id: Option<Option<String>>,
     pub fade_ms: Option<Option<TimerSetting>>,
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
+    pub motion_activation_enabled: Option<Option<bool>>,
     pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
 }
 
@@ -1041,6 +1043,9 @@ impl RoomProfileSettingsPatch {
         }
         if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
             settings.motion_timeout_secs = motion_timeout_secs.clone();
+        }
+        if let Some(motion_activation_enabled) = self.motion_activation_enabled {
+            settings.motion_activation_enabled = motion_activation_enabled;
         }
         if let Some(profile_overrides) = &self.profile_overrides {
             match profile_overrides {
@@ -1074,6 +1079,17 @@ impl RoomProfileSettingsPatch {
             || self.mood_scene_id.is_some()
             || self.fade_ms.is_some()
             || self.motion_timeout_secs.is_some()
+            || self.motion_activation_enabled.is_some()
+            || self.profile_overrides.is_some()
+    }
+
+    fn touches_lighting_output_settings(&self) -> bool {
+        self.clear_all
+            || self.profile_id.is_some()
+            || self.mood_enabled.is_some()
+            || self.mood_profile_id.is_some()
+            || self.mood_scene_id.is_some()
+            || self.fade_ms.is_some()
             || self.profile_overrides.is_some()
     }
 }
@@ -4606,7 +4622,7 @@ pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
     Ok(ProfileBundle {
-        schema_version: BUNDLE_SCHEMA_VERSION,
+        schema_version: PROFILE_BUNDLE_SCHEMA_VERSION,
         kind: crate::bundle::BundleKind::ProfileBundle,
         name: None,
         description: None,
@@ -4781,7 +4797,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         .sort_by(|left, right| left.hub_key.to_string().cmp(&right.hub_key.to_string()));
 
     Ok(BackupBundle {
-        schema_version: BUNDLE_SCHEMA_VERSION,
+        schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
         kind: crate::bundle::BundleKind::BackupBundle,
         created_at: chrono::Utc::now().to_rfc3339(),
         secrets_included: include_secrets,
@@ -7676,6 +7692,7 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
         mood_scene_id: Some(room.room_profile.mood_scene_id.clone()),
         fade_ms: Some(room.room_profile.fade_ms.clone()),
         motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
+        motion_activation_enabled: Some(room.room_profile.motion_activation_enabled),
         profile_overrides: Some(Some(
             room.room_profile
                 .profile_overrides
@@ -7769,7 +7786,7 @@ pub fn do_profile_bundle_import(
     payload: ProfileBundleImportPayload,
 ) -> Result<String> {
     let bundle = payload.into_bundle();
-    if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
+    if bundle.schema_version != PROFILE_BUNDLE_SCHEMA_VERSION {
         return Err(anyhow::anyhow!(
             "Unsupported profile bundle schema version: {}",
             bundle.schema_version
@@ -7925,7 +7942,10 @@ fn apply_backup_configuration(
 }
 
 pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<String> {
-    if bundle.schema_version != BUNDLE_SCHEMA_VERSION {
+    if !matches!(
+        bundle.schema_version,
+        LEGACY_BACKUP_SCHEMA_VERSION | BACKUP_BUNDLE_SCHEMA_VERSION
+    ) {
         return Err(anyhow::anyhow!(
             "Unsupported backup schema version: {}",
             bundle.schema_version
@@ -10128,6 +10148,9 @@ pub fn do_node_preferences_set(
     );
     let profile_settings_touched =
         room_profile.is_some_and(|patch| patch.touches_profile_settings());
+    let lighting_output_settings_touched =
+        room_profile.is_some_and(|patch| patch.touches_lighting_output_settings());
+    let motion_activation_enabled_before = snap.profile_settings.motion_activation_enabled();
     let motion_timeout_before = if profile_settings_touched {
         Some(resolved_motion_timeout_for_node_settings(
             state,
@@ -10156,6 +10179,7 @@ pub fn do_node_preferences_set(
     if let Some(patch) = room_profile {
         patch.apply_to(&mut profile_settings);
     }
+    let motion_activation_enabled_after = profile_settings.motion_activation_enabled();
     let persistent_state =
         room_state_for_mood_setting(power_save, &profile_settings, requested_state);
     let (soft_off, mood_active, hard_off) = room_flags_for_target_state(persistent_state)?;
@@ -10238,6 +10262,9 @@ pub fn do_node_preferences_set(
             refresh_cached_motion_timeout_after_settings_change(state, node_id, timeout_secs);
         }
     }
+    if motion_activation_enabled_before != motion_activation_enabled_after {
+        queue_motion_timer_clear(state, node_id);
+    }
 
     let entered_hard_off = hard_off && !prev_hard_off;
     let left_hard_off = !hard_off && prev_hard_off;
@@ -10318,7 +10345,7 @@ pub fn do_node_preferences_set(
             }
             RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
         }
-    } else if profile_settings_touched {
+    } else if lighting_output_settings_touched {
         match persistent_state {
             RoomModeState::Mood => {
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to mood", node_id);
@@ -14302,6 +14329,7 @@ mod tests {
             mood_scene_id: Some("scene".to_string()),
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
+            motion_activation_enabled: Some(false),
             profile_overrides: BTreeMap::from([(
                 "custom".to_string(),
                 LightProfileNodeOverride {
@@ -14343,6 +14371,7 @@ mod tests {
             mood_scene_id: Some(Some("relax".to_string())),
             fade_ms: Some(Some(TimerSetting::Fixed { value: 250 })),
             motion_timeout_secs: Some(Some(TimerSetting::Fixed { value: 45 })),
+            motion_activation_enabled: Some(Some(true)),
             profile_overrides: Some(Some(profile_overrides)),
             ..Default::default()
         };
@@ -14357,6 +14386,7 @@ mod tests {
             settings.motion_timeout_secs,
             Some(TimerSetting::Fixed { value: 45 })
         );
+        assert!(settings.motion_activation_enabled());
         assert_eq!(
             settings
                 .profile_overrides
@@ -14379,6 +14409,7 @@ mod tests {
             mood_scene_id: Some(None),
             fade_ms: Some(None),
             motion_timeout_secs: Some(None),
+            motion_activation_enabled: Some(None),
             profile_overrides: Some(None),
             ..Default::default()
         };
@@ -16472,7 +16503,7 @@ mod tests {
         let err = do_backup_restore(
             &state,
             BackupBundle {
-                schema_version: BUNDLE_SCHEMA_VERSION,
+                schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
                 kind: BundleKind::BackupBundle,
                 created_at: "2026-04-16T00:00:00Z".into(),
                 secrets_included: false,
@@ -17799,7 +17830,7 @@ mod tests {
         let bundle = build_profile_bundle_dto(&state).unwrap();
         let s = state.lock().unwrap();
 
-        assert_eq!(bundle.schema_version, BUNDLE_SCHEMA_VERSION);
+        assert_eq!(bundle.schema_version, PROFILE_BUNDLE_SCHEMA_VERSION);
         assert_eq!(bundle.kind, BundleKind::ProfileBundle);
         assert_eq!(bundle.profile.power_save, factory_default_power_save());
         assert_eq!(
@@ -17847,7 +17878,7 @@ mod tests {
                 .with_trigger(ModeTransitionTrigger::Sunset);
 
         let payload = ProfileBundleImportPayload::Bundle(ProfileBundle {
-            schema_version: BUNDLE_SCHEMA_VERSION,
+            schema_version: PROFILE_BUNDLE_SCHEMA_VERSION,
             kind: BundleKind::ProfileBundle,
             name: Some("Current Profiles".into()),
             description: Some("Portable profile bundle".into()),
@@ -17896,7 +17927,7 @@ mod tests {
         let json = do_profile_bundle_import(
             &state,
             serde_json::from_value::<ProfileBundleImportPayload>(serde_json::json!({
-                "schema_version": BUNDLE_SCHEMA_VERSION,
+                "schema_version": PROFILE_BUNDLE_SCHEMA_VERSION,
                 "kind": "configuration_bundle",
                 "name": "Legacy",
                 "configuration": {
@@ -18121,7 +18152,7 @@ mod tests {
 
         let hub_key = HubKey::new(HubType::new("mock"), "bridge.local");
         let bundle = BackupBundle {
-            schema_version: BUNDLE_SCHEMA_VERSION,
+            schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: true,
@@ -18281,7 +18312,7 @@ mod tests {
 
         let hub_key = HubKey::new(HubType::new("mock"), "bridge.local");
         let bundle = BackupBundle {
-            schema_version: BUNDLE_SCHEMA_VERSION,
+            schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
@@ -18807,7 +18838,7 @@ mod tests {
         room.brightness_offset = 5.0;
 
         let bundle = BackupBundle {
-            schema_version: BUNDLE_SCHEMA_VERSION,
+            schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
@@ -18909,7 +18940,7 @@ mod tests {
         let err = do_backup_restore(
             &state,
             BackupBundle {
-                schema_version: BUNDLE_SCHEMA_VERSION,
+                schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
                 kind: BundleKind::BackupBundle,
                 created_at: "2026-04-16T00:00:00Z".into(),
                 secrets_included: false,
@@ -18964,7 +18995,7 @@ mod tests {
 
         let restored_key = HubKey::new(HubType::new("mock"), "restored.local");
         let bundle = BackupBundle {
-            schema_version: BUNDLE_SCHEMA_VERSION,
+            schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
@@ -19017,7 +19048,7 @@ mod tests {
 
         let restored = Arc::new(Mutex::new(AppState::default()));
         let bundle = BackupBundle {
-            schema_version: BUNDLE_SCHEMA_VERSION,
+            schema_version: BACKUP_BUNDLE_SCHEMA_VERSION,
             kind: BundleKind::BackupBundle,
             created_at: "2026-04-16T00:00:00Z".into(),
             secrets_included: false,
@@ -20608,6 +20639,37 @@ mod tests {
             state.lock().unwrap().pending_motion_clear,
             vec!["r1".to_string()]
         );
+    }
+
+    #[test]
+    fn disabling_motion_activation_clears_timer_without_turning_off_room() {
+        let snap = make_snapshot("r1", false, false);
+        let (state, runtime) = setup_state(vec![snap]);
+
+        let result = do_node_preferences_set(
+            &state,
+            "r1",
+            None,
+            None,
+            None,
+            None,
+            Some(&RoomProfileSettingsPatch {
+                motion_activation_enabled: Some(Some(false)),
+                ..Default::default()
+            }),
+            false,
+        );
+
+        assert!(result.is_ok());
+        assert!(runtime.events().is_empty(), "room power must not change");
+        assert_eq!(
+            state.lock().unwrap().pending_motion_clear,
+            vec!["r1".to_string()]
+        );
+        let snap = runtime.engine_room_snapshot("r1").unwrap();
+        assert!(!snap.hard_off);
+        assert!(!snap.soft_off);
+        assert!(!snap.profile_settings.motion_activation_enabled());
     }
 
     #[test]

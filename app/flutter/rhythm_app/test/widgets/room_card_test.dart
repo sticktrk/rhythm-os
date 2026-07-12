@@ -37,6 +37,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         Map<String, dynamic>? profileSettings,
       })> nodePreferenceCalls = [];
   final List<({String nodeId, int brightness})> nodeBrightnessCalls = [];
+  final List<({String nodeId, bool enabled, String requestId})>
+      motionActivationCalls = [];
+  Completer<RhythmRoomState?>? motionActivationCompleter;
+  bool motionActivationSucceeds = true;
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<({String nodeId, String action})> nodeActionCalls = [];
   final List<
@@ -134,6 +138,30 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     ));
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeMotionActivationSet({
+    required String nodeId,
+    required bool enabled,
+    required String requestId,
+  }) async {
+    motionActivationCalls.add((
+      nodeId: nodeId,
+      enabled: enabled,
+      requestId: requestId,
+    ));
+    final pending = motionActivationCompleter;
+    if (pending != null) return pending.future;
+    if (!motionActivationSucceeds) return null;
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'rhythm_enabled': true,
+      'time_offset': 0.0,
+      'brightness_offset': 0.0,
+      'state': 'active',
+      'profile_settings': {'motion_activation_enabled': enabled},
+    });
   }
 
   @override
@@ -255,6 +283,221 @@ void main() {
     // gating itself is covered by a dedicated test below.
     FirstRunExplainer.seenReader = (_) => true;
     FirstRunExplainer.seenWriter = (_) async {};
+  });
+
+  testWidgets('header docks motion right and neutral tap disables motion only',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    roomProvider.markRoomHasSensor('room-1');
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'device_ids': ['light-1', 'motion-1'],
+            'devices': [
+              {'id': 'motion-1', 'type': 'motion'},
+            ],
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0,
+            'brightness_offset': 0,
+            'state': 'active',
+            'profile_settings': {'motion_activation_enabled': true},
+          },
+        ],
+      }),
+    );
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      transitioning: true,
+      lightsOn: true,
+    );
+    await tester.pump();
+
+    final title = find.byKey(const ValueKey('room-card-title-room-1'));
+    final activity = find.byKey(const ValueKey('room-card-activity-room-1'));
+    final motion = find.byKey(const ValueKey('room-card-motion-room-1'));
+    expect(
+      tester.getCenter(title).dx,
+      lessThan(tester.getCenter(activity).dx),
+    );
+    expect(
+      tester.getCenter(activity).dx,
+      lessThan(tester.getCenter(motion).dx),
+    );
+
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      transitioning: false,
+      lightsOn: true,
+    );
+    await tester.pump();
+    final pendingResponse = Completer<RhythmRoomState?>();
+    connection.api.motionActivationCompleter = pendingResponse;
+    await tester.tap(motion);
+    await tester.pump();
+
+    final pending = find.byKey(
+      const ValueKey('room-card-motion-pending-room-1'),
+    );
+    expect(pending, findsOneWidget);
+    await tester.tap(pending);
+    await tester.pump();
+    expect(connection.api.motionActivationCalls, hasLength(1));
+
+    pendingResponse.complete(
+      RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'rhythm_enabled': true,
+        'time_offset': 0.0,
+        'brightness_offset': 0.0,
+        'state': 'active',
+        'profile_settings': {'motion_activation_enabled': false},
+      }),
+    );
+    connection.api.motionActivationCompleter = null;
+    await tester.pump();
+
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(roomProvider.isLightsOn('room-1'), isTrue);
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isFalse);
+    expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
+    expect(connection.api.motionActivationCalls, hasLength(1));
+    expect(connection.api.motionActivationCalls.single.enabled, isFalse);
+    expect(connection.api.motionActivationCalls.single.requestId, isNotEmpty);
+
+    await tester.tap(motion);
+    await tester.pump();
+
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(roomProvider.isLightsOn('room-1'), isTrue);
+    expect(connection.api.motionActivationCalls, hasLength(2));
+    expect(connection.api.motionActivationCalls.last.enabled, isTrue);
+  });
+
+  testWidgets('motion countdown tap does nothing', (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    roomProvider.markRoomHasSensor('room-1');
+    roomProvider.updateMotionTimer(
+      'room-1',
+      MotionTimerInfo(
+        motionActive: false,
+        motionOwned: true,
+        remainingSecs: 30,
+        timeoutSecs: 60,
+        receivedAt: DateTime.now(),
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('room-card-motion-room-1')),
+    );
+    await tester.pump();
+
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+    expect(
+      roomProvider.getDisplayRoomState('room-1'),
+      isNot(RoomModeState.hardOff),
+    );
+    expect(find.text('Settings'), findsNothing);
   });
 
   testWidgets('shows and clears a spinner while the room is transitioning',

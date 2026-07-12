@@ -50,7 +50,11 @@ const LOG_CAPTURE_ROTATIONS_ENV: &str = "RHYTHM_DEBUG_BUNDLE_LOG_ROTATIONS";
 const EXACT_PERSISTED_FILES: &[&str] = &["topology.json", "canonical_registry.json", "rooms.json"];
 /// Included when present, but legitimately absent on devices that have never
 /// paired a device or applied an OTA — so never reported as missing.
-const OPTIONAL_PERSISTED_FILES: &[&str] = &["pairing_history.json", "ota_history.json"];
+const OPTIONAL_PERSISTED_FILES: &[&str] = &[
+    "pairing_history.json",
+    "ota_history.json",
+    "activity_history.json",
+];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const OTA_DEBUG_FILES: &[&str] = &[crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
@@ -805,7 +809,12 @@ pub fn build_debug_bundle_with_app_log(
     }
 
     if let Some(app_log) = app_log {
-        append_bytes(&mut builder, "app/app.log", app_log.log_text.as_bytes(), 0o644)?;
+        append_bytes(
+            &mut builder,
+            "app/app.log",
+            app_log.log_text.as_bytes(),
+            0o644,
+        )?;
         let metadata = app_log.metadata.unwrap_or_else(|| {
             serde_json::json!({
                 "kind": "rhythm_app_log",
@@ -1276,7 +1285,10 @@ fn discover_persisted_artifacts(
         }
     }
 
-    for file_name in OPTIONAL_PERSISTED_FILES.iter().chain(REMOTE_ACCESS_DEBUG_FILES) {
+    for file_name in OPTIONAL_PERSISTED_FILES
+        .iter()
+        .chain(REMOTE_ACCESS_DEBUG_FILES)
+    {
         let source_path = data_dir.join(file_name);
         if source_path.is_file() {
             discovered.push(FileArtifact {
@@ -3564,6 +3576,16 @@ mod tests {
         fs::write(log_dir.join("cloudflared.log"), b"cloudflared-log").unwrap();
         fs::write(data_dir.join("topology.json"), br#"{"rooms":[]}"#).unwrap();
         fs::write(
+            data_dir.join("rooms.json"),
+            br#"{"rooms":[{"id":"office","profile_settings":{"motion_activation_enabled":false}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("activity_history.json"),
+            br#"{"activities":[{"action_id":"set_motion_activation","correlation_id":"motion-test-1","payload":{"requested_enabled":false,"status":"applied"}}]}"#,
+        )
+        .unwrap();
+        fs::write(
             data_dir.join("canonical_registry.json"),
             br#"{"devices":{},"triage":{"entries":[]}}"#,
         )
@@ -3669,6 +3691,22 @@ mod tests {
             Some(br#"{"devices":{},"triage":{"entries":[]}}"#.as_slice())
         );
         assert_eq!(
+            files.get("persisted/rooms.json").map(Vec::as_slice),
+            Some(
+                br#"{"rooms":[{"id":"office","profile_settings":{"motion_activation_enabled":false}}]}"#
+                    .as_slice()
+            )
+        );
+        assert_eq!(
+            files
+                .get("persisted/activity_history.json")
+                .map(Vec::as_slice),
+            Some(
+                br#"{"activities":[{"action_id":"set_motion_activation","correlation_id":"motion-test-1","payload":{"requested_enabled":false,"status":"applied"}}]}"#
+                    .as_slice()
+            )
+        );
+        assert_eq!(
             files
                 .get("persisted/hub_registry_mock_local.json")
                 .map(Vec::as_slice),
@@ -3714,9 +3752,9 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            6
+            8
         );
-        assert!(manifest["missing_persisted_files"]
+        assert!(!manifest["missing_persisted_files"]
             .as_array()
             .unwrap()
             .iter()
@@ -3773,7 +3811,7 @@ mod tests {
             diagnostics["persisted_data_dir"],
             data_dir.display().to_string()
         );
-        assert!(diagnostics["missing_persisted_files"]
+        assert!(!diagnostics["missing_persisted_files"]
             .as_array()
             .unwrap()
             .iter()

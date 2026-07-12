@@ -155,6 +155,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   final List<({String sceneId, String targetId, int? transitionMs})>
       applySceneCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
+  final List<({String nodeId, bool enabled, String requestId})>
+      motionActivationCalls = [];
+  Completer<RhythmRoomState?>? motionActivationCompleter;
+  bool motionActivationSucceeds = true;
   final List<
       ({
         String nodeId,
@@ -190,8 +194,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<Map<String, dynamic>?> getTriageCount() async => null;
 
   @override
-  Future<List<Map<String, dynamic>>?> getTriageEntries() async =>
-      triageEntries;
+  Future<List<Map<String, dynamic>>?> getTriageEntries() async => triageEntries;
 
   @override
   Future<Map<String, dynamic>?> resolveTriageNewResult(String entryId) async {
@@ -219,6 +222,30 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     ));
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeMotionActivationSet({
+    required String nodeId,
+    required bool enabled,
+    required String requestId,
+  }) async {
+    motionActivationCalls.add((
+      nodeId: nodeId,
+      enabled: enabled,
+      requestId: requestId,
+    ));
+    final pending = motionActivationCompleter;
+    if (pending != null) return pending.future;
+    if (!motionActivationSucceeds) return null;
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'rhythm_enabled': true,
+      'time_offset': 0.0,
+      'brightness_offset': 0.0,
+      'state': 'active',
+      'profile_settings': {'motion_activation_enabled': enabled},
+    });
   }
 
   @override
@@ -995,6 +1022,167 @@ void main() {
       expect(api.hubCredentialsCalls, 0);
       expect(hubConnected, isFalse);
       expect(connection.reconnectCalls, 0);
+    });
+  });
+
+  group('ServerSyncProvider motion activation', () {
+    RhythmHello motionHello({bool supported = true, bool enabled = true}) {
+      return RhythmHello.fromJson({
+        'version': '0.6.509-beta',
+        'capabilities': {
+          'api_schema_version': 1,
+          'features':
+              supported ? [RhythmFeature.motionActivationToggle] : <String>[],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              if (supported) 'motion_activation_enabled': enabled,
+            },
+          },
+        ],
+      });
+    }
+
+    testWidgets('older appliances keep the motion control non-actionable', (
+      tester,
+    ) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(motionHello(supported: false));
+      await tester.pump();
+
+      expect(provider.motionActivationSupportedForNode('room-1'), isFalse);
+      expect(
+        await provider.setNodeMotionActivationEnabled('room-1', false),
+        isFalse,
+      );
+      expect(api.motionActivationCalls, isEmpty);
+      expect(provider.motionActivationEnabledForNode('room-1'), isTrue);
+    });
+
+    testWidgets('rejected write rolls back state and restores the timer', (
+      tester,
+    ) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..motionActivationSucceeds = false;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(motionHello());
+      await tester.pump();
+      final timer = MotionTimerInfo(
+        motionActive: true,
+        motionOwned: true,
+        remainingSecs: null,
+        timeoutSecs: 300,
+        receivedAt: DateTime.now(),
+      );
+      roomProvider.updateNodeMotionTimer('room-1', timer);
+
+      expect(
+        await provider.setNodeMotionActivationEnabled('room-1', false),
+        isFalse,
+      );
+      expect(provider.motionActivationEnabledForNode('room-1'), isTrue);
+      expect(roomProvider.getMotionTimer('room-1'), timer);
+      expect(provider.motionActivationPendingForNode('room-1'), isFalse);
+    });
+
+    testWidgets('serializes repeated taps until authoritative state returns', (
+      tester,
+    ) async {
+      final roomProvider = RoomProvider();
+      final completer = Completer<RhythmRoomState?>();
+      final api = _FakeRhythmServerApi()..motionActivationCompleter = completer;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(motionHello());
+      await tester.pump();
+
+      final first = provider.setNodeMotionActivationEnabled('room-1', false);
+      await tester.pump();
+      expect(provider.motionActivationPendingForNode('room-1'), isTrue);
+      expect(
+        await provider.setNodeMotionActivationEnabled('room-1', true),
+        isFalse,
+      );
+      expect(api.motionActivationCalls, hasLength(1));
+
+      completer.complete(
+        RhythmRoomState.fromJson({
+          'node_id': 'room-1',
+          'rhythm_enabled': true,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'state': 'active',
+          'profile_settings': {'motion_activation_enabled': false},
+        }),
+      );
+      expect(await first, isTrue);
+      expect(provider.motionActivationPendingForNode('room-1'), isFalse);
+      expect(provider.motionActivationEnabledForNode('room-1'), isFalse);
+    });
+
+    testWidgets('disconnected writes do not change optimistic state', (
+      tester,
+    ) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(motionHello());
+      await tester.pump();
+      connection.isConnected = false;
+
+      expect(
+        await provider.setNodeMotionActivationEnabled('room-1', false),
+        isFalse,
+      );
+      expect(provider.motionActivationEnabledForNode('room-1'), isTrue);
+      expect(api.motionActivationCalls, isEmpty);
     });
   });
 
@@ -4127,18 +4315,22 @@ void main() {
 
     expect(find.text('Motion Controls'), findsOneWidget);
     expect(
-      tester.widget<CheckboxListTile>(
-        find.widgetWithText(CheckboxListTile, 'Kitchen'),
-      ).value,
+      tester
+          .widget<CheckboxListTile>(
+            find.widgetWithText(CheckboxListTile, 'Kitchen'),
+          )
+          .value,
       isTrue,
     );
 
     await tester.tap(find.text('Kitchen'));
     await tester.pump();
     expect(
-      tester.widget<ElevatedButton>(
-        find.widgetWithText(ElevatedButton, 'SAVE'),
-      ).onPressed,
+      tester
+          .widget<ElevatedButton>(
+            find.widgetWithText(ElevatedButton, 'SAVE'),
+          )
+          .onPressed,
       isNull,
     );
 

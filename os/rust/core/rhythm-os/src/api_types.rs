@@ -9,6 +9,7 @@ use rhythm_core::{
     ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState,
     RoomProfileSettings, TimerSetting,
 };
+use serde::ser::SerializeStruct;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -47,6 +48,7 @@ pub struct RoomProfileSettingsDto {
     pub fade_ms: Option<TimerSetting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_timeout_secs: Option<TimerSetting>,
+    pub motion_activation_enabled: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profile_overrides: BTreeMap<String, LightProfileNodeOverride>,
 }
@@ -60,6 +62,7 @@ impl RoomProfileSettingsDto {
             mood_scene_id: settings.mood_scene_id.clone(),
             fade_ms: settings.fade_ms.clone(),
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
+            motion_activation_enabled: settings.motion_activation_enabled(),
             profile_overrides: settings.profile_overrides.clone(),
         }
     }
@@ -266,9 +269,25 @@ pub struct HubStartupRetryDto {
 }
 
 /// API capability metadata in state snapshot.
-#[derive(Clone, Debug, Serialize)]
+pub const API_SCHEMA_VERSION: u32 = 1;
+pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
+
+#[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
     pub hubs: Vec<HubCapabilityDto>,
+}
+
+impl Serialize for ApiCapabilitiesDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("ApiCapabilitiesDto", 3)?;
+        state.serialize_field("api_schema_version", &API_SCHEMA_VERSION)?;
+        state.serialize_field("features", &[FEATURE_MOTION_ACTIVATION_TOGGLE])?;
+        state.serialize_field("hubs", &self.hubs)?;
+        state.end()
+    }
 }
 
 /// Capabilities for one available hub integration.
@@ -1362,6 +1381,14 @@ mod tests {
         assert_eq!(json["nodes"][0]["name"], "Office");
         assert_eq!(json["hubs"][0]["type"], "hue");
         assert_eq!(json["capabilities"]["hubs"][0]["type"], "matter");
+        assert_eq!(
+            json["capabilities"]["api_schema_version"],
+            API_SCHEMA_VERSION
+        );
+        assert_eq!(
+            json["capabilities"]["features"][0],
+            FEATURE_MOTION_ACTIVATION_TOGGLE
+        );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
             "matter_on_network_setup_code"
