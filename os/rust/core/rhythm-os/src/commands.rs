@@ -1574,31 +1574,6 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
     }
 }
 
-pub(crate) fn refresh_lights_on_cache_for_runtime_node_with_source(
-    state: &SharedState,
-    runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
-    source: ObservedPowerSource,
-) {
-    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
-        return;
-    };
-    refresh_lights_on_cache_for_runtime_snapshot_with_source(state, runtime, &snap, source);
-}
-
-pub(crate) fn refresh_lights_on_cache_for_runtime_node(
-    state: &SharedState,
-    runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
-) {
-    refresh_lights_on_cache_for_runtime_node_with_source(
-        state,
-        runtime,
-        node_id,
-        ObservedPowerSource::Command,
-    );
-}
-
 pub(crate) fn refresh_all_lights_on_cache_for_runtime(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -10294,18 +10269,22 @@ pub fn do_node_preferences_set(
     let entered_hard_off = hard_off && !prev_hard_off;
     let left_hard_off = !hard_off && prev_hard_off;
 
-    let mut refresh_lights_on = false;
+    // State-changing commands already tell us the intended power state. Do
+    // not immediately read the integration after enqueueing the write: the
+    // read can race session establishment, contend with the command, and
+    // return the pre-command value while dispatch is still pending.
+    let mut commanded_lights_on = None;
 
     if entered_hard_off {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering hard_off", node_id);
         queue_motion_timer_clear(state, node_id);
         let event = InputEvent::new(node_id, ButtonAction::LightsOff);
         if let Err(e) = runtime.handle_event(&event) {
             warn!(target: "cmd", "lights_off for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(false);
         }
     } else if mood_active && !prev_mood_active {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering mood", node_id);
         if let Err(e) = apply_mood_scene_or_tick(
             state,
@@ -10315,26 +10294,31 @@ pub fn do_node_preferences_set(
             false,
         ) {
             warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(true);
         }
     } else if soft_off && !prev_soft_off {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering standby", node_id);
         if let Err(e) = runtime.soft_off_tick_room(node_id) {
             warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(true);
         }
     } else if (!soft_off && prev_soft_off) || (!mood_active && prev_mood_active) {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} leaving mood/standby, turning on", node_id);
         if let Err(e) = runtime.turn_on_room(node_id) {
             warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(true);
         }
     } else if left_hard_off {
-        refresh_lights_on = true;
         match persistent_state {
             RoomModeState::Active => {
                 info!(target: "cmd", "node_preferences_set: {} leaving hard_off to active", node_id);
                 if let Err(e) = runtime.turn_on_room(node_id) {
                     warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Mood => {
@@ -10347,12 +10331,16 @@ pub fn do_node_preferences_set(
                     false,
                 ) {
                     warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Standby => {
                 info!(target: "cmd", "node_preferences_set: {} leaving hard_off to standby", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
                     warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
@@ -10360,7 +10348,6 @@ pub fn do_node_preferences_set(
     } else if lighting_output_settings_touched {
         match persistent_state {
             RoomModeState::Mood => {
-                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to mood", node_id);
                 if let Err(e) = apply_mood_scene_or_tick(
                     state,
@@ -10370,20 +10357,24 @@ pub fn do_node_preferences_set(
                     false,
                 ) {
                     warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Standby => {
-                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to standby", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
                     warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Active if lights_on => {
-                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to active lights", node_id);
                 if let Err(e) = runtime.turn_on_room(node_id) {
                     warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::HardOff
@@ -10393,8 +10384,8 @@ pub fn do_node_preferences_set(
         }
     }
 
-    if refresh_lights_on {
-        refresh_lights_on_cache_for_runtime_node(state, &runtime, node_id);
+    if let Some(lights_on) = commanded_lights_on {
+        update_lights_on_cache_for_runtime_node(state, &runtime, node_id, lights_on);
     }
 
     {
@@ -11408,6 +11399,78 @@ fn sync_endpoint_device_rooms(
     }
 }
 
+fn build_hub_device_room_assignments(
+    state: &AppState,
+    device: &crate::canonical::identity::CanonicalDevice,
+    room_id: Option<&str>,
+) -> Vec<crate::hub::HubDeviceRoomAssignment> {
+    device
+        .active_endpoints()
+        .map(|endpoint| {
+            let mut target_hub_room_ids = room_id
+                .and_then(|target_room_id| state.topology.get(target_room_id))
+                .map(|target_room| {
+                    target_room
+                        .hub_room_bindings
+                        .iter()
+                        .filter(|binding| binding.hub_key == endpoint.hub_key)
+                        .map(|binding| binding.hub_room_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            target_hub_room_ids.sort();
+            target_hub_room_ids.dedup();
+            crate::hub::HubDeviceRoomAssignment {
+                hub_key: endpoint.hub_key.clone(),
+                native_device_id: endpoint.native_id.clone(),
+                device_type: device.device_type.clone(),
+                target_rhythm_room_id: room_id.map(str::to_string),
+                target_hub_room_ids,
+            }
+        })
+        .collect()
+}
+
+struct PreparedHubDeviceRoomAssignment {
+    assignment: crate::hub::HubDeviceRoomAssignment,
+    target_hub_room_id: Option<Option<String>>,
+    rollback: Option<crate::hub::HubDeviceRoomAssignmentRollback>,
+}
+
+fn rollback_prepared_hub_device_room_assignments(
+    prepared: Vec<PreparedHubDeviceRoomAssignment>,
+    primary_error: anyhow::Error,
+) -> anyhow::Error {
+    let mut rollback_failures = Vec::new();
+    for prepared in prepared.into_iter().rev() {
+        let Some(rollback) = prepared.rollback else {
+            continue;
+        };
+        if let Err(error) = rollback() {
+            log::error!(
+                target: "hub_room_assignment",
+                "Failed to roll back native room assignment for {} on {}: {:#}",
+                prepared.assignment.native_device_id,
+                prepared.assignment.hub_key,
+                error
+            );
+            rollback_failures.push(format!(
+                "{} on {}: {error:#}",
+                prepared.assignment.native_device_id, prepared.assignment.hub_key
+            ));
+        }
+    }
+
+    if rollback_failures.is_empty() {
+        primary_error
+    } else {
+        anyhow::anyhow!(
+            "{primary_error:#}; native rollback also failed: {}",
+            rollback_failures.join("; ")
+        )
+    }
+}
+
 /// Assign a canonical device to a Rhythm room (or unassign with None).
 ///
 /// Updates the canonical registry AND the topology so the composite routing
@@ -11417,7 +11480,7 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
-    let (assignments, prepare_hub_device_room_assignment_fn) = {
+    let (assignments, source_room_id, prepare_hub_device_room_assignment_fn) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let device = s
             .canonical_registry
@@ -11430,58 +11493,95 @@ pub fn do_canonical_assign_room(
             }
         }
 
-        let assignments = device
-            .active_endpoints()
-            .map(|endpoint| {
-                let mut target_hub_room_ids = room_id
-                    .and_then(|target_room_id| s.topology.get(target_room_id))
-                    .map(|target_room| {
-                        target_room
-                            .hub_room_bindings
-                            .iter()
-                            .filter(|binding| binding.hub_key == endpoint.hub_key)
-                            .map(|binding| binding.hub_room_id.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                target_hub_room_ids.sort();
-                target_hub_room_ids.dedup();
-                crate::hub::HubDeviceRoomAssignment {
-                    hub_key: endpoint.hub_key.clone(),
-                    native_device_id: endpoint.native_id.clone(),
-                    device_type: device.device_type.clone(),
-                    target_rhythm_room_id: room_id.map(str::to_string),
-                    target_hub_room_ids,
-                }
-            })
-            .collect::<Vec<_>>();
-        (assignments, s.prepare_hub_device_room_assignment_fn.clone())
+        let assignments = build_hub_device_room_assignments(&s, device, room_id);
+        let source_room_id = s
+            .topology
+            .device_parent_room_id(device_id)
+            .map(str::to_string)
+            .or_else(|| device.room_id.clone());
+        (
+            assignments,
+            source_room_id,
+            s.prepare_hub_device_room_assignment_fn.clone(),
+        )
     };
 
     let mut prepared_assignments = Vec::new();
     if let Some(prepare) = prepare_hub_device_room_assignment_fn {
-        for assignment in assignments {
-            let outcome = prepare(state, &assignment)?;
-            if let crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned { target_hub_room_id } =
-                &outcome
-            {
-                let valid_target = match assignment.target_rhythm_room_id.as_deref() {
-                    Some(_) => target_hub_room_id
-                        .as_ref()
-                        .is_some_and(|target| assignment.target_hub_room_ids.contains(target)),
-                    None => target_hub_room_id.is_none(),
-                };
-                if !valid_target {
-                    return Err(anyhow::anyhow!(
-                        "Integration returned a native room outside the requested Rhythm target"
+        for assignment in &assignments {
+            let outcome = match prepare(state, assignment) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err(rollback_prepared_hub_device_room_assignments(
+                        prepared_assignments,
+                        error,
                     ));
                 }
+            };
+            match outcome {
+                crate::hub::HubDeviceRoomAssignmentOutcome::Unchanged => {
+                    prepared_assignments.push(PreparedHubDeviceRoomAssignment {
+                        assignment: assignment.clone(),
+                        target_hub_room_id: None,
+                        rollback: None,
+                    });
+                }
+                crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
+                    target_hub_room_id,
+                    rollback,
+                } => {
+                    let valid_target = match assignment.target_rhythm_room_id.as_deref() {
+                        Some(_) => target_hub_room_id
+                            .as_ref()
+                            .is_some_and(|target| assignment.target_hub_room_ids.contains(target)),
+                        None => target_hub_room_id.is_none(),
+                    };
+                    prepared_assignments.push(PreparedHubDeviceRoomAssignment {
+                        assignment: assignment.clone(),
+                        target_hub_room_id: Some(target_hub_room_id),
+                        rollback: Some(rollback),
+                    });
+                    if !valid_target {
+                        return Err(rollback_prepared_hub_device_room_assignments(
+                            prepared_assignments,
+                            anyhow::anyhow!(
+                                "Integration returned a native room outside the requested Rhythm target"
+                            ),
+                        ));
+                    }
+                }
             }
-            prepared_assignments.push((assignment, outcome));
         }
     }
 
-    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut s = match state.lock() {
+        Ok(state) => state,
+        Err(_) => {
+            return Err(rollback_prepared_hub_device_room_assignments(
+                prepared_assignments,
+                anyhow::anyhow!("lock"),
+            ));
+        }
+    };
+
+    let state_is_unchanged = s.canonical_registry.get(device_id).is_some_and(|device| {
+        let current_room_id = s
+            .topology
+            .device_parent_room_id(device_id)
+            .map(str::to_string)
+            .or_else(|| device.room_id.clone());
+        current_room_id == source_room_id
+            && build_hub_device_room_assignments(&s, device, room_id) == assignments
+    });
+    if !state_is_unchanged {
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            prepared_assignments,
+            anyhow::anyhow!(
+                "Device or room topology changed while native room assignment was in progress"
+            ),
+        ));
+    }
 
     // Snapshot endpoints and old room before mutating.
     let device = s
@@ -11521,32 +11621,51 @@ pub fn do_canonical_assign_room(
 
     if let Some(target_room_id) = room_id {
         if s.topology.get(target_room_id).is_none() {
-            return Err(anyhow::anyhow!("Room not found: {}", target_room_id));
+            drop(s);
+            return Err(rollback_prepared_hub_device_room_assignments(
+                prepared_assignments,
+                anyhow::anyhow!("Room not found: {}", target_room_id),
+            ));
         }
     }
 
-    for (assignment, outcome) in &prepared_assignments {
-        if !matches!(assignment.device_type, DeviceType::Light) {
+    let topology_before_assignment = s.topology.clone();
+    let canonical_before_assignment = s.canonical_registry.clone();
+    let mut topology_mirror_failed = false;
+    for prepared in &prepared_assignments {
+        if !matches!(prepared.assignment.device_type, DeviceType::Light) {
             continue;
         }
-        if let crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned { target_hub_room_id } =
-            outcome
-        {
+        if let Some(target_hub_room_id) = &prepared.target_hub_room_id {
             if !s.topology.reassign_hub_light_device(
-                &assignment.hub_key,
-                &assignment.native_device_id,
+                &prepared.assignment.hub_key,
+                &prepared.assignment.native_device_id,
+                prepared.assignment.target_rhythm_room_id.as_deref(),
                 target_hub_room_id.as_deref(),
-            ) && target_hub_room_id.is_some()
-            {
-                return Err(anyhow::anyhow!(
-                    "Native room reassignment succeeded but the matching source-room binding was not found"
-                ));
+            ) {
+                topology_mirror_failed = true;
+                break;
             }
         }
     }
+    if topology_mirror_failed {
+        s.topology = topology_before_assignment;
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            prepared_assignments,
+            anyhow::anyhow!(
+                "Native room reassignment succeeded but the matching target-room binding was not found"
+            ),
+        ));
+    }
 
     if !s.canonical_registry.assign_room(device_id, room_id) {
-        return Err(anyhow::anyhow!("Device not found: {}", device_id));
+        s.topology = topology_before_assignment;
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            prepared_assignments,
+            anyhow::anyhow!("Device not found: {}", device_id),
+        ));
     }
 
     if let Some(target_room_id) = room_id {
@@ -11556,11 +11675,19 @@ pub fn do_canonical_assign_room(
             crate::topology::DevicePlacement::UserOverride,
         ) {
             s.topology.ensure_standalone_device(device_id);
-            s.topology.assign_device(
+            if !s.topology.assign_device(
                 device_id,
                 Some(target_room_id),
                 crate::topology::DevicePlacement::UserOverride,
-            );
+            ) {
+                s.topology = topology_before_assignment;
+                s.canonical_registry = canonical_before_assignment;
+                drop(s);
+                return Err(rollback_prepared_hub_device_room_assignments(
+                    prepared_assignments,
+                    anyhow::anyhow!("Failed to assign device to target room"),
+                ));
+            }
         }
         if let Some(old_id) = &old_room_id {
             if let Some(room) = s.topology.get_mut(old_id) {
@@ -12775,6 +12902,7 @@ mod tests {
         time_offset_updates: Mutex<Vec<(String, f32)>>,
         sun_times_updates: Mutex<Vec<Option<rhythm_core::SunTimes>>>,
         light_states: Mutex<HashMap<String, bool>>,
+        light_state_queries: AtomicUsize,
         current_hour: f32,
     }
 
@@ -12791,6 +12919,7 @@ mod tests {
                 time_offset_updates: Mutex::new(Vec::new()),
                 sun_times_updates: Mutex::new(Vec::new()),
                 light_states: Mutex::new(HashMap::new()),
+                light_state_queries: AtomicUsize::new(0),
                 current_hour,
             }
         }
@@ -12873,6 +13002,10 @@ mod tests {
 
         fn sun_times_updates(&self) -> Vec<Option<rhythm_core::SunTimes>> {
             self.sun_times_updates.lock().unwrap().clone()
+        }
+
+        fn light_state_query_count(&self) -> usize {
+            self.light_state_queries.load(Ordering::SeqCst)
         }
     }
 
@@ -13084,6 +13217,7 @@ mod tests {
             Ok(())
         }
         fn any_lights_on(&self, room_id: &str) -> anyhow::Result<bool> {
+            self.light_state_queries.fetch_add(1, Ordering::SeqCst);
             Ok(self.any_target_lights_on(room_id))
         }
         fn current_hour(&self) -> f32 {
@@ -20576,6 +20710,29 @@ mod tests {
     }
 
     #[test]
+    fn room_preferences_active_records_command_intent_without_physical_read() {
+        let mut snap = make_snapshot("r1", false, false);
+        snap.hard_off = true;
+        let (state, runtime) = setup_state(vec![snap]);
+        runtime.set_light_on("r1", false);
+
+        do_node_preferences_set(
+            &state,
+            "r1",
+            Some(true),
+            None,
+            None,
+            Some(RoomModeState::Active),
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.light_state_query_count(), 0);
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
+    }
+
+    #[test]
     fn room_preferences_mood_queues_motion_timer_clear() {
         let snap = make_snapshot("r1", false, false);
         let (state, runtime) = setup_state(vec![snap]);
@@ -22551,6 +22708,84 @@ mod tests {
     }
 
     #[test]
+    fn canonical_native_room_move_rolls_back_prior_endpoint_when_later_endpoint_fails() {
+        let (state, device_id, source_room_id, target_room_id, _primary_hub_key) =
+            setup_native_room_move();
+        let secondary_hub_key = HubKey::new(HubType::new("room_authoritative"), "bridge-2");
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .canonical_registry
+                .get_mut(&device_id)
+                .unwrap()
+                .upsert_endpoint(
+                    secondary_hub_key.clone(),
+                    "hub-device-2".to_string(),
+                    1,
+                    Some("Nook".to_string()),
+                );
+            state
+                .topology
+                .get_mut(&source_room_id)
+                .unwrap()
+                .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                    hub_key: secondary_hub_key.clone(),
+                    hub_room_id: "hub-nook-2".to_string(),
+                    control_id: "grouped-nook-2".to_string(),
+                    light_device_ids: vec!["hub-device-2".to_string()],
+                });
+            state
+                .topology
+                .get_mut(&target_room_id)
+                .unwrap()
+                .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                    hub_key: secondary_hub_key.clone(),
+                    hub_room_id: "hub-office-2".to_string(),
+                    control_id: "grouped-office-2".to_string(),
+                    light_device_ids: Vec::new(),
+                });
+        }
+
+        let rollback_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rollback_calls_for_callback = rollback_calls.clone();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                if assignment.hub_key == secondary_hub_key {
+                    return Err(anyhow::anyhow!("Second hub rejected room update"));
+                }
+                let rollback_calls = rollback_calls_for_callback.clone();
+                let native_device_id = assignment.native_device_id.clone();
+                Ok(crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
+                    target_hub_room_id: assignment.target_hub_room_ids.first().cloned(),
+                    rollback: Box::new(move || {
+                        rollback_calls.lock().unwrap().push(native_device_id);
+                        Ok(())
+                    }),
+                })
+            }));
+
+        let error =
+            do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Second hub rejected room update"));
+        assert_eq!(
+            *rollback_calls.lock().unwrap(),
+            vec!["hub-device-1".to_string()]
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(source_room_id.as_str())
+        );
+        assert_eq!(
+            state.canonical_registry.get(&device_id).unwrap().room_id,
+            Some(source_room_id)
+        );
+    }
+
+    #[test]
     fn canonical_native_room_move_runs_integration_before_local_topology() {
         let (state, device_id, _source_room_id, target_room_id, hub_key) = setup_native_room_move();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -22564,6 +22799,7 @@ mod tests {
                 ));
                 Ok(crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
                     target_hub_room_id: assignment.target_hub_room_ids.first().cloned(),
+                    rollback: Box::new(|| Ok(())),
                 })
             }));
 

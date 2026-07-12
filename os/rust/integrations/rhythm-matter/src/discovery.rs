@@ -1,18 +1,14 @@
 //! Matter device discovery for room sync.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
-use log::warn;
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
 use rhythm_os::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 
 use crate::hub_state::MatterHubData;
 use crate::transport::{CommissionedDevice, MatterDeviceInfo, MatterTransport};
-
-const SYNC_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Matter hub discovery.
 ///
@@ -71,31 +67,25 @@ impl HubDiscovery for MatterDiscovery {
     }
 
     fn discover_identities(&self) -> Result<Vec<DiscoveredIdentity>> {
-        let devices = self.transport.list_devices()?;
+        let persisted_devices = self
+            .transport
+            .list_commissioned_devices()
+            .unwrap_or_default();
+        let devices = if persisted_devices.is_empty() {
+            self.transport
+                .list_devices()?
+                .into_iter()
+                .map(|info| (Self::fallback_commissioned(&info), Some(info)))
+                .collect::<Vec<_>>()
+        } else {
+            persisted_devices
+                .into_iter()
+                .map(|device| (device, None))
+                .collect::<Vec<_>>()
+        };
         let mut identities = Vec::with_capacity(devices.len());
 
-        for info in devices {
-            if self.hub_data.is_decommission_suppressed(info.node_id) {
-                continue;
-            }
-
-            let (commissioned, used_fallback) = match crate::lifecycle::probe_light_with_deadline(
-                &self.transport,
-                info.node_id,
-                SYNC_PROBE_TIMEOUT,
-            ) {
-                Ok(device) => (device, false),
-                Err(error) => {
-                    warn!(
-                        target: "room_sync",
-                        "Matter: probe failed for node {} during sync, using basic device info: {}",
-                        info.node_id,
-                        error
-                    );
-                    (Self::fallback_commissioned(&info), true)
-                }
-            };
-
+        for (commissioned, fallback_info) in devices {
             if self
                 .hub_data
                 .is_decommission_suppressed(commissioned.node_id)
@@ -103,7 +93,8 @@ impl HubDiscovery for MatterDiscovery {
                 continue;
             }
 
-            if used_fallback {
+            let used_fallback = fallback_info.is_some();
+            if let Some(info) = fallback_info {
                 self.hub_data.record_device_info(&info, false);
             } else {
                 self.hub_data.record_commissioned_device(&commissioned);
@@ -115,24 +106,22 @@ impl HubDiscovery for MatterDiscovery {
             );
             if used_fallback {
                 crate::commissioning::store_fallback_device_metadata(&self.hub_data, &device_id);
-            } else {
+            } else if !self
+                .hub_data
+                .device_caps
+                .lock()
+                .is_ok_and(|caps| caps.contains_key(&device_id))
+                || !self
+                    .hub_data
+                    .device_quirks
+                    .lock()
+                    .is_ok_and(|quirks| quirks.contains_key(&device_id))
+            {
                 crate::commissioning::store_device_metadata(
                     &self.hub_data,
                     &commissioned,
                     &device_id,
                 );
-                if let Err(error) = crate::capture::persist_device_capture(
-                    &self.hub_data,
-                    &commissioned,
-                    "sync_probe",
-                ) {
-                    warn!(
-                        target: "room_sync",
-                        "Matter: failed to persist sync probe capture for {}: {}",
-                        device_id,
-                        error
-                    );
-                }
             }
 
             identities.push(Self::device_identity(&commissioned));
@@ -146,7 +135,7 @@ impl HubDiscovery for MatterDiscovery {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use rhythm_os::hub::HubEvent;
@@ -160,7 +149,8 @@ mod tests {
 
     struct FakeTransport {
         devices: Vec<MatterDeviceInfo>,
-        probes: HashMap<u64, Result<CommissionedDevice, String>>,
+        persisted_devices: Vec<CommissionedDevice>,
+        probe_calls: AtomicUsize,
     }
 
     impl MatterTransport for FakeTransport {
@@ -179,12 +169,13 @@ mod tests {
             Ok(self.devices.clone())
         }
 
-        fn probe_light(&self, node_id: u64) -> anyhow::Result<CommissionedDevice> {
-            match self.probes.get(&node_id) {
-                Some(Ok(device)) => Ok(device.clone()),
-                Some(Err(error)) => anyhow::bail!("{}", error),
-                None => anyhow::bail!("unknown node"),
-            }
+        fn list_commissioned_devices(&self) -> anyhow::Result<Vec<CommissionedDevice>> {
+            Ok(self.persisted_devices.clone())
+        }
+
+        fn probe_light(&self, _node_id: u64) -> anyhow::Result<CommissionedDevice> {
+            self.probe_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("discovery must not probe persisted devices")
         }
 
         fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> anyhow::Result<()> {
@@ -370,25 +361,22 @@ mod tests {
     }
 
     #[test]
-    fn discovery_emits_identities_with_probe_fallback_and_suppression() {
+    fn discovery_uses_persisted_records_without_probing_and_honors_suppression() {
         let hub_data = hub_data();
         assert!(hub_data.begin_decommission(3));
         assert!(hub_data.begin_decommission(5));
 
         let transport = Arc::new(FakeTransport {
-            devices: vec![
-                device_info(1),
-                device_info(2),
-                device_info(3),
-                device_info(4),
+            devices: Vec::new(),
+            persisted_devices: vec![
+                commissioned_device(1, 2),
+                commissioned_device(2, 1),
+                commissioned_device(3, 1),
+                commissioned_device(5, 1),
             ],
-            probes: HashMap::from([
-                (1, Ok(commissioned_device(1, 2))),
-                (2, Err("probe failed".to_string())),
-                (4, Ok(commissioned_device(5, 1))),
-            ]),
+            probe_calls: AtomicUsize::new(0),
         });
-        let discovery = MatterDiscovery::new(transport, hub_data.clone());
+        let discovery = MatterDiscovery::new(transport.clone(), hub_data.clone());
 
         assert!(discovery.discover_rooms().unwrap().is_empty());
         assert!(discovery.discover_devices().unwrap().is_empty());
@@ -417,5 +405,24 @@ mod tests {
             .lock()
             .unwrap()
             .contains_key("matter-2"));
+        assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn discovery_falls_back_to_basic_identity_without_probing_old_transports() {
+        let hub_data = hub_data();
+        let transport = Arc::new(FakeTransport {
+            devices: vec![device_info(7)],
+            persisted_devices: Vec::new(),
+            probe_calls: AtomicUsize::new(0),
+        });
+        let discovery = MatterDiscovery::new(transport.clone(), hub_data);
+
+        let identities = discovery.discover_identities().unwrap();
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].native_id, "matter-7");
+        assert_eq!(identities[0].name, "Vendor 7 Lamp 7");
+        assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
     }
 }

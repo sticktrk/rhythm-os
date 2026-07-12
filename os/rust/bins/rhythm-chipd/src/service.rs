@@ -93,9 +93,13 @@ impl ChipControllerService {
                     device,
                 })?)
             }
-            ChipRpcRequest::ListDevices => Ok(serde_json::to_value(ChipRpcListDevicesResponse {
-                devices: self.device_store().list_devices(),
-            })?),
+            ChipRpcRequest::ListDevices => {
+                let store = self.device_store();
+                Ok(serde_json::to_value(ChipRpcListDevicesResponse {
+                    devices: store.list_devices(),
+                    commissioned_devices: store.devices(),
+                })?)
+            }
             ChipRpcRequest::ProbeLight { node_id } => {
                 self.require_initialized()?;
                 let _lifecycle = self.lifecycle_lock.lock();
@@ -701,6 +705,7 @@ mod tests {
         let initial_list: ChipRpcListDevicesResponse =
             serde_json::from_value(service.handle(ChipRpcRequest::ListDevices).unwrap()).unwrap();
         assert!(initial_list.devices.is_empty());
+        assert!(initial_list.commissioned_devices.is_empty());
         assert_eq!(
             string_error(service.handle(ChipRpcRequest::ProbeLight { node_id: 10 })),
             "Controller not initialized"
@@ -719,6 +724,8 @@ mod tests {
             serde_json::from_value(service.handle(ChipRpcRequest::ListDevices).unwrap()).unwrap();
         assert_eq!(list.devices.len(), 1);
         assert_eq!(list.devices[0].node_id, 10);
+        assert_eq!(list.commissioned_devices.len(), 1);
+        assert_eq!(list.commissioned_devices[0].light_endpoint, 2);
 
         let probed: ChipRpcProbeLightResponse = serde_json::from_value(
             service

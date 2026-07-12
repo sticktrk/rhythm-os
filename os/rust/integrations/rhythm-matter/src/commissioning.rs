@@ -15,9 +15,7 @@ use serde_json::Value;
 use crate::hub_state::MatterHubData;
 use crate::transport::{
     CommissionedDevice, MatterCommissionRequest, MatterCommissioningNetwork,
-    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterSubscriptionTarget,
-    MatterTransport, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterTransport,
 };
 
 /// Parsed Matter pairing request owned by `rhythm-matter`.
@@ -328,7 +326,6 @@ fn build_success_session(
 
     hub_data.record_commissioned_device(&device);
     store_device_metadata(hub_data, &device, &device_id);
-    subscribe_paired_device(hub_data, &device, &device_id);
     if let Err(error) = crate::capture::persist_device_capture(hub_data, &device, "pair") {
         warn!(
             target: "sys",
@@ -361,32 +358,6 @@ fn build_success_session(
         }),
         error: None,
     })
-}
-
-fn subscribe_paired_device(
-    hub_data: &Arc<MatterHubData>,
-    device: &CommissionedDevice,
-    device_id: &str,
-) {
-    let Some(transport) = hub_data.transport.get() else {
-        return;
-    };
-    let target = MatterSubscriptionTarget {
-        node_id: device.node_id,
-        endpoint: device.light_endpoint,
-    };
-    if let Err(error) = transport.subscribe_on_off(
-        &[target],
-        DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
-        DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-    ) {
-        warn!(
-            target: "sys",
-            "Matter: failed to subscribe paired device {} for live On/Off reports: {}",
-            device_id,
-            error
-        );
-    }
 }
 
 pub(crate) fn store_device_metadata(
@@ -515,7 +486,7 @@ fn materialize_unassigned_canonical_device(
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use rhythm_os::hub::HubEvent;
@@ -525,29 +496,21 @@ mod tests {
     use crate::cloud_profiles::CloudMatterProfileCatalog;
     use crate::controller::MatterDeviceRegistry;
     use crate::transport::{
-        MatterAttributeReport, MatterColorMode, MatterDeviceInfo, MatterGroup, MatterGroupMember,
-        MatterLevelCommandVariant, MatterLevelStepMode,
+        MatterColorMode, MatterDeviceInfo, MatterGroup, MatterGroupMember,
+        MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
     };
 
     #[derive(Default)]
     struct FakeMatterTransport {
         commission_requests: Mutex<Vec<MatterCommissionRequest>>,
         commission_error: Mutex<Option<String>>,
-        subscriptions: Mutex<Vec<Vec<MatterSubscriptionTarget>>>,
-        subscription_error: Mutex<Option<String>>,
+        subscribe_calls: AtomicUsize,
     }
 
     impl FakeMatterTransport {
         fn with_commission_error(error: impl Into<String>) -> Self {
             Self {
                 commission_error: Mutex::new(Some(error.into())),
-                ..Self::default()
-            }
-        }
-
-        fn with_subscription_error(error: impl Into<String>) -> Self {
-            Self {
-                subscription_error: Mutex::new(Some(error.into())),
                 ..Self::default()
             }
         }
@@ -656,19 +619,12 @@ mod tests {
 
         fn subscribe_on_off(
             &self,
-            targets: &[MatterSubscriptionTarget],
+            _targets: &[MatterSubscriptionTarget],
             _min_interval_secs: u16,
             _max_interval_secs: u16,
         ) -> Result<()> {
-            self.subscriptions.lock().unwrap().push(targets.to_vec());
-            if let Some(error) = self.subscription_error.lock().unwrap().clone() {
-                anyhow::bail!(error);
-            }
-            Ok(())
-        }
-
-        fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
-            Ok(Vec::new())
+            self.subscribe_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("automatic subscriptions are disabled")
         }
     }
 
@@ -985,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn pair_device_success_records_fabric_state_metadata_subscription_and_event() {
+    fn pair_device_success_records_fabric_state_metadata_and_event_without_subscription() {
         let (state, path) = state_with_storage("pair-success");
         save_wifi(&path, &wifi("PairNet", "pair-secret"));
         let (hub_data, event_rx) = hub_data();
@@ -1013,13 +969,7 @@ mod tests {
         assert_eq!(requests[0].rendezvous, MatterCommissioningRendezvous::Ble);
         drop(requests);
 
-        assert_eq!(
-            transport.subscriptions.lock().unwrap().as_slice(),
-            &[vec![MatterSubscriptionTarget {
-                node_id: 10,
-                endpoint: 2
-            }]]
-        );
+        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 0);
         assert_eq!(hub_data.commissioned.lock().unwrap()[0].node_id, 10);
         assert!(hub_data
             .device_caps
@@ -1088,33 +1038,6 @@ mod tests {
             .contains("timed out while discovering the bulb"));
         assert_eq!(transport.commission_requests.lock().unwrap().len(), 1);
         assert!(hub_data.commissioned.lock().unwrap().is_empty());
-
-        std::fs::remove_dir_all(path).ok();
-    }
-
-    #[test]
-    fn pair_device_success_continues_when_subscription_registration_fails() {
-        let (state, path) = state_with_storage("pair-subscription-failure");
-        save_wifi(&path, &wifi("PairNet", "pair-secret"));
-        let (hub_data, _event_rx) = hub_data();
-        let transport = install_transport(
-            &hub_data,
-            Arc::new(FakeMatterTransport::with_subscription_error(
-                "subscription unavailable",
-            )),
-        );
-
-        let session = pair_device(
-            &state,
-            transport.clone() as Arc<dyn MatterTransport>,
-            hub_data.clone(),
-            &pairing_request(),
-        )
-        .unwrap();
-
-        assert_eq!(session.status, PairingStatus::Complete);
-        assert_eq!(transport.subscriptions.lock().unwrap().len(), 1);
-        assert_eq!(hub_data.commissioned.lock().unwrap()[0].node_id, 10);
 
         std::fs::remove_dir_all(path).ok();
     }

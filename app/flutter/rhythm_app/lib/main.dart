@@ -34,8 +34,9 @@ import 'providers/server_sync_provider.dart';
 import 'providers/subscription_provider.dart';
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
+import 'widgets/hub_connection_loading_screen.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
   AppLogService.instance.install();
   if (kDebugMode) {
@@ -44,21 +45,114 @@ void main() async {
 
   final caps = PlatformCapabilities.fromPlatform();
 
+  // Render a Flutter frame immediately so iOS/Android can release the native
+  // launch screen while storage, account, and local-brain startup continues.
+  runApp(RhythmBootstrap(capabilities: caps));
+
   // Force portrait orientation by default on mobile
   // (Designer screen overrides this to landscape)
   if (!kIsWeb) {
-    try {
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.portraitDown,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
-    } catch (e) {
-      debugPrint('Could not set orientation: $e');
-    }
+    unawaited(_configurePreferredOrientations());
+  }
+}
+
+Future<void> _configurePreferredOrientations() async {
+  try {
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  } catch (e) {
+    debugPrint('Could not set orientation: $e');
+  }
+}
+
+/// Values produced by startup before the provider graph can be built.
+class RhythmStartupResult {
+  final HybridApiClient? client;
+  final String? initError;
+
+  const RhythmStartupResult({this.client, this.initError});
+}
+
+typedef RhythmStartupInitializer = Future<RhythmStartupResult> Function(
+  PlatformCapabilities capabilities,
+);
+
+/// Owns asynchronous startup after Flutter has already drawn its first frame.
+class RhythmBootstrap extends StatefulWidget {
+  final PlatformCapabilities capabilities;
+  final RhythmStartupInitializer initializer;
+
+  const RhythmBootstrap({
+    super.key,
+    required this.capabilities,
+    this.initializer = initializeRhythmApp,
+  });
+
+  @override
+  State<RhythmBootstrap> createState() => _RhythmBootstrapState();
+}
+
+class _RhythmBootstrapState extends State<RhythmBootstrap> {
+  late final Future<RhythmStartupResult> _startup;
+
+  @override
+  void initState() {
+    super.initState();
+    _startup = widget.initializer(widget.capabilities);
   }
 
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<RhythmStartupResult>(
+      future: _startup,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const _StartupLoadingApp();
+        }
+
+        final result = snapshot.data;
+        final String? initError;
+        if (snapshot.hasError) {
+          initError = 'Failed to initialize: ${snapshot.error}';
+        } else if (result == null) {
+          initError = 'Client failed to initialize';
+        } else {
+          initError = result.initError;
+        }
+
+        return RhythmApp(
+          client: result?.client,
+          initError: initError,
+          capabilities: widget.capabilities,
+        );
+      },
+    );
+  }
+}
+
+class _StartupLoadingApp extends StatelessWidget {
+  const _StartupLoadingApp();
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Scaffold(
+        key: Key('rhythm_startup_loading'),
+        backgroundColor: Color(0xFF0D1117),
+        body: HubConnectionLoadingScreen(),
+      ),
+    );
+  }
+}
+
+Future<RhythmStartupResult> initializeRhythmApp(
+  PlatformCapabilities caps,
+) async {
   // Initialize SettingsService BEFORE Backend (for onboardingComplete check)
   // This also performs one-time migration from SharedPreferences to Hive
   await SettingsService.instance.initialize();
@@ -139,11 +233,10 @@ void main() async {
     }
   }
 
-  runApp(RhythmApp(
+  return RhythmStartupResult(
     client: client,
     initError: initError,
-    capabilities: caps,
-  ));
+  );
 }
 
 class RhythmApp extends StatelessWidget {
@@ -617,14 +710,7 @@ class _AuthGateState extends State<AuthGate> {
     }
 
     if (_isLoading) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0D1117),
-        body: Center(
-          child: CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF9A825)),
-          ),
-        ),
-      );
+      return const HubConnectionLoadingScreen();
     }
 
     if (_requiresAccount) {

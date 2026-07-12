@@ -781,7 +781,7 @@ impl DispatcherShared {
         self.notify.notify_one();
     }
 
-    fn apply_timeout_cooldown(&self, key: &str) {
+    fn apply_timeout_cooldown(&self, key: &str) -> Option<Instant> {
         if let Ok(mut queue) = self.queue.lock() {
             let cooldown_until = Instant::now() + self.policy.timeout_cooldown;
             match self.policy.timeout_scope {
@@ -794,7 +794,27 @@ impl DispatcherShared {
                     queue.hub_cooldown_until = Some(cooldown_until);
                 }
             }
+            return Some(cooldown_until);
         }
+        None
+    }
+
+    fn clear_timeout_cooldown(&self, key: &str, applied_until: Instant) {
+        if let Ok(mut queue) = self.queue.lock() {
+            match self.policy.timeout_scope {
+                HubDispatchTimeoutScope::Target => {
+                    if queue.target_cooldowns.get(key) == Some(&applied_until) {
+                        queue.target_cooldowns.remove(key);
+                    }
+                }
+                HubDispatchTimeoutScope::Hub => {
+                    if queue.hub_cooldown_until == Some(applied_until) {
+                        queue.hub_cooldown_until = None;
+                    }
+                }
+            }
+        }
+        self.notify.notify_one();
     }
 
     /// Close the mailbox and drop pending commands, reporting each drop.
@@ -899,7 +919,7 @@ async fn supervise_dispatch(shared: Arc<DispatcherShared>, ready: ReadyJob) {
             shared.finish_dispatch(&action);
         }
         Err(_) => {
-            shared.apply_timeout_cooldown(&key);
+            let cooldown_until = shared.apply_timeout_cooldown(&key);
             shared.emit(shared.outcome_for(
                 &node_id,
                 &action,
@@ -914,6 +934,12 @@ async fn supervise_dispatch(shared: Arc<DispatcherShared>, ready: ReadyJob) {
             // the in-flight budget stay honest. The wait is bounded by the
             // transport's own timeouts.
             let late = transport_call.await;
+            let late_succeeded = matches!(&late, Ok(Ok(())));
+            if late_succeeded {
+                if let Some(cooldown_until) = cooldown_until {
+                    shared.clear_timeout_cooldown(&key, cooldown_until);
+                }
+            }
             tracing::warn!(
                 target: "cmd",
                 event = "hub_dispatch_late_completion",
@@ -921,7 +947,7 @@ async fn supervise_dispatch(shared: Arc<DispatcherShared>, ready: ReadyJob) {
                 node_id = %node_id,
                 dispatch_target = %key,
                 total_ms = started.elapsed().as_millis() as u64,
-                result_ok = matches!(&late, Ok(Ok(()))),
+                result_ok = late_succeeded,
                 "Timed-out hub dispatch eventually completed"
             );
             shared.finish_dispatch(&action);
@@ -2275,7 +2301,7 @@ mod tests {
 
         blocking.release();
 
-        // After the cooldown expires commands flow again.
+        // Once the timed-out transport call succeeds, commands flow again.
         assert!(wait_until(Duration::from_secs(3), || {
             block_on(composite.turn_on("room1", LightingCommand::new(60, 3200))).is_ok()
         }));
@@ -2283,6 +2309,45 @@ mod tests {
             blocking.turn_on_count() >= 2
         }));
         blocking.release();
+    }
+
+    #[test]
+    fn late_success_clears_timeout_cooldown_before_its_deadline() {
+        let blocking = Arc::new(BlockingController::new());
+        let composite = Arc::new(CompositeController::new());
+        let outcomes = OutcomeCollector::install(&composite);
+        composite.register_controller_with_policy(
+            "hub_a",
+            blocking.clone(),
+            HubDispatchPolicy {
+                timeout_cooldown: Duration::from_secs(30),
+                ..fast_timeout_policy()
+            },
+        );
+        composite.update_routing(route(&[("room1", "hub_a", group_target("room1"))]));
+
+        block_on(composite.turn_on("room1", LightingCommand::new(80, 4000))).unwrap();
+        outcomes
+            .wait_for(Duration::from_secs(5), |outcome| {
+                matches!(outcome.status, HubDispatchStatus::TimedOut { .. })
+            })
+            .expect("timeout outcome");
+
+        let during_timeout = block_on(composite.turn_on("room1", LightingCommand::new(50, 3000)));
+        assert!(matches!(during_timeout, Err(LightControlError::Timeout(_))));
+
+        blocking.release();
+        let released_at = Instant::now();
+        assert!(wait_until(Duration::from_secs(3), || {
+            block_on(composite.turn_on("room1", LightingCommand::new(60, 3200))).is_ok()
+        }));
+        assert!(
+            released_at.elapsed() < Duration::from_secs(5),
+            "retry waited for the 30-second cooldown instead of late success"
+        );
+        assert!(wait_until(Duration::from_secs(5), || {
+            blocking.turn_on_count() >= 2
+        }));
     }
 
     #[test]

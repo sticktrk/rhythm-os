@@ -18,6 +18,7 @@ import 'package:rhythm_app/screens/server_disconnected_screen.dart';
 import 'package:rhythm_app/screens/settings/automations_screen.dart';
 import 'package:rhythm_app/screens/settings/settings_screen.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
+import 'package:rhythm_app/widgets/hub_connection_loading_screen.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -579,7 +580,8 @@ void main() {
     expect(find.text('Welcome to Rhythm'), findsOneWidget);
   });
 
-  testWidgets('uses the Home name during home entry refresh', (tester) async {
+  testWidgets('uses the shared connecting screen during home entry refresh',
+      (tester) async {
     final roomProvider = RoomProvider();
     final home = Home.create(
       id: 'home-1',
@@ -608,8 +610,10 @@ void main() {
       serverSync: serverSync,
     );
 
-    expect(find.text('Kitchen'), findsOneWidget);
-    expect(find.text('Connecting to Home'), findsNothing);
+    expect(find.byType(HubConnectionLoadingScreen), findsWidgets);
+    expect(find.text('Setting up...'), findsWidgets);
+    expect(find.text('Connecting to your lights'), findsWidgets);
+    expect(find.text('Kitchen'), findsNothing);
   });
 
   testWidgets(
@@ -653,8 +657,9 @@ void main() {
     serverSync.beginHomeEntryRefresh(homeName: home.name);
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(find.text('Kitchen'), findsOneWidget);
-    expect(find.byType(ServerDisconnectedScreen), findsOneWidget);
+    expect(find.byType(HubConnectionLoadingScreen), findsWidgets);
+    expect(find.text('Setting up...'), findsWidgets);
+    expect(find.byType(ServerDisconnectedScreen), findsNothing);
     expect(find.byType(SettingsScreen), findsOneWidget);
 
     serverSync.cancelHomeEntryRefresh();
@@ -662,7 +667,7 @@ void main() {
   });
 
   testWidgets(
-      'keeps the disconnected screen visible across reconnect attempts until connected',
+      'keeps the shared connecting screen visible across slow reconnect attempts',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider([_serverHub(remote: true)]);
@@ -688,8 +693,11 @@ void main() {
 
     await tester.pump(const Duration(seconds: 5));
 
-    expect(find.text('Connecting to Your Home'), findsOneWidget);
-    expect(find.text('Connecting...'), findsOneWidget);
+    expect(find.byType(HubConnectionLoadingScreen), findsOneWidget);
+    expect(find.text('Setting up...'), findsOneWidget);
+    expect(find.text('Connecting to your lights'), findsOneWidget);
+    expect(find.text('Connecting to Your Home'), findsNothing);
+    expect(find.text('Connecting...'), findsNothing);
     expect(find.text('Trying local'), findsNothing);
     expect(find.text('Trying remote'), findsNothing);
     expect(find.text('Retry Now'), findsNothing);
@@ -699,13 +707,14 @@ void main() {
 
     connection.setConnectionState(RhythmConnectionState.connecting);
     await tester.pump(const Duration(milliseconds: 10));
-    expect(find.text('Connecting to Your Home'), findsOneWidget);
+    expect(find.text('Setting up...'), findsOneWidget);
 
     connection.setConnectionState(RhythmConnectionState.connected);
     await tester.pump(const Duration(milliseconds: 10));
-    expect(find.text('Connecting to Your Home'), findsNothing);
+    expect(find.text('Setting up...'), findsOneWidget);
     _emitSyncedHello(connection);
     await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('Setting up...'), findsNothing);
     expect(find.text('Add Hubs'), findsOneWidget);
   });
 

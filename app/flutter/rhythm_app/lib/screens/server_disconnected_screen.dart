@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/models/hub.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../widgets/solar_orbit.dart';
+import '../widgets/hub_connection_loading_screen.dart';
 import '../providers/server_sync_provider.dart';
 
 /// Full-screen state shown when a paired rhythm-server is unreachable.
@@ -19,6 +20,10 @@ class ServerDisconnectedScreen extends StatefulWidget {
   final FutureOr<void> Function()? onRetry;
   final bool autoRetry;
 
+  /// Keep automatic retry behavior while presenting the shared connection
+  /// loader instead of the unreachable/error artwork.
+  final bool showConnectionLoading;
+
   /// Non-destructive escape hatch shown as the standard top-left Home icon.
   final VoidCallback? onChooseHome;
 
@@ -30,6 +35,7 @@ class ServerDisconnectedScreen extends StatefulWidget {
     this.title,
     this.onRetry,
     this.autoRetry = true,
+    this.showConnectionLoading = false,
     this.onChooseHome,
     this.retryInterval = const Duration(seconds: 6),
   });
@@ -59,19 +65,27 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
     _ringController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 24),
-    )..repeat();
+    );
 
     // Breathing pulse for the center icon glow
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
-    )..repeat(reverse: true);
+    );
 
     // Initial fade-in
     _fadeInController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
-    )..forward();
+    );
+
+    // The shared loader owns its own single pulse. Do not keep the hidden
+    // orbit/fade tickers running behind it while a slow connection retries.
+    if (!widget.showConnectionLoading) {
+      _ringController.repeat();
+      _pulseController.repeat(reverse: true);
+      _fadeInController.forward();
+    }
 
     if (widget.autoRetry) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -122,6 +136,17 @@ class _ServerDisconnectedScreenState extends State<ServerDisconnectedScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (widget.showConnectionLoading) {
+      return HubConnectionLoadingScreen(
+        onChooseHome: widget.onChooseHome == null
+            ? null
+            : () {
+                HapticFeedback.lightImpact();
+                widget.onChooseHome?.call();
+              },
+      );
+    }
+
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: FadeTransition(

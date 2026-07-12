@@ -1,8 +1,8 @@
 //! Matter light group management.
 //!
-//! Matter group addressing differs from Hue/HA room control: the controller
-//! must provision a fabric-local group on member endpoints, then commands are
-//! sent to a u16 group ID instead of a node/endpoint pair.
+//! Matter group addressing differs from Hue/HA room control. Rhythm always
+//! publishes logical group membership; physical fabric groups are optional
+//! because the default controller path fans commands out to member endpoints.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,7 @@ pub struct MatterGroupController {
     transport: Arc<dyn MatterTransport>,
     registry: Arc<Mutex<MatterDeviceRegistry>>,
     groups: Mutex<Vec<LightGroup>>,
+    provision_physical_groups: bool,
 }
 
 impl MatterGroupController {
@@ -55,7 +56,15 @@ impl MatterGroupController {
             transport,
             registry,
             groups: Mutex::new(Vec::new()),
+            provision_physical_groups: true,
         }
+    }
+
+    /// Choose whether topology sync also provisions CHIP group state on each
+    /// endpoint. Fan-out-only dispatch needs only the logical registry state.
+    pub fn with_physical_group_provisioning(mut self, enabled: bool) -> Self {
+        self.provision_physical_groups = enabled;
+        self
     }
 
     fn matter_members(device_ids: &[String]) -> Vec<MatterGroupMember> {
@@ -258,6 +267,19 @@ impl MatterGroupController {
             }
         }
         self.cache_groups(groups.clone());
+
+        if !self.provision_physical_groups {
+            info!(
+                target: "sys",
+                "Matter group sync: skipped physical provisioning; fan-out-only dispatch uses logical membership"
+            );
+            info!(
+                target: "sys",
+                "Matter group sync complete: groups={}",
+                groups.len()
+            );
+            return Ok(groups);
+        }
 
         for (matter_group, light_group) in &planned {
             if let Some(previous) = existing
@@ -565,6 +587,33 @@ mod tests {
             }
             other => panic!("expected ConfigureGroup, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sync_topology_groups_logical_only_skips_physical_group_operations() {
+        let transport = Arc::new(SpyTransport::new());
+        let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
+        let controller = MatterGroupController::new(transport.clone(), registry.clone())
+            .with_physical_group_provisioning(false);
+
+        let groups = controller
+            .sync_topology_groups(&[MatterTopologyGroup {
+                area_id: "bookcase".to_string(),
+                name: "Bookcase".to_string(),
+                member_device_ids: vec!["matter-103".to_string(), "matter-102".to_string()],
+            }])
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            registry
+                .lock()
+                .unwrap()
+                .get_grouped_light_id("bookcase")
+                .as_deref(),
+            Some(groups[0].control_id.as_str())
+        );
+        assert!(transport.operations().is_empty());
     }
 
     #[test]
