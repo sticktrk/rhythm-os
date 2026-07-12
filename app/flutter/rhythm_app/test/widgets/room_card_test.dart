@@ -377,7 +377,7 @@ void main() {
       tester.getCenter(activity).dx,
       lessThan(tester.getCenter(motion).dx),
     );
-    expect(tester.getSize(motion), const Size(48, 48));
+    expect(tester.getSize(motion), const Size(28, 28));
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -391,10 +391,7 @@ void main() {
     await tester.pump();
     final pendingResponse = Completer<RhythmRoomState?>();
     connection.api.motionActivationCompleter = pendingResponse;
-    final motionRect = tester.getRect(motion);
-    await tester.tapAt(
-      Offset(motionRect.right - 46, motionRect.center.dy),
-    );
+    await tester.tap(motion);
     await tester.pump();
 
     final pending = find.byKey(
@@ -435,6 +432,45 @@ void main() {
     expect(roomProvider.isLightsOn('room-1'), isTrue);
     expect(connection.api.motionActivationCalls, hasLength(2));
     expect(connection.api.motionActivationCalls.last.enabled, isTrue);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'version': '0.6.510-beta',
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'device_ids': ['light-1', 'motion-1'],
+            'devices': [
+              {'id': 'motion-1', 'type': 'motion'},
+            ],
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0,
+            'brightness_offset': 0,
+            'state': 'active',
+            'profile_settings': const <String, dynamic>{},
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    expect(serverSync.motionActivationSupportedForNode('room-1'), isFalse);
+    await tester.tap(motion);
+    await tester.pump();
+
+    expect(connection.api.motionActivationCalls, hasLength(2));
+    expect(
+      find.text(
+        'Update the Rhythm appliance (0.6.510-beta) to control motion for Kitchen.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Settings'), findsNothing);
   });
 
   testWidgets('motion countdown tap does nothing', (tester) async {
