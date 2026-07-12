@@ -7,10 +7,16 @@ class SupportService {
 
   final SupabaseRestClient _supabase;
 
-  Future<SupportSnapshotDto> loadSnapshot(AdminSession session) async {
+  Future<List<SupportHubDto>> loadFleetHubs(AdminSession session) async {
     final hubRows = await _loadActiveServerHubs(session);
-    final hubs = hubRows
+    return hubRows
         .map(SupportHubDto.fromSupabase)
+        .where((hub) => hub.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<SupportSnapshotDto> loadSnapshot(AdminSession session) async {
+    final hubs = (await loadFleetHubs(session))
         .where((hub) => hub.id.isNotEmpty && hub.homeId.isNotEmpty)
         .toList(growable: false);
     if (hubs.isEmpty) {

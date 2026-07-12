@@ -5,6 +5,7 @@ import 'package:shelf_router/shelf_router.dart';
 
 import 'config.dart';
 import 'device_probe_service.dart';
+import 'fleet_report_service.dart';
 import 'models.dart';
 import 'supabase_rest_client.dart';
 import 'support_service.dart';
@@ -15,15 +16,18 @@ class AdminApiServer {
     required SupabaseRestClient supabase,
     required SupportService support,
     required DeviceProbeService probes,
+    required FleetReportService fleetReports,
   })  : _config = config,
         _supabase = supabase,
         _support = support,
-        _probes = probes;
+        _probes = probes,
+        _fleetReports = fleetReports;
 
   final AdminApiConfig _config;
   final SupabaseRestClient _supabase;
   final SupportService _support;
   final DeviceProbeService _probes;
+  final FleetReportService _fleetReports;
 
   Handler get handler {
     final router = Router()
@@ -31,6 +35,7 @@ class AdminApiServer {
       ..get('/ready', _ready)
       ..get('/api/me', _me)
       ..get('/api/support/snapshot', _supportSnapshot)
+      ..get('/api/fleet/hubs', _fleetHubs)
       ..post('/api/hubs/<hubId>/probe', _probeHub)
       ..get('/api/hubs/<hubId>/status', _hubStatus)
       ..post('/api/hubs/<hubId>/ota/check', _checkHubUpdate)
@@ -38,6 +43,7 @@ class AdminApiServer {
       ..post('/api/hubs/<hubId>/debug-bundle', _downloadDebugBundle)
       ..get('/api/hubs/<hubId>/logs', _listHubLogs)
       ..get('/api/hubs/<hubId>/logs/<sourceId>/tail', _tailHubLog)
+      ..post('/api/hubs/<hubId>/fleet-report', _reportFleetFinding)
       ..post('/api/hubs/<hubId>/device-admin/proxy', _deviceAdminProxy);
 
     return Pipeline()
@@ -99,6 +105,15 @@ class AdminApiServer {
     final session = await _requireStaff(request);
     final snapshot = await _support.loadSnapshot(session);
     return _json(snapshot.toJson());
+  }
+
+  Future<Response> _fleetHubs(Request request) async {
+    final session = await _requireStaff(request);
+    final hubs = await _support.loadFleetHubs(session);
+    return _json({
+      'total': hubs.length,
+      'hubs': hubs.map((hub) => hub.toJson()).toList(growable: false),
+    });
   }
 
   Future<Response> _probeHub(Request request, String hubId) async {
@@ -171,28 +186,24 @@ class AdminApiServer {
     return _json(result.toJson());
   }
 
+  Future<Response> _reportFleetFinding(
+    Request request,
+    String hubId,
+  ) async {
+    final session = await _requireStaff(request);
+    final body = await _readJsonObject(request, 'Fleet finding');
+    final finding = FleetFindingReportRequestDto.fromJson(body);
+    final result = await _fleetReports.report(
+      session: session,
+      hubId: hubId,
+      finding: finding,
+    );
+    return _json(result.toJson());
+  }
+
   Future<Response> _deviceAdminProxy(Request request, String hubId) async {
     final session = await _requireStaff(request);
-    final rawBody = await request.readAsString();
-    if (rawBody.trim().isEmpty) {
-      throw const AdminApiException(400, 'Device admin request body is empty.');
-    }
-    final Map<String, dynamic> body;
-    try {
-      final decoded = jsonDecode(rawBody);
-      if (decoded is! Map) {
-        throw const AdminApiException(
-          400,
-          'Device admin request body must be a JSON object.',
-        );
-      }
-      body = decoded.map((key, value) => MapEntry(key.toString(), value));
-    } on FormatException {
-      throw const AdminApiException(
-        400,
-        'Device admin request body is not valid JSON.',
-      );
-    }
+    final body = await _readJsonObject(request, 'Device admin request');
     final proxyRequest = DeviceAdminProxyRequestDto.fromJson(body);
     final result = await _probes.proxyJson(
       session: session,
@@ -200,6 +211,25 @@ class AdminApiServer {
       request: proxyRequest,
     );
     return _json(result.toJson());
+  }
+
+  Future<Map<String, dynamic>> _readJsonObject(
+    Request request,
+    String label,
+  ) async {
+    final rawBody = await request.readAsString();
+    if (rawBody.trim().isEmpty) {
+      throw AdminApiException(400, '$label body is empty.');
+    }
+    try {
+      final decoded = jsonDecode(rawBody);
+      if (decoded is! Map) {
+        throw AdminApiException(400, '$label body must be a JSON object.');
+      }
+      return decoded.map((key, value) => MapEntry(key.toString(), value));
+    } on FormatException {
+      throw AdminApiException(400, '$label body is not valid JSON.');
+    }
   }
 
   Future<AdminSession> _requireStaff(Request request) async {
