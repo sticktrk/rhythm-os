@@ -799,7 +799,42 @@ else
     echo "Building for $PLATFORM..."
     if [ "$BUILD_IPA" = true ]; then
         echo "Building IPA for TestFlight..."
+        # Never accept an IPA or archive left by an earlier invocation when
+        # deciding whether this build or its authenticated fallback succeeded.
+        rm -rf "$FLUTTER_APP/build/ios/ipa" \
+            "$FLUTTER_APP/build/ios/archive/Runner.xcarchive"
+        set +e
         flutter build ipa $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        FLUTTER_IPA_STATUS=$?
+        set -e
+
+        IPA_FILE=""
+        if [ -d "$FLUTTER_APP/build/ios/ipa" ]; then
+            IPA_FILE=$(find "$FLUTTER_APP/build/ios/ipa" -name "*.ipa" -type f | head -1)
+        fi
+
+        # Preserve the normal interactive Xcode path. If Flutter produced an
+        # archive but export could not see an Xcode account or distribution
+        # certificate, retry only the export with the same App Store Connect
+        # API key that TestFlight upload already requires.
+        if [ -z "$IPA_FILE" ] && [ -d "$FLUTTER_APP/build/ios/archive/Runner.xcarchive" ]; then
+            echo ""
+            echo "Flutter produced an archive but no IPA; retrying export with App Store Connect authentication..."
+            "$SCRIPT_DIR/export-testflight-ipa.sh" \
+                --archive "$FLUTTER_APP/build/ios/archive/Runner.xcarchive" \
+                --export-path "$FLUTTER_APP/build/ios/ipa" \
+                --api-key "$ASC_API_KEY_PATH" \
+                --team-id "$TEAM_ID" \
+                --bundle-id "$IOS_APP_IDENTIFIER"
+            IPA_FILE=$(find "$FLUTTER_APP/build/ios/ipa" -name "*.ipa" -type f | head -1)
+        elif [ "$FLUTTER_IPA_STATUS" -ne 0 ]; then
+            exit "$FLUTTER_IPA_STATUS"
+        fi
+
+        if [ -z "$IPA_FILE" ]; then
+            echo "Error: No IPA file found in build/ios/ipa/"
+            exit 1
+        fi
         echo ""
         echo "IPA created at: build/ios/ipa/"
 
@@ -828,13 +863,6 @@ else
             if [ ! -f "$ASC_API_KEY_PATH" ]; then
                 echo "Error: App Store Connect API key not configured."
                 echo "Run: ./tools/app/scripts/build-mobile.sh --setup-testflight"
-                exit 1
-            fi
-
-            # Find the IPA file
-            IPA_FILE=$(find "$FLUTTER_APP/build/ios/ipa" -name "*.ipa" -type f | head -1)
-            if [ -z "$IPA_FILE" ]; then
-                echo "Error: No IPA file found in build/ios/ipa/"
                 exit 1
             fi
 
