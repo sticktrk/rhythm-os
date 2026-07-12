@@ -146,17 +146,25 @@ fn record_startup_with(
 
     if let Some(prior) = prior_boot {
         let intent_matches = restart_intent.as_ref().is_some_and(|intent| {
-            intent.boot_id.is_none() || prior.boot_id.is_none() || intent.boot_id == prior.boot_id
+            intent.process_pid == prior.process_pid
+                && (intent.boot_id.is_none()
+                    || prior.boot_id.is_none()
+                    || intent.boot_id == prior.boot_id)
         });
-        let same_boot = prior.boot_id.is_some() && prior.boot_id == boot_id;
+        let same_boot = match (prior.boot_id.as_ref(), boot_id.as_ref()) {
+            (Some(prior_boot_id), Some(current_boot_id)) => Some(prior_boot_id == current_boot_id),
+            _ => None,
+        };
         let classification = match (same_boot, intent_matches) {
-            (true, true) => "planned_process_restart",
-            (true, false) => "unplanned_process_restart",
-            (false, true) => restart_intent
+            (Some(true), true) => "planned_process_restart",
+            (Some(true), false) => "unplanned_process_restart",
+            (Some(false), true) => restart_intent
                 .as_ref()
                 .map(|intent| intent.category.as_str())
                 .unwrap_or("planned_host_restart"),
-            (false, false) => "unplanned_host_restart_unknown",
+            (Some(false), false) => "unplanned_host_restart_unknown",
+            (None, true) => "planned_restart_scope_unknown",
+            (None, false) => "unplanned_restart_scope_unknown",
         };
         let previous = PreviousBootRecord {
             schema_version: 1,
@@ -472,7 +480,7 @@ mod tests {
                 schema_version: 1,
                 recorded_at: now.to_rfc3339(),
                 boot_id: Some("boot-a".into()),
-                process_pid: 1,
+                process_pid: std::process::id(),
                 reason: "self-update".into(),
                 category: restart_category("self-update").into(),
             },
@@ -498,6 +506,75 @@ mod tests {
 
         let previous: serde_json::Value = read_json(&dir.join(PREVIOUS_BOOT_FILE)).unwrap();
         assert_eq!(previous["classification"], "unplanned_host_restart_unknown");
+        assert_eq!(previous["planned_restart"], false);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_boot_ids_do_not_claim_a_host_restart() {
+        let dir = temp_dir("missing-boot-id");
+        let now = Utc::now();
+        record_startup_with(&dir, "desktop", None, None, now).unwrap();
+        record_startup_with(&dir, "desktop", None, None, now).unwrap();
+
+        let previous: serde_json::Value = read_json(&dir.join(PREVIOUS_BOOT_FILE)).unwrap();
+        assert_eq!(
+            previous["classification"],
+            "unplanned_restart_scope_unknown"
+        );
+        assert_eq!(previous["planned_restart"], false);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn planned_restart_without_boot_ids_reports_unknown_scope() {
+        let dir = temp_dir("planned-missing-boot-id");
+        let now = Utc::now();
+        record_startup_with(&dir, "desktop", None, None, now).unwrap();
+        write_json(
+            &dir.join(RESTART_INTENT_FILE),
+            &RestartIntent {
+                schema_version: 1,
+                recorded_at: now.to_rfc3339(),
+                boot_id: None,
+                process_pid: std::process::id(),
+                reason: "user request".into(),
+                category: restart_category("user request").into(),
+            },
+        )
+        .unwrap();
+
+        record_startup_with(&dir, "desktop", None, None, now).unwrap();
+
+        let previous: serde_json::Value = read_json(&dir.join(PREVIOUS_BOOT_FILE)).unwrap();
+        assert_eq!(previous["classification"], "planned_restart_scope_unknown");
+        assert_eq!(previous["planned_restart"], true);
+        assert_eq!(previous["restart_reason"], "user request");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_restart_intent_from_another_process_is_not_matched() {
+        let dir = temp_dir("stale-intent");
+        let now = Utc::now();
+        record_startup_with(&dir, "appliance", Some("boot-a".into()), Some(10.0), now).unwrap();
+        write_json(
+            &dir.join(RESTART_INTENT_FILE),
+            &RestartIntent {
+                schema_version: 1,
+                recorded_at: now.to_rfc3339(),
+                boot_id: Some("boot-a".into()),
+                process_pid: std::process::id().saturating_add(1),
+                reason: "self-update".into(),
+                category: restart_category("self-update").into(),
+            },
+        )
+        .unwrap();
+
+        record_startup_with(&dir, "appliance", Some("boot-a".into()), Some(20.0), now).unwrap();
+
+        let previous: serde_json::Value = read_json(&dir.join(PREVIOUS_BOOT_FILE)).unwrap();
+        assert_eq!(previous["classification"], "unplanned_process_restart");
         assert_eq!(previous["planned_restart"], false);
         let _ = fs::remove_dir_all(dir);
     }
