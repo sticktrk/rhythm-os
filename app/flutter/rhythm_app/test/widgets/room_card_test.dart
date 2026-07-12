@@ -377,6 +377,7 @@ void main() {
       tester.getCenter(activity).dx,
       lessThan(tester.getCenter(motion).dx),
     );
+    expect(tester.getSize(motion), const Size(48, 48));
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -390,13 +391,17 @@ void main() {
     await tester.pump();
     final pendingResponse = Completer<RhythmRoomState?>();
     connection.api.motionActivationCompleter = pendingResponse;
-    await tester.tap(motion);
+    final motionRect = tester.getRect(motion);
+    await tester.tapAt(
+      Offset(motionRect.right - 46, motionRect.center.dy),
+    );
     await tester.pump();
 
     final pending = find.byKey(
       const ValueKey('room-card-motion-pending-room-1'),
     );
     expect(pending, findsOneWidget);
+    expect(find.text('Settings'), findsNothing);
     await tester.tap(pending);
     await tester.pump();
     expect(connection.api.motionActivationCalls, hasLength(1));
