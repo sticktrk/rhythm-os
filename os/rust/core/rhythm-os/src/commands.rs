@@ -1558,31 +1558,6 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
     }
 }
 
-pub(crate) fn refresh_lights_on_cache_for_runtime_node_with_source(
-    state: &SharedState,
-    runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
-    source: ObservedPowerSource,
-) {
-    let Some(snap) = runtime.engine_effective_node_snapshot(node_id) else {
-        return;
-    };
-    refresh_lights_on_cache_for_runtime_snapshot_with_source(state, runtime, &snap, source);
-}
-
-pub(crate) fn refresh_lights_on_cache_for_runtime_node(
-    state: &SharedState,
-    runtime: &Arc<dyn RuntimeHandle>,
-    node_id: &str,
-) {
-    refresh_lights_on_cache_for_runtime_node_with_source(
-        state,
-        runtime,
-        node_id,
-        ObservedPowerSource::Command,
-    );
-}
-
 pub(crate) fn refresh_all_lights_on_cache_for_runtime(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -10267,18 +10242,22 @@ pub fn do_node_preferences_set(
     let entered_hard_off = hard_off && !prev_hard_off;
     let left_hard_off = !hard_off && prev_hard_off;
 
-    let mut refresh_lights_on = false;
+    // State-changing commands already tell us the intended power state. Do
+    // not immediately read the integration after enqueueing the write: the
+    // read can race session establishment, contend with the command, and
+    // return the pre-command value while dispatch is still pending.
+    let mut commanded_lights_on = None;
 
     if entered_hard_off {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering hard_off", node_id);
         queue_motion_timer_clear(state, node_id);
         let event = InputEvent::new(node_id, ButtonAction::LightsOff);
         if let Err(e) = runtime.handle_event(&event) {
             warn!(target: "cmd", "lights_off for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(false);
         }
     } else if mood_active && !prev_mood_active {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering mood", node_id);
         if let Err(e) = apply_mood_scene_or_tick(
             state,
@@ -10288,26 +10267,31 @@ pub fn do_node_preferences_set(
             false,
         ) {
             warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(true);
         }
     } else if soft_off && !prev_soft_off {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} entering standby", node_id);
         if let Err(e) = runtime.soft_off_tick_room(node_id) {
             warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(true);
         }
     } else if (!soft_off && prev_soft_off) || (!mood_active && prev_mood_active) {
-        refresh_lights_on = true;
         info!(target: "cmd", "node_preferences_set: {} leaving mood/standby, turning on", node_id);
         if let Err(e) = runtime.turn_on_room(node_id) {
             warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
+        } else {
+            commanded_lights_on = Some(true);
         }
     } else if left_hard_off {
-        refresh_lights_on = true;
         match persistent_state {
             RoomModeState::Active => {
                 info!(target: "cmd", "node_preferences_set: {} leaving hard_off to active", node_id);
                 if let Err(e) = runtime.turn_on_room(node_id) {
                     warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Mood => {
@@ -10320,12 +10304,16 @@ pub fn do_node_preferences_set(
                     false,
                 ) {
                     warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Standby => {
                 info!(target: "cmd", "node_preferences_set: {} leaving hard_off to standby", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
                     warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
@@ -10333,7 +10321,6 @@ pub fn do_node_preferences_set(
     } else if profile_settings_touched {
         match persistent_state {
             RoomModeState::Mood => {
-                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to mood", node_id);
                 if let Err(e) = apply_mood_scene_or_tick(
                     state,
@@ -10343,20 +10330,24 @@ pub fn do_node_preferences_set(
                     false,
                 ) {
                     warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Standby => {
-                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to standby", node_id);
                 if let Err(e) = runtime.soft_off_tick_room(node_id) {
                     warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::Active if lights_on => {
-                refresh_lights_on = true;
                 info!(target: "cmd", "node_preferences_set: {} applying profile settings to active lights", node_id);
                 if let Err(e) = runtime.turn_on_room(node_id) {
                     warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
+                } else {
+                    commanded_lights_on = Some(true);
                 }
             }
             RoomModeState::HardOff
@@ -10366,8 +10357,8 @@ pub fn do_node_preferences_set(
         }
     }
 
-    if refresh_lights_on {
-        refresh_lights_on_cache_for_runtime_node(state, &runtime, node_id);
+    if let Some(lights_on) = commanded_lights_on {
+        update_lights_on_cache_for_runtime_node(state, &runtime, node_id, lights_on);
     }
 
     {
@@ -12884,6 +12875,7 @@ mod tests {
         time_offset_updates: Mutex<Vec<(String, f32)>>,
         sun_times_updates: Mutex<Vec<Option<rhythm_core::SunTimes>>>,
         light_states: Mutex<HashMap<String, bool>>,
+        light_state_queries: AtomicUsize,
         current_hour: f32,
     }
 
@@ -12900,6 +12892,7 @@ mod tests {
                 time_offset_updates: Mutex::new(Vec::new()),
                 sun_times_updates: Mutex::new(Vec::new()),
                 light_states: Mutex::new(HashMap::new()),
+                light_state_queries: AtomicUsize::new(0),
                 current_hour,
             }
         }
@@ -12982,6 +12975,10 @@ mod tests {
 
         fn sun_times_updates(&self) -> Vec<Option<rhythm_core::SunTimes>> {
             self.sun_times_updates.lock().unwrap().clone()
+        }
+
+        fn light_state_query_count(&self) -> usize {
+            self.light_state_queries.load(Ordering::SeqCst)
         }
     }
 
@@ -13193,6 +13190,7 @@ mod tests {
             Ok(())
         }
         fn any_lights_on(&self, room_id: &str) -> anyhow::Result<bool> {
+            self.light_state_queries.fetch_add(1, Ordering::SeqCst);
             Ok(self.any_target_lights_on(room_id))
         }
         fn current_hour(&self) -> f32 {
@@ -20647,6 +20645,29 @@ mod tests {
         let snap = runtime.engine_room_snapshot("r1").unwrap();
         assert!(!snap.soft_off);
         assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn room_preferences_active_records_command_intent_without_physical_read() {
+        let mut snap = make_snapshot("r1", false, false);
+        snap.hard_off = true;
+        let (state, runtime) = setup_state(vec![snap]);
+        runtime.set_light_on("r1", false);
+
+        do_node_preferences_set(
+            &state,
+            "r1",
+            Some(true),
+            None,
+            None,
+            Some(RoomModeState::Active),
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.light_state_query_count(), 0);
+        assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
     }
 
     #[test]

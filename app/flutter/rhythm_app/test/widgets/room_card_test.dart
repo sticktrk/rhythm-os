@@ -38,6 +38,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       })> nodePreferenceCalls = [];
   final List<({String nodeId, int brightness})> nodeBrightnessCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
+  final List<({String nodeId, String action})> nodeActionCalls = [];
   final List<
       ({
         String nodeId,
@@ -133,6 +134,15 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     ));
+  }
+
+  @override
+  Future<RhythmRoomState?> nodeAction({
+    required String nodeId,
+    required String action,
+  }) async {
+    nodeActionCalls.add((nodeId: nodeId, action: action));
+    return null;
   }
 }
 
@@ -554,6 +564,70 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
     expect(badge, findsNothing);
+  });
+
+  testWidgets('on from off sends one reset action without active preference',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Matter',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['matter-104', 'matter-106', 'matter-107'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.hardOff,
+      lightsOn: false,
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await _tapRoomSegment(tester, 'On');
+    await tester.pump();
+
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+    expect(
+      connection.api.nodeActionCalls,
+      [(nodeId: 'room-1', action: 'reset')],
+    );
   });
 
   testWidgets('mood segment sends mood room state', (tester) async {
