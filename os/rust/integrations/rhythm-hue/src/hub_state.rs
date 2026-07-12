@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::registry::HueDeviceRegistry;
+use crate::sse_liveness::HueSseLiveness;
 
 /// Hue-specific runtime data stored in `ActiveHub::hub_data`.
 ///
@@ -18,4 +19,6 @@ pub struct HueHubData {
     pub username: String,
     /// Shared device registry for room lookups and SSE routing.
     pub registry: Arc<Mutex<HueDeviceRegistry>>,
+    /// Correlates successful light writes with raw event-stream activity.
+    pub sse_liveness: Arc<HueSseLiveness>,
 }

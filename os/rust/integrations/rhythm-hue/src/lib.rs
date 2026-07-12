@@ -19,6 +19,7 @@ pub mod reqwest_sse;
 pub mod reqwest_transport;
 pub mod room_membership;
 pub mod sse;
+pub mod sse_liveness;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod transport;
