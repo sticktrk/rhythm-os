@@ -1,12 +1,11 @@
 //! Matter hub lifecycle — connect, disconnect, runtime creation.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use log::{info, warn};
+use log::info;
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
@@ -14,10 +13,7 @@ use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
-use crate::transport::{
-    CommissionedDevice, MatterDeviceInfo, MatterSubscriptionTarget, MatterTransport,
-    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
-};
+use crate::transport::{CommissionedDevice, MatterDeviceInfo, MatterTransport};
 
 /// Connect to the local Matter fabric.
 pub fn connect_matter(
@@ -42,7 +38,6 @@ pub fn connect_matter(
         &cloud_profiles,
         &hub_key,
     );
-    let subscription_targets = initial_metadata.subscription_targets.clone();
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -65,7 +60,6 @@ pub fn connect_matter(
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
     let cloud_profiles_for_hub_data = cloud_profiles.clone();
-    let hub_key_for_subscriptions = hub_key.clone();
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
     let node_proof_of_life_for_closure = node_proof_of_life.clone();
 
@@ -106,16 +100,6 @@ pub fn connect_matter(
         move |_registry, _shutdown| event_rx,
     )?;
 
-    if let Some(hub_data) = hub.data::<Arc<MatterHubData>>().cloned() {
-        start_attribute_report_loop(
-            hub_key_for_subscriptions,
-            transport,
-            subscription_targets,
-            hub_data.node_proof_of_life.clone(),
-            hub_data.event_tx.clone(),
-        );
-    }
-
     Ok((hub, event_rx))
 }
 
@@ -125,8 +109,8 @@ fn device_info_from_record(device: &CommissionedDevice) -> MatterDeviceInfo {
         vendor_name: device.vendor_name.clone(),
         product_name: device.product_name.clone(),
         // Persisted metadata proves identity and capabilities, not current
-        // liveness. Keep the neutral startup behavior; live subscriptions and
-        // command/read outcomes update reachability after connect.
+        // liveness. Keep the neutral startup behavior; command/read outcomes
+        // update reachability after connect without starting background work.
         reachable: true,
     }
 }
@@ -153,7 +137,6 @@ fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
 struct InitialDeviceMetadata {
     device_caps: HashMap<String, LightCapabilities>,
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
-    subscription_targets: Vec<MatterSubscriptionTarget>,
 }
 
 /// Build the best metadata available without talking to the device.
@@ -189,10 +172,6 @@ fn fallback_initial_device_metadata(
 ) -> InitialDeviceMetadata {
     let mut device_caps = HashMap::new();
     let mut device_quirks = HashMap::new();
-    let mut subscription_endpoints = commissioned
-        .iter()
-        .map(|info| (info.node_id, 1u16))
-        .collect::<HashMap<_, _>>();
     let commissioned_nodes = commissioned
         .iter()
         .map(|info| info.node_id)
@@ -219,28 +198,20 @@ fn fallback_initial_device_metadata(
                 if &endpoint.hub_key != hub_key {
                     continue;
                 }
-                let Some((node_id, endpoint_id)) = parse_device_id(&endpoint.native_id) else {
+                let Some((node_id, _)) = parse_device_id(&endpoint.native_id) else {
                     continue;
                 };
                 if commissioned_nodes.contains(&node_id) {
                     let info = commissioned.iter().find(|info| info.node_id == node_id);
                     insert_fallback(endpoint.native_id.clone(), info);
-                    subscription_endpoints.insert(node_id, endpoint_id);
                 }
             }
         }
     }
 
-    let mut subscription_targets = subscription_endpoints
-        .into_iter()
-        .map(|(node_id, endpoint)| MatterSubscriptionTarget { node_id, endpoint })
-        .collect::<Vec<_>>();
-    subscription_targets.sort_by_key(|target| (target.node_id, target.endpoint));
-
     InitialDeviceMetadata {
         device_caps,
         device_quirks,
-        subscription_targets,
     }
 }
 
@@ -275,12 +246,6 @@ fn initial_device_metadata(
                 )
         })
         .unwrap_or_default();
-    let mut subscription_endpoints = metadata
-        .subscription_targets
-        .iter()
-        .map(|target| (target.node_id, target.endpoint))
-        .collect::<HashMap<_, _>>();
-
     for device in persisted_devices {
         let device_id = format_device_id(device.node_id, device.light_endpoint);
         let mut caps = crate::commissioning::build_device_capabilities(device);
@@ -303,87 +268,8 @@ fn initial_device_metadata(
                 metadata.device_quirks.insert(alias.clone(), quirks.clone());
             }
         }
-        subscription_endpoints.insert(device.node_id, device.light_endpoint);
     }
-
-    metadata.subscription_targets = subscription_endpoints
-        .into_iter()
-        .map(|(node_id, endpoint)| MatterSubscriptionTarget { node_id, endpoint })
-        .collect();
     metadata
-        .subscription_targets
-        .sort_by_key(|target| (target.node_id, target.endpoint));
-    metadata
-}
-
-fn start_attribute_report_loop(
-    hub_key: HubKey,
-    transport: Arc<dyn MatterTransport>,
-    targets: Vec<MatterSubscriptionTarget>,
-    node_proof_of_life: Arc<Mutex<HashMap<u64, Instant>>>,
-    event_tx: Sender<HubEvent>,
-) {
-    if targets.is_empty() {
-        return;
-    }
-
-    let _ = std::thread::Builder::new()
-        .name("matter-attr-sub".to_string())
-        .spawn(move || {
-            let mut retry_delay = Duration::from_secs(1);
-            loop {
-                if let Err(error) = transport.subscribe_on_off(
-                    &targets,
-                    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
-                    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-                ) {
-                    warn!(
-                        target: "evt",
-                        "Matter: failed to start On/Off attribute subscriptions; retrying in {:?}: {}",
-                        retry_delay,
-                        error
-                    );
-                    std::thread::sleep(retry_delay);
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
-                    continue;
-                }
-
-                info!(
-                    target: "evt",
-                    "Matter: subscribed to On/Off reports for {} endpoint(s)",
-                    targets.len()
-                );
-                retry_delay = Duration::from_secs(1);
-
-                loop {
-                    match transport.drain_attribute_reports() {
-                        Ok(reports) => {
-                            for report in reports {
-                                if let Ok(mut proof) = node_proof_of_life.lock() {
-                                    proof.insert(report.node_id, Instant::now());
-                                }
-                                if let Some(event) = crate::events::translate_report(&report) {
-                                    if event_tx.send(event.with_hub_key(hub_key.clone())).is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            warn!(
-                                target: "evt",
-                                "Matter: failed to drain attribute reports; resubscribing: {}",
-                                error
-                            );
-                            std::thread::sleep(retry_delay);
-                            break;
-                        }
-                    }
-
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-            }
-        });
 }
 
 /// Format a Matter node ID as a device ID string.
@@ -422,8 +308,8 @@ mod tests {
 
     use crate::provider::matter_credentials;
     use crate::transport::{
-        CommissionedDevice, MatterAttributeReport, MatterColorMode, MatterCommissionRequest,
-        MatterGroup, MatterGroupMember,
+        CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterGroup,
+        MatterGroupMember, MatterSubscriptionTarget,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -433,8 +319,6 @@ mod tests {
         persisted_devices: Vec<CommissionedDevice>,
         probe_calls: AtomicUsize,
         subscribe_calls: AtomicUsize,
-        subscribe_failures_remaining: AtomicUsize,
-        subscribed_targets: Mutex<Vec<Vec<MatterSubscriptionTarget>>>,
     }
 
     impl FakeMatterTransport {
@@ -444,14 +328,7 @@ mod tests {
                 persisted_devices,
                 probe_calls: AtomicUsize::new(0),
                 subscribe_calls: AtomicUsize::new(0),
-                subscribe_failures_remaining: AtomicUsize::new(0),
-                subscribed_targets: Mutex::new(Vec::new()),
             }
-        }
-
-        fn with_subscribe_failures(mut self, count: usize) -> Self {
-            self.subscribe_failures_remaining = AtomicUsize::new(count);
-            self
         }
     }
 
@@ -544,29 +421,12 @@ mod tests {
 
         fn subscribe_on_off(
             &self,
-            targets: &[MatterSubscriptionTarget],
+            _targets: &[MatterSubscriptionTarget],
             _min_interval_secs: u16,
             _max_interval_secs: u16,
         ) -> Result<()> {
             self.subscribe_calls.fetch_add(1, Ordering::SeqCst);
-            self.subscribed_targets
-                .lock()
-                .unwrap()
-                .push(targets.to_vec());
-            if self
-                .subscribe_failures_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                anyhow::bail!("temporary subscription failure")
-            }
-            Ok(())
-        }
-
-        fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
-            Ok(Vec::new())
+            anyhow::bail!("automatic subscriptions are disabled")
         }
     }
 
@@ -640,17 +500,6 @@ mod tests {
         }
     }
 
-    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-        let started = std::time::Instant::now();
-        while started.elapsed() < timeout {
-            if condition() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        condition()
-    }
-
     #[test]
     fn parse_simple_device_id() {
         assert_eq!(parse_device_id("matter-100"), Some((100, 1)));
@@ -721,13 +570,6 @@ mod tests {
 
         assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(metadata.device_caps.contains_key("matter-12-2"));
-        assert_eq!(
-            metadata.subscription_targets,
-            vec![MatterSubscriptionTarget {
-                node_id: 12,
-                endpoint: 2,
-            }]
-        );
     }
 
     #[test]
@@ -782,17 +624,10 @@ mod tests {
             metadata.device_quirks.get("matter-107"),
             Some(&vec![DeviceQuirk::NeedsXyNotCt])
         );
-        assert_eq!(
-            metadata.subscription_targets,
-            vec![MatterSubscriptionTarget {
-                node_id: 107,
-                endpoint: 1,
-            }]
-        );
     }
 
     #[test]
-    fn connect_matter_uses_persisted_records_without_probing_and_tags_events() {
+    fn connect_matter_uses_persisted_records_without_probing_or_subscribing_and_tags_events() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
         let state = shared_state("connect");
@@ -833,26 +668,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(event.hub_key(), Some(&key));
-        assert!(
-            wait_until(Duration::from_secs(1), || transport
-                .subscribe_calls
-                .load(Ordering::SeqCst)
-                >= 1),
-            "Matter subscriptions did not start"
-        );
-        assert_eq!(
-            transport.subscribed_targets.lock().unwrap()[0],
-            vec![
-                MatterSubscriptionTarget {
-                    node_id: 10,
-                    endpoint: 2,
-                },
-                MatterSubscriptionTarget {
-                    node_id: 107,
-                    endpoint: 1,
-                },
-            ]
-        );
+        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 0);
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 
@@ -876,43 +692,7 @@ mod tests {
             ])
         );
         assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
-        assert!(
-            wait_until(Duration::from_secs(1), || transport
-                .subscribe_calls
-                .load(Ordering::SeqCst)
-                >= 1),
-            "fallback Matter subscriptions did not start"
-        );
-        assert_eq!(
-            transport.subscribed_targets.lock().unwrap()[0],
-            vec![MatterSubscriptionTarget {
-                node_id: 107,
-                endpoint: 1,
-            }]
-        );
-        std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
-    }
-
-    #[test]
-    fn attribute_subscriptions_retry_after_temporary_failure() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
-        let state = shared_state("subscription-retry");
-        let transport = Arc::new(
-            FakeMatterTransport::new(Vec::new(), vec![commissioned_device(10, 2)])
-                .with_subscribe_failures(1),
-        );
-
-        let (_hub, _event_rx) = connect_matter(&state, transport.clone()).unwrap();
-
-        assert!(
-            wait_until(Duration::from_secs(3), || transport
-                .subscribe_calls
-                .load(Ordering::SeqCst)
-                >= 2),
-            "Matter subscription did not retry after a temporary failure"
-        );
-        assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 0);
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 }

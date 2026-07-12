@@ -29,6 +29,19 @@ const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
 
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(default)
+}
+
+pub(crate) fn matter_group_fanout_only_enabled() -> bool {
+    env_flag_enabled(MATTER_GROUP_FANOUT_ONLY_ENV, true)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MatterOnOffReadBackoff {
     marked_at: Instant,
@@ -99,7 +112,7 @@ impl MatterLightController {
             transport,
             hub_data,
             on_off_read_backoff,
-            group_fanout_only: Self::group_fanout_only_enabled(),
+            group_fanout_only: matter_group_fanout_only_enabled(),
         }
     }
 
@@ -164,21 +177,8 @@ impl MatterLightController {
         format!("{target_label} fallback-from-group-{group_id}")
     }
 
-    fn env_flag_enabled(name: &str, default: bool) -> bool {
-        std::env::var(name)
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
-            })
-            .unwrap_or(default)
-    }
-
-    fn group_fanout_only_enabled() -> bool {
-        Self::env_flag_enabled(MATTER_GROUP_FANOUT_ONLY_ENV, true)
-    }
-
     fn group_safety_fanout_enabled() -> bool {
-        Self::env_flag_enabled(MATTER_GROUP_SAFETY_FANOUT_ENV, true)
+        env_flag_enabled(MATTER_GROUP_SAFETY_FANOUT_ENV, true)
     }
 
     fn log_group_fanout_only(

@@ -182,7 +182,8 @@ pub fn sync_topology_groups(state: &SharedState, key: &HubKey) -> Result<()> {
 
     let transport = get_transport(state)?;
     let hub_data = get_hub_data(state)?;
-    let controller = MatterGroupController::new(transport, hub_data.registry.clone());
+    let controller = MatterGroupController::new(transport, hub_data.registry.clone())
+        .with_physical_group_provisioning(!crate::controller::matter_group_fanout_only_enabled());
     let groups = controller
         .sync_topology_groups(&specs)
         .map_err(|error| anyhow::anyhow!("Matter group sync failed: {}", error))?;
@@ -889,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_topology_groups_configures_matter_group_and_topology_binding() {
+    fn sync_topology_groups_publishes_logical_binding_without_physical_group_by_default() {
         let state = state();
         let data = hub_data();
         let transport = install_transport(&data, Arc::new(FakeMatterTransport::default()));
@@ -924,22 +925,7 @@ mod tests {
 
         sync_topology_groups(&state, &matter_key()).unwrap();
 
-        let configured = transport.configured_groups.lock().unwrap().clone();
-        assert_eq!(configured.len(), 1);
-        assert_eq!(configured[0].members.len(), 2);
-        assert_eq!(
-            configured[0].members,
-            vec![
-                MatterGroupMember {
-                    node_id: 42,
-                    endpoint: 2
-                },
-                MatterGroupMember {
-                    node_id: 43,
-                    endpoint: 2
-                },
-            ]
-        );
+        assert!(transport.configured_groups.lock().unwrap().is_empty());
 
         let state = state.lock().unwrap();
         let room = state.topology.get(&room_id).unwrap();
@@ -954,6 +940,7 @@ mod tests {
             binding.light_device_ids,
             vec!["matter-42-2".to_string(), "matter-43-2".to_string()]
         );
+        let expected_group_id = parse_group_control_id(&binding.control_id);
         assert!(state
             .topology
             .get(&stale_room_id)
@@ -971,7 +958,7 @@ mod tests {
             registry
                 .get_grouped_light_id(&room_id)
                 .and_then(|control_id| parse_group_control_id(&control_id)),
-            Some(configured[0].group_id)
+            expected_group_id
         );
     }
 
