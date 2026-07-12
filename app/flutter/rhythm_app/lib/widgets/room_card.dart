@@ -18,7 +18,7 @@ import 'solar_orbit.dart'; // For CelestialColors
 /// Light mode for a room card.
 enum RoomMode { mood, standby, on, off }
 
-const double _roomHeaderActionHitSize = 48;
+const double _roomHeaderActionHitSize = 28;
 
 /// Hue-style room card with CCT-tinted background, big segmented power
 /// control (mood / off / on), rhythm controls, and brightness slider.
@@ -399,10 +399,28 @@ class _RoomCardState extends State<RoomCard> {
 
   Future<void> _setMotionActivationEnabled(bool enabled) async {
     HapticFeedback.lightImpact();
-    await context.read<ServerSyncProvider>().setNodeMotionActivationEnabled(
-          widget.roomId,
-          enabled,
-        );
+    final applied = await context
+        .read<ServerSyncProvider>()
+        .setNodeMotionActivationEnabled(widget.roomId, enabled);
+    if (!mounted || applied) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Motion activation could not be updated.'),
+      ),
+    );
+  }
+
+  void _showMotionActivationUnavailable(String roomName) {
+    HapticFeedback.lightImpact();
+    final version = context.read<ServerSyncProvider>().firmwareVersion;
+    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Update the Rhythm appliance$versionSuffix to control motion for $roomName.',
+        ),
+      ),
+    );
   }
 
   double _effectiveCurveHour(RoomDto room) {
@@ -550,6 +568,14 @@ class _RoomCardState extends State<RoomCard> {
 
         final showActivitySpinner =
             _localActionPending || isTransitioning || isDispatchPending;
+        final VoidCallback? motionIndicatorTap =
+            motionTimer?.remainingSecs != null
+                ? null
+                : !motionActivationSupported
+                    ? () => _showMotionActivationUnavailable(room.name)
+                    : motionActivationEnabled
+                        ? () => _setMotionActivationEnabled(false)
+                        : null;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
@@ -819,12 +845,7 @@ class _RoomCardState extends State<RoomCard> {
                                     info: motionTimer,
                                     color: iconColor,
                                     roomName: room.name,
-                                    onTap: motionTimer.remainingSecs == null &&
-                                            motionActivationEnabled &&
-                                            motionActivationSupported
-                                        ? () =>
-                                            _setMotionActivationEnabled(false)
-                                        : null,
+                                    onTap: motionIndicatorTap,
                                     onExpired: () => context
                                         .read<RoomProvider>()
                                         .clearMotionTimer(widget.roomId),
@@ -834,12 +855,13 @@ class _RoomCardState extends State<RoomCard> {
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: Semantics(
-                                    button: motionActivationSupported,
+                                    button: true,
                                     label: motionActivationSupported
                                         ? motionActivationEnabled
                                             ? 'Turn off motion activation for ${room.name}'
                                             : 'Turn on motion activation for ${room.name}'
-                                        : 'Motion sensor for ${room.name}',
+                                        : 'Motion control for ${room.name} '
+                                            'requires an appliance update',
                                     child: GestureDetector(
                                       key: ValueKey(
                                         'room-card-motion-${widget.roomId}',
@@ -849,7 +871,10 @@ class _RoomCardState extends State<RoomCard> {
                                           ? () => _setMotionActivationEnabled(
                                                 !motionActivationEnabled,
                                               )
-                                          : null,
+                                          : () =>
+                                              _showMotionActivationUnavailable(
+                                                room.name,
+                                              ),
                                       child: SizedBox(
                                         width: _roomHeaderActionHitSize,
                                         height: _roomHeaderActionHitSize,
@@ -865,7 +890,9 @@ class _RoomCardState extends State<RoomCard> {
                                               size: 18,
                                               color: iconColor.withValues(
                                                 alpha: motionActivationEnabled
-                                                    ? 0.45
+                                                    ? motionActivationSupported
+                                                        ? 0.45
+                                                        : 0.18
                                                     : 0.30,
                                               ),
                                             ),
