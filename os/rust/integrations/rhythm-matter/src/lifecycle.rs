@@ -15,17 +15,9 @@ use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
 use crate::transport::{
-    MatterDeviceInfo, MatterSubscriptionTarget, MatterTransport,
+    CommissionedDevice, MatterDeviceInfo, MatterSubscriptionTarget, MatterTransport,
     DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
-
-/// How long a single device probe may run during hub bootstrap before we give
-/// up and fall back to basic device info. Reachable devices respond in well
-/// under a second; an unreachable one would otherwise block the connect path on
-/// a ~35s CHIP timeout, delaying the whole Matter integration from loading.
-/// A later successful rediscovery fills in real capabilities once the device
-/// becomes reachable. See #169.
-const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connect to the local Matter fabric.
 pub fn connect_matter(
@@ -33,9 +25,24 @@ pub fn connect_matter(
     transport: Arc<dyn MatterTransport>,
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
     let hub_key = HubKey::new(HubType::new("matter"), "local");
-    let commissioned = transport.list_devices().unwrap_or_default();
+    let persisted_devices = transport.list_commissioned_devices().unwrap_or_default();
+    let commissioned = if persisted_devices.is_empty() {
+        transport.list_devices().unwrap_or_default()
+    } else {
+        persisted_devices
+            .iter()
+            .map(device_info_from_record)
+            .collect()
+    };
     let cloud_profiles = crate::cloud_profiles::load_or_sync_for_state(state);
-    let initial_metadata = fallback_initial_device_metadata(state, &commissioned, &hub_key);
+    let initial_metadata = initial_device_metadata(
+        state,
+        &commissioned,
+        &persisted_devices,
+        &cloud_profiles,
+        &hub_key,
+    );
+    let subscription_targets = initial_metadata.subscription_targets.clone();
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -58,7 +65,7 @@ pub fn connect_matter(
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
     let cloud_profiles_for_hub_data = cloud_profiles.clone();
-    let hub_key_for_refresh = hub_key.clone();
+    let hub_key_for_subscriptions = hub_key.clone();
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
     let node_proof_of_life_for_closure = node_proof_of_life.clone();
 
@@ -100,18 +107,28 @@ pub fn connect_matter(
     )?;
 
     if let Some(hub_data) = hub.data::<Arc<MatterHubData>>().cloned() {
-        start_initial_metadata_refresh(
-            state.clone(),
+        start_attribute_report_loop(
+            hub_key_for_subscriptions,
             transport,
-            commissioned,
-            cloud_profiles,
-            hub_key_for_refresh,
-            hub_data,
-            CONNECT_PROBE_TIMEOUT,
+            subscription_targets,
+            hub_data.node_proof_of_life.clone(),
+            hub_data.event_tx.clone(),
         );
     }
 
     Ok((hub, event_rx))
+}
+
+fn device_info_from_record(device: &CommissionedDevice) -> MatterDeviceInfo {
+    MatterDeviceInfo {
+        node_id: device.node_id,
+        vendor_name: device.vendor_name.clone(),
+        product_name: device.product_name.clone(),
+        // Persisted metadata proves identity and capabilities, not current
+        // liveness. Keep the neutral startup behavior; live subscriptions and
+        // command/read outcomes update reachability after connect.
+        reachable: true,
+    }
 }
 
 fn configured_fabric_id(state: &SharedState, hub_key: &HubKey) -> String {
@@ -137,7 +154,32 @@ struct InitialDeviceMetadata {
     device_caps: HashMap<String, LightCapabilities>,
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
     subscription_targets: Vec<MatterSubscriptionTarget>,
-    unreachable_nodes: HashSet<u64>,
+}
+
+/// Build the best metadata available without talking to the device.
+///
+/// `list_devices` is backed by chipd's persisted device store, so its vendor
+/// and product names survive a temporary connectivity failure. Preserve any
+/// matching built-in profile here instead of replacing it with an anonymous
+/// extended-color fallback. In particular, command quirks such as
+/// `NeedsExplicitOn` remain necessary while the device is unreachable to
+/// probes but reachable again by the time a light command is dispatched.
+fn fallback_device_metadata(info: &MatterDeviceInfo) -> (LightCapabilities, Vec<DeviceQuirk>) {
+    let Some(entry) =
+        rhythm_devices::builtin_db().lookup(info.vendor_name.as_str(), info.product_name.as_str())
+    else {
+        return (
+            crate::commissioning::fallback_device_capabilities(),
+            Vec::new(),
+        );
+    };
+
+    let quirks = entry
+        .matter
+        .as_ref()
+        .map(|matter| matter.quirks.clone())
+        .unwrap_or_default();
+    (entry.capabilities(), quirks)
 }
 
 fn fallback_initial_device_metadata(
@@ -147,20 +189,28 @@ fn fallback_initial_device_metadata(
 ) -> InitialDeviceMetadata {
     let mut device_caps = HashMap::new();
     let mut device_quirks = HashMap::new();
+    let mut subscription_endpoints = commissioned
+        .iter()
+        .map(|info| (info.node_id, 1u16))
+        .collect::<HashMap<_, _>>();
     let commissioned_nodes = commissioned
         .iter()
         .map(|info| info.node_id)
         .collect::<HashSet<_>>();
 
-    let mut insert_fallback = |device_id: String| {
-        device_caps
-            .entry(device_id.clone())
-            .or_insert_with(crate::commissioning::fallback_device_capabilities);
-        device_quirks.entry(device_id).or_default();
+    let mut insert_fallback = |device_id: String, info: Option<&MatterDeviceInfo>| {
+        let (caps, quirks) = info.map(fallback_device_metadata).unwrap_or_else(|| {
+            (
+                crate::commissioning::fallback_device_capabilities(),
+                Vec::new(),
+            )
+        });
+        device_caps.entry(device_id.clone()).or_insert(caps);
+        device_quirks.entry(device_id).or_insert(quirks);
     };
 
     for info in commissioned {
-        insert_fallback(format_device_id(info.node_id, 1));
+        insert_fallback(format_device_id(info.node_id, 1), Some(info));
     }
 
     if let Ok(state) = state.lock() {
@@ -169,195 +219,101 @@ fn fallback_initial_device_metadata(
                 if &endpoint.hub_key != hub_key {
                     continue;
                 }
-                let Some((node_id, _endpoint_id)) = parse_device_id(&endpoint.native_id) else {
+                let Some((node_id, endpoint_id)) = parse_device_id(&endpoint.native_id) else {
                     continue;
                 };
                 if commissioned_nodes.contains(&node_id) {
-                    insert_fallback(endpoint.native_id.clone());
+                    let info = commissioned.iter().find(|info| info.node_id == node_id);
+                    insert_fallback(endpoint.native_id.clone(), info);
+                    subscription_endpoints.insert(node_id, endpoint_id);
                 }
             }
         }
     }
 
-    InitialDeviceMetadata {
-        device_caps,
-        device_quirks,
-        subscription_targets: Vec::new(),
-        unreachable_nodes: HashSet::new(),
-    }
-}
-
-/// Probe a node but give up after `timeout`, so a single unreachable device
-/// cannot stall the whole hub bootstrap on a serial ~35s CHIP timeout. The
-/// probe runs on a detached thread; on timeout we return an error and let the
-/// caller fall back to basic device info until rediscovery can recover real
-/// capabilities later. See #169.
-pub(crate) fn probe_light_with_deadline(
-    transport: &Arc<dyn MatterTransport>,
-    node_id: u64,
-    timeout: Duration,
-) -> Result<crate::transport::CommissionedDevice> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let probe_transport = transport.clone();
-    std::thread::Builder::new()
-        .name(format!("matter-probe-{node_id}"))
-        .spawn(move || {
-            let _ = tx.send(probe_transport.probe_light(node_id));
-        })?;
-
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!(
-            "probe timed out after {}ms (node {} unreachable)",
-            timeout.as_millis(),
-            node_id
-        )),
-    }
-}
-
-fn load_initial_device_metadata(
-    state: &SharedState,
-    transport: &Arc<dyn MatterTransport>,
-    commissioned: &[MatterDeviceInfo],
-    cloud_profiles: &crate::cloud_profiles::CloudMatterProfileCatalog,
-    probe_timeout: Duration,
-) -> InitialDeviceMetadata {
-    let mut device_caps = HashMap::new();
-    let mut device_quirks = HashMap::new();
-    let mut subscription_targets = Vec::new();
-    let mut unreachable_nodes = HashSet::new();
-    let local_overrides = crate::local_quirks::load_overrides_for_state(state);
-
-    for info in commissioned {
-        match probe_light_with_deadline(transport, info.node_id, probe_timeout) {
-            Ok(device) => {
-                let device_id = format_device_id(device.node_id, device.light_endpoint);
-                subscription_targets.push(MatterSubscriptionTarget {
-                    node_id: device.node_id,
-                    endpoint: device.light_endpoint,
-                });
-                let mut caps = crate::commissioning::build_device_capabilities(&device);
-                let mut quirks = crate::commissioning::build_device_quirks(&device);
-                cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
-                if let Some(override_caps) = local_overrides.capabilities.get(&device_id) {
-                    crate::local_quirks::apply_capability_override(&mut caps, override_caps);
-                }
-                device_caps.insert(device_id.clone(), caps);
-                if let Some(local_quirks) = local_overrides.quirks.get(&device_id) {
-                    quirks = local_quirks.clone();
-                }
-                device_quirks.insert(device_id, quirks);
-            }
-            Err(error) => {
-                warn!(
-                    target: "sys",
-                    "Matter: failed to probe node {} during connect, using fallback metadata and skipping live subscriptions until rediscovery: {}",
-                    info.node_id,
-                    error
-                );
-                let device_id = format_device_id(info.node_id, 1);
-                device_caps
-                    .entry(device_id.clone())
-                    .or_insert_with(crate::commissioning::fallback_device_capabilities);
-                device_quirks.entry(device_id).or_default();
-                unreachable_nodes.insert(info.node_id);
-            }
-        }
-    }
+    let mut subscription_targets = subscription_endpoints
+        .into_iter()
+        .map(|(node_id, endpoint)| MatterSubscriptionTarget { node_id, endpoint })
+        .collect::<Vec<_>>();
+    subscription_targets.sort_by_key(|target| (target.node_id, target.endpoint));
 
     InitialDeviceMetadata {
         device_caps,
         device_quirks,
         subscription_targets,
-        unreachable_nodes,
     }
 }
 
-fn commissioned_with_reachability(
-    commissioned: Vec<MatterDeviceInfo>,
-    metadata: &InitialDeviceMetadata,
-) -> Vec<MatterDeviceInfo> {
-    commissioned
-        .into_iter()
-        .map(|mut device| {
-            if metadata.unreachable_nodes.contains(&device.node_id) {
-                device.reachable = false;
-            }
-            device
+fn initial_device_metadata(
+    state: &SharedState,
+    commissioned: &[MatterDeviceInfo],
+    persisted_devices: &[CommissionedDevice],
+    cloud_profiles: &crate::cloud_profiles::CloudMatterProfileCatalog,
+    hub_key: &HubKey,
+) -> InitialDeviceMetadata {
+    let mut metadata = fallback_initial_device_metadata(state, commissioned, hub_key);
+    let local_overrides = crate::local_quirks::load_overrides_for_state(state);
+    let aliases_by_node = state
+        .lock()
+        .ok()
+        .map(|state| {
+            state
+                .canonical_registry
+                .devices()
+                .flat_map(|device| device.active_endpoints())
+                .filter(|endpoint| &endpoint.hub_key == hub_key)
+                .filter_map(|endpoint| {
+                    parse_device_id(&endpoint.native_id)
+                        .map(|(node_id, _)| (node_id, endpoint.native_id.clone()))
+                })
+                .fold(
+                    HashMap::<u64, Vec<String>>::new(),
+                    |mut aliases, (node_id, id)| {
+                        aliases.entry(node_id).or_default().push(id);
+                        aliases
+                    },
+                )
         })
-        .collect()
-}
+        .unwrap_or_default();
+    let mut subscription_endpoints = metadata
+        .subscription_targets
+        .iter()
+        .map(|target| (target.node_id, target.endpoint))
+        .collect::<HashMap<_, _>>();
 
-fn start_initial_metadata_refresh(
-    state: SharedState,
-    transport: Arc<dyn MatterTransport>,
-    commissioned: Vec<MatterDeviceInfo>,
-    cloud_profiles: crate::cloud_profiles::CloudMatterProfileCatalog,
-    hub_key: HubKey,
-    hub_data: Arc<MatterHubData>,
-    probe_timeout: Duration,
-) {
-    if commissioned.is_empty() {
-        return;
+    for device in persisted_devices {
+        let device_id = format_device_id(device.node_id, device.light_endpoint);
+        let mut caps = crate::commissioning::build_device_capabilities(device);
+        let mut quirks = crate::commissioning::build_device_quirks(device);
+        cloud_profiles.apply_to_device(device, &mut caps, &mut quirks);
+        if let Some(override_caps) = local_overrides.capabilities.get(&device_id) {
+            crate::local_quirks::apply_capability_override(&mut caps, override_caps);
+        }
+        if let Some(local_quirks) = local_overrides.quirks.get(&device_id) {
+            quirks = local_quirks.clone();
+        }
+
+        metadata.device_caps.insert(device_id.clone(), caps.clone());
+        metadata
+            .device_quirks
+            .insert(device_id.clone(), quirks.clone());
+        if let Some(aliases) = aliases_by_node.get(&device.node_id) {
+            for alias in aliases {
+                metadata.device_caps.insert(alias.clone(), caps.clone());
+                metadata.device_quirks.insert(alias.clone(), quirks.clone());
+            }
+        }
+        subscription_endpoints.insert(device.node_id, device.light_endpoint);
     }
 
-    let spawn_result = std::thread::Builder::new()
-        .name("matter-initial-metadata".to_string())
-        .spawn(move || {
-            let device_count = commissioned.len();
-            let metadata = load_initial_device_metadata(
-                &state,
-                &transport,
-                &commissioned,
-                &cloud_profiles,
-                probe_timeout,
-            );
-            let subscription_targets = metadata.subscription_targets.clone();
-            let subscription_count = subscription_targets.len();
-            let refreshed = commissioned_with_reachability(commissioned, &metadata);
-
-            if let Ok(mut list) = hub_data.commissioned.lock() {
-                for device in refreshed {
-                    if let Some(existing) = list
-                        .iter_mut()
-                        .find(|existing| existing.node_id == device.node_id)
-                    {
-                        *existing = device;
-                    } else {
-                        list.push(device);
-                    }
-                }
-            }
-
-            if let Ok(mut device_caps) = hub_data.device_caps.lock() {
-                device_caps.extend(metadata.device_caps);
-            }
-            if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
-                device_quirks.extend(metadata.device_quirks);
-            }
-
-            info!(
-                target: "sys",
-                "Matter: initial metadata refresh complete for {} device(s), live subscriptions={}",
-                device_count,
-                subscription_count
-            );
-            start_attribute_report_loop(
-                hub_key,
-                transport,
-                subscription_targets,
-                hub_data.node_proof_of_life.clone(),
-                hub_data.event_tx.clone(),
-            );
-        });
-
-    if let Err(error) = spawn_result {
-        warn!(
-            target: "sys",
-            "Matter: failed to spawn initial metadata refresh: {}",
-            error
-        );
-    }
+    metadata.subscription_targets = subscription_endpoints
+        .into_iter()
+        .map(|(node_id, endpoint)| MatterSubscriptionTarget { node_id, endpoint })
+        .collect();
+    metadata
+        .subscription_targets
+        .sort_by_key(|target| (target.node_id, target.endpoint));
+    metadata
 }
 
 fn start_attribute_report_loop(
@@ -374,51 +330,58 @@ fn start_attribute_report_loop(
     let _ = std::thread::Builder::new()
         .name("matter-attr-sub".to_string())
         .spawn(move || {
-            if let Err(error) = transport.subscribe_on_off(
-                &targets,
-                DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
-                DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-            ) {
-                warn!(
-                    target: "evt",
-                    "Matter: failed to start On/Off attribute subscriptions: {}",
-                    error
-                );
-                return;
-            }
-
-            info!(
-                target: "evt",
-                "Matter: subscribed to On/Off reports for {} endpoint(s)",
-                targets.len()
-            );
-
+            let mut retry_delay = Duration::from_secs(1);
             loop {
-                match transport.drain_attribute_reports() {
-                    Ok(reports) => {
-                        for report in reports {
-                            if let Ok(mut proof) = node_proof_of_life.lock() {
-                                proof.insert(report.node_id, Instant::now());
-                            }
-                            if let Some(event) = crate::events::translate_report(&report) {
-                                if event_tx.send(event.with_hub_key(hub_key.clone())).is_err() {
-                                    return;
+                if let Err(error) = transport.subscribe_on_off(
+                    &targets,
+                    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                ) {
+                    warn!(
+                        target: "evt",
+                        "Matter: failed to start On/Off attribute subscriptions; retrying in {:?}: {}",
+                        retry_delay,
+                        error
+                    );
+                    std::thread::sleep(retry_delay);
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+
+                info!(
+                    target: "evt",
+                    "Matter: subscribed to On/Off reports for {} endpoint(s)",
+                    targets.len()
+                );
+                retry_delay = Duration::from_secs(1);
+
+                loop {
+                    match transport.drain_attribute_reports() {
+                        Ok(reports) => {
+                            for report in reports {
+                                if let Ok(mut proof) = node_proof_of_life.lock() {
+                                    proof.insert(report.node_id, Instant::now());
+                                }
+                                if let Some(event) = crate::events::translate_report(&report) {
+                                    if event_tx.send(event.with_hub_key(hub_key.clone())).is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
+                        Err(error) => {
+                            warn!(
+                                target: "evt",
+                                "Matter: failed to drain attribute reports; resubscribing: {}",
+                                error
+                            );
+                            std::thread::sleep(retry_delay);
+                            break;
+                        }
                     }
-                    Err(error) => {
-                        warn!(
-                            target: "evt",
-                            "Matter: failed to drain attribute reports: {}",
-                            error
-                        );
-                        std::thread::sleep(Duration::from_secs(2));
-                        continue;
-                    }
-                }
 
-                std::thread::sleep(Duration::from_millis(250));
+                    std::thread::sleep(Duration::from_millis(250));
+                }
             }
         });
 }
@@ -451,7 +414,7 @@ pub fn parse_device_id(device_id: &str) -> Option<(u64, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rhythm_core::runtime::hub_registry::DeviceType;
     use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
@@ -467,25 +430,27 @@ mod tests {
 
     struct FakeMatterTransport {
         devices: Vec<MatterDeviceInfo>,
-        probe_failures: HashMap<u64, String>,
-        probe_delays: HashMap<u64, Duration>,
+        persisted_devices: Vec<CommissionedDevice>,
+        probe_calls: AtomicUsize,
         subscribe_calls: AtomicUsize,
+        subscribe_failures_remaining: AtomicUsize,
+        subscribed_targets: Mutex<Vec<Vec<MatterSubscriptionTarget>>>,
     }
 
     impl FakeMatterTransport {
-        fn new(devices: Vec<MatterDeviceInfo>, probe_failures: HashMap<u64, String>) -> Self {
+        fn new(devices: Vec<MatterDeviceInfo>, persisted_devices: Vec<CommissionedDevice>) -> Self {
             Self {
                 devices,
-                probe_failures,
-                probe_delays: HashMap::new(),
+                persisted_devices,
+                probe_calls: AtomicUsize::new(0),
                 subscribe_calls: AtomicUsize::new(0),
+                subscribe_failures_remaining: AtomicUsize::new(0),
+                subscribed_targets: Mutex::new(Vec::new()),
             }
         }
 
-        /// Make `probe_light` for `node_id` block for `delay`, emulating an
-        /// unreachable device that only fails after the CHIP timeout.
-        fn with_probe_delay(mut self, node_id: u64, delay: Duration) -> Self {
-            self.probe_delays.insert(node_id, delay);
+        fn with_subscribe_failures(mut self, count: usize) -> Self {
+            self.subscribe_failures_remaining = AtomicUsize::new(count);
             self
         }
     }
@@ -506,14 +471,13 @@ mod tests {
             Ok(self.devices.clone())
         }
 
-        fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
-            if let Some(delay) = self.probe_delays.get(&node_id) {
-                std::thread::sleep(*delay);
-            }
-            if let Some(error) = self.probe_failures.get(&node_id) {
-                anyhow::bail!("{}", error);
-            }
-            Ok(commissioned_device(node_id, 2))
+        fn list_commissioned_devices(&self) -> Result<Vec<CommissionedDevice>> {
+            Ok(self.persisted_devices.clone())
+        }
+
+        fn probe_light(&self, _node_id: u64) -> Result<CommissionedDevice> {
+            self.probe_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("startup must not probe persisted Matter devices")
         }
 
         fn set_on_off(&self, _node_id: u64, _endpoint: u16, _on: bool) -> Result<()> {
@@ -580,13 +544,25 @@ mod tests {
 
         fn subscribe_on_off(
             &self,
-            _targets: &[MatterSubscriptionTarget],
+            targets: &[MatterSubscriptionTarget],
             _min_interval_secs: u16,
             _max_interval_secs: u16,
         ) -> Result<()> {
-            self.subscribe_calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            anyhow::bail!("subscriptions disabled in test")
+            self.subscribe_calls.fetch_add(1, Ordering::SeqCst);
+            self.subscribed_targets
+                .lock()
+                .unwrap()
+                .push(targets.to_vec());
+            if self
+                .subscribe_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                anyhow::bail!("temporary subscription failure")
+            }
+            Ok(())
         }
 
         fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
@@ -621,6 +597,15 @@ mod tests {
         }
     }
 
+    fn h6004_device_info(node_id: u64) -> MatterDeviceInfo {
+        MatterDeviceInfo {
+            node_id,
+            vendor_name: "Shenzhen Qianyan Technology".to_string(),
+            product_name: "H6004".to_string(),
+            reachable: true,
+        }
+    }
+
     fn commissioned_device(node_id: u64, endpoint: u16) -> CommissionedDevice {
         CommissionedDevice {
             node_id,
@@ -633,6 +618,25 @@ mod tests {
             color_modes: vec![MatterColorMode::ColorTemperature],
             min_kelvin: Some(2700),
             max_kelvin: Some(5000),
+        }
+    }
+
+    fn h6004_device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Shenzhen Qianyan Technology".to_string(),
+            product_name: "H6004".to_string(),
+            vendor_id: 4999,
+            product_id: 24580,
+            serial_number: Some(format!("h6004-{node_id}")),
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::Xy,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: Some(2000),
+            max_kelvin: Some(6500),
         }
     }
 
@@ -717,10 +721,78 @@ mod tests {
 
         assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(metadata.device_caps.contains_key("matter-12-2"));
+        assert_eq!(
+            metadata.subscription_targets,
+            vec![MatterSubscriptionTarget {
+                node_id: 12,
+                endpoint: 2,
+            }]
+        );
     }
 
     #[test]
-    fn connect_matter_builds_hub_data_from_commissioned_devices_and_tags_events() {
+    fn fallback_initial_metadata_preserves_known_device_quirks() {
+        let state = shared_state("fallback-known-quirks");
+        let key = HubKey::new(HubType::new("matter"), "local");
+
+        let metadata = fallback_initial_device_metadata(&state, &[h6004_device_info(107)], &key);
+
+        assert_eq!(
+            metadata.device_quirks.get("matter-107"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::CommandThrottleMs(250),
+            ])
+        );
+        assert!(metadata
+            .device_caps
+            .get("matter-107")
+            .is_some_and(LightCapabilities::supports_xy_color));
+    }
+
+    #[test]
+    fn persisted_metadata_applies_local_overrides_after_builtin_and_cloud_profiles() {
+        let state = shared_state("persisted-overrides");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let device = h6004_device(107);
+        crate::local_quirks::save_device_profile_override(
+            &state,
+            "matter-107",
+            Some(vec![DeviceQuirk::NeedsXyNotCt]),
+            Some(crate::local_quirks::LocalCapabilityOverride {
+                min_brightness: Some(17),
+                supports_transition: Some(false),
+            }),
+            Some("test-report".to_string()),
+        )
+        .unwrap();
+
+        let metadata = initial_device_metadata(
+            &state,
+            &[device_info_from_record(&device)],
+            &[device],
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &key,
+        );
+
+        let caps = metadata.device_caps.get("matter-107").unwrap();
+        assert_eq!(caps.min_brightness, Some(17));
+        assert!(!caps.supports_transition);
+        assert_eq!(
+            metadata.device_quirks.get("matter-107"),
+            Some(&vec![DeviceQuirk::NeedsXyNotCt])
+        );
+        assert_eq!(
+            metadata.subscription_targets,
+            vec![MatterSubscriptionTarget {
+                node_id: 107,
+                endpoint: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn connect_matter_uses_persisted_records_without_probing_and_tags_events() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
         let state = shared_state("connect");
@@ -731,11 +803,9 @@ mod tests {
             .hub_credentials
             .insert(key.clone(), matter_credentials("local", "fabric-test"));
 
-        let mut probe_failures = HashMap::new();
-        probe_failures.insert(12, "probe failed".to_string());
         let transport = Arc::new(FakeMatterTransport::new(
-            vec![device_info(10), device_info(12)],
-            probe_failures,
+            Vec::new(),
+            vec![commissioned_device(10, 2), h6004_device(107)],
         ));
 
         let (hub, event_rx) = connect_matter(&state, transport.clone()).unwrap();
@@ -744,149 +814,105 @@ mod tests {
         let data = hub.data::<Arc<MatterHubData>>().unwrap();
         assert_eq!(data.fabric_id, "fabric-test");
         assert_eq!(data.commissioned.lock().unwrap().len(), 2);
-        assert!(data.device_caps.lock().unwrap().contains_key("matter-10"));
-        assert!(data.device_caps.lock().unwrap().contains_key("matter-12"));
-
-        assert!(
-            wait_until(Duration::from_secs(1), || {
-                let caps_ready = data.device_caps.lock().unwrap().contains_key("matter-10-2");
-                let unreachable_marked = !data
-                    .commissioned
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|device| device.node_id == 12)
-                    .unwrap()
-                    .reachable;
-                caps_ready && unreachable_marked
-            }),
-            "initial Matter metadata refresh did not complete"
-        );
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-10-2"));
+        assert!(data.device_caps.lock().unwrap().contains_key("matter-107"));
         assert_eq!(
             data.next_node_id.load(std::sync::atomic::Ordering::SeqCst),
-            13
+            108
         );
-        assert!(data.device_caps.lock().unwrap().contains_key("matter-10-2"));
-        assert!(data.device_caps.lock().unwrap().contains_key("matter-12"));
-        assert!(!data.device_caps.lock().unwrap().contains_key("matter-12-2"));
+        assert_eq!(
+            data.device_quirks.lock().unwrap().get("matter-107"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::CommandThrottleMs(250),
+            ])
+        );
+        assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
 
         let event = event_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(event.hub_key(), Some(&key));
-        for _ in 0..20 {
-            if transport
+        assert!(
+            wait_until(Duration::from_secs(1), || transport
                 .subscribe_calls
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+                .load(Ordering::SeqCst)
+                >= 1),
+            "Matter subscriptions did not start"
+        );
         assert_eq!(
-            transport
-                .subscribe_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
+            transport.subscribed_targets.lock().unwrap()[0],
+            vec![
+                MatterSubscriptionTarget {
+                    node_id: 10,
+                    endpoint: 2,
+                },
+                MatterSubscriptionTarget {
+                    node_id: 107,
+                    endpoint: 1,
+                },
+            ]
         );
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 
     #[test]
-    fn connect_matter_returns_before_initial_probe_refresh_finishes() {
+    fn connect_matter_falls_back_to_basic_list_without_probing_old_transports() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
-        let state = shared_state("connect-async-probe");
-        let mut probe_failures = HashMap::new();
-        probe_failures.insert(12, "probe failed".to_string());
-        let transport = Arc::new(
-            FakeMatterTransport::new(vec![device_info(12)], probe_failures)
-                .with_probe_delay(12, Duration::from_millis(800)),
-        );
+        let state = shared_state("connect-old-transport");
+        let transport = Arc::new(FakeMatterTransport::new(
+            vec![h6004_device_info(107)],
+            Vec::new(),
+        ));
 
-        let started = std::time::Instant::now();
-        let (hub, _event_rx) = connect_matter(&state, transport).unwrap();
-        let elapsed = started.elapsed();
-
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "Matter connect waited for initial probe refresh: {:?}",
-            elapsed
-        );
-
+        let (hub, _event_rx) = connect_matter(&state, transport.clone()).unwrap();
         let data = hub.data::<Arc<MatterHubData>>().unwrap();
-        assert!(data.device_caps.lock().unwrap().contains_key("matter-12"));
-        assert!(
-            data.commissioned
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|device| device.node_id == 12)
-                .unwrap()
-                .reachable,
-            "connect should expose cached commissioned devices before live reachability probing"
+        assert_eq!(
+            data.device_quirks.lock().unwrap().get("matter-107"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::CommandThrottleMs(250),
+            ])
         );
-
+        assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
         assert!(
-            wait_until(Duration::from_secs(2), || {
-                !data
-                    .commissioned
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|device| device.node_id == 12)
-                    .unwrap()
-                    .reachable
-            }),
-            "background metadata refresh did not mark the failed node unreachable"
+            wait_until(Duration::from_secs(1), || transport
+                .subscribe_calls
+                .load(Ordering::SeqCst)
+                >= 1),
+            "fallback Matter subscriptions did not start"
+        );
+        assert_eq!(
+            transport.subscribed_targets.lock().unwrap()[0],
+            vec![MatterSubscriptionTarget {
+                node_id: 107,
+                endpoint: 1,
+            }]
         );
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 
     #[test]
-    fn load_initial_device_metadata_bounds_unreachable_probe() {
-        // A device that hangs (unreachable) must not block the connect path:
-        // the probe is bounded by a deadline and the device falls back to basic
-        // info, so Matter still loads promptly. Regression for #169.
-        let state = shared_state("probe-deadline");
-        let transport: Arc<dyn MatterTransport> = Arc::new(
-            FakeMatterTransport::new(vec![device_info(10), device_info(12)], HashMap::new())
-                .with_probe_delay(12, Duration::from_secs(5)),
+    fn attribute_subscriptions_retry_after_temporary_failure() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
+        let state = shared_state("subscription-retry");
+        let transport = Arc::new(
+            FakeMatterTransport::new(Vec::new(), vec![commissioned_device(10, 2)])
+                .with_subscribe_failures(1),
         );
-        let commissioned = transport.list_devices().unwrap();
-        let cloud = crate::cloud_profiles::CloudMatterProfileCatalog::default();
 
-        let started = std::time::Instant::now();
-        let metadata = load_initial_device_metadata(
-            &state,
-            &transport,
-            &commissioned,
-            &cloud,
-            Duration::from_millis(200),
-        );
-        let elapsed = started.elapsed();
+        let (_hub, _event_rx) = connect_matter(&state, transport.clone()).unwrap();
 
-        // Unpatched code probes serially with no deadline and would block ~5s
-        // on node 12. With the deadline it returns in ~200ms.
         assert!(
-            elapsed < Duration::from_secs(2),
-            "bootstrap probe blocked on unreachable device: {:?}",
-            elapsed
+            wait_until(Duration::from_secs(3), || transport
+                .subscribe_calls
+                .load(Ordering::SeqCst)
+                >= 2),
+            "Matter subscription did not retry after a temporary failure"
         );
-        // Reachable device pre-warmed; unreachable device gets fallback
-        // metadata but no subscription target, so background subscriptions
-        // cannot occupy chipd on a known-bad node.
-        assert!(metadata.device_caps.contains_key("matter-10-2"));
-        assert!(metadata.device_caps.contains_key("matter-12"));
-        assert!(!metadata.device_caps.contains_key("matter-12-2"));
-        let fallback_caps = metadata.device_caps.get("matter-12").unwrap();
-        assert!(fallback_caps.supports_hue_saturation());
-        assert!(!fallback_caps.supports_xy_color());
-        assert!(metadata.unreachable_nodes.contains(&12));
-        assert!(!metadata
-            .subscription_targets
-            .iter()
-            .any(|target| target.node_id == 12 && target.endpoint == 1));
+        assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
+        std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 }

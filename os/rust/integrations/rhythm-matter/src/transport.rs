@@ -68,6 +68,14 @@ pub trait MatterTransport: Send + Sync {
     /// List devices currently known to the controller.
     fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>>;
 
+    /// List the complete device records persisted by the controller.
+    ///
+    /// Older transports may not support this additive contract. Callers must
+    /// fall back to [`Self::list_devices`] without probing when it is absent.
+    fn list_commissioned_devices(&self) -> Result<Vec<CommissionedDevice>> {
+        anyhow::bail!("persisted Matter device records are not supported by this transport")
+    }
+
     /// Probe a single node and return its typed light capabilities.
     fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice>;
 
@@ -462,6 +470,13 @@ mod tests {
             }],
         };
 
+        assert_eq!(
+            transport
+                .list_commissioned_devices()
+                .unwrap_err()
+                .to_string(),
+            "persisted Matter device records are not supported by this transport"
+        );
         assert_error(
             transport.configure_group(&group),
             "Matter groups are not supported by this transport",
