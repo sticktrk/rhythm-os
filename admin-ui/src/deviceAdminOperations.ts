@@ -472,6 +472,19 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     }
   },
   {
+    id: 'node-motion-activation',
+    category: 'Node Runtime',
+    label: 'Set motion activation',
+    description: 'Enable or disable motion-triggered activation for a node.',
+    method: 'PUT',
+    path: 'api/nodes/motion-activation',
+    body: {
+      node_id: '{node_id}',
+      enabled: true,
+      request_id: '{request_id}'
+    }
+  },
+  {
     id: 'node-profile-overrides',
     category: 'Node Runtime',
     label: 'Set profile overrides',
