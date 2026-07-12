@@ -1,7 +1,9 @@
 //! Test support — no-op and typed spy Matter transports.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -255,6 +257,9 @@ pub struct SpyTransport {
     failing_nodes: Mutex<HashSet<u64>>,
     failing_read_nodes: Mutex<HashSet<u64>>,
     timing_out_nodes: Mutex<HashSet<u64>>,
+    color_temperature_delay: Mutex<Option<Duration>>,
+    active_color_temperature: AtomicUsize,
+    max_active_color_temperature: AtomicUsize,
     failing_groups: Mutex<HashSet<u16>>,
     failing_group_removals: Mutex<HashSet<u16>>,
     group_removal_observer: Mutex<Option<GroupRemovalObserver>>,
@@ -274,6 +279,9 @@ impl SpyTransport {
             failing_nodes: Mutex::new(HashSet::new()),
             failing_read_nodes: Mutex::new(HashSet::new()),
             timing_out_nodes: Mutex::new(HashSet::new()),
+            color_temperature_delay: Mutex::new(None),
+            active_color_temperature: AtomicUsize::new(0),
+            max_active_color_temperature: AtomicUsize::new(0),
             failing_groups: Mutex::new(HashSet::new()),
             failing_group_removals: Mutex::new(HashSet::new()),
             group_removal_observer: Mutex::new(None),
@@ -338,6 +346,14 @@ impl SpyTransport {
 
     pub fn allow_node_commands(&self, node_id: u64) {
         self.timing_out_nodes.lock().unwrap().remove(&node_id);
+    }
+
+    pub fn delay_color_temperature(&self, delay: Duration) {
+        *self.color_temperature_delay.lock().unwrap() = Some(delay);
+    }
+
+    pub fn max_concurrent_color_temperature(&self) -> usize {
+        self.max_active_color_temperature.load(Ordering::SeqCst)
     }
 
     pub fn fail_group_commands(&self, group_id: u16) {
@@ -667,6 +683,14 @@ impl MatterTransport for SpyTransport {
             kelvin,
             transition_ms,
         });
+        let delay = *self.color_temperature_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            let active = self.active_color_temperature.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active_color_temperature
+                .fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(delay);
+            self.active_color_temperature.fetch_sub(1, Ordering::SeqCst);
+        }
         if timeout {
             return Err(Self::timeout_error(node_id));
         }

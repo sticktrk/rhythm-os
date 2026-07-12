@@ -500,6 +500,24 @@ mod tests {
         }
     }
 
+    fn sengled_w41_device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Sengled".to_string(),
+            product_name: "W41-N15A".to_string(),
+            vendor_id: 4448,
+            product_id: 36866,
+            serial_number: Some(format!("sengled-{node_id}")),
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: None,
+            max_kelvin: None,
+        }
+    }
+
     #[test]
     fn parse_simple_device_id() {
         assert_eq!(parse_device_id("matter-100"), Some((100, 1)));
@@ -623,6 +641,33 @@ mod tests {
         assert_eq!(
             metadata.device_quirks.get("matter-107"),
             Some(&vec![DeviceQuirk::NeedsXyNotCt])
+        );
+    }
+
+    #[test]
+    fn persisted_sengled_metadata_keeps_profile_xy_and_explicit_on() {
+        let state = shared_state("persisted-sengled-profile");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let device = sengled_w41_device(104);
+
+        let metadata = initial_device_metadata(
+            &state,
+            &[device_info_from_record(&device)],
+            &[device],
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &key,
+        );
+
+        assert!(metadata
+            .device_caps
+            .get("matter-104")
+            .is_some_and(LightCapabilities::supports_xy_color));
+        assert_eq!(
+            metadata.device_quirks.get("matter-104"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsXyNotCt,
+            ])
         );
     }
 
