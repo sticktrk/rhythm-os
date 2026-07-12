@@ -28,6 +28,8 @@ const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
+const MATTER_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(15);
+const MATTER_DEVICE_FANOUT_CONCURRENCY: usize = 8;
 
 fn env_flag_enabled(name: &str, default: bool) -> bool {
     std::env::var(name)
@@ -46,6 +48,7 @@ pub(crate) fn matter_group_fanout_only_enabled() -> bool {
 struct MatterOnOffReadBackoff {
     marked_at: Instant,
     suppress_until: Instant,
+    command_retry_after: Instant,
     suppress_commands: bool,
 }
 
@@ -54,6 +57,12 @@ enum MatterOnOffRead {
     On,
     Off,
     Suppressed,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MatterDeviceCommandOutcome {
+    successes: usize,
+    failures: usize,
 }
 
 fn initial_connectivity_backoff(
@@ -74,6 +83,7 @@ fn initial_connectivity_backoff(
                         MatterOnOffReadBackoff {
                             marked_at,
                             suppress_until,
+                            command_retry_after: marked_at,
                             suppress_commands: false,
                         },
                     )
@@ -377,6 +387,7 @@ impl MatterLightController {
                 MatterOnOffReadBackoff {
                     marked_at,
                     suppress_until: marked_at + MATTER_ON_OFF_READ_BACKOFF,
+                    command_retry_after: marked_at + MATTER_COMMAND_RETRY_BACKOFF,
                     suppress_commands,
                 },
             );
@@ -401,7 +412,11 @@ impl MatterLightController {
                         backoff.remove(&(node_id, endpoint));
                         return false;
                     }
-                    return include_read_only || entry.suppress_commands;
+                    return if include_read_only {
+                        true
+                    } else {
+                        entry.suppress_commands && entry.command_retry_after > now
+                    };
                 }
                 Some(_) => {
                     backoff.remove(&(node_id, endpoint));
@@ -463,6 +478,219 @@ impl MatterLightController {
             || lower.contains("failed to connect")
     }
 
+    /// Run one operation per Matter endpoint concurrently while preserving
+    /// the caller's input order in the returned outcomes. `rhythm-chipd`
+    /// handles control requests concurrently, so serial fan-out here only
+    /// stacks cold CASE-session latency across otherwise independent bulbs.
+    /// Keep the fan-out bounded below chipd's connection limit so unusually
+    /// large rooms cannot crowd out unrelated controller work.
+    fn parallel_device_fanout<T, F>(&self, device_ids: &[String], operation: F) -> Vec<T>
+    where
+        T: Send,
+        F: Fn(&str) -> T + Sync,
+    {
+        let mut outcomes = Vec::with_capacity(device_ids.len());
+        for chunk in device_ids.chunks(MATTER_DEVICE_FANOUT_CONCURRENCY) {
+            let mut chunk_outcomes = std::thread::scope(|scope| {
+                let operation = &operation;
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|device_id| scope.spawn(move || operation(device_id)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .expect("Matter device fan-out worker panicked")
+                    })
+                    .collect::<Vec<_>>()
+            });
+            outcomes.append(&mut chunk_outcomes);
+        }
+        outcomes
+    }
+
+    /// Apply one complete lighting command to one endpoint. Commands within a
+    /// bulb remain ordered (color before brightness); only independent bulbs
+    /// run concurrently.
+    fn turn_on_device(
+        &self,
+        device_id: &str,
+        command: &LightingCommand,
+    ) -> MatterDeviceCommandOutcome {
+        let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
+            warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
+            return MatterDeviceCommandOutcome {
+                successes: 0,
+                failures: 1,
+            };
+        };
+        if self.command_backoff_active(node_id, endpoint) {
+            tracing::debug!(
+                target: "cmd",
+                event = "matter_command_backoff_skip",
+                node_id,
+                endpoint,
+                backoff_secs = MATTER_COMMAND_RETRY_BACKOFF.as_secs(),
+                "Matter write skipped while endpoint is in connectivity backoff"
+            );
+            return MatterDeviceCommandOutcome {
+                successes: 0,
+                failures: 1,
+            };
+        }
+
+        let (caps, quirks) = self.device_metadata(device_id, node_id);
+        let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            command,
+            Self::color_preference(&quirks),
+        );
+        let throttle_ms = quirks.iter().find_map(|quirk| match quirk {
+            DeviceQuirk::CommandThrottleMs(ms) => Some(*ms),
+            _ => None,
+        });
+        let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
+
+        let mut outcome = MatterDeviceCommandOutcome::default();
+        let mut already_sent_on = false;
+        // Once a write to this device fails with a connectivity timeout,
+        // stop sending its remaining attribute commands. Other bulbs keep
+        // running in their own fan-out workers.
+        let mut unreachable = false;
+
+        if needs_explicit_on {
+            if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
+                warn!(
+                    target: "cmd",
+                    "Matter: explicit on command failed for node {}: {}",
+                    node_id,
+                    e
+                );
+                outcome.failures += 1;
+                unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
+            } else {
+                outcome.successes += 1;
+                already_sent_on = true;
+            }
+            Self::maybe_throttle(throttle_ms);
+        }
+
+        // Color attributes are sent before brightness so bulbs that treat a
+        // color command as a state reload cannot clobber the requested level.
+        if !unreachable {
+            if let Some((hue, saturation)) = adapted.hue_saturation {
+                if let Err(e) = self.transport.set_hue_saturation(
+                    node_id,
+                    endpoint,
+                    hue,
+                    saturation,
+                    adapted.transition_ms,
+                ) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: hue/saturation command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    outcome.failures += 1;
+                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
+                } else {
+                    outcome.successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            } else if let Some((x, y)) = adapted.xy {
+                if let Err(e) =
+                    self.transport
+                        .set_xy(node_id, endpoint, x, y, adapted.transition_ms)
+                {
+                    warn!(
+                        target: "cmd",
+                        "Matter: xy command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    outcome.failures += 1;
+                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
+                } else {
+                    outcome.successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            } else if let Some(kelvin) = adapted.kelvin {
+                if let Err(e) = self.transport.set_color_temperature(
+                    node_id,
+                    endpoint,
+                    kelvin,
+                    adapted.transition_ms,
+                ) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: color temperature command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    outcome.failures += 1;
+                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
+                } else {
+                    outcome.successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            }
+        }
+
+        if !unreachable {
+            if let Some(brightness) = adapted.brightness {
+                let level = clusters::brightness_to_level(brightness);
+                if let Err(e) =
+                    self.transport
+                        .set_brightness(node_id, endpoint, level, adapted.transition_ms)
+                {
+                    warn!(
+                        target: "cmd",
+                        "Matter: brightness command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    outcome.failures += 1;
+                    self.note_connectivity_failure(node_id, endpoint, &e, true);
+                } else {
+                    outcome.successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            } else if adapted.on && !already_sent_on {
+                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
+                    warn!(
+                        target: "cmd",
+                        "Matter: on command failed for node {}: {}",
+                        node_id,
+                        e
+                    );
+                    outcome.failures += 1;
+                    self.note_connectivity_failure(node_id, endpoint, &e, true);
+                } else {
+                    outcome.successes += 1;
+                }
+                Self::maybe_throttle(throttle_ms);
+            }
+        }
+
+        if outcome.successes > 0 {
+            self.clear_connectivity_backoff(node_id, endpoint);
+        }
+        if outcome.successes > 0 && outcome.failures > 0 {
+            warn!(
+                target: "cmd",
+                "Matter turn_on partial for device {}: successes={} failures={}",
+                device_id,
+                outcome.successes,
+                outcome.failures
+            );
+        }
+
+        outcome
+    }
+
     fn turn_on_devices(
         &self,
         target_label: &str,
@@ -474,184 +702,14 @@ impl MatterLightController {
         let mut partial_devices = 0usize;
         let mut failed_devices = 0usize;
 
-        for device_id in device_ids {
-            let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
-                warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
-                failed_devices += 1;
-                continue;
-            };
-            if self.command_backoff_active(node_id, endpoint) {
-                tracing::debug!(
-                    target: "cmd",
-                    event = "matter_command_backoff_skip",
-                    node_id,
-                    endpoint,
-                    backoff_secs = MATTER_ON_OFF_READ_BACKOFF.as_secs(),
-                    "Matter write skipped while endpoint is in connectivity backoff"
-                );
-                failed_devices += 1;
-                continue;
-            }
-
-            let (caps, quirks) = self.device_metadata(device_id, node_id);
-            let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
-                &caps,
-                &command,
-                Self::color_preference(&quirks),
-            );
-            let throttle_ms = quirks.iter().find_map(|quirk| match quirk {
-                DeviceQuirk::CommandThrottleMs(ms) => Some(*ms),
-                _ => None,
-            });
-            let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
-
-            let mut command_successes = 0usize;
-            let mut command_failures = 0usize;
-            let mut already_sent_on = false;
-            // Once a write to this device fails with a connectivity timeout,
-            // stop sending its remaining attribute commands. An unreachable
-            // device times out on every command in turn (~25s each on the CHIP
-            // stack), so a single dead group member would otherwise stall the
-            // whole dispatch for >75s. The read path (`any_lights_on_target`)
-            // already short-circuits the same way. See #169.
-            let mut unreachable = false;
-
-            if needs_explicit_on {
-                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: explicit on command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    command_failures += 1;
-                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                } else {
-                    command_successes += 1;
-                    already_sent_on = true;
-                }
-                Self::maybe_throttle(throttle_ms);
-            }
-
-            // Color attributes are sent before brightness so that bulbs that
-            // treat MoveToColorTemperature/MoveToColor as a level-resetting
-            // state reload (observed on budget Matter-over-WiFi bulbs)
-            // cannot clobber the user's requested brightness — see #51.
-            if !unreachable {
-                if let Some((hue, saturation)) = adapted.hue_saturation {
-                    if let Err(e) = self.transport.set_hue_saturation(
-                        node_id,
-                        endpoint,
-                        hue,
-                        saturation,
-                        adapted.transition_ms,
-                    ) {
-                        warn!(
-                            target: "cmd",
-                            "Matter: hue/saturation command failed for node {}: {}",
-                            node_id,
-                            e
-                        );
-                        command_failures += 1;
-                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                    } else {
-                        command_successes += 1;
-                    }
-                    Self::maybe_throttle(throttle_ms);
-                } else if let Some((x, y)) = adapted.xy {
-                    if let Err(e) =
-                        self.transport
-                            .set_xy(node_id, endpoint, x, y, adapted.transition_ms)
-                    {
-                        warn!(
-                            target: "cmd",
-                            "Matter: xy command failed for node {}: {}",
-                            node_id,
-                            e
-                        );
-                        command_failures += 1;
-                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                    } else {
-                        command_successes += 1;
-                    }
-                    Self::maybe_throttle(throttle_ms);
-                } else if let Some(kelvin) = adapted.kelvin {
-                    if let Err(e) = self.transport.set_color_temperature(
-                        node_id,
-                        endpoint,
-                        kelvin,
-                        adapted.transition_ms,
-                    ) {
-                        warn!(
-                            target: "cmd",
-                            "Matter: color temperature command failed for node {}: {}",
-                            node_id,
-                            e
-                        );
-                        command_failures += 1;
-                        unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                    } else {
-                        command_successes += 1;
-                    }
-                    Self::maybe_throttle(throttle_ms);
-                }
-            }
-
-            if !unreachable {
-                if let Some(brightness) = adapted.brightness {
-                    let level = clusters::brightness_to_level(brightness);
-                    if let Err(e) = self.transport.set_brightness(
-                        node_id,
-                        endpoint,
-                        level,
-                        adapted.transition_ms,
-                    ) {
-                        warn!(
-                            target: "cmd",
-                            "Matter: brightness command failed for node {}: {}",
-                            node_id,
-                            e
-                        );
-                        command_failures += 1;
-                        self.note_connectivity_failure(node_id, endpoint, &e, true);
-                    } else {
-                        command_successes += 1;
-                    }
-                    Self::maybe_throttle(throttle_ms);
-                } else if adapted.on && !already_sent_on {
-                    if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
-                        warn!(
-                            target: "cmd",
-                            "Matter: on command failed for node {}: {}",
-                            node_id,
-                            e
-                        );
-                        command_failures += 1;
-                        self.note_connectivity_failure(node_id, endpoint, &e, true);
-                    } else {
-                        command_successes += 1;
-                    }
-                    Self::maybe_throttle(throttle_ms);
-                }
-            }
-
-            if command_successes > 0 {
-                self.clear_connectivity_backoff(node_id, endpoint);
-            }
-
-            match (command_successes, command_failures) {
+        let outcomes = self.parallel_device_fanout(device_ids, |device_id| {
+            self.turn_on_device(device_id, &command)
+        });
+        for outcome in outcomes {
+            match (outcome.successes, outcome.failures) {
                 (0, _) => failed_devices += 1,
                 (_, 0) => successful_devices += 1,
-                _ => {
-                    partial_devices += 1;
-                    warn!(
-                        target: "cmd",
-                        "Matter turn_on partial for device {}: successes={} failures={}",
-                        device_id,
-                        command_successes,
-                        command_failures
-                    );
-                }
+                _ => partial_devices += 1,
             }
         }
 
@@ -984,10 +1042,9 @@ impl MatterLightController {
         let mut successful_devices = 0usize;
         let mut failed_devices = 0usize;
 
-        for device_id in device_ids {
+        let outcomes = self.parallel_device_fanout(device_ids, |device_id| {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
-                failed_devices += 1;
-                continue;
+                return false;
             };
             if self.command_backoff_active(node_id, endpoint) {
                 tracing::debug!(
@@ -995,20 +1052,26 @@ impl MatterLightController {
                     event = "matter_command_backoff_skip",
                     node_id,
                     endpoint,
-                    backoff_secs = MATTER_ON_OFF_READ_BACKOFF.as_secs(),
+                    backoff_secs = MATTER_COMMAND_RETRY_BACKOFF.as_secs(),
                     "Matter off skipped while endpoint is in connectivity backoff"
                 );
-                failed_devices += 1;
-                continue;
+                return false;
             }
 
             if let Err(e) = self.transport.set_on_off(node_id, endpoint, false) {
                 warn!(target: "cmd", "Matter: off command failed for node {}: {}", node_id, e);
                 self.note_connectivity_failure(node_id, endpoint, &e, true);
-                failed_devices += 1;
+                false
             } else {
-                successful_devices += 1;
                 self.clear_connectivity_backoff(node_id, endpoint);
+                true
+            }
+        });
+        for succeeded in outcomes {
+            if succeeded {
+                successful_devices += 1;
+            } else {
+                failed_devices += 1;
             }
         }
 
@@ -1598,6 +1661,26 @@ mod tests {
             .count()
     }
 
+    fn operations_for_node(
+        operations: &[RecordedOperation],
+        expected_node_id: u64,
+    ) -> Vec<RecordedOperation> {
+        operations
+            .iter()
+            .filter(|operation| match operation {
+                RecordedOperation::SetOnOff { node_id, .. }
+                | RecordedOperation::IdentifyLight { node_id, .. }
+                | RecordedOperation::SetBrightness { node_id, .. }
+                | RecordedOperation::SetColorTemperature { node_id, .. }
+                | RecordedOperation::SetXy { node_id, .. }
+                | RecordedOperation::SetHueSaturation { node_id, .. }
+                | RecordedOperation::ReadOnOff { node_id, .. } => *node_id == expected_node_id,
+                _ => false,
+            })
+            .cloned()
+            .collect()
+    }
+
     #[test]
     fn turn_on_breaks_read_only_backoff_for_nodes_marked_unreachable_at_boot() {
         let spy = Arc::new(SpyTransport::new());
@@ -1699,39 +1782,35 @@ mod tests {
         let operations = spy.operations();
         assert_eq!(operations.len(), 4);
 
-        assert!(matches!(
-            operations[0],
-            RecordedOperation::SetColorTemperature {
-                node_id: 42,
-                endpoint: 1,
-                ..
-            }
-        ));
+        for node_id in [42, 43] {
+            let node_operations = operations_for_node(&operations, node_id);
+            assert!(matches!(
+                node_operations[0],
+                RecordedOperation::SetColorTemperature { endpoint: 1, .. }
+            ));
+            assert_eq!(
+                node_operations[1],
+                RecordedOperation::SetBrightness {
+                    node_id,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn turn_on_fans_out_to_devices_concurrently() {
+        let (controller, spy, _) = make_controller();
+        spy.delay_color_temperature(Duration::from_millis(40));
+
+        block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
+
         assert_eq!(
-            operations[1],
-            RecordedOperation::SetBrightness {
-                node_id: 42,
-                endpoint: 1,
-                level: clusters::brightness_to_level(80),
-                transition_ms: None,
-            }
-        );
-        assert!(matches!(
-            operations[2],
-            RecordedOperation::SetColorTemperature {
-                node_id: 43,
-                endpoint: 1,
-                ..
-            }
-        ));
-        assert_eq!(
-            operations[3],
-            RecordedOperation::SetBrightness {
-                node_id: 43,
-                endpoint: 1,
-                level: clusters::brightness_to_level(80),
-                transition_ms: None,
-            }
+            spy.max_concurrent_color_temperature(),
+            2,
+            "independent Matter endpoints should not serialize cold-session latency"
         );
     }
 
@@ -1807,35 +1886,26 @@ mod tests {
 
         block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
 
-        assert_eq!(
-            spy.operations(),
-            vec![
-                RecordedOperation::SetColorTemperature {
-                    node_id: 42,
-                    endpoint: 1,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetBrightness {
-                    node_id: 42,
-                    endpoint: 1,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
-                RecordedOperation::SetColorTemperature {
-                    node_id: 43,
-                    endpoint: 1,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetBrightness {
-                    node_id: 43,
-                    endpoint: 1,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
-            ]
-        );
+        let operations = spy.operations();
+        for node_id in [42, 43] {
+            assert_eq!(
+                operations_for_node(&operations, node_id),
+                vec![
+                    RecordedOperation::SetColorTemperature {
+                        node_id,
+                        endpoint: 1,
+                        kelvin: 4000,
+                        transition_ms: None,
+                    },
+                    RecordedOperation::SetBrightness {
+                        node_id,
+                        endpoint: 1,
+                        level: clusters::brightness_to_level(80),
+                        transition_ms: None,
+                    },
+                ]
+            );
+        }
     }
 
     #[test]
@@ -1843,12 +1913,20 @@ mod tests {
         let (controller, spy, registry) = make_controller();
         set_kitchen_group(&registry, 65281);
         spy.set_probe_device(profiled_color_bulb(42, "Leedarson", "Smart RGBTW Bulb"));
-        spy.set_probe_device(profiled_color_bulb(43, "Sengled", "W41-N15A"));
+        let mut sengled = profiled_color_bulb(43, "Sengled", "W41-N15A");
+        sengled.vendor_id = 4448;
+        sengled.product_id = 36866;
+        sengled.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
+        spy.set_probe_device(sengled);
 
         block_on(controller.turn_on("kitchen", LightingCommand::new(50, 1809))).unwrap();
 
+        let operations = spy.operations();
         assert_eq!(
-            spy.operations(),
+            operations_for_node(&operations, 42),
             vec![
                 RecordedOperation::SetOnOff {
                     node_id: 42,
@@ -1866,6 +1944,16 @@ mod tests {
                     endpoint: 1,
                     level: clusters::brightness_to_level(50),
                     transition_ms: None,
+                },
+            ]
+        );
+        assert_eq!(
+            operations_for_node(&operations, 43),
+            vec![
+                RecordedOperation::SetOnOff {
+                    node_id: 43,
+                    endpoint: 1,
+                    on: true,
                 },
                 RecordedOperation::SetXy {
                     node_id: 43,
@@ -1900,9 +1988,10 @@ mod tests {
         ))
         .unwrap();
 
+        let operations = spy.operations();
         assert_eq!(
-            spy.operations(),
-            vec![
+            &operations[..2],
+            &[
                 RecordedOperation::SetGroupColorTemperature {
                     group_id,
                     kelvin: 4000,
@@ -1913,32 +2002,27 @@ mod tests {
                     level: clusters::brightness_to_level(80),
                     transition_ms: None,
                 },
-                RecordedOperation::SetColorTemperature {
-                    node_id: 42,
-                    endpoint: 1,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetBrightness {
-                    node_id: 42,
-                    endpoint: 1,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
-                RecordedOperation::SetColorTemperature {
-                    node_id: 43,
-                    endpoint: 1,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetBrightness {
-                    node_id: 43,
-                    endpoint: 1,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
             ]
         );
+        for node_id in [42, 43] {
+            assert_eq!(
+                operations_for_node(&operations, node_id),
+                vec![
+                    RecordedOperation::SetColorTemperature {
+                        node_id,
+                        endpoint: 1,
+                        kelvin: 4000,
+                        transition_ms: None,
+                    },
+                    RecordedOperation::SetBrightness {
+                        node_id,
+                        endpoint: 1,
+                        level: clusters::brightness_to_level(80),
+                        transition_ms: None,
+                    },
+                ]
+            );
+        }
     }
 
     #[test]
@@ -2128,21 +2212,18 @@ mod tests {
 
         block_on(controller.turn_off("kitchen", None)).unwrap();
 
-        assert_eq!(
-            spy.operations(),
-            vec![
-                RecordedOperation::SetOnOff {
-                    node_id: 42,
+        let operations = spy.operations();
+        assert_eq!(operations.len(), 2);
+        for node_id in [42, 43] {
+            assert_eq!(
+                operations_for_node(&operations, node_id),
+                vec![RecordedOperation::SetOnOff {
+                    node_id,
                     endpoint: 1,
                     on: false,
-                },
-                RecordedOperation::SetOnOff {
-                    node_id: 43,
-                    endpoint: 1,
-                    on: false,
-                },
-            ]
-        );
+                }]
+            );
+        }
     }
 
     #[test]
@@ -2153,21 +2234,18 @@ mod tests {
 
         block_on(controller.turn_off("kitchen", None)).unwrap();
 
-        assert_eq!(
-            spy.operations(),
-            vec![
-                RecordedOperation::SetOnOff {
-                    node_id: 42,
+        let operations = spy.operations();
+        assert_eq!(operations.len(), 2);
+        for node_id in [42, 43] {
+            assert_eq!(
+                operations_for_node(&operations, node_id),
+                vec![RecordedOperation::SetOnOff {
+                    node_id,
                     endpoint: 1,
                     on: false,
-                },
-                RecordedOperation::SetOnOff {
-                    node_id: 43,
-                    endpoint: 1,
-                    on: false,
-                },
-            ]
-        );
+                }]
+            );
+        }
     }
 
     #[test]
@@ -2186,25 +2264,25 @@ mod tests {
         ))
         .unwrap();
 
+        let operations = spy.operations();
         assert_eq!(
-            spy.operations(),
-            vec![
-                RecordedOperation::SetGroupOnOff {
-                    group_id,
-                    on: false,
-                },
-                RecordedOperation::SetOnOff {
-                    node_id: 42,
-                    endpoint: 1,
-                    on: false,
-                },
-                RecordedOperation::SetOnOff {
-                    node_id: 43,
-                    endpoint: 1,
-                    on: false,
-                },
-            ]
+            operations[0],
+            RecordedOperation::SetGroupOnOff {
+                group_id,
+                on: false,
+            }
         );
+        assert_eq!(operations.len(), 3);
+        for node_id in [42, 43] {
+            assert_eq!(
+                operations_for_node(&operations, node_id),
+                vec![RecordedOperation::SetOnOff {
+                    node_id,
+                    endpoint: 1,
+                    on: false,
+                }]
+            );
+        }
     }
 
     #[test]
@@ -2463,6 +2541,34 @@ mod tests {
             operation,
             RecordedOperation::SetBrightness { node_id: 42, .. }
         )));
+    }
+
+    #[test]
+    fn command_retry_backoff_expires_before_read_backoff() {
+        let (controller, spy, _) = make_controller();
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+        spy.timeout_node_commands(42);
+
+        let first = block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000)));
+        assert!(matches!(first, Err(LightControlError::CommandFailed(_))));
+        assert_eq!(write_count_for_node(&spy.operations(), 42), 1);
+
+        spy.allow_node_commands(42);
+        let mut backoff = controller.on_off_read_backoff.lock().unwrap();
+        let entry = backoff.get_mut(&(42, 1)).unwrap();
+        entry.command_retry_after = Instant::now() - Duration::from_millis(1);
+        assert!(entry.suppress_until > Instant::now());
+        drop(backoff);
+
+        block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000))).unwrap();
+
+        assert_eq!(
+            write_count_for_node(&spy.operations(), 42),
+            3,
+            "a recovered session should be retried without waiting for the two-minute read backoff"
+        );
     }
 
     #[test]

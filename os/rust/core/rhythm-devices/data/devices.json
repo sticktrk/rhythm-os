@@ -521,7 +521,7 @@
     "light_type": "extended_color",
     "color_modes": ["xy", "color_temperature"],
     "matter": {
-      "quirks": ["needs_xy_not_ct"]
+      "quirks": ["needs_explicit_on", "needs_xy_not_ct"]
     }
   },
   {

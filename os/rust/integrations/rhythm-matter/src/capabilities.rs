@@ -81,6 +81,23 @@ pub fn enrich_from_db(
         if caps.min_brightness.is_none() {
             caps.min_brightness = entry.min_brightness;
         }
+
+        // Some Matter bulbs omit XY from their descriptor even though XY is
+        // the only reliable color path they implement. A NeedsXyNotCt profile
+        // is therefore also authoritative capability evidence; without this
+        // enrichment the preference cannot ever select XY and silently falls
+        // back to the known-broken color-temperature command.
+        let needs_xy = entry
+            .matter
+            .as_ref()
+            .is_some_and(|matter| matter.quirks.contains(&DeviceQuirk::NeedsXyNotCt));
+        if needs_xy
+            && entry.capabilities().supports_xy_color()
+            && !caps.color_modes.contains(&ColorMode::Xy)
+        {
+            caps.color_modes.push(ColorMode::Xy);
+            caps.light_type = LightType::ExtendedColor;
+        }
     }
 }
 
@@ -277,6 +294,36 @@ mod tests {
         assert_eq!(caps.gamut, None);
         assert_eq!(caps.min_brightness, None);
         assert_eq!(caps.min_kelvin, Some(2700));
+    }
+
+    #[test]
+    fn needs_xy_profile_restores_xy_when_matter_descriptor_omits_it() {
+        let device = CommissionedDevice {
+            node_id: 104,
+            vendor_name: "Sengled".to_string(),
+            product_name: "W41-N15A".to_string(),
+            vendor_id: 4448,
+            product_id: 36866,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: None,
+            max_kelvin: None,
+        };
+
+        let mut caps = capabilities_from_commissioned(&device);
+        assert!(!caps.supports_xy_color());
+
+        enrich_from_db(&mut caps, &device, rhythm_devices::builtin_db());
+
+        assert!(caps.supports_xy_color());
+        assert_eq!(
+            quirks_from_db(&device, rhythm_devices::builtin_db()),
+            vec![DeviceQuirk::NeedsExplicitOn, DeviceQuirk::NeedsXyNotCt]
+        );
     }
 
     #[test]
