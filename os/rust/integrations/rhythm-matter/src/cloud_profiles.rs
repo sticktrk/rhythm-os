@@ -96,6 +96,8 @@ pub struct CloudMatterProfileQuirks {
     #[serde(default)]
     pub needs_xy_not_ct: Option<bool>,
     #[serde(default)]
+    pub needs_hue_saturation_not_ct: Option<bool>,
+    #[serde(default)]
     pub xy_color_commands_ack_but_no_visible_change: Option<bool>,
     #[serde(default)]
     pub recommended_command_spacing_ms: Option<u32>,
@@ -181,6 +183,11 @@ impl CloudMatterDeviceProfile {
             || self.capabilities.preferred_color_command.as_deref() == Some("xy")
         {
             push_unique_quirk(quirks, DeviceQuirk::NeedsXyNotCt);
+        }
+        if self.quirks.needs_hue_saturation_not_ct == Some(true)
+            || self.capabilities.preferred_color_command.as_deref() == Some("hue_saturation")
+        {
+            push_unique_quirk(quirks, DeviceQuirk::NeedsHueSaturationNotCt);
         }
         if let Some(ms) = self
             .quirks
@@ -318,6 +325,9 @@ fn device_quirk_from_value(value: &serde_json::Value) -> Option<DeviceQuirk> {
         serde_json::Value::String(value) if value == "needs_xy_not_ct" => {
             Some(DeviceQuirk::NeedsXyNotCt)
         }
+        serde_json::Value::String(value) if value == "needs_hue_saturation_not_ct" => {
+            Some(DeviceQuirk::NeedsHueSaturationNotCt)
+        }
         serde_json::Value::Object(map) => map
             .get("command_throttle_ms")
             .and_then(serde_json::Value::as_u64)
@@ -433,10 +443,12 @@ mod tests {
             quirks: CloudMatterProfileQuirks {
                 needs_explicit_on: Some(true),
                 needs_xy_not_ct: Some(true),
+                needs_hue_saturation_not_ct: Some(true),
                 recommended_command_spacing_ms: Some(0),
                 runtime_quirks: vec![
                     serde_json::json!("needs_explicit_on"),
                     serde_json::json!("needs_xy_not_ct"),
+                    serde_json::json!("needs_hue_saturation_not_ct"),
                     serde_json::json!({"command_throttle_ms": 125}),
                     serde_json::json!({"command_throttle_ms": 9_999_999_999_u64}),
                     serde_json::json!("unknown"),
@@ -468,6 +480,7 @@ mod tests {
             1
         );
         assert!(quirks.contains(&DeviceQuirk::NeedsXyNotCt));
+        assert!(quirks.contains(&DeviceQuirk::NeedsHueSaturationNotCt));
         assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(125)));
     }
 

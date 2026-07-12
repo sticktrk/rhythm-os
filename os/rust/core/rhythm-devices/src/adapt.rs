@@ -16,7 +16,13 @@ use crate::capabilities::LightCapabilities;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ColorRequest {
     /// The engine requested a kelvin target plus an xy fallback derived from it.
-    ColorTemperature { kelvin: u16, xy: (f32, f32) },
+    ColorTemperature {
+        kelvin: u16,
+        xy: (f32, f32),
+        /// Hue/saturation representation of the same white target when the
+        /// protocol or device only applies that command family reliably.
+        hue_saturation: Option<(u8, u8)>,
+    },
     /// The engine requested direct color with both xy and hue/saturation forms.
     DirectColor {
         xy: (f32, f32),
@@ -33,6 +39,9 @@ pub enum ColorPreference {
     PreferColorTemperature,
     /// Prefer xy when supported, otherwise fall back to color temperature.
     PreferXy,
+    /// Prefer hue/saturation when supported, otherwise fall back to color
+    /// temperature and then xy.
+    PreferHueSaturation,
 }
 
 /// A lighting command adapted to a specific device's capabilities.
@@ -127,7 +136,11 @@ fn select_color(
                 (None, None, None)
             }
         }
-        ColorRequest::ColorTemperature { kelvin, xy } => {
+        ColorRequest::ColorTemperature {
+            kelvin,
+            xy,
+            hue_saturation,
+        } => {
             let clamped_kelvin = clamp_kelvin(kelvin, caps.min_kelvin, caps.max_kelvin);
             let clamped_xy = clamp_xy(caps, xy);
 
@@ -136,8 +149,10 @@ fn select_color(
                     (Some(clamped_kelvin), None, None)
                 }
                 ColorPreference::PreferXy if supports_xy => (None, Some(clamped_xy), None),
+                ColorPreference::PreferHueSaturation if supports_hs => (None, None, hue_saturation),
                 _ if supports_ct => (Some(clamped_kelvin), None, None),
                 _ if supports_xy => (None, Some(clamped_xy), None),
+                _ if supports_hs => (None, None, hue_saturation),
                 _ => (None, None, None),
             }
         }
@@ -193,6 +208,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             Some(500),
             ColorPreference::PreferColorTemperature,
@@ -215,6 +231,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             Some(500),
             ColorPreference::PreferColorTemperature,
@@ -240,6 +257,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             None,
             ColorPreference::PreferColorTemperature,
@@ -260,6 +278,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             None,
             ColorPreference::PreferColorTemperature,
@@ -278,6 +297,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             Some(1000),
             ColorPreference::PreferColorTemperature,
@@ -321,6 +341,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 6500,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             None,
             ColorPreference::PreferColorTemperature,
@@ -338,6 +359,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.31, 0.33),
+                hue_saturation: None,
             },
             Some(500),
             ColorPreference::PreferColorTemperature,
@@ -359,6 +381,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.31, 0.33),
+                hue_saturation: None,
             },
             Some(500),
             ColorPreference::PreferXy,
@@ -368,6 +391,34 @@ mod tests {
         assert_eq!(adapted.kelvin, None);
         assert_eq!(adapted.xy, Some((0.31, 0.33)));
         assert_eq!(adapted.hue_saturation, None);
+    }
+
+    #[test]
+    fn extended_color_prefers_hue_saturation_for_white_targets_when_requested() {
+        let caps = LightCapabilities {
+            color_modes: vec![
+                ColorMode::HueSaturation,
+                ColorMode::Xy,
+                ColorMode::ColorTemperature,
+            ],
+            ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+        };
+        let adapted = adapt_command(
+            &caps,
+            80,
+            ColorRequest::ColorTemperature {
+                kelvin: 1800,
+                xy: (0.55, 0.408),
+                hue_saturation: Some((11, 254)),
+            },
+            Some(500),
+            ColorPreference::PreferHueSaturation,
+        );
+
+        assert_eq!(adapted.brightness, Some(80));
+        assert_eq!(adapted.kelvin, None);
+        assert_eq!(adapted.xy, None);
+        assert_eq!(adapted.hue_saturation, Some((11, 254)));
     }
 
     #[test]
@@ -453,6 +504,7 @@ mod tests {
             ColorRequest::ColorTemperature {
                 kelvin: 4000,
                 xy: (0.3, 0.3),
+                hue_saturation: None,
             },
             Some(500),
             ColorPreference::PreferColorTemperature,
