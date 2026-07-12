@@ -6,6 +6,7 @@ pub const BUILD_VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
 };
 
 pub mod auto_update;
+pub mod boot_diagnostics;
 pub mod bootstate;
 pub mod debug_bundle;
 pub mod http_server;

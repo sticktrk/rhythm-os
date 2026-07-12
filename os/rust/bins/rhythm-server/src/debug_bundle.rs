@@ -57,6 +57,17 @@ const OPTIONAL_PERSISTED_FILES: &[&str] = &[
 ];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const OTA_DEBUG_FILES: &[&str] = &[crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH];
+const BOOT_DIAGNOSTIC_FILES: &[&str] = &[
+    crate::boot_diagnostics::CURRENT_BOOT_FILE,
+    crate::boot_diagnostics::PREVIOUS_BOOT_FILE,
+    crate::boot_diagnostics::RESTART_INTENT_FILE,
+    crate::boot_diagnostics::PREVIOUS_RESTART_INTENT_FILE,
+    crate::boot_diagnostics::LAST_GASP_FILE,
+    crate::boot_diagnostics::PREVIOUS_LAST_GASP_FILE,
+    crate::boot_diagnostics::KERNEL_CURRENT_FILE,
+    crate::boot_diagnostics::KERNEL_PREVIOUS_FILE,
+    crate::boot_diagnostics::HARDWARE_RESET_FILE,
+];
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
 #[cfg(target_os = "linux")]
 const THREAD_SNAPSHOT_ENTRY_LIMIT: usize = 64;
@@ -334,6 +345,39 @@ struct RuntimeHubHealth {
     reconnect_sync_age_secs: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     startup_retry: Option<RuntimeHubStartupRetryHealth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hue_sse: Option<RuntimeHueSseHealth>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeHueSseHealth {
+    pending_write_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oldest_pending_write_age_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_connected_epoch_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_sse_activity_epoch_ms: Option<i64>,
+    connection_count: u64,
+    reconnect_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_reconnect_reason: Option<String>,
+}
+
+fn runtime_hue_sse_health(hub: &rhythm_os::hub::ActiveHub) -> Option<RuntimeHueSseHealth> {
+    let snapshot = hub
+        .data::<rhythm_hue::hub_state::HueHubData>()?
+        .sse_liveness
+        .snapshot();
+    Some(RuntimeHueSseHealth {
+        pending_write_count: snapshot.pending_write_count,
+        oldest_pending_write_age_secs: snapshot.oldest_pending_write_age_secs,
+        last_connected_epoch_ms: snapshot.last_connected_epoch_ms,
+        last_sse_activity_epoch_ms: snapshot.last_sse_activity_epoch_ms,
+        connection_count: snapshot.connection_count,
+        reconnect_count: snapshot.reconnect_count,
+        last_reconnect_reason: snapshot.last_reconnect_reason,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -1308,6 +1352,41 @@ fn discover_persisted_artifacts(
         }
     }
 
+    for file_name in BOOT_DIAGNOSTIC_FILES {
+        let source_path = data_dir.join(file_name);
+        if source_path.is_file() {
+            discovered.push(FileArtifact {
+                source_path,
+                archive_path: format!("persisted/{file_name}"),
+            });
+        }
+    }
+
+    let pstore_dir = data_dir.join(crate::boot_diagnostics::PSTORE_DIR);
+    if let Ok(entries) = fs::read_dir(pstore_dir) {
+        for entry in entries.flatten().take(8) {
+            let source_path = entry.path();
+            if !source_path.is_file() {
+                continue;
+            }
+            let Some(file_name) = source_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            discovered.push(FileArtifact {
+                source_path,
+                archive_path: format!(
+                    "persisted/{}/{}",
+                    crate::boot_diagnostics::PSTORE_DIR,
+                    file_name
+                ),
+            });
+        }
+    }
+
     let entries = match fs::read_dir(&data_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1871,7 +1950,10 @@ fn linux_clock_ticks_per_second(diagnostics: &mut BundleDiagnostics) -> Option<u
     }
 }
 
-fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -> Result<String> {
+pub(crate) fn build_runtime_health_json(
+    state: &SharedState,
+    generated_at: DateTime<Utc>,
+) -> Result<String> {
     let now_epoch_ms = generated_at.timestamp_millis();
     let now_instant = std::time::Instant::now();
     let s = lock_state(state)?;
@@ -1920,6 +2002,7 @@ fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -
                         last_error: retry.last_error.clone(),
                     }
                 }),
+                hue_sse: runtime_hue_sse_health(hub),
             }
         })
         .collect::<Vec<_>>();
@@ -1963,6 +2046,7 @@ fn build_runtime_health_json(state: &SharedState, generated_at: DateTime<Utc>) -
                     manual_retry_required: retry.manual_retry_required,
                     last_error: retry.last_error.clone(),
                 }),
+            hue_sse: None,
         });
     }
     hubs.sort_by(|left, right| left.hub_key.cmp(&right.hub_key));
@@ -3641,6 +3725,19 @@ mod tests {
             br#"{"schema_version":1,"last_check":{"decision":"up_to_date"}}"#,
         )
         .unwrap();
+        fs::create_dir_all(data_dir.join(crate::boot_diagnostics::PSTORE_DIR)).unwrap();
+        fs::write(
+            data_dir.join(crate::boot_diagnostics::PREVIOUS_BOOT_FILE),
+            br#"{"schema_version":1,"classification":"unplanned_host_restart_unknown"}"#,
+        )
+        .unwrap();
+        fs::write(
+            data_dir
+                .join(crate::boot_diagnostics::PSTORE_DIR)
+                .join("dmesg-ramoops-0"),
+            b"prior-kernel-panic",
+        )
+        .unwrap();
 
         let state: SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
@@ -3730,6 +3827,21 @@ mod tests {
                 .map(Vec::as_slice),
             Some(br#"{"schema_version":1,"last_check":{"decision":"up_to_date"}}"#.as_slice())
         );
+        assert_eq!(
+            files
+                .get("persisted/boot-diagnostics/previous-boot.json")
+                .map(Vec::as_slice),
+            Some(
+                br#"{"schema_version":1,"classification":"unplanned_host_restart_unknown"}"#
+                    .as_slice()
+            )
+        );
+        assert_eq!(
+            files
+                .get("persisted/boot-diagnostics/pstore/dmesg-ramoops-0")
+                .map(Vec::as_slice),
+            Some(b"prior-kernel-panic".as_slice())
+        );
         assert!(!files.contains_key("persisted/cloudflared/connector_token"));
         assert!(files.contains_key("state.json"));
         assert!(files.contains_key("profile_bundle.json"));
@@ -3752,7 +3864,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            8
+            10
         );
         assert!(!manifest["missing_persisted_files"]
             .as_array()

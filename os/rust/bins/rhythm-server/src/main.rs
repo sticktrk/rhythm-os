@@ -45,6 +45,18 @@ fn main() -> Result<()> {
 
     info!(target: "sys", "Rhythm Server v{} starting...", VERSION);
 
+    // Expand and create the data dir before any startup checks can exit so
+    // this process attempt remains visible to the next debug bundle.
+    let data_dir = shellexpand(&args.data_dir);
+    std::fs::create_dir_all(&data_dir)?;
+    std::env::set_var("RHYTHM_DATA_DIR", &data_dir);
+    if let Err(error) = rhythm_server::boot_diagnostics::record_startup(
+        std::path::Path::new(&data_dir),
+        &platform_type,
+    ) {
+        warn!(target: "sys", "Failed to record boot diagnostics: {}", error);
+    }
+
     // If a self-update was just installed, count this start attempt and roll
     // back to the previous binaries once a crash-looping build exhausts its
     // probation. Must run before anything that could crash the process.
@@ -69,7 +81,7 @@ fn main() -> Result<()> {
                 if restored.len() == 1 { "y" } else { "ies" }
             );
             rhythm_server::ota_history::record(
-                std::path::Path::new(&shellexpand(&args.data_dir)),
+                std::path::Path::new(&data_dir),
                 rhythm_server::ota_history::entry(
                     previous_version.as_deref(),
                     target_version.as_deref(),
@@ -80,10 +92,6 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
     }
-
-    // Expand ~ in data dir
-    let data_dir = shellexpand(&args.data_dir);
-    std::fs::create_dir_all(&data_dir)?;
 
     // Create storage backend
     let file_storage = FileStorage::new(&data_dir)?;
@@ -188,6 +196,10 @@ fn main() -> Result<()> {
     }
 
     info!(target: "sys", "Data directory: {}", data_dir);
+    rhythm_server::boot_diagnostics::spawn_last_gasp_recorder(
+        state.clone(),
+        std::path::PathBuf::from(&data_dir),
+    );
 
     // Spawn event loop on a dedicated std::thread (not tokio)
     {

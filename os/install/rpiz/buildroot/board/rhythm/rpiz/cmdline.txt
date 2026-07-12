@@ -1,1 +1,1 @@
-console=tty1 root=/dev/mmcblk0p2 rootwait rw
+console=tty1 root=/dev/mmcblk0p2 rootwait rw panic=10

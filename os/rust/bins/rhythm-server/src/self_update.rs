@@ -2473,6 +2473,16 @@ pub fn schedule_liveness_restart() {
 
 fn schedule_restart(reason: &'static str) {
     let dry_run = restart_dry_run_enabled();
+    if !dry_run {
+        if let Err(error) = crate::boot_diagnostics::record_restart_intent(reason) {
+            log::warn!(
+                target: "sys",
+                "Failed to persist restart intent ({}): {}",
+                reason,
+                error
+            );
+        }
+    }
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1));
         if dry_run {

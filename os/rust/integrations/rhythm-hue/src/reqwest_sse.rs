@@ -73,7 +73,7 @@ fn build_sse_client() -> Result<reqwest::Client, reqwest::Error> {
 #[derive(Debug, Eq, PartialEq)]
 enum StreamEnd {
     Shutdown,
-    Reconnect,
+    Reconnect(&'static str),
 }
 
 /// Consume one established Hue event stream until shutdown or a real stream
@@ -127,7 +127,7 @@ where
                         "SSE line exceeded {} bytes without newline, reconnecting",
                         MAX_SSE_LINE_BYTES
                     );
-                    return StreamEnd::Reconnect;
+                    return StreamEnd::Reconnect("oversized_sse_line");
                 }
 
                 if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
@@ -143,11 +143,11 @@ where
             }
             Ok(Some(Err(e))) => {
                 warn!(target: "sse", "SSE error: {}{}", e, fd_log_suffix());
-                return StreamEnd::Reconnect;
+                return StreamEnd::Reconnect("stream_error");
             }
             Ok(None) => {
                 warn!(target: "sse", "SSE stream ended");
-                return StreamEnd::Reconnect;
+                return StreamEnd::Reconnect("stream_ended");
             }
             Err(_) => {
                 if let Some(failure) =
@@ -159,7 +159,7 @@ where
                         failure.oldest_age.as_secs(),
                         failure.pending_count
                     );
-                    return StreamEnd::Reconnect;
+                    return StreamEnd::Reconnect("expected_activity_timeout");
                 }
 
                 // Quiet streams are valid until a successful bridge write
@@ -232,6 +232,7 @@ async fn run_sse_loop(
         let client = match build_sse_client() {
             Ok(c) => c,
             Err(e) => {
+                sse_liveness.note_reconnect("client_build_error");
                 warn!(
                     target: "sse",
                     "Failed to build SSE client: {}{}",
@@ -260,6 +261,7 @@ async fn run_sse_loop(
         .await
         {
             Err(_) => {
+                sse_liveness.note_reconnect("connect_timeout");
                 warn!(
                     target: "sse",
                     "SSE connect timed out after {}s{}",
@@ -274,6 +276,7 @@ async fn run_sse_loop(
             Ok(Ok(response)) => match response.error_for_status() {
                 Ok(response) => response,
                 Err(e) => {
+                    sse_liveness.note_reconnect("http_status_error");
                     warn!(
                         target: "sse",
                         "SSE connect failed: {}{}",
@@ -287,6 +290,7 @@ async fn run_sse_loop(
                 }
             },
             Ok(Err(e)) => {
+                sse_liveness.note_reconnect("request_error");
                 warn!(
                     target: "sse",
                     "SSE request failed: {}{}",
@@ -307,7 +311,7 @@ async fn run_sse_loop(
         let _ = tx.try_send(HueSseEvent::Connected);
         backoff = Duration::from_secs(1);
 
-        if consume_sse_stream(
+        let stream_end = consume_sse_stream(
             &mut stream,
             tx,
             shutdown,
@@ -316,10 +320,10 @@ async fn run_sse_loop(
             Duration::from_secs(SSE_SHUTDOWN_POLL_SECS),
             Duration::from_secs(SSE_EXPECTED_ACTIVITY_TIMEOUT_SECS),
         )
-        .await
-            == StreamEnd::Shutdown
-        {
-            return;
+        .await;
+        match stream_end {
+            StreamEnd::Shutdown => return,
+            StreamEnd::Reconnect(reason) => sse_liveness.note_reconnect(reason),
         }
 
         if !shutdown.load(Ordering::Relaxed) {
@@ -412,7 +416,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome, StreamEnd::Reconnect);
+        assert_eq!(outcome, StreamEnd::Reconnect("stream_ended"));
     }
 
     #[tokio::test]
@@ -435,7 +439,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome, StreamEnd::Reconnect);
+        assert_eq!(outcome, StreamEnd::Reconnect("expected_activity_timeout"));
     }
 
     #[tokio::test]
