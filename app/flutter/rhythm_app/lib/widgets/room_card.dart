@@ -313,13 +313,29 @@ class _RoomCardState extends State<RoomCard> {
   /// turn the room on and reset it to the live adaptive curve — same outcome as
   /// the "Reset to curve" affordance.
   void _resetToOn() {
+    HapticFeedback.mediumImpact();
+    final roomProvider = context.read<RoomProvider>();
     final serverSync = context.read<ServerSyncProvider>();
-    // Sequence the two writes: fired concurrently, the reset can land before
-    // the preferences-set, which then re-raises server-side work the reset
-    // already settled.
-    unawaited(_applyModeChange(RoomMode.on).then((_) {
-      serverSync.dispatchResetNode(widget.roomId);
-    }));
+    final previousMode =
+        _analyticsModeForState(roomProvider.getDisplayRoomState(widget.roomId));
+
+    // Reset is the complete server action: it enables Rhythm, clears offsets,
+    // leaves off states, and dispatches the live curve. Sending an Active
+    // preference first duplicates the physical Matter command.
+    roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+    roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
+    serverSync.dispatchResetNode(widget.roomId);
+    AnalyticsService().logRoomModeChanged(
+      roomId: widget.roomId,
+      previousMode: previousMode,
+      nextMode: RoomMode.on.name,
+    );
+    setState(() {
+      _sliderBrightness = null;
+      _cctMode = false;
+      _sliderKelvin = null;
+    });
   }
 
   /// Reset this node to its adaptive curve position.

@@ -861,7 +861,17 @@ class RoomProvider extends ChangeNotifier {
     final roomStateLocked = _roomStateLockedUntil[roomId];
     final roomStateUnlocked =
         roomStateLocked == null || DateTime.now().isAfter(roomStateLocked);
-    if (roomStateUnlocked) {
+    final acknowledgedState = _acknowledgedRoomStates[roomId];
+    final pendingProtectsState = pendingDispatch &&
+        acknowledgedState != null &&
+        _roomStates[roomId] == acknowledgedState &&
+        state != acknowledgedState;
+    if (pendingProtectsState) {
+      // A pending command can outlive the short optimistic lock. Do not let a
+      // pre-command snapshot flip the card while physical delivery is still
+      // unresolved; the pending=false outcome remains authoritative.
+      _suppressedRoomStates.remove(roomId);
+    } else if (roomStateUnlocked) {
       _suppressedRoomStates.remove(roomId);
       _acknowledgedRoomStates.remove(roomId);
       if (_roomStates[roomId] != state) {
@@ -888,7 +898,14 @@ class RoomProvider extends ChangeNotifier {
     // Update observed lights_on (respecting the 3s lock for optimistic UI).
     if (lightsOn != null) {
       final lockedUntil = _lightsOnLockedUntil[roomId];
-      if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
+      final acknowledgedLightsOn = _acknowledgedLightsOn[roomId];
+      final pendingProtectsLights = pendingDispatch &&
+          acknowledgedLightsOn != null &&
+          room.lightsOn == acknowledgedLightsOn &&
+          lightsOn != acknowledgedLightsOn;
+      if (pendingProtectsLights) {
+        _suppressedLightsOn.remove(roomId);
+      } else if (lockedUntil == null || DateTime.now().isAfter(lockedUntil)) {
         _suppressedLightsOn.remove(roomId);
         _acknowledgedLightsOn.remove(roomId);
         if (room.lightsOn != lightsOn) {

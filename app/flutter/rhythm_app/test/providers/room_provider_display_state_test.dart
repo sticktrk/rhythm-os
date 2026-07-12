@@ -264,6 +264,64 @@ void main() {
       });
     });
 
+    test('keeps acknowledged state while dispatch remains pending', () {
+      fakeAsync((async) {
+        unawaited(provider.addRoom(
+          const RoomDto(
+            id: 'room-1',
+            name: 'Matter',
+            source: RoomSourceDto.matter,
+            deviceIds: ['matter-104', 'matter-106', 'matter-107'],
+            rhythmEnabled: true,
+            disabled: false,
+            lightsOn: false,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+          ),
+        ));
+        async.flushMicrotasks();
+
+        unawaited(provider.setRoomLightsOnLocal('room-1', true));
+        provider.setRoomStateLocal('room-1', RoomModeState.active);
+        provider.acknowledgeOptimisticNodeState(
+          'room-1',
+          state: RoomModeState.active,
+          lightsOn: true,
+        );
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(seconds: 4));
+        unawaited(provider.applyServerNodeState(
+          'room-1',
+          rhythmEnabled: true,
+          timeOffset: 0,
+          brightnessOffset: 0,
+          state: RoomModeState.active,
+          pendingDispatch: true,
+          lightsOn: false,
+        ));
+        async.flushMicrotasks();
+
+        expect(provider.isNodeDispatchPending('room-1'), isTrue);
+        expect(provider.getRoomState('room-1'), RoomModeState.active);
+        expect(provider.getDisplayRoomState('room-1'), RoomModeState.active);
+
+        unawaited(provider.applyServerNodeState(
+          'room-1',
+          rhythmEnabled: true,
+          timeOffset: 0,
+          brightnessOffset: 0,
+          state: RoomModeState.hardOff,
+          pendingDispatch: false,
+          lightsOn: false,
+        ));
+        async.flushMicrotasks();
+
+        expect(provider.isNodeDispatchPending('room-1'), isFalse);
+        expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
+      });
+    });
+
     test('clears stale transitioning flag after defensive timeout', () {
       fakeAsync((async) {
         unawaited(provider.addRoom(
