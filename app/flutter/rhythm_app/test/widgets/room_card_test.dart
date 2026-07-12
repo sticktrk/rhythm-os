@@ -871,6 +871,17 @@ void main() {
       connection.api.nodeActionCalls,
       [(nodeId: 'room-1', action: 'reset')],
     );
+    final activitySpinner = find.byKey(
+      const ValueKey('room_transition_spinner'),
+    );
+    expect(activitySpinner, findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 399));
+    expect(activitySpinner, findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(activitySpinner, findsNothing);
   });
 
   testWidgets('mood segment sends mood room state', (tester) async {
