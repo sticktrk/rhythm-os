@@ -32,6 +32,7 @@ import 'utils/room_visibility.dart';
 import 'widgets/connect_hub_screen.dart';
 import 'widgets/disabled_mode_banner.dart';
 import 'widgets/hardware_gate_screen.dart';
+import 'widgets/hub_connection_loading_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
 import 'widgets/report_bug_flow.dart';
@@ -844,6 +845,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           if (_serverLostConnection) {
             return ServerDisconnectedScreen(
               serverHub: serverHub,
+              showConnectionLoading: true,
               onChooseHome: () => ConnectHubScreen.show(
                 context,
                 mode: ConnectHubMode.rhythmServer,
@@ -935,83 +937,36 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         serverSync.homeEntryRefreshHomeName ?? homeName ?? 'Home';
     final error = serverSync.homeEntryRefreshError;
 
+    void chooseHome() {
+      serverSync.cancelHomeEntryRefresh();
+      ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);
+    }
+
+    if (error == null) {
+      return HubConnectionLoadingScreen(onChooseHome: chooseHome);
+    }
+
     return ServerDisconnectedScreen(
       serverHub: serverHub,
-      title: error == null ? displayHome : 'Server Unreachable',
-      autoRetry: error != null,
-      onRetry: error == null
-          ? null
-          : () async {
-              await serverSync.refreshForHomeEntry(
-                homeName: displayHome,
-                allowWifiFastPath: false,
-              );
-            },
+      title: 'Server Unreachable',
+      onRetry: () async {
+        await serverSync.refreshForHomeEntry(
+          homeName: displayHome,
+          allowWifiFastPath: false,
+        );
+      },
       // Escape hatch so a hung handshake never traps the user: drop the gate
       // and open the Home chooser.
-      onChooseHome: () {
-        serverSync.cancelHomeEntryRefresh();
-        ConnectHubScreen.show(context, mode: ConnectHubMode.rhythmServer);
-      },
+      onChooseHome: chooseHome,
     );
   }
 
   /// Server hub is connected/connecting but has no rooms yet (Hue discovery in progress).
   Widget _buildServerConnectingState() {
-    return SafeArea(
-      bottom: false,
-      child: Stack(
-        children: [
-          Positioned(
-            top: 8,
-            left: 12,
-            child: IconButton(
-              tooltip: 'Choose Home',
-              onPressed: () => ConnectHubScreen.show(
-                context,
-                mode: ConnectHubMode.rhythmServer,
-              ),
-              icon: Icon(
-                Icons.home_rounded,
-                color: CelestialColors.textSecondary.withValues(alpha: 0.82),
-              ),
-            ),
-          ),
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _PulsingIcon(
-                    icon: Icons.hub,
-                    color: CelestialColors.accentBlue,
-                  ),
-                  const SizedBox(height: 24),
-                  Text(
-                    'Setting up...',
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Connecting to your lights',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.7),
-                      fontSize: 15,
-                      height: 1.5,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
+    return HubConnectionLoadingScreen(
+      onChooseHome: () => ConnectHubScreen.show(
+        context,
+        mode: ConnectHubMode.rhythmServer,
       ),
     );
   }
@@ -1249,51 +1204,6 @@ class _PreHomeAccountButton extends StatelessWidget {
               ),
             ),
           ),
-        );
-      },
-    );
-  }
-}
-
-/// Pulsing icon for the server-connecting state.
-class _PulsingIcon extends StatefulWidget {
-  final IconData icon;
-  final Color color;
-  const _PulsingIcon({required this.icon, required this.color});
-
-  @override
-  State<_PulsingIcon> createState() => _PulsingIconState();
-}
-
-class _PulsingIconState extends State<_PulsingIcon>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        final opacity = 0.3 + 0.7 * _controller.value;
-        return Icon(
-          widget.icon,
-          size: 64,
-          color: widget.color.withValues(alpha: opacity),
         );
       },
     );
