@@ -405,6 +405,10 @@ pub struct ChipRpcAttributeReportsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipRpcListDevicesResponse {
     pub devices: Vec<MatterDeviceInfo>,
+    /// Complete records from chipd's persisted device store. Optional for
+    /// compatibility with older sidecars that returned only basic identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commissioned_devices: Vec<CommissionedDevice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,6 +430,17 @@ pub struct ChipRpcOperationalDiscoveryResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_devices_response_accepts_legacy_payload_without_full_records() {
+        let response: ChipRpcListDevicesResponse = serde_json::from_str(
+            r#"{"devices":[{"node_id":10,"vendor_name":"Vendor","product_name":"Lamp","reachable":true}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.devices.len(), 1);
+        assert!(response.commissioned_devices.is_empty());
+    }
 
     #[test]
     fn rpc_error_classifies_ble_stack_failures() {

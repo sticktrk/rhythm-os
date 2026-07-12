@@ -1082,6 +1082,11 @@ impl MatterTransport for ChipTransport {
         Ok(response.devices)
     }
 
+    fn list_commissioned_devices(&self) -> Result<Vec<CommissionedDevice>> {
+        let response: ChipRpcListDevicesResponse = self.call(ChipRpcRequest::ListDevices)?;
+        Ok(response.commissioned_devices)
+    }
+
     fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
         let response: ChipRpcProbeLightResponse =
             self.call(ChipRpcRequest::ProbeLight { node_id })?;
@@ -1660,6 +1665,7 @@ mod tests {
                         product_name: "Lamp".to_string(),
                         reachable: true,
                     }],
+                    commissioned_devices: Vec::new(),
                 },
             )
         });
@@ -1668,6 +1674,33 @@ mod tests {
         let devices = transport.list_devices().unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].node_id, 42);
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn list_commissioned_devices_uses_additive_rpc_field() {
+        let socket_path = temp_socket_path("list-commissioned-devices");
+        let device = commissioned_test_device(42);
+        let expected = device.clone();
+        let server = spawn_fake_server(socket_path.clone(), move |request| {
+            assert!(matches!(request.request, ChipRpcRequest::ListDevices));
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipRpcListDevicesResponse {
+                    devices: Vec::new(),
+                    commissioned_devices: vec![device.clone()],
+                },
+            )
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let devices = transport.list_commissioned_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].node_id, expected.node_id);
+        assert_eq!(devices[0].light_endpoint, expected.light_endpoint);
+        assert_eq!(devices[0].color_modes, expected.color_modes);
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);
