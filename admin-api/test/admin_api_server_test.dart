@@ -491,7 +491,7 @@ void main() {
         },
         body: jsonEncode({
           'title': 'Matter worker repeatedly failed',
-          'fingerprint': List.filled(64, 'a').join(),
+          'findingIds': ['20260712T120000Z:0001'],
           'severity': 'error',
           'scanRunId': '20260712T120000Z',
           'detectedAt': '2026-07-12T12:00:00Z',
@@ -509,7 +509,6 @@ void main() {
         jsonDecode(await fleetReportResponse.readAsString()) as Map;
     expect(fleetReport['submissionId'], isNotEmpty);
     expect(fleetReport['referenceCode'], 'DBG-FLEET01');
-    expect(fleetReport['fingerprint'], List.filled(64, 'a').join());
     expect(fleetReport['issue_created'], isTrue);
     expect(fleetReport['issue_number'], 177);
 
@@ -669,9 +668,7 @@ http.Response _supabaseResponse(http.BaseRequest request) {
     expect(body['user_id'], 'staff-user');
     expect(body['app_platform'], 'admin-fleet');
     expect(
-      body['summary'],
-      contains('Fleet fingerprint: ${List.filled(64, 'a').join()}'),
-    );
+        body['summary'], contains('Run-local findings: 20260712T120000Z:0001'));
     expect(body['summary'], isNot(contains('actual-secret')));
     expect(body['summary'], contains('credential=<redacted>'));
     return _jsonResponse([

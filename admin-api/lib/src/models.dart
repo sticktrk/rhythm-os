@@ -652,26 +652,26 @@ class DeviceOtaActionDto {
 class FleetFindingReportRequestDto {
   const FleetFindingReportRequestDto({
     required this.title,
-    required this.fingerprint,
     required this.severity,
     required this.scanRunId,
     required this.detectedAt,
     required this.occurrences,
     required this.affectedHubCount,
     required this.samples,
+    required this.findingIds,
     this.journeyStage,
     this.serverVersion,
     this.platformContext,
   });
 
   final String title;
-  final String fingerprint;
   final String severity;
   final String scanRunId;
   final DateTime detectedAt;
   final int occurrences;
   final int affectedHubCount;
   final List<String> samples;
+  final List<String> findingIds;
   final String? journeyStage;
   final String? serverVersion;
   final String? platformContext;
@@ -679,7 +679,6 @@ class FleetFindingReportRequestDto {
   factory FleetFindingReportRequestDto.fromJson(Map<String, dynamic> json) {
     final rawTitle = cleanString(json['title']);
     final title = rawTitle == null ? null : _sanitizeFleetText(rawTitle, 180);
-    final fingerprint = cleanString(json['fingerprint'])?.toLowerCase();
     final severity = cleanString(json['severity'])?.toLowerCase() ?? 'error';
     final scanRunId = cleanString(json['scanRunId']);
     final detectedAt = parseDateTime(json['detectedAt']);
@@ -687,13 +686,6 @@ class FleetFindingReportRequestDto {
       throw const AdminApiException(
         400,
         'Fleet finding title is required and must be at most 180 characters.',
-      );
-    }
-    if (fingerprint == null ||
-        !RegExp(r'^[a-f0-9]{16,64}$').hasMatch(fingerprint)) {
-      throw const AdminApiException(
-        400,
-        'Fleet finding fingerprint must be 16-64 lowercase hex characters.',
       );
     }
     if (!const {'critical', 'error', 'warning'}.contains(severity)) {
@@ -723,6 +715,17 @@ class FleetFindingReportRequestDto {
             .toList(growable: false)
         : const <String>[];
     final requestedJourneyStage = cleanString(json['journeyStage']);
+    final rawFindingIds = json['findingIds'];
+    final findingIds = rawFindingIds is List
+        ? rawFindingIds
+            .whereType<String>()
+            .map((value) => value.trim())
+            .where(
+              (value) => RegExp(r'^[A-Za-z0-9_.:-]{1,120}$').hasMatch(value),
+            )
+            .take(12)
+            .toList(growable: false)
+        : const <String>[];
     final requestedOccurrences = json['occurrences'];
     final requestedAffectedHubCount = json['affectedHubCount'];
     const journeyStages = {
@@ -741,7 +744,6 @@ class FleetFindingReportRequestDto {
     };
     return FleetFindingReportRequestDto(
       title: title,
-      fingerprint: fingerprint,
       severity: severity,
       scanRunId: scanRunId,
       detectedAt: detectedAt,
@@ -758,6 +760,7 @@ class FleetFindingReportRequestDto {
           .clamp(1, 100000)
           .toInt(),
       samples: samples,
+      findingIds: findingIds,
       journeyStage: journeyStages.contains(requestedJourneyStage)
           ? requestedJourneyStage
           : 'unknown',
@@ -814,19 +817,16 @@ class FleetFindingReportResultDto {
   const FleetFindingReportResultDto({
     required this.submissionId,
     required this.referenceCode,
-    required this.fingerprint,
     required this.reportResult,
   });
 
   final String submissionId;
   final String referenceCode;
-  final String fingerprint;
   final Map<String, dynamic> reportResult;
 
   Map<String, dynamic> toJson() => {
         'submissionId': submissionId,
         'referenceCode': referenceCode,
-        'fingerprint': fingerprint,
         ...reportResult,
       };
 }

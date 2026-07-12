@@ -102,7 +102,6 @@ class FleetReportService {
     return FleetFindingReportResultDto(
       submissionId: submissionId,
       referenceCode: submission['reference_code'] as String? ?? '',
-      fingerprint: finding.fingerprint,
       reportResult: reportResult,
     );
   }
@@ -111,8 +110,9 @@ class FleetReportService {
     return [
       finding.title,
       '',
-      'Fleet fingerprint: ${finding.fingerprint}',
       'Fleet scan run: ${finding.scanRunId}',
+      if (finding.findingIds.isNotEmpty)
+        'Run-local findings: ${finding.findingIds.join(', ')}',
       'Detected at: ${finding.detectedAt.toUtc().toIso8601String()}',
       'Severity: ${finding.severity}',
       'Occurrences: ${finding.occurrences}',

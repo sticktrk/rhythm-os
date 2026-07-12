@@ -296,10 +296,7 @@ async function createGitHubIssue({
 function buildIssueTitle(submission: DebugBundleSubmission): string {
   const fleet = isFleetSubmission(submission)
   const prefix = fleet ? 'fleet-report: ' : 'app-report: '
-  const fingerprint = fleetFingerprint(submission.summary)
-  const suffix = fleet && fingerprint
-    ? ` (FLEET-${fingerprint.substring(0, 12)})`
-    : ` (${submission.reference_code})`
+  const suffix = ` (${submission.reference_code})`
   const maxDetailLength = 256 - prefix.length - suffix.length
   const titleDetail =
     summaryTitleDetail(submission.summary) ??
@@ -393,11 +390,6 @@ function buildIssueBody(
 
 function isFleetSubmission(submission: DebugBundleSubmission): boolean {
   return submission.app_platform?.trim().toLowerCase() === 'admin-fleet'
-}
-
-function fleetFingerprint(summary: string | null): string | null {
-  const match = summary?.match(/Fleet fingerprint:\s*([a-f0-9]{16,64})/i)
-  return match?.[1]?.toLowerCase() ?? null
 }
 
 async function markGitHubIssueError(
