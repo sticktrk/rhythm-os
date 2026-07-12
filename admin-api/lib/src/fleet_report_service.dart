@@ -21,6 +21,51 @@ class FleetReportService {
   final SupportService _support;
   final DeviceProbeService _probes;
 
+  Future<DeviceDebugBundleDto> downloadForReview({
+    required AdminSession session,
+    required String hubId,
+  }) async {
+    if (!_supabase.canUseServiceRole) {
+      throw const AdminApiException(
+        503,
+        'Secure debug bundle transfer requires SUPABASE_SERVICE_ROLE_KEY.',
+      );
+    }
+    final transferId = _uuidV4();
+    final storagePath =
+        '${session.user.id}/fleet-review/$transferId/debug-bundle.tar.gz';
+    try {
+      final submitted = await _submitToPrivateStorage(
+        session: session,
+        hubId: hubId,
+        storagePath: storagePath,
+      );
+      final bytes = await _supabase.downloadStorageObject(
+        bucket: _bucket,
+        path: storagePath,
+      );
+      if (bytes.isEmpty) {
+        throw const AdminApiException(
+          502,
+          'Secure debug bundle transfer returned an empty archive.',
+        );
+      }
+      return DeviceDebugBundleDto(
+        hubId: submitted.hubId,
+        route: submitted.route,
+        baseUrl: submitted.baseUrl,
+        fileName: _safeFileName(
+          submitted.fileName ?? 'rhythm-debug-bundle-$transferId.tar.gz',
+          transferId,
+        ),
+        contentType: submitted.contentType,
+        bytes: bytes,
+      );
+    } finally {
+      await _deleteUploadedBundle(storagePath);
+    }
+  }
+
   Future<FleetFindingReportResultDto> report({
     required AdminSession session,
     required String hubId,
@@ -45,27 +90,13 @@ class FleetReportService {
     final fallbackFileName = 'rhythm-debug-bundle-$submissionId.tar.gz';
     final storagePath =
         '${session.user.id}/fleet/$submissionId/$fallbackFileName';
-    final uploadUrl = await _supabase.createSignedStorageUploadUrl(
-      bucket: _bucket,
-      path: storagePath,
-    );
-
     late final DeviceDebugBundleSubmissionDto bundle;
     try {
-      bundle = await _probes.submitDebugBundle(
+      bundle = await _submitToPrivateStorage(
         session: session,
         hubId: hubId,
-        uploadUrl: uploadUrl,
+        storagePath: storagePath,
       );
-      final legacyBytes = bundle.legacyBytes;
-      if (!bundle.uploadedByDevice && legacyBytes != null) {
-        await _supabase.uploadStorageObject(
-          bucket: _bucket,
-          path: storagePath,
-          bytes: legacyBytes,
-          contentType: bundle.contentType,
-        );
-      }
     } catch (_) {
       await _deleteUploadedBundle(storagePath);
       rethrow;
@@ -118,6 +149,32 @@ class FleetReportService {
       referenceCode: submission['reference_code'] as String? ?? '',
       reportResult: reportResult,
     );
+  }
+
+  Future<DeviceDebugBundleSubmissionDto> _submitToPrivateStorage({
+    required AdminSession session,
+    required String hubId,
+    required String storagePath,
+  }) async {
+    final uploadUrl = await _supabase.createSignedStorageUploadUrl(
+      bucket: _bucket,
+      path: storagePath,
+    );
+    final bundle = await _probes.submitDebugBundle(
+      session: session,
+      hubId: hubId,
+      uploadUrl: uploadUrl,
+    );
+    final legacyBytes = bundle.legacyBytes;
+    if (!bundle.uploadedByDevice && legacyBytes != null) {
+      await _supabase.uploadStorageObject(
+        bucket: _bucket,
+        path: storagePath,
+        bytes: legacyBytes,
+        contentType: bundle.contentType,
+      );
+    }
+    return bundle;
   }
 
   Future<void> _deleteUploadedBundle(String storagePath) async {

@@ -194,6 +194,21 @@ class SupabaseRestClient {
     return '$storageBase${signedPath.startsWith('/') ? '' : '/'}$signedPath';
   }
 
+  Future<List<int>> downloadStorageObject({
+    required String bucket,
+    required String path,
+  }) async {
+    final credentials = _credentials(serviceRole: true);
+    final response = await _http.get(
+      _supabaseUri('storage/v1/object/$bucket/$path'),
+      headers: credentials.headers,
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw AdminApiException(response.statusCode, _supabaseError(response));
+    }
+    return response.bodyBytes;
+  }
+
   Future<void> deleteStorageObject({
     required String bucket,
     required String path,

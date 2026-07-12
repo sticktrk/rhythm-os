@@ -105,7 +105,7 @@ void main() {
             body['upload_url'],
             startsWith(
               'https://supabase.test/storage/v1/object/upload/sign/'
-              'support-debug-bundles/staff-user/fleet/',
+              'support-debug-bundles/staff-user/',
             ),
           );
           expect(body['upload_url'], endsWith('?token=signed-upload-token'));
@@ -373,7 +373,7 @@ void main() {
     expect(_header(response, 'content-type'), 'application/gzip');
     expect(
       _header(response, 'content-disposition'),
-      'attachment; filename="rhythm-debug-bundle-rpiz-test.tar.gz"',
+      'attachment; filename="rhythm-debug-bundle-rpiz-direct.tar.gz"',
     );
     expect(_header(response, 'x-rhythm-route'), 'remote');
     expect(_header(response, 'x-rhythm-base-url'), 'https://device.test:443');
@@ -532,7 +532,7 @@ void main() {
         .cast<http.Request>()
         .toList();
     expect(bundleRequests, hasLength(2));
-    expect(bundleRequests.first.body, isEmpty);
+    expect(bundleRequests.first.body, contains('"upload_url"'));
     expect(bundleRequests.last.body, contains('"upload_url"'));
 
     final adminProxyResponse = await server.handler(
@@ -669,13 +669,17 @@ http.Response _supabaseResponse(http.BaseRequest request) {
     ]);
   }
 
-  if (request.url.path ==
-      '/storage/v1/object/support-debug-bundles/staff-user/fleet') {
-    return http.Response('not found', 404);
+  if (request.url.path == '/storage/v1/object/support-debug-bundles') {
+    expect(request.method, 'DELETE');
+    expect(request.headers['apikey'], 'service-role-key');
+    expect(request.headers['Authorization'], 'Bearer service-role-key');
+    final body = jsonDecode((request as http.Request).body) as Map;
+    expect((body['prefixes'] as List).single, contains('/fleet-review/'));
+    return _jsonResponse([]);
   }
 
   if (request.url.path.startsWith(
-    '/storage/v1/object/upload/sign/support-debug-bundles/staff-user/fleet/',
+    '/storage/v1/object/upload/sign/support-debug-bundles/staff-user/',
   )) {
     expect(request.method, 'POST');
     expect(request.headers['apikey'], 'service-role-key');
@@ -688,8 +692,17 @@ http.Response _supabaseResponse(http.BaseRequest request) {
   }
 
   if (request.url.path.startsWith(
-    '/storage/v1/object/support-debug-bundles/staff-user/fleet/',
+    '/storage/v1/object/support-debug-bundles/staff-user/',
   )) {
+    if (request.method == 'GET') {
+      expect(request.headers['apikey'], 'service-role-key');
+      expect(request.headers['Authorization'], 'Bearer service-role-key');
+      return http.Response.bytes(
+        [0x1f, 0x8b, 0x08],
+        200,
+        headers: {'content-type': 'application/gzip'},
+      );
+    }
     return http.Response('legacy upload should not be used', 500);
   }
 

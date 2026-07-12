@@ -148,7 +148,7 @@ class AdminApiServer {
 
   Future<Response> _downloadDebugBundle(Request request, String hubId) async {
     final session = await _requireStaff(request);
-    final bundle = await _probes.downloadDebugBundle(
+    final bundle = await _fleetReports.downloadForReview(
       session: session,
       hubId: hubId,
     );
