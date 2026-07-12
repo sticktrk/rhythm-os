@@ -411,6 +411,28 @@ class DeviceDebugBundleDto {
   final List<int> bytes;
 }
 
+class DeviceDebugBundleSubmissionDto {
+  const DeviceDebugBundleSubmissionDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.contentType,
+    required this.uploadedByDevice,
+    this.fileName,
+    this.sizeBytes,
+    this.legacyBytes,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final String contentType;
+  final bool uploadedByDevice;
+  final String? fileName;
+  final int? sizeBytes;
+  final List<int>? legacyBytes;
+}
+
 class DeviceLogSourceDto {
   const DeviceLogSourceDto({
     required this.id,

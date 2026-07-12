@@ -41,20 +41,41 @@ class FleetReportService {
       );
     }
 
-    final bundle = await _probes.downloadDebugBundle(
-      session: session,
-      hubId: hubId,
-    );
     final submissionId = _uuidV4();
-    final fileName = _safeFileName(bundle.fileName, submissionId);
-    final storagePath = '${session.user.id}/fleet/$submissionId/$fileName';
-
-    await _supabase.uploadStorageObject(
+    final fallbackFileName = 'rhythm-debug-bundle-$submissionId.tar.gz';
+    final storagePath =
+        '${session.user.id}/fleet/$submissionId/$fallbackFileName';
+    final uploadUrl = await _supabase.createSignedStorageUploadUrl(
       bucket: _bucket,
       path: storagePath,
-      bytes: bundle.bytes,
-      contentType: 'application/gzip',
     );
+
+    late final DeviceDebugBundleSubmissionDto bundle;
+    try {
+      bundle = await _probes.submitDebugBundle(
+        session: session,
+        hubId: hubId,
+        uploadUrl: uploadUrl,
+      );
+      final legacyBytes = bundle.legacyBytes;
+      if (!bundle.uploadedByDevice && legacyBytes != null) {
+        await _supabase.uploadStorageObject(
+          bucket: _bucket,
+          path: storagePath,
+          bytes: legacyBytes,
+          contentType: bundle.contentType,
+        );
+      }
+    } catch (_) {
+      await _deleteUploadedBundle(storagePath);
+      rethrow;
+    }
+
+    final fileName = _safeFileName(
+      bundle.fileName ?? fallbackFileName,
+      submissionId,
+    );
+    final sizeBytes = bundle.sizeBytes ?? bundle.legacyBytes?.length;
 
     late final Map<String, dynamic> submission;
     try {
@@ -79,18 +100,11 @@ class FleetReportService {
           'bundle_storage_path': storagePath,
           'bundle_file_name': fileName,
           'bundle_content_type': 'application/gzip',
-          'bundle_size_bytes': bundle.bytes.length,
+          'bundle_size_bytes': sizeBytes,
         },
       );
     } catch (_) {
-      try {
-        await _supabase.deleteStorageObject(
-          bucket: _bucket,
-          path: storagePath,
-        );
-      } catch (_) {
-        // Preserve the insert error; orphan cleanup is best effort.
-      }
+      await _deleteUploadedBundle(storagePath);
       rethrow;
     }
 
@@ -104,6 +118,17 @@ class FleetReportService {
       referenceCode: submission['reference_code'] as String? ?? '',
       reportResult: reportResult,
     );
+  }
+
+  Future<void> _deleteUploadedBundle(String storagePath) async {
+    try {
+      await _supabase.deleteStorageObject(
+        bucket: _bucket,
+        path: storagePath,
+      );
+    } catch (_) {
+      // Preserve the primary failure; orphan cleanup is best effort.
+    }
   }
 
   String _summary(FleetFindingReportRequestDto finding) {

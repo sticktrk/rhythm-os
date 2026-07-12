@@ -160,6 +160,40 @@ class SupabaseRestClient {
     }
   }
 
+  Future<String> createSignedStorageUploadUrl({
+    required String bucket,
+    required String path,
+  }) async {
+    final credentials = _credentials(serviceRole: true);
+    final response = await _http.post(
+      _supabaseUri('storage/v1/object/upload/sign/$bucket/$path'),
+      headers: {
+        ...credentials.headers,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw AdminApiException(response.statusCode, _supabaseError(response));
+    }
+    final decoded = jsonDecode(response.body);
+    final signedPath = decoded is Map ? decoded['url'] as String? : null;
+    if (signedPath == null || signedPath.trim().isEmpty) {
+      throw const AdminApiException(
+        502,
+        'Supabase returned an invalid signed upload URL.',
+      );
+    }
+    final signedUri = Uri.parse(signedPath);
+    if (signedUri.hasScheme) return signedUri.toString();
+    if (signedPath.startsWith('/storage/v1/')) {
+      return config.supabaseUrl.resolve(signedPath).toString();
+    }
+    final storageBase = _supabaseUri('storage/v1').toString();
+    return '$storageBase${signedPath.startsWith('/') ? '' : '/'}$signedPath';
+  }
+
   Future<void> deleteStorageObject({
     required String bucket,
     required String path,

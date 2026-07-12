@@ -99,6 +99,22 @@ void main() {
         deviceRequests.add(request);
         expect(request.method, 'POST');
         expect(request.headers['Authorization'], 'Bearer legacy-token');
+        if (request is http.Request && request.body.isNotEmpty) {
+          final body = jsonDecode(request.body) as Map;
+          expect(
+            body['upload_url'],
+            startsWith(
+              'https://supabase.test/storage/v1/object/upload/sign/'
+              'support-debug-bundles/staff-user/fleet/',
+            ),
+          );
+          expect(body['upload_url'], endsWith('?token=signed-upload-token'));
+          return _jsonResponse({
+            'uploaded': true,
+            'file_name': 'rhythm-debug-bundle-rpiz-direct.tar.gz',
+            'size_bytes': 4321,
+          });
+        }
         return http.Response.bytes(
           [0x1f, 0x8b, 0x08],
           200,
@@ -511,6 +527,13 @@ void main() {
     expect(fleetReport['referenceCode'], 'DBG-FLEET01');
     expect(fleetReport['issue_created'], isTrue);
     expect(fleetReport['issue_number'], 177);
+    final bundleRequests = deviceRequests
+        .where((request) => request.url.path == '/api/diag/debug-bundle')
+        .cast<http.Request>()
+        .toList();
+    expect(bundleRequests, hasLength(2));
+    expect(bundleRequests.first.body, isEmpty);
+    expect(bundleRequests.last.body, contains('"upload_url"'));
 
     final adminProxyResponse = await server.handler(
       Request(
@@ -652,13 +675,22 @@ http.Response _supabaseResponse(http.BaseRequest request) {
   }
 
   if (request.url.path.startsWith(
-    '/storage/v1/object/support-debug-bundles/staff-user/fleet/',
+    '/storage/v1/object/upload/sign/support-debug-bundles/staff-user/fleet/',
   )) {
     expect(request.method, 'POST');
     expect(request.headers['apikey'], 'service-role-key');
     expect(request.headers['Authorization'], 'Bearer service-role-key');
-    expect(request.headers['x-upsert'], 'false');
-    return _jsonResponse({'Key': request.url.path});
+    expect((request as http.Request).body, '{}');
+    return _jsonResponse({
+      'url': '${request.url.path.replaceFirst('/storage/v1', '')}'
+          '?token=signed-upload-token',
+    });
+  }
+
+  if (request.url.path.startsWith(
+    '/storage/v1/object/support-debug-bundles/staff-user/fleet/',
+  )) {
+    return http.Response('legacy upload should not be used', 500);
   }
 
   if (request.url.path == '/rest/v1/support_debug_bundle_submissions') {
@@ -667,6 +699,8 @@ http.Response _supabaseResponse(http.BaseRequest request) {
     final body = jsonDecode((request as http.Request).body) as Map;
     expect(body['user_id'], 'staff-user');
     expect(body['app_platform'], 'admin-fleet');
+    expect(body['bundle_file_name'], 'rhythm-debug-bundle-rpiz-direct.tar.gz');
+    expect(body['bundle_size_bytes'], 4321);
     expect(
         body['summary'], contains('Run-local findings: 20260712T120000Z:0001'));
     expect(body['summary'], isNot(contains('actual-secret')));
