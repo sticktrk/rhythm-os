@@ -18,6 +18,8 @@ import 'solar_orbit.dart'; // For CelestialColors
 /// Light mode for a room card.
 enum RoomMode { mood, standby, on, off }
 
+const double _roomHeaderActionHitSize = 48;
+
 /// Hue-style room card with CCT-tinted background, big segmented power
 /// control (mood / off / on), rhythm controls, and brightness slider.
 class RoomCard extends StatefulWidget {
@@ -755,18 +757,25 @@ class _RoomCardState extends State<RoomCard> {
                                     label:
                                         'Updating motion activation for ${room.name}',
                                     child: GestureDetector(
+                                      key: ValueKey(
+                                        'room-card-motion-pending-${widget.roomId}',
+                                      ),
                                       behavior: HitTestBehavior.opaque,
                                       onTap: () {},
                                       child: SizedBox(
-                                        key: ValueKey(
-                                          'room-card-motion-pending-${widget.roomId}',
-                                        ),
-                                        width: 28,
-                                        height: 28,
-                                        child: const Padding(
-                                          padding: EdgeInsets.all(6),
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
+                                        width: _roomHeaderActionHitSize,
+                                        height: _roomHeaderActionHitSize,
+                                        child: const Align(
+                                          alignment: Alignment.centerRight,
+                                          child: SizedBox(
+                                            width: 28,
+                                            height: 28,
+                                            child: Padding(
+                                              padding: EdgeInsets.all(6),
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -815,17 +824,24 @@ class _RoomCardState extends State<RoomCard> {
                                               )
                                           : null,
                                       child: SizedBox(
-                                        width: 28,
-                                        height: 28,
-                                        child: Icon(
-                                          motionActivationEnabled
-                                              ? Icons.sensors_rounded
-                                              : Icons.sensors_off_rounded,
-                                          size: 18,
-                                          color: iconColor.withValues(
-                                            alpha: motionActivationEnabled
-                                                ? 0.45
-                                                : 0.30,
+                                        width: _roomHeaderActionHitSize,
+                                        height: _roomHeaderActionHitSize,
+                                        child: Align(
+                                          alignment: Alignment.centerRight,
+                                          child: SizedBox(
+                                            width: 28,
+                                            height: 28,
+                                            child: Icon(
+                                              motionActivationEnabled
+                                                  ? Icons.sensors_rounded
+                                                  : Icons.sensors_off_rounded,
+                                              size: 18,
+                                              color: iconColor.withValues(
+                                                alpha: motionActivationEnabled
+                                                    ? 0.45
+                                                    : 0.30,
+                                              ),
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -2210,9 +2226,16 @@ class _MotionIndicatorState extends State<_MotionIndicator>
         // Consume countdown taps so they do not open the room settings sheet.
         onTap: widget.onTap ?? () {},
         child: SizedBox(
-          width: 28,
-          height: 28,
-          child: Center(child: indicator),
+          width: _roomHeaderActionHitSize,
+          height: _roomHeaderActionHitSize,
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: SizedBox(
+              width: 28,
+              height: 28,
+              child: Center(child: indicator),
+            ),
+          ),
         ),
       ),
     );
