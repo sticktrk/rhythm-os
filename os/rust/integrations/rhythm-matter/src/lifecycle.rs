@@ -140,6 +140,32 @@ struct InitialDeviceMetadata {
     unreachable_nodes: HashSet<u64>,
 }
 
+/// Build the best metadata available without talking to the device.
+///
+/// `list_devices` is backed by chipd's persisted device store, so its vendor
+/// and product names survive a temporary connectivity failure. Preserve any
+/// matching built-in profile here instead of replacing it with an anonymous
+/// extended-color fallback. In particular, command quirks such as
+/// `NeedsExplicitOn` remain necessary while the device is unreachable to
+/// probes but reachable again by the time a light command is dispatched.
+fn fallback_device_metadata(info: &MatterDeviceInfo) -> (LightCapabilities, Vec<DeviceQuirk>) {
+    let Some(entry) =
+        rhythm_devices::builtin_db().lookup(info.vendor_name.as_str(), info.product_name.as_str())
+    else {
+        return (
+            crate::commissioning::fallback_device_capabilities(),
+            Vec::new(),
+        );
+    };
+
+    let quirks = entry
+        .matter
+        .as_ref()
+        .map(|matter| matter.quirks.clone())
+        .unwrap_or_default();
+    (entry.capabilities(), quirks)
+}
+
 fn fallback_initial_device_metadata(
     state: &SharedState,
     commissioned: &[MatterDeviceInfo],
@@ -152,15 +178,19 @@ fn fallback_initial_device_metadata(
         .map(|info| info.node_id)
         .collect::<HashSet<_>>();
 
-    let mut insert_fallback = |device_id: String| {
-        device_caps
-            .entry(device_id.clone())
-            .or_insert_with(crate::commissioning::fallback_device_capabilities);
-        device_quirks.entry(device_id).or_default();
+    let mut insert_fallback = |device_id: String, info: Option<&MatterDeviceInfo>| {
+        let (caps, quirks) = info.map(fallback_device_metadata).unwrap_or_else(|| {
+            (
+                crate::commissioning::fallback_device_capabilities(),
+                Vec::new(),
+            )
+        });
+        device_caps.entry(device_id.clone()).or_insert(caps);
+        device_quirks.entry(device_id).or_insert(quirks);
     };
 
     for info in commissioned {
-        insert_fallback(format_device_id(info.node_id, 1));
+        insert_fallback(format_device_id(info.node_id, 1), Some(info));
     }
 
     if let Ok(state) = state.lock() {
@@ -173,7 +203,8 @@ fn fallback_initial_device_metadata(
                     continue;
                 };
                 if commissioned_nodes.contains(&node_id) {
-                    insert_fallback(endpoint.native_id.clone());
+                    let info = commissioned.iter().find(|info| info.node_id == node_id);
+                    insert_fallback(endpoint.native_id.clone(), info);
                 }
             }
         }
@@ -256,10 +287,9 @@ fn load_initial_device_metadata(
                     error
                 );
                 let device_id = format_device_id(info.node_id, 1);
-                device_caps
-                    .entry(device_id.clone())
-                    .or_insert_with(crate::commissioning::fallback_device_capabilities);
-                device_quirks.entry(device_id).or_default();
+                let (caps, quirks) = fallback_device_metadata(info);
+                device_caps.entry(device_id.clone()).or_insert(caps);
+                device_quirks.entry(device_id).or_insert(quirks);
                 unreachable_nodes.insert(info.node_id);
             }
         }
@@ -621,6 +651,15 @@ mod tests {
         }
     }
 
+    fn h6004_device_info(node_id: u64) -> MatterDeviceInfo {
+        MatterDeviceInfo {
+            node_id,
+            vendor_name: "Shenzhen Qianyan Technology".to_string(),
+            product_name: "H6004".to_string(),
+            reachable: true,
+        }
+    }
+
     fn commissioned_device(node_id: u64, endpoint: u16) -> CommissionedDevice {
         CommissionedDevice {
             node_id,
@@ -717,6 +756,26 @@ mod tests {
 
         assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(metadata.device_caps.contains_key("matter-12-2"));
+    }
+
+    #[test]
+    fn fallback_initial_metadata_preserves_known_device_quirks() {
+        let state = shared_state("fallback-known-quirks");
+        let key = HubKey::new(HubType::new("matter"), "local");
+
+        let metadata = fallback_initial_device_metadata(&state, &[h6004_device_info(107)], &key);
+
+        assert_eq!(
+            metadata.device_quirks.get("matter-107"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::CommandThrottleMs(250),
+            ])
+        );
+        assert!(metadata
+            .device_caps
+            .get("matter-107")
+            .is_some_and(LightCapabilities::supports_xy_color));
     }
 
     #[test]
@@ -888,5 +947,35 @@ mod tests {
             .subscription_targets
             .iter()
             .any(|target| target.node_id == 12 && target.endpoint == 1));
+    }
+
+    #[test]
+    fn failed_probe_keeps_known_device_quirks_in_refreshed_metadata() {
+        let state = shared_state("failed-probe-known-quirks");
+        let mut probe_failures = HashMap::new();
+        probe_failures.insert(107, "temporarily unreachable".to_string());
+        let transport: Arc<dyn MatterTransport> = Arc::new(FakeMatterTransport::new(
+            vec![h6004_device_info(107)],
+            probe_failures,
+        ));
+        let commissioned = transport.list_devices().unwrap();
+
+        let metadata = load_initial_device_metadata(
+            &state,
+            &transport,
+            &commissioned,
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(
+            metadata.device_quirks.get("matter-107"),
+            Some(&vec![
+                DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::CommandThrottleMs(250),
+            ]),
+            "a failed live probe must not erase quirks known from persisted identity"
+        );
+        assert!(metadata.unreachable_nodes.contains(&107));
     }
 }
