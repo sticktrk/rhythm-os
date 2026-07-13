@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:rhythm_admin_api/src/config.dart';
 import 'package:rhythm_admin_api/src/device_probe_service.dart';
+import 'package:rhythm_admin_api/src/fleet_report_service.dart';
 import 'package:rhythm_admin_api/src/server.dart';
 import 'package:rhythm_admin_api/src/supabase_rest_client.dart';
 import 'package:rhythm_admin_api/src/support_access_service.dart';
@@ -37,14 +38,21 @@ void main() {
       supabase: supabase,
       httpClient: client,
     );
+    final support = SupportService(supabase: supabase);
+    final probes = DeviceProbeService(
+      supabase: supabase,
+      supportAccess: supportAccess,
+      httpClient: client,
+    );
     final server = AdminApiServer(
       config: config,
       supabase: supabase,
-      support: SupportService(supabase: supabase),
-      probes: DeviceProbeService(
+      support: support,
+      probes: probes,
+      fleetReports: FleetReportService(
         supabase: supabase,
-        supportAccess: supportAccess,
-        httpClient: client,
+        support: support,
+        probes: probes,
       ),
     );
 
@@ -91,6 +99,22 @@ void main() {
         deviceRequests.add(request);
         expect(request.method, 'POST');
         expect(request.headers['Authorization'], 'Bearer legacy-token');
+        if (request is http.Request && request.body.isNotEmpty) {
+          final body = jsonDecode(request.body) as Map;
+          expect(
+            body['upload_url'],
+            startsWith(
+              'https://supabase.test/storage/v1/object/upload/sign/'
+              'support-debug-bundles/staff-user/',
+            ),
+          );
+          expect(body['upload_url'], endsWith('?token=signed-upload-token'));
+          return _jsonResponse({
+            'uploaded': true,
+            'file_name': 'rhythm-debug-bundle-rpiz-direct.tar.gz',
+            'size_bytes': 4321,
+          });
+        }
         return http.Response.bytes(
           [0x1f, 0x8b, 0x08],
           200,
@@ -316,14 +340,21 @@ void main() {
       supabase: supabase,
       httpClient: client,
     );
+    final support = SupportService(supabase: supabase);
+    final probes = DeviceProbeService(
+      supabase: supabase,
+      supportAccess: supportAccess,
+      httpClient: client,
+    );
     final server = AdminApiServer(
       config: config,
       supabase: supabase,
-      support: SupportService(supabase: supabase),
-      probes: DeviceProbeService(
+      support: support,
+      probes: probes,
+      fleetReports: FleetReportService(
         supabase: supabase,
-        supportAccess: supportAccess,
-        httpClient: client,
+        support: support,
+        probes: probes,
       ),
     );
 
@@ -342,7 +373,7 @@ void main() {
     expect(_header(response, 'content-type'), 'application/gzip');
     expect(
       _header(response, 'content-disposition'),
-      'attachment; filename="rhythm-debug-bundle-rpiz-test.tar.gz"',
+      'attachment; filename="rhythm-debug-bundle-rpiz-direct.tar.gz"',
     );
     expect(_header(response, 'x-rhythm-route'), 'remote');
     expect(_header(response, 'x-rhythm-base-url'), 'https://device.test:443');
@@ -391,6 +422,21 @@ void main() {
     expect(tail['requestedLines'], 120);
     expect(tail['returnedLines'], 2);
     expect((tail['lines'] as List).last['text'], 'cloudflared connected');
+
+    final fleetResponse = await server.handler(
+      Request(
+        'GET',
+        Uri.parse('http://admin.test/api/fleet/hubs'),
+        headers: {'authorization': 'Bearer staff-session'},
+      ),
+    );
+    expect(fleetResponse.statusCode, 200);
+    final fleet = jsonDecode(await fleetResponse.readAsString()) as Map;
+    expect(fleet['total'], 2);
+    expect(
+      (fleet['hubs'] as List).map((hub) => hub['id']),
+      containsAll(['hub-1', 'hub-orphan']),
+    );
 
     final statusResponse = await server.handler(
       Request(
@@ -450,6 +496,44 @@ void main() {
     expect(otaUpdate['action'], 'update');
     expect(otaUpdate['tokenAvailable'], isTrue);
     expect(otaUpdate['result']['message'], 'Update started');
+
+    final fleetReportResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/fleet-report'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'title': 'Matter worker repeatedly failed',
+          'findingIds': ['20260712T120000Z:0001'],
+          'severity': 'error',
+          'scanRunId': '20260712T120000Z',
+          'detectedAt': '2026-07-12T12:00:00Z',
+          'occurrences': 4,
+          'affectedHubCount': 1,
+          'journeyStage': 'integration commissioning',
+          'serverVersion': '0.4.200-beta',
+          'platformContext': 'rpiz',
+          'samples': ['ERROR Matter worker failed token=actual-secret'],
+        }),
+      ),
+    );
+    expect(fleetReportResponse.statusCode, 200);
+    final fleetReport =
+        jsonDecode(await fleetReportResponse.readAsString()) as Map;
+    expect(fleetReport['submissionId'], isNotEmpty);
+    expect(fleetReport['referenceCode'], 'DBG-FLEET01');
+    expect(fleetReport['issue_created'], isTrue);
+    expect(fleetReport['issue_number'], 177);
+    final bundleRequests = deviceRequests
+        .where((request) => request.url.path == '/api/diag/debug-bundle')
+        .cast<http.Request>()
+        .toList();
+    expect(bundleRequests, hasLength(2));
+    expect(bundleRequests.first.body, contains('"upload_url"'));
+    expect(bundleRequests.last.body, contains('"upload_url"'));
 
     final adminProxyResponse = await server.handler(
       Request(
@@ -563,7 +647,7 @@ void main() {
     final ready = jsonDecode(await readyResponse.readAsString()) as Map;
     expect(ready['remoteDebugReady'], isTrue);
     expect(ready['missing'], isEmpty);
-    expect(deviceRequests, hasLength(13));
+    expect(deviceRequests, hasLength(14));
   });
 }
 
@@ -585,6 +669,75 @@ http.Response _supabaseResponse(http.BaseRequest request) {
     ]);
   }
 
+  if (request.url.path == '/storage/v1/object/support-debug-bundles') {
+    expect(request.method, 'DELETE');
+    expect(request.headers['apikey'], 'service-role-key');
+    expect(request.headers['Authorization'], 'Bearer service-role-key');
+    final body = jsonDecode((request as http.Request).body) as Map;
+    expect((body['prefixes'] as List).single, contains('/fleet-review/'));
+    return _jsonResponse([]);
+  }
+
+  if (request.url.path.startsWith(
+    '/storage/v1/object/upload/sign/support-debug-bundles/staff-user/',
+  )) {
+    expect(request.method, 'POST');
+    expect(request.headers['apikey'], 'service-role-key');
+    expect(request.headers['Authorization'], 'Bearer service-role-key');
+    expect((request as http.Request).body, '{}');
+    return _jsonResponse({
+      'url': '${request.url.path.replaceFirst('/storage/v1', '')}'
+          '?token=signed-upload-token',
+    });
+  }
+
+  if (request.url.path.startsWith(
+    '/storage/v1/object/support-debug-bundles/staff-user/',
+  )) {
+    if (request.method == 'GET') {
+      expect(request.headers['apikey'], 'service-role-key');
+      expect(request.headers['Authorization'], 'Bearer service-role-key');
+      return http.Response.bytes(
+        [0x1f, 0x8b, 0x08],
+        200,
+        headers: {'content-type': 'application/gzip'},
+      );
+    }
+    return http.Response('legacy upload should not be used', 500);
+  }
+
+  if (request.url.path == '/rest/v1/support_debug_bundle_submissions') {
+    expect(request.method, 'POST');
+    expect(request.headers['apikey'], 'service-role-key');
+    final body = jsonDecode((request as http.Request).body) as Map;
+    expect(body['user_id'], 'staff-user');
+    expect(body['app_platform'], 'admin-fleet');
+    expect(body['bundle_file_name'], 'rhythm-debug-bundle-rpiz-direct.tar.gz');
+    expect(body['bundle_size_bytes'], 4321);
+    expect(
+        body['summary'], contains('Run-local findings: 20260712T120000Z:0001'));
+    expect(body['summary'], isNot(contains('actual-secret')));
+    expect(body['summary'], contains('credential=<redacted>'));
+    return _jsonResponse([
+      {
+        ...body,
+        'reference_code': 'DBG-FLEET01',
+      }
+    ]);
+  }
+
+  if (request.url.path == '/functions/v1/report-bug') {
+    expect(request.method, 'POST');
+    expect(request.headers['apikey'], 'anon-key');
+    expect(request.headers['Authorization'], 'Bearer staff-session');
+    return _jsonResponse({
+      'issue_created': true,
+      'status': 'reported',
+      'issue_url': 'https://github.com/sticktrk/cross/issues/177',
+      'issue_number': 177,
+    });
+  }
+
   if (request.url.path == '/rest/v1/hubs') {
     expect(request.headers['apikey'], 'service-role-key');
     expect(request.headers['Authorization'], 'Bearer service-role-key');
@@ -604,6 +757,17 @@ http.Response _supabaseResponse(http.BaseRequest request) {
         'token': 'legacy-token',
         'encrypted_token': null,
         'server_instance_id': 'srv-test',
+      },
+      {
+        'id': 'hub-orphan',
+        'home_id': 'missing-home',
+        'type': 'server',
+        'name': 'Orphan Light Box',
+        'endpoint': {'host': 'orphan.test', 'port': 80, 'useSsl': false},
+        'enabled': true,
+        'token': 'legacy-token',
+        'encrypted_token': null,
+        'server_instance_id': 'srv-orphan',
       },
     ]);
   }

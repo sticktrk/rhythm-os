@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:rhythm_admin_api/src/config.dart';
 import 'package:rhythm_admin_api/src/device_probe_service.dart';
 import 'package:rhythm_admin_api/src/env_loader.dart';
+import 'package:rhythm_admin_api/src/fleet_report_service.dart';
 import 'package:rhythm_admin_api/src/server.dart';
 import 'package:rhythm_admin_api/src/support_access_service.dart';
 import 'package:rhythm_admin_api/src/supabase_rest_client.dart';
@@ -22,11 +23,17 @@ Future<void> main() async {
     supabase: supabase,
     supportAccess: supportAccess,
   );
+  final fleetReports = FleetReportService(
+    supabase: supabase,
+    support: support,
+    probes: probes,
+  );
   final server = AdminApiServer(
     config: config,
     supabase: supabase,
     support: support,
     probes: probes,
+    fleetReports: fleetReports,
   );
 
   final httpServer = await shelf_io.serve(

@@ -411,6 +411,28 @@ class DeviceDebugBundleDto {
   final List<int> bytes;
 }
 
+class DeviceDebugBundleSubmissionDto {
+  const DeviceDebugBundleSubmissionDto({
+    required this.hubId,
+    required this.route,
+    required this.baseUrl,
+    required this.contentType,
+    required this.uploadedByDevice,
+    this.fileName,
+    this.sizeBytes,
+    this.legacyBytes,
+  });
+
+  final String hubId;
+  final String route;
+  final String baseUrl;
+  final String contentType;
+  final bool uploadedByDevice;
+  final String? fileName;
+  final int? sizeBytes;
+  final List<int>? legacyBytes;
+}
+
 class DeviceLogSourceDto {
   const DeviceLogSourceDto({
     required this.id,
@@ -646,6 +668,188 @@ class DeviceOtaActionDto {
         'tokenAvailable': tokenAvailable,
         'hasEncryptedToken': hasEncryptedToken,
         'result': result,
+      };
+}
+
+class FleetFindingReportRequestDto {
+  const FleetFindingReportRequestDto({
+    required this.title,
+    required this.severity,
+    required this.scanRunId,
+    required this.detectedAt,
+    required this.occurrences,
+    required this.affectedHubCount,
+    required this.samples,
+    required this.findingIds,
+    this.journeyStage,
+    this.serverVersion,
+    this.platformContext,
+  });
+
+  final String title;
+  final String severity;
+  final String scanRunId;
+  final DateTime detectedAt;
+  final int occurrences;
+  final int affectedHubCount;
+  final List<String> samples;
+  final List<String> findingIds;
+  final String? journeyStage;
+  final String? serverVersion;
+  final String? platformContext;
+
+  factory FleetFindingReportRequestDto.fromJson(Map<String, dynamic> json) {
+    final rawTitle = cleanString(json['title']);
+    final title = rawTitle == null ? null : _sanitizeFleetText(rawTitle, 180);
+    final severity = cleanString(json['severity'])?.toLowerCase() ?? 'error';
+    final scanRunId = cleanString(json['scanRunId']);
+    final detectedAt = parseDateTime(json['detectedAt']);
+    if (title == null || title.length > 180) {
+      throw const AdminApiException(
+        400,
+        'Fleet finding title is required and must be at most 180 characters.',
+      );
+    }
+    if (!const {'critical', 'error', 'warning'}.contains(severity)) {
+      throw const AdminApiException(
+        400,
+        'Fleet finding severity must be critical, error, or warning.',
+      );
+    }
+    if (scanRunId == null ||
+        scanRunId.length > 100 ||
+        !RegExp(r'^[A-Za-z0-9_.:-]+$').hasMatch(scanRunId)) {
+      throw const AdminApiException(400, 'Fleet scan run id is required.');
+    }
+    if (detectedAt == null) {
+      throw const AdminApiException(
+        400,
+        'Fleet finding detectedAt must be an ISO-8601 timestamp.',
+      );
+    }
+    final rawSamples = json['samples'];
+    final samples = rawSamples is List
+        ? rawSamples
+            .whereType<String>()
+            .map((sample) => _sanitizeFleetText(sample, 500))
+            .where((sample) => sample.isNotEmpty)
+            .take(12)
+            .toList(growable: false)
+        : const <String>[];
+    final requestedJourneyStage = cleanString(json['journeyStage']);
+    final rawFindingIds = json['findingIds'];
+    final findingIds = rawFindingIds is List
+        ? rawFindingIds
+            .whereType<String>()
+            .map((value) => value.trim())
+            .where(
+              (value) => RegExp(r'^[A-Za-z0-9_.:-]{1,120}$').hasMatch(value),
+            )
+            .take(12)
+            .toList(growable: false)
+        : const <String>[];
+    final requestedOccurrences = json['occurrences'];
+    final requestedAffectedHubCount = json['affectedHubCount'];
+    const journeyStages = {
+      'discovery',
+      'BLE',
+      'Wi-Fi',
+      'LAN/auth',
+      'cloud identity',
+      'remote access',
+      'OTA/reboot',
+      'integration commissioning',
+      'canonicalization',
+      'command dispatch',
+      'physical confirmation',
+      'unknown',
+    };
+    return FleetFindingReportRequestDto(
+      title: title,
+      severity: severity,
+      scanRunId: scanRunId,
+      detectedAt: detectedAt,
+      occurrences: ((requestedOccurrences is num
+                  ? requestedOccurrences.toInt()
+                  : null) ??
+              1)
+          .clamp(1, 100000)
+          .toInt(),
+      affectedHubCount: ((requestedAffectedHubCount is num
+                  ? requestedAffectedHubCount.toInt()
+                  : null) ??
+              1)
+          .clamp(1, 100000)
+          .toInt(),
+      samples: samples,
+      findingIds: findingIds,
+      journeyStage: journeyStages.contains(requestedJourneyStage)
+          ? requestedJourneyStage
+          : 'unknown',
+      serverVersion: _sanitizeFleetMetadata(json['serverVersion']),
+      platformContext: _sanitizeFleetMetadata(json['platformContext']),
+    );
+  }
+}
+
+String? _sanitizeFleetMetadata(Object? value) {
+  final cleaned = cleanString(value);
+  return cleaned == null ? null : _sanitizeFleetText(cleaned, 100);
+}
+
+String _sanitizeFleetText(String value, int maxLength) {
+  var sanitized = value
+      .replaceAll(RegExp(r'\x1b\[[0-9;]*m'), '')
+      .replaceAll(
+        RegExp(r'\bbearer\s+[A-Za-z0-9._~+/=-]+', caseSensitive: false),
+        'Bearer <redacted>',
+      )
+      .replaceAll(
+        RegExp(
+          r'\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b',
+        ),
+        '<jwt>',
+      )
+      .replaceAll(
+        RegExp(
+          r'\b(token|secret|password|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+',
+          caseSensitive: false,
+        ),
+        'credential=<redacted>',
+      )
+      .replaceAll(
+        RegExp(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
+        '<email>',
+      )
+      .replaceAll(RegExp(r'https?://[^\s)]+'), '<url>')
+      .replaceAll(
+        RegExp(
+          r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b',
+        ),
+        '<uuid>',
+      )
+      .trim();
+  if (sanitized.length > maxLength) {
+    sanitized = '${sanitized.substring(0, maxLength - 3)}...';
+  }
+  return sanitized;
+}
+
+class FleetFindingReportResultDto {
+  const FleetFindingReportResultDto({
+    required this.submissionId,
+    required this.referenceCode,
+    required this.reportResult,
+  });
+
+  final String submissionId;
+  final String referenceCode;
+  final Map<String, dynamic> reportResult;
+
+  Map<String, dynamic> toJson() => {
+        'submissionId': submissionId,
+        'referenceCode': referenceCode,
+        ...reportResult,
       };
 }
 

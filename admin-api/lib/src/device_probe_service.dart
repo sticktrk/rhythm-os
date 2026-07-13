@@ -97,6 +97,50 @@ class DeviceProbeService {
     );
   }
 
+  Future<DeviceDebugBundleSubmissionDto> submitDebugBundle({
+    required AdminSession session,
+    required String hubId,
+    required String uploadUrl,
+  }) async {
+    final hub = await _loadHub(session: session, hubId: hubId);
+    final candidates = _endpointCandidates(hub);
+    if (candidates.isEmpty) {
+      throw const AdminApiException(
+        400,
+        'No endpoint is configured for this Light Box.',
+      );
+    }
+
+    final failures = <String>[];
+    var sawAuthRequired = false;
+    for (final candidate in candidates) {
+      final baseUrl = candidate.endpoint.baseUrl;
+      final token = await _authTokenForEndpoint(session, hub, baseUrl);
+      final result = await _submitDebugBundleToEndpoint(
+        hub: hub,
+        candidate: candidate,
+        authToken: token,
+        uploadUrl: uploadUrl,
+      );
+      if (result.submission != null) return result.submission!;
+      if (result.authRequired) sawAuthRequired = true;
+      if (result.message != null) {
+        failures.add('${candidate.route} $baseUrl: ${result.message}');
+      }
+    }
+
+    if (sawAuthRequired) {
+      throw AdminApiException(403, _debugBundleAuthRequiredMessage(hub));
+    }
+    throw AdminApiException(
+      502,
+      failures.isEmpty
+          ? 'No configured endpoint submitted a debug bundle.'
+          : 'No configured endpoint submitted a debug bundle. '
+              '${failures.join(' ')}',
+    );
+  }
+
   Future<DeviceStatusDto> loadStatus({
     required AdminSession session,
     required String hubId,
@@ -571,6 +615,90 @@ class DeviceProbeService {
     }
   }
 
+  Future<_DebugBundleSubmissionEndpointResult> _submitDebugBundleToEndpoint({
+    required _ProbeHub hub,
+    required ({String route, HubEndpointDto endpoint}) candidate,
+    required String? authToken,
+    required String uploadUrl,
+  }) async {
+    final baseUrl = candidate.endpoint.baseUrl;
+    try {
+      final response = await _http
+          .post(
+            _uriWithAppendedPath(baseUrl, 'api/diag/debug-bundle'),
+            headers: {
+              'Accept': 'application/json,application/gzip,*/*',
+              'Content-Type': 'application/json',
+              if (authToken != null) 'Authorization': 'Bearer $authToken',
+            },
+            body: jsonEncode({'upload_url': uploadUrl}),
+          )
+          .timeout(const Duration(minutes: 3));
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        return const _DebugBundleSubmissionEndpointResult.authRequired();
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return _DebugBundleSubmissionEndpointResult.error(
+          'debug bundle submission returned HTTP ${response.statusCode}'
+          '${_responseErrorSuffix(response)}.',
+        );
+      }
+
+      final contentType = response.headers['content-type'] ?? '';
+      final isLegacyBundle = contentType.contains('application/gzip') ||
+          (response.bodyBytes.length >= 2 &&
+              response.bodyBytes[0] == 0x1f &&
+              response.bodyBytes[1] == 0x8b);
+      if (isLegacyBundle) {
+        return _DebugBundleSubmissionEndpointResult.submission(
+          DeviceDebugBundleSubmissionDto(
+            hubId: hub.id,
+            route: candidate.route,
+            baseUrl: baseUrl,
+            contentType: contentType.isEmpty ? 'application/gzip' : contentType,
+            uploadedByDevice: false,
+            fileName: _attachmentFileName(
+                  response.headers['content-disposition'],
+                ) ??
+                _fallbackDebugBundleFileName(hub.id),
+            sizeBytes: response.bodyBytes.length,
+            legacyBytes: response.bodyBytes,
+          ),
+        );
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map || decoded['uploaded'] != true) {
+        return const _DebugBundleSubmissionEndpointResult.error(
+          'device did not confirm the debug bundle upload.',
+        );
+      }
+      return _DebugBundleSubmissionEndpointResult.submission(
+        DeviceDebugBundleSubmissionDto(
+          hubId: hub.id,
+          route: candidate.route,
+          baseUrl: baseUrl,
+          contentType: 'application/gzip',
+          uploadedByDevice: true,
+          fileName: cleanString(decoded['file_name']),
+          sizeBytes: (decoded['size_bytes'] as num?)?.toInt(),
+        ),
+      );
+    } on TimeoutException {
+      return const _DebugBundleSubmissionEndpointResult.error(
+        'debug bundle submission timed out.',
+      );
+    } on FormatException {
+      return const _DebugBundleSubmissionEndpointResult.error(
+        'device returned an invalid debug bundle submission response.',
+      );
+    } catch (error) {
+      return _DebugBundleSubmissionEndpointResult.error(
+        'debug bundle submission failed: $error',
+      );
+    }
+  }
+
   Future<_StateFetchResult> _fetchState(String baseUrl, String? token) async {
     try {
       final response = await _http.get(
@@ -1028,6 +1156,28 @@ class _DebugBundleEndpointResult {
       : this._(authRequired: true, message: 'authentication required');
 
   final DeviceDebugBundleDto? bundle;
+  final String? message;
+  final bool authRequired;
+}
+
+class _DebugBundleSubmissionEndpointResult {
+  const _DebugBundleSubmissionEndpointResult._({
+    this.submission,
+    this.message,
+    this.authRequired = false,
+  });
+
+  const _DebugBundleSubmissionEndpointResult.submission(
+    DeviceDebugBundleSubmissionDto submission,
+  ) : this._(submission: submission);
+
+  const _DebugBundleSubmissionEndpointResult.error(String message)
+      : this._(message: message);
+
+  const _DebugBundleSubmissionEndpointResult.authRequired()
+      : this._(authRequired: true, message: 'authentication required');
+
+  final DeviceDebugBundleSubmissionDto? submission;
   final String? message;
   final bool authRequired;
 }

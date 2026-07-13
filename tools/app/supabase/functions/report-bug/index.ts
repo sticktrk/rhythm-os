@@ -155,6 +155,7 @@ async function handleRequest(
       body: buildIssueBody(submission, signedBundleLink),
       labels: dedupe([
         'App Bug Report',
+        ...(isFleetSubmission(submission) ? ['fleet-detected'] : []),
         ...readCsvEnv('GITHUB_ISSUES_LABELS'),
       ]),
       assignees: readCsvEnv('GITHUB_ISSUES_ASSIGNEES'),
@@ -293,7 +294,8 @@ async function createGitHubIssue({
 }
 
 function buildIssueTitle(submission: DebugBundleSubmission): string {
-  const prefix = 'app-report: '
+  const fleet = isFleetSubmission(submission)
+  const prefix = fleet ? 'fleet-report: ' : 'app-report: '
   const suffix = ` (${submission.reference_code})`
   const maxDetailLength = 256 - prefix.length - suffix.length
   const titleDetail =
@@ -329,6 +331,7 @@ function buildIssueBody(
   submission: DebugBundleSubmission,
   signedBundleLink: SignedBundleLink | null,
 ): string {
+  const fleet = isFleetSubmission(submission)
   const summary = submission.summary?.trim()
   const hasBundle = !!submission.bundle_storage_path
   const bundleSection = hasBundle
@@ -356,9 +359,11 @@ function buildIssueBody(
       ]
 
   return [
-    'Created automatically from the Rhythm app Report Bug flow.',
+    fleet
+      ? 'Created automatically from the Rhythm fleet log triage flow.'
+      : 'Created automatically from the Rhythm app Report Bug flow.',
     '',
-    '## User Summary',
+    fleet ? '## Detected Finding' : '## User Summary',
     summary ? quoteBlock(summary) : '_No summary provided._',
     '',
     '## Submission',
@@ -367,20 +372,24 @@ function buildIssueBody(
     `- Submitted at: ${submission.created_at}`,
     `- Auth mode: ${submission.is_anonymous ? 'anonymous' : 'signed in'}`,
     '',
-    '## App',
+    fleet ? '## Automation' : '## App',
     `- Version: ${valueOrUnknown(submission.app_version)}`,
     `- Build: ${valueOrUnknown(submission.app_build)}`,
     `- Platform: ${valueOrUnknown(submission.app_platform)}`,
     '',
     '## RhythmServer',
-    `- Hub: ${valueOrUnknown(submission.server_name)}`,
-    `- Hub ID: ${valueOrUnknown(submission.server_hub_id)}`,
-    `- Endpoint: ${formatEndpoint(submission)}`,
+    `- Hub: ${fleet ? 'Redacted representative hub' : valueOrUnknown(submission.server_name)}`,
+    `- Hub ID: ${fleet ? 'Redacted' : valueOrUnknown(submission.server_hub_id)}`,
+    `- Endpoint: ${fleet ? 'Redacted' : formatEndpoint(submission)}`,
     `- Version: ${valueOrUnknown(submission.server_version)}`,
     `- Platform context: ${valueOrUnknown(submission.server_platform_context)}`,
     '',
     ...bundleSection,
   ].join('\n')
+}
+
+function isFleetSubmission(submission: DebugBundleSubmission): boolean {
+  return submission.app_platform?.trim().toLowerCase() === 'admin-fleet'
 }
 
 async function markGitHubIssueError(
