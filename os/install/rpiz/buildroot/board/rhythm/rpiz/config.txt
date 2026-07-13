@@ -1,4 +1,7 @@
 kernel=kernel.img
 dtoverlay=miniuart-bt
+# Reserve persistent RAM for the prior boot's panic/oops console. Rhythm
+# copies any resulting /sys/fs/pstore records into the next debug bundle.
+dtoverlay=ramoops
 core_freq=250
 enable_uart=1

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use axum::middleware;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -81,8 +82,14 @@ pub fn create_router(state: SharedState) -> Router {
                 auth_state,
                 rhythm_os::auth::require_api_auth_middleware,
             ))
-            .layer(CorsLayer::permissive()),
+            .layer(CorsLayer::permissive())
+            .layer(middleware::from_fn(record_http_activity)),
     )
+}
+
+async fn record_http_activity(request: axum::http::Request<Body>, next: Next) -> Response {
+    crate::boot_diagnostics::record_http_request();
+    next.run(request).await
 }
 
 // ---------------------------------------------------------------------------

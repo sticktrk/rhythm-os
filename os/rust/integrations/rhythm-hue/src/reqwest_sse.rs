@@ -14,13 +14,15 @@ use futures::StreamExt;
 use log::{debug, info, warn};
 
 use crate::sse::{drain_sse_lines, HueSseConfig, HueSseEvent, SseParseState};
+use crate::sse_liveness::HueSseLiveness;
 
-/// Maximum seconds without any SSE bytes before assuming the connection is
-/// stalled and reconnecting. Motion controls are latency-sensitive, and Hue
-/// bridges normally send heartbeat comment frames every ~10s, so 15s catches a
-/// dead stream after roughly one missed heartbeat instead of waiting through
-/// several missed room-entry events.
-const SSE_IDLE_TIMEOUT_SECS: u64 = 15;
+/// Maximum time after a successful Hue light write to wait for any raw SSE
+/// traffic before treating the event subscription as stalled.
+const SSE_EXPECTED_ACTIVITY_TIMEOUT_SECS: u64 = 120;
+
+/// Poll often enough to observe shutdown without shortening the failure
+/// timeout above.
+const SSE_SHUTDOWN_POLL_SECS: u64 = 15;
 
 /// Log an "SSE alive" message at this interval during idle periods.
 const ALIVE_LOG_INTERVAL_SECS: u64 = 300;
@@ -68,6 +70,105 @@ fn build_sse_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum StreamEnd {
+    Shutdown,
+    Reconnect(&'static str),
+}
+
+/// Consume one established Hue event stream until shutdown or a real stream
+/// failure. The intervals are injectable so the quiet-stream contract can be
+/// covered without a two-minute test.
+async fn consume_sse_stream<S, B, E>(
+    stream: &mut S,
+    tx: &SyncSender<HueSseEvent>,
+    shutdown: &AtomicBool,
+    parse_state: &mut SseParseState,
+    sse_liveness: &HueSseLiveness,
+    idle_poll: Duration,
+    expected_activity_timeout: Duration,
+) -> StreamEnd
+where
+    S: futures::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut chunks_since_alive: u32 = 0;
+    let mut line_buf = Vec::with_capacity(4096);
+    let now = Instant::now();
+    let mut last_byte_event = now;
+    let mut last_alive_log = now;
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return StreamEnd::Shutdown;
+        }
+
+        match tokio::time::timeout(idle_poll, stream.next()).await {
+            Ok(Some(Ok(chunk))) => {
+                let idle_secs = last_byte_event.elapsed().as_secs();
+                if idle_secs > 60 {
+                    debug!(
+                        target: "sse",
+                        "SSE: bytes after {}m{}s idle",
+                        idle_secs / 60,
+                        idle_secs % 60
+                    );
+                }
+
+                last_byte_event = Instant::now();
+                sse_liveness.observe_sse_activity();
+                chunks_since_alive = chunks_since_alive.saturating_add(1);
+                line_buf.extend_from_slice(chunk.as_ref());
+                drain_sse_lines(&mut line_buf, tx, parse_state);
+                if line_buf.len() > MAX_SSE_LINE_BYTES {
+                    warn!(
+                        target: "sse",
+                        "SSE line exceeded {} bytes without newline, reconnecting",
+                        MAX_SSE_LINE_BYTES
+                    );
+                    return StreamEnd::Reconnect("oversized_sse_line");
+                }
+
+                if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
+                    debug!(
+                        target: "sse",
+                        "SSE: alive ({} chunks in last {}m)",
+                        chunks_since_alive,
+                        ALIVE_LOG_INTERVAL_SECS / 60
+                    );
+                    last_alive_log = Instant::now();
+                    chunks_since_alive = 0;
+                }
+            }
+            Ok(Some(Err(e))) => {
+                warn!(target: "sse", "SSE error: {}{}", e, fd_log_suffix());
+                return StreamEnd::Reconnect("stream_error");
+            }
+            Ok(None) => {
+                warn!(target: "sse", "SSE stream ended");
+                return StreamEnd::Reconnect("stream_ended");
+            }
+            Err(_) => {
+                if let Some(failure) =
+                    sse_liveness.expected_activity_failure(expected_activity_timeout)
+                {
+                    warn!(
+                        target: "sse",
+                        "SSE: no bytes for {}s after successful Hue light writes ({} pending); reconnecting",
+                        failure.oldest_age.as_secs(),
+                        failure.pending_count
+                    );
+                    return StreamEnd::Reconnect("expected_activity_timeout");
+                }
+
+                // Quiet streams are valid until a successful bridge write
+                // gives us a concrete reason to expect event traffic.
+            }
+        }
+    }
+}
+
 /// Start an SSE event stream reader in a background thread.
 ///
 /// Returns a receiver for parsed SSE events. The thread runs until
@@ -75,6 +176,7 @@ fn build_sse_client() -> Result<reqwest::Client, reqwest::Error> {
 pub fn start_reqwest_sse(
     config: HueSseConfig,
     shutdown: Arc<AtomicBool>,
+    sse_liveness: Arc<HueSseLiveness>,
 ) -> std::sync::mpsc::Receiver<HueSseEvent> {
     let (tx, rx) = sync_channel::<HueSseEvent>(64);
 
@@ -97,7 +199,7 @@ pub fn start_reqwest_sse(
                     return;
                 }
             };
-            rt.block_on(run_sse_loop(&config, &tx, &shutdown));
+            rt.block_on(run_sse_loop(&config, &tx, &shutdown, &sse_liveness));
         });
     if let Err(e) = spawn_result {
         warn!(target: "sse", "Failed to spawn SSE thread: {}", e);
@@ -107,7 +209,12 @@ pub fn start_reqwest_sse(
 }
 
 /// SSE event loop using raw reqwest response streaming.
-async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutdown: &AtomicBool) {
+async fn run_sse_loop(
+    config: &HueSseConfig,
+    tx: &SyncSender<HueSseEvent>,
+    shutdown: &AtomicBool,
+    sse_liveness: &HueSseLiveness,
+) {
     let url = format!("https://{}/eventstream/clip/v2", config.bridge_ip);
 
     let mut backoff = Duration::from_secs(1);
@@ -125,6 +232,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         let client = match build_sse_client() {
             Ok(c) => c,
             Err(e) => {
+                sse_liveness.note_reconnect("client_build_error");
                 warn!(
                     target: "sse",
                     "Failed to build SSE client: {}{}",
@@ -153,6 +261,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
         .await
         {
             Err(_) => {
+                sse_liveness.note_reconnect("connect_timeout");
                 warn!(
                     target: "sse",
                     "SSE connect timed out after {}s{}",
@@ -167,6 +276,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             Ok(Ok(response)) => match response.error_for_status() {
                 Ok(response) => response,
                 Err(e) => {
+                    sse_liveness.note_reconnect("http_status_error");
                     warn!(
                         target: "sse",
                         "SSE connect failed: {}{}",
@@ -180,6 +290,7 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
                 }
             },
             Ok(Err(e)) => {
+                sse_liveness.note_reconnect("request_error");
                 warn!(
                     target: "sse",
                     "SSE request failed: {}{}",
@@ -193,77 +304,26 @@ async fn run_sse_loop(config: &HueSseConfig, tx: &SyncSender<HueSseEvent>, shutd
             }
         };
 
-        let mut chunks_since_alive: u32 = 0;
-        let mut line_buf = Vec::with_capacity(4096);
         let mut stream = response.bytes_stream();
 
         info!(target: "sse", "SSE connected (conn #{})", connect_count);
+        sse_liveness.reset_for_connected_stream();
         let _ = tx.try_send(HueSseEvent::Connected);
         backoff = Duration::from_secs(1);
-        let now = Instant::now();
-        let mut last_byte_event = now;
-        let mut last_alive_log = now;
 
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-
-            match tokio::time::timeout(Duration::from_secs(SSE_IDLE_TIMEOUT_SECS), stream.next())
-                .await
-            {
-                Ok(Some(Ok(chunk))) => {
-                    let idle_secs = last_byte_event.elapsed().as_secs();
-                    if idle_secs > 60 {
-                        debug!(
-                            target: "sse",
-                            "SSE: bytes after {}m{}s idle",
-                            idle_secs / 60,
-                            idle_secs % 60
-                        );
-                    }
-
-                    last_byte_event = Instant::now();
-                    chunks_since_alive = chunks_since_alive.saturating_add(1);
-                    line_buf.extend_from_slice(&chunk);
-                    drain_sse_lines(&mut line_buf, tx, &mut parse_state);
-                    if line_buf.len() > MAX_SSE_LINE_BYTES {
-                        warn!(
-                            target: "sse",
-                            "SSE line exceeded {} bytes without newline, reconnecting",
-                            MAX_SSE_LINE_BYTES
-                        );
-                        break;
-                    }
-
-                    if last_alive_log.elapsed().as_secs() >= ALIVE_LOG_INTERVAL_SECS {
-                        debug!(
-                            target: "sse",
-                            "SSE: alive ({} chunks in last {}m)",
-                            chunks_since_alive,
-                            ALIVE_LOG_INTERVAL_SECS / 60
-                        );
-                        last_alive_log = Instant::now();
-                        chunks_since_alive = 0;
-                    }
-                }
-                Ok(Some(Err(e))) => {
-                    warn!(target: "sse", "SSE error: {}{}", e, fd_log_suffix());
-                    break;
-                }
-                Ok(None) => {
-                    warn!(target: "sse", "SSE stream ended");
-                    break;
-                }
-                Err(_) => {
-                    warn!(
-                        target: "sse",
-                        "SSE: No bytes for {}s (stall detected), reconnecting",
-                        SSE_IDLE_TIMEOUT_SECS
-                    );
-                    break;
-                }
-            }
+        let stream_end = consume_sse_stream(
+            &mut stream,
+            tx,
+            shutdown,
+            &mut parse_state,
+            sse_liveness,
+            Duration::from_secs(SSE_SHUTDOWN_POLL_SECS),
+            Duration::from_secs(SSE_EXPECTED_ACTIVITY_TIMEOUT_SECS),
+        )
+        .await;
+        match stream_end {
+            StreamEnd::Shutdown => return,
+            StreamEnd::Reconnect(reason) => sse_liveness.note_reconnect(reason),
         }
 
         if !shutdown.load(Ordering::Relaxed) {
@@ -307,5 +367,112 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/event-stream")
         );
+    }
+
+    #[tokio::test]
+    async fn quiet_stream_without_expected_activity_stays_connected() {
+        let mut stream = futures::stream::pending::<Result<&'static [u8], &'static str>>();
+        let (tx, _rx) = sync_channel::<HueSseEvent>(4);
+        let shutdown = AtomicBool::new(false);
+        let mut parse_state = SseParseState::new();
+        let sse_liveness = HueSseLiveness::default();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(40),
+            consume_sse_stream(
+                &mut stream,
+                &tx,
+                &shutdown,
+                &mut parse_state,
+                &sse_liveness,
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            ),
+        )
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "an idle but open SSE response must remain connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn ended_stream_still_requests_reconnect() {
+        let mut stream = futures::stream::empty::<Result<&'static [u8], &'static str>>();
+        let (tx, _rx) = sync_channel::<HueSseEvent>(4);
+        let shutdown = AtomicBool::new(false);
+        let mut parse_state = SseParseState::new();
+        let sse_liveness = HueSseLiveness::default();
+
+        let outcome = consume_sse_stream(
+            &mut stream,
+            &tx,
+            &shutdown,
+            &mut parse_state,
+            &sse_liveness,
+            Duration::from_millis(5),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(outcome, StreamEnd::Reconnect("stream_ended"));
+    }
+
+    #[tokio::test]
+    async fn missing_expected_activity_requests_reconnect_after_timeout() {
+        let mut stream = futures::stream::pending::<Result<&'static [u8], &'static str>>();
+        let (tx, _rx) = sync_channel::<HueSseEvent>(4);
+        let shutdown = AtomicBool::new(false);
+        let mut parse_state = SseParseState::new();
+        let sse_liveness = HueSseLiveness::default();
+        sse_liveness.begin_expected_activity();
+
+        let outcome = consume_sse_stream(
+            &mut stream,
+            &tx,
+            &shutdown,
+            &mut parse_state,
+            &sse_liveness,
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert_eq!(outcome, StreamEnd::Reconnect("expected_activity_timeout"));
+    }
+
+    #[tokio::test]
+    async fn filtered_light_bytes_satisfy_expected_activity() {
+        use futures::StreamExt as _;
+
+        let light_update = Ok::<_, &'static str>(
+            b"data: [{\"data\":[{\"type\":\"grouped_light\"}]}]\n".as_slice(),
+        );
+        let mut stream = futures::stream::iter([light_update]).chain(futures::stream::pending::<
+            Result<&'static [u8], &'static str>,
+        >());
+        let (tx, _rx) = sync_channel::<HueSseEvent>(4);
+        let shutdown = AtomicBool::new(false);
+        let mut parse_state = SseParseState::new();
+        let sse_liveness = HueSseLiveness::default();
+        sse_liveness.begin_expected_activity();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(40),
+            consume_sse_stream(
+                &mut stream,
+                &tx,
+                &shutdown,
+                &mut parse_state,
+                &sse_liveness,
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            ),
+        )
+        .await;
+
+        assert!(outcome.is_err());
+        assert_eq!(sse_liveness.pending_count(), 0);
     }
 }

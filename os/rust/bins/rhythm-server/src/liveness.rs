@@ -14,12 +14,14 @@ const PERIODIC_WATCHDOG_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const PERIODIC_WATCHDOG_LOCK_POLL: Duration = Duration::from_millis(100);
 
 pub fn spawn_periodic_watchdog(state: SharedState) {
+    crate::boot_diagnostics::watchdog_armed();
     std::thread::Builder::new()
         .name("liveness-watchdog".to_string())
         .spawn(move || {
             let mut consecutive_lock_failures: u64 = 0;
             loop {
                 std::thread::sleep(PERIODIC_WATCHDOG_CHECK_INTERVAL);
+                crate::boot_diagnostics::watchdog_heartbeat();
 
                 let view = try_acquire_liveness_view(
                     &state,
@@ -35,6 +37,7 @@ pub fn spawn_periodic_watchdog(state: SharedState) {
                 );
 
                 if let Some((age_secs, threshold_secs, reason)) = stale {
+                    crate::boot_diagnostics::watchdog_triggered(reason);
                     log::error!(
                         target: "sys",
                         "Periodic liveness stale for {}s (threshold {}s, reason {}); restarting appliance",

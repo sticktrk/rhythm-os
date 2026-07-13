@@ -16,6 +16,7 @@ use crate::registry::{HueDeviceRegistry, HueRegistrySnapshot};
 use crate::reqwest_sse::start_reqwest_sse;
 use crate::reqwest_transport::ReqwestHueTransport;
 use crate::sse::HueSseConfig;
+use crate::sse_liveness::HueSseLiveness;
 
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{
@@ -105,7 +106,7 @@ pub fn create_hue_controller(
     use crate::controller::HueLightController;
     use crate::hub_state::HueHubData;
 
-    let (bridge_ip, username, registry) = {
+    let (bridge_ip, username, registry, sse_liveness) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         let creds = s
@@ -118,16 +119,17 @@ pub fn create_hue_controller(
         let bridge_ip = creds.address.clone();
 
         let hue_data = s.hubs.get(key).and_then(|h| h.data::<HueHubData>());
-        let reg = hue_data
-            .map(|hue| hue.registry.clone())
+        let (reg, sse_liveness) = hue_data
+            .map(|hue| (hue.registry.clone(), hue.sse_liveness.clone()))
             .ok_or_else(|| anyhow::anyhow!("Hue hub not active for {}", key))?;
 
-        (bridge_ip, username, reg)
+        (bridge_ip, username, reg, sse_liveness)
     };
 
     let transport = ReqwestHueTransport::new(&bridge_ip)?;
     let controller = HueLightController::new(transport, username, registry)
-        .with_capability_source(state.clone(), key.clone());
+        .with_capability_source(state.clone(), key.clone())
+        .with_sse_liveness(sse_liveness);
     Ok(std::sync::Arc::new(controller))
 }
 
@@ -265,8 +267,14 @@ fn connect_hue_sse(
         state,
         key.clone(),
         snapshot,
-        |config, registry, shutdown| {
-            start_event_stream(config.bridge_ip, config.username, registry, shutdown)
+        |config, registry, shutdown, sse_liveness| {
+            start_event_stream(
+                config.bridge_ip,
+                config.username,
+                registry,
+                shutdown,
+                sse_liveness,
+            )
         },
     )?;
 
@@ -294,13 +302,14 @@ fn start_event_stream(
     username: String,
     registry: Arc<Mutex<HueDeviceRegistry>>,
     shutdown: Arc<AtomicBool>,
+    sse_liveness: Arc<HueSseLiveness>,
 ) -> Receiver<HubEvent> {
     let sse_config = HueSseConfig {
         bridge_ip,
         username,
     };
 
-    let sse_rx = start_reqwest_sse(sse_config, shutdown.clone());
+    let sse_rx = start_reqwest_sse(sse_config, shutdown.clone(), sse_liveness);
 
     crate::events::start_event_translator(sse_rx, registry, shutdown, None, None, None)
 }
@@ -448,6 +457,7 @@ mod tests {
                 bridge_ip: "192.0.2.10".to_string(),
                 username: "user-123".to_string(),
                 registry,
+                sse_liveness: Arc::new(HueSseLiveness::default()),
             }),
             registry: None,
             discovery: None,

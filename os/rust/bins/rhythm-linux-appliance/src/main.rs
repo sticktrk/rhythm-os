@@ -115,6 +115,13 @@ fn main() -> Result<()> {
     }
 
     std::fs::create_dir_all(&args.data_dir)?;
+    std::env::set_var("RHYTHM_DATA_DIR", &args.data_dir);
+    if let Err(error) = rhythm_server::boot_diagnostics::record_startup(
+        std::path::Path::new(&args.data_dir),
+        &platform_type,
+    ) {
+        warn!(target: "sys", "Failed to record boot diagnostics: {}", error);
+    }
 
     // Appliance bundle-only updates (drift repair, bundle releases without a
     // rootfs image) install over the running rootfs without an A/B slot
@@ -261,6 +268,10 @@ fn main() -> Result<()> {
     }
 
     info!(target: "sys", "Data directory: {}", args.data_dir);
+    rhythm_server::boot_diagnostics::spawn_last_gasp_recorder(
+        state.clone(),
+        std::path::PathBuf::from(&args.data_dir),
+    );
 
     {
         let event_state = state.clone();

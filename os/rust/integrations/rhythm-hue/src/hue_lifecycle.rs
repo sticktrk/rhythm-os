@@ -20,6 +20,7 @@ use rhythm_os::registry::{HubDeviceRegistry, RegistrySnapshot};
 use rhythm_os::state::SharedState;
 
 use crate::hub_state::HueHubData;
+use crate::sse_liveness::HueSseLiveness;
 
 /// Configuration for connecting the Hue SSE event stream.
 pub struct HueSseConnectConfig {
@@ -46,6 +47,7 @@ where
         HueSseConnectConfig,
         Arc<Mutex<HubDeviceRegistry>>,
         Arc<AtomicBool>,
+        Arc<HueSseLiveness>,
     ) -> Receiver<HubEvent>,
 {
     let (bridge_ip, username) = {
@@ -66,6 +68,9 @@ where
 
     let bridge_ip_clone = bridge_ip.clone();
     let username_clone = username.clone();
+    let sse_liveness = Arc::new(HueSseLiveness::default());
+    let hub_sse_liveness = sse_liveness.clone();
+    let stream_sse_liveness = sse_liveness.clone();
 
     rhythm_os::lifecycle::connect_hub(
         state,
@@ -79,6 +84,7 @@ where
                 bridge_ip: bridge_ip_clone,
                 username: username_clone,
                 registry,
+                sse_liveness: hub_sse_liveness,
             })
         },
         // start_event_stream: wrap the platform closure with SSE config
@@ -87,7 +93,7 @@ where
                 bridge_ip,
                 username,
             };
-            start_event_stream(sse_config, registry, shutdown)
+            start_event_stream(sse_config, registry, shutdown, stream_sse_liveness)
         },
     )
 }
@@ -104,17 +110,17 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
     use crate::controller::HueLightController;
     use log::warn;
 
-    let (hub_key, username, registry) = {
+    let (hub_key, username, registry, sse_liveness) = {
         let s = state
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
 
-        let (hub_key, registry) = s
+        let (hub_key, registry, sse_liveness) = s
             .hubs
             .iter()
             .find_map(|(key, hub)| {
                 hub.data::<HueHubData>()
-                    .map(|hue| (key.clone(), hue.registry.clone()))
+                    .map(|hue| (key.clone(), hue.registry.clone(), hue.sse_liveness.clone()))
             })
             .ok_or_else(|| anyhow::anyhow!("Hue hub not active (call connect_sse first)"))?;
 
@@ -126,11 +132,12 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
             .ok_or_else(|| anyhow::anyhow!("Hue credentials not configured"))?
             .to_string();
 
-        (hub_key, user, registry)
+        (hub_key, user, registry, sse_liveness)
     };
 
     let controller = HueLightController::new(transport, username, registry.clone())
-        .with_capability_source(state.clone(), hub_key.clone());
+        .with_capability_source(state.clone(), hub_key.clone())
+        .with_sse_liveness(sse_liveness);
 
     rhythm_os::lifecycle::ensure_hub_runtime(
         state,
@@ -241,7 +248,9 @@ mod tests {
             &state,
             key.clone(),
             None,
-            |_config, _registry, _shutdown| panic!("missing credentials must not start SSE"),
+            |_config, _registry, _shutdown, _sse_liveness| {
+                panic!("missing credentials must not start SSE")
+            },
         ));
         assert!(missing.contains("No hub credentials configured"));
 
@@ -253,7 +262,9 @@ mod tests {
             &state,
             key,
             None,
-            |_config, _registry, _shutdown| panic!("invalid credentials must not start SSE"),
+            |_config, _registry, _shutdown, _sse_liveness| {
+                panic!("invalid credentials must not start SSE")
+            },
         ));
         assert_eq!(invalid, "Hue credentials not configured");
     }
@@ -273,10 +284,11 @@ mod tests {
             &state,
             key.clone(),
             None,
-            move |config, registry, shutdown| {
+            move |config, registry, shutdown, sse_liveness| {
                 assert_eq!(config.bridge_ip, "192.0.2.10");
                 assert_eq!(config.username, "user-123");
                 assert!(!shutdown.load(std::sync::atomic::Ordering::Relaxed));
+                assert_eq!(sse_liveness.pending_count(), 0);
                 registry
                     .lock()
                     .unwrap()
@@ -325,6 +337,7 @@ mod tests {
                     bridge_ip: "192.0.2.10".to_string(),
                     username: "user-123".to_string(),
                     registry,
+                    sse_liveness: Arc::new(HueSseLiveness::default()),
                 }),
                 registry: None,
                 discovery: None,

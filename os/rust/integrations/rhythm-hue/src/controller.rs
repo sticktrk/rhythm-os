@@ -20,6 +20,7 @@ use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::state::SharedState;
 
 use crate::registry::HueDeviceRegistry;
+use crate::sse_liveness::HueSseLiveness;
 use crate::transport::HueTransport;
 
 const DISPATCH_INFO_MS: u128 = 250;
@@ -37,6 +38,7 @@ pub struct HueLightController<H: HueTransport> {
     light_resource_ids: Mutex<HashMap<String, String>>,
     capability_state: Option<SharedState>,
     capability_hub_key: Option<HubKey>,
+    sse_liveness: Option<Arc<HueSseLiveness>>,
 }
 
 impl<H: HueTransport> HueLightController<H> {
@@ -55,6 +57,7 @@ impl<H: HueTransport> HueLightController<H> {
             light_resource_ids: Mutex::new(HashMap::new()),
             capability_state: None,
             capability_hub_key: None,
+            sse_liveness: None,
         }
     }
 
@@ -64,6 +67,30 @@ impl<H: HueTransport> HueLightController<H> {
         self.capability_state = Some(state);
         self.capability_hub_key = Some(hub_key);
         self
+    }
+
+    /// Attach the per-bridge SSE activity tracker used to verify that
+    /// successful light writes are followed by event-stream traffic.
+    pub fn with_sse_liveness(mut self, sse_liveness: Arc<HueSseLiveness>) -> Self {
+        self.sse_liveness = Some(sse_liveness);
+        self
+    }
+
+    fn tracked_light_write(
+        &self,
+        write: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let token = self
+            .sse_liveness
+            .as_ref()
+            .and_then(|liveness| liveness.begin_expected_activity());
+        let result = write();
+        if result.is_err() {
+            if let Some(liveness) = self.sse_liveness.as_ref() {
+                liveness.cancel_expected_activity(token);
+            }
+        }
+        result
     }
 
     /// Eagerly establish the TLS connection to the Hue bridge so the first
@@ -123,15 +150,17 @@ impl<H: HueTransport> HueLightController<H> {
         let dynamics = adapted.transition_ms.map(|ms| ms as u16);
         let started = Instant::now();
 
-        if let Err(e) = self.client.set_grouped_light(
-            &self.username,
-            grouped_light_id,
-            true,
-            adapted.brightness,
-            adapted.kelvin,
-            adapted.xy,
-            dynamics.filter(|ms| *ms > 0),
-        ) {
+        if let Err(e) = self.tracked_light_write(|| {
+            self.client.set_grouped_light(
+                &self.username,
+                grouped_light_id,
+                true,
+                adapted.brightness,
+                adapted.kelvin,
+                adapted.xy,
+                dynamics.filter(|ms| *ms > 0),
+            )
+        }) {
             tracing::warn!(
                 target: "cmd",
                 event = "hue_turn_on_failed",
@@ -207,15 +236,17 @@ impl<H: HueTransport> HueLightController<H> {
             .filter(|ms| *ms > 0);
         let started = Instant::now();
 
-        if let Err(e) = self.client.set_grouped_light(
-            &self.username,
-            grouped_light_id,
-            false,
-            None,
-            None,
-            None,
-            fade_ms,
-        ) {
+        if let Err(e) = self.tracked_light_write(|| {
+            self.client.set_grouped_light(
+                &self.username,
+                grouped_light_id,
+                false,
+                None,
+                None,
+                None,
+                fade_ms,
+            )
+        }) {
             tracing::warn!(
                 target: "cmd",
                 event = "hue_turn_off_failed",
@@ -376,15 +407,17 @@ impl<H: HueTransport> HueLightController<H> {
 
         for native_id in native_ids {
             let light_id = self.light_resource_id(native_id);
-            if let Err(e) = self.client.set_light(
-                &self.username,
-                &light_id,
-                true,
-                adapted.brightness,
-                adapted.kelvin,
-                adapted.xy,
-                dynamics.filter(|ms| *ms > 0),
-            ) {
+            if let Err(e) = self.tracked_light_write(|| {
+                self.client.set_light(
+                    &self.username,
+                    &light_id,
+                    true,
+                    adapted.brightness,
+                    adapted.kelvin,
+                    adapted.xy,
+                    dynamics.filter(|ms| *ms > 0),
+                )
+            }) {
                 tracing::warn!(
                     target: "cmd",
                     event = "hue_light_turn_on_failed",
@@ -464,10 +497,10 @@ impl<H: HueTransport> HueLightController<H> {
 
         for native_id in native_ids {
             let light_id = self.light_resource_id(native_id);
-            if let Err(e) =
+            if let Err(e) = self.tracked_light_write(|| {
                 self.client
                     .set_light(&self.username, &light_id, false, None, None, None, fade_ms)
-            {
+            }) {
                 tracing::warn!(
                     target: "cmd",
                     event = "hue_light_turn_off_failed",
@@ -741,6 +774,31 @@ mod tests {
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn successful_light_write_expects_sse_activity() {
+        let (controller, _) = make_spy_controller();
+        let liveness = Arc::new(HueSseLiveness::default());
+        let controller = controller.with_sse_liveness(liveness.clone());
+
+        block_on(controller.turn_on("room1", LightingCommand::new(80, 4000))).unwrap();
+
+        assert_eq!(liveness.pending_count(), 1);
+        liveness.observe_sse_activity();
+        assert_eq!(liveness.pending_count(), 0);
+    }
+
+    #[test]
+    fn failed_light_write_cancels_sse_expectation() {
+        let (controller, _) = make_spy_controller();
+        let liveness = Arc::new(HueSseLiveness::default());
+        controller.client.set_should_fail(true);
+        let controller = controller.with_sse_liveness(liveness.clone());
+
+        assert!(block_on(controller.turn_on("room1", LightingCommand::new(80, 4000))).is_err());
+
+        assert_eq!(liveness.pending_count(), 0);
     }
 
     #[test]
