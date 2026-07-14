@@ -28,7 +28,11 @@ const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
-const MATTER_FIRST_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+// A native control RPC can time out at the 8s client deadline while chipd is
+// still retiring the stale CASE exchange. Retrying before that cleanup ends
+// reuses the same stale session and turns one recoverable timeout into a
+// repeated failure with the longer dead-device backoff.
+const MATTER_FIRST_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(8);
 const MATTER_REPEATED_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 const MATTER_DEVICE_FANOUT_CONCURRENCY: usize = 8;
 
@@ -2583,6 +2587,18 @@ mod tests {
         assert_eq!(write_count_for_node(&spy.operations(), 42), 1);
 
         spy.allow_node_commands(42);
+        let premature_retry =
+            block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000)));
+        assert!(matches!(
+            premature_retry,
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert_eq!(
+            write_count_for_node(&spy.operations(), 42),
+            1,
+            "the first retry must wait for chipd to retire the stale CASE session"
+        );
+
         let mut backoff = controller.on_off_read_backoff.lock().unwrap();
         let entry = backoff.get_mut(&(42, 1)).unwrap();
         entry.command_retry_after = Instant::now() - Duration::from_millis(1);
@@ -2599,7 +2615,7 @@ mod tests {
     }
 
     #[test]
-    fn first_command_timeout_retries_before_repeated_timeout_backoff() {
+    fn first_command_timeout_waits_for_session_retirement_before_repeated_backoff() {
         let (controller, _, _) = make_controller();
 
         controller.mark_connectivity_failed(42, 1, true);
@@ -2612,8 +2628,9 @@ mod tests {
             .unwrap();
         assert_eq!(first.consecutive_command_failures, 1);
         assert!(
-            first.command_retry_after <= Instant::now() + MATTER_FIRST_COMMAND_RETRY_BACKOFF,
-            "the first cold-session timeout should get a quick recovery attempt"
+            first.command_retry_after
+                > Instant::now() + MATTER_FIRST_COMMAND_RETRY_BACKOFF - Duration::from_millis(100),
+            "the first cold-session timeout must leave time for native session retirement"
         );
 
         controller.mark_connectivity_failed(42, 1, true);

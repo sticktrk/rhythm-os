@@ -62,10 +62,12 @@ using chip::Controller::DiscoveryType;
 using chip::Controller::OnNOCChainGeneration;
 using chip::Controller::WiFiCredentials;
 
-// Must stay below the 8s control-RPC socket timeout in chip_transport.rs so a
-// slow/unreachable bulb produces a real CHIP error response instead of the
-// caller abandoning the socket while this operation keeps a thread pinned.
-constexpr std::chrono::seconds kOperationTimeout(7);
+// The Rust control-RPC client gives up after 8s, but CHIP can deliver the
+// exchange timeout several seconds later. Keep the callback context alive
+// through that retirement window; returning earlier would destroy an
+// operation that CHIP still references. A truly wedged operation is handled
+// by WaitForCompletion's supervised sidecar exit below.
+constexpr std::chrono::seconds kOperationTimeout(15);
 constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
@@ -560,7 +562,14 @@ public:
         std::unique_lock<std::mutex> lock(mMutex);
         if (!mCondition.wait_for(lock, timeout, [this] { return mDone; }))
         {
-            return CHIP_ERROR_TIMEOUT;
+            // CHIP still owns callbacks whose context points at this
+            // operation. Returning would destroy the stack object and leave
+            // a late callback with a dangling pointer. Exit the isolated
+            // sidecar instead; rhythm-matter will respawn it on the next RPC.
+            ChipLogError(Controller,
+                         "Matter operation did not retire within %llds; exiting for supervisor restart",
+                         static_cast<long long>(timeout.count()));
+            std::_Exit(70); // EX_SOFTWARE; skip destructors that may touch the wedged stack
         }
         return mStatus;
     }
