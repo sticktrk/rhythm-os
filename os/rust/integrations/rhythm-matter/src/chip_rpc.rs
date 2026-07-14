@@ -7,9 +7,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::transport::{
-    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
-    MatterGroup, MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
-    MatterSubscriptionTarget,
+    CommissionedDevice, MatterAttributeReport, MatterCommandSubmission, MatterCommissionRequest,
+    MatterControllerEventBatch, MatterControllerEventCursor, MatterDeviceInfo,
+    MatterEndpointCommandPlan, MatterGroup, MatterGroupMember, MatterLevelCommandVariant,
+    MatterLevelStepMode, MatterSubscriptionTarget,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +160,17 @@ pub enum ChipRpcRequest {
         max_interval_secs: u16,
     },
     DrainAttributeReports,
+    /// Accept complete endpoint plans for asynchronous controller-owned
+    /// execution. The response confirms admission, not device delivery.
+    SubmitEndpointPlans {
+        plans: Vec<MatterEndpointCommandPlan>,
+    },
+    /// Long-poll the restart-aware controller event stream.
+    WaitControllerEvents {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<MatterControllerEventCursor>,
+        max_wait_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,6 +412,16 @@ pub struct ChipRpcJsonValueResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChipRpcAttributeReportsResponse {
     pub reports: Vec<MatterAttributeReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipRpcSubmitEndpointPlansResponse {
+    pub submissions: Vec<MatterCommandSubmission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipRpcControllerEventsResponse {
+    pub batch: MatterControllerEventBatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

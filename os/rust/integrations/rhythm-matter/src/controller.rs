@@ -1,6 +1,7 @@
 //! Matter light controller using the typed Matter transport.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,15 +9,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, info, warn};
 use rhythm_core::controller::{
-    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+    HubCommandReceipt, HubDispatchTarget, HubLightController, LightControlError,
+    LightControlResult, LightController,
 };
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
-use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities, LightType};
+#[cfg(test)]
+use rhythm_devices::LightType;
+use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities};
 
 use crate::clusters;
 use crate::hub_state::MatterHubData;
-use crate::transport::MatterTransport;
+use crate::transport::{MatterCommandStep, MatterEndpointCommandPlan, MatterTransport};
 
 /// Type alias for the registry (same as HA and Hue).
 pub type MatterDeviceRegistry = rhythm_os::registry::HubDeviceRegistry;
@@ -28,13 +32,6 @@ const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
-// A native control RPC can time out at the 8s client deadline while chipd is
-// still retiring the stale CASE exchange. Retrying before that cleanup ends
-// reuses the same stale session and turns one recoverable timeout into a
-// repeated failure with the longer dead-device backoff.
-const MATTER_FIRST_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(8);
-const MATTER_REPEATED_COMMAND_RETRY_BACKOFF: Duration = Duration::from_secs(15);
-const MATTER_DEVICE_FANOUT_CONCURRENCY: usize = 8;
 
 fn env_flag_enabled(name: &str, default: bool) -> bool {
     std::env::var(name)
@@ -53,9 +50,6 @@ pub(crate) fn matter_group_fanout_only_enabled() -> bool {
 struct MatterOnOffReadBackoff {
     marked_at: Instant,
     suppress_until: Instant,
-    command_retry_after: Instant,
-    consecutive_command_failures: u8,
-    suppress_commands: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,12 +57,6 @@ enum MatterOnOffRead {
     On,
     Off,
     Suppressed,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct MatterDeviceCommandOutcome {
-    successes: usize,
-    failures: usize,
 }
 
 fn initial_connectivity_backoff(
@@ -89,9 +77,6 @@ fn initial_connectivity_backoff(
                         MatterOnOffReadBackoff {
                             marked_at,
                             suppress_until,
-                            command_retry_after: marked_at,
-                            consecutive_command_failures: 0,
-                            suppress_commands: false,
                         },
                     )
                 })
@@ -119,6 +104,7 @@ pub struct MatterLightController {
     hub_data: Arc<MatterHubData>,
     on_off_read_backoff: Mutex<HashMap<(u64, u16), MatterOnOffReadBackoff>>,
     group_fanout_only: bool,
+    next_command_id: AtomicU64,
 }
 
 impl MatterLightController {
@@ -130,7 +116,208 @@ impl MatterLightController {
             hub_data,
             on_off_read_backoff,
             group_fanout_only: matter_group_fanout_only_enabled(),
+            next_command_id: AtomicU64::new(
+                chrono::Utc::now().timestamp_millis().unsigned_abs().max(1) << 16,
+            ),
         }
+    }
+
+    fn next_command_id(&self) -> u64 {
+        self.next_command_id.fetch_add(1, Ordering::Relaxed).max(1)
+    }
+
+    fn submit_plans(
+        &self,
+        target_label: &str,
+        plans: Vec<MatterEndpointCommandPlan>,
+    ) -> LightControlResult<HubCommandReceipt> {
+        if plans.is_empty() {
+            return Ok(HubCommandReceipt::delivered());
+        }
+        let expected_ids: Vec<u64> = plans.iter().map(|plan| plan.command_id).collect();
+        let submissions = match self.transport.submit_endpoint_plans(&plans) {
+            Ok(submissions) => submissions,
+            Err(error) => {
+                if Self::looks_like_connectivity_timeout(&error) {
+                    for plan in &plans {
+                        self.mark_connectivity_failed(plan.node_id, plan.endpoint);
+                    }
+                }
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter controller rejected target {} plans: {error:#}",
+                    target_label
+                )));
+            }
+        };
+        let returned_ids: Vec<u64> = submissions
+            .iter()
+            .map(|submission| submission.command_id)
+            .collect();
+        if returned_ids != expected_ids {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter controller returned mismatched command ids for target {}",
+                target_label
+            )));
+        }
+        for (plan, submission) in plans.iter().zip(&submissions) {
+            if submission.completed {
+                self.clear_connectivity_backoff(plan.node_id, plan.endpoint);
+            }
+        }
+        let pending_ids: Vec<u64> = submissions
+            .iter()
+            .filter(|submission| !submission.completed)
+            .map(|submission| submission.command_id)
+            .collect();
+        if pending_ids.is_empty() {
+            Ok(HubCommandReceipt::delivered())
+        } else {
+            let mut stream_ids = submissions
+                .iter()
+                .filter(|submission| !submission.completed)
+                .filter_map(|submission| submission.controller_stream_id.as_deref());
+            let Some(stream_id) = stream_ids.next() else {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter controller accepted target {} plans without a stream identity",
+                    target_label
+                )));
+            };
+            if stream_ids.any(|candidate| candidate != stream_id) {
+                return Err(LightControlError::CommandFailed(format!(
+                    "Matter controller accepted target {} plans across multiple stream identities",
+                    target_label
+                )));
+            }
+            Ok(HubCommandReceipt::accepted(
+                pending_ids,
+                stream_id.to_string(),
+            ))
+        }
+    }
+
+    fn turn_on_plans(
+        &self,
+        device_ids: &[String],
+        command: &LightingCommand,
+    ) -> LightControlResult<Vec<MatterEndpointCommandPlan>> {
+        let mut plans = Vec::with_capacity(device_ids.len());
+        for device_id in device_ids {
+            let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
+                warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
+                continue;
+            };
+            let (caps, quirks) = self.device_metadata(device_id, node_id);
+            let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
+                &caps,
+                command,
+                Self::color_preference(&quirks),
+            );
+            let mut steps = Vec::new();
+            let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
+            if needs_explicit_on {
+                steps.push(MatterCommandStep::SetOnOff { on: true });
+            }
+            if let Some((hue, saturation)) = adapted.hue_saturation {
+                steps.push(MatterCommandStep::SetHueSaturation {
+                    hue,
+                    saturation,
+                    transition_ms: adapted.transition_ms,
+                });
+            } else if let Some((x, y)) = adapted.xy {
+                steps.push(MatterCommandStep::SetXy {
+                    x,
+                    y,
+                    transition_ms: adapted.transition_ms,
+                });
+            } else if let Some(kelvin) = adapted.kelvin {
+                steps.push(MatterCommandStep::SetColorTemperature {
+                    kelvin,
+                    transition_ms: adapted.transition_ms,
+                });
+            }
+            if let Some(brightness) = adapted.brightness {
+                steps.push(MatterCommandStep::SetBrightness {
+                    level: clusters::brightness_to_level(brightness),
+                    transition_ms: adapted.transition_ms,
+                });
+            } else if adapted.on && !needs_explicit_on {
+                steps.push(MatterCommandStep::SetOnOff { on: true });
+            }
+            if steps.is_empty() {
+                continue;
+            }
+            plans.push(MatterEndpointCommandPlan {
+                command_id: self.next_command_id(),
+                node_id,
+                endpoint,
+                steps,
+                inter_step_delay_ms: quirks.iter().find_map(|quirk| match quirk {
+                    DeviceQuirk::CommandThrottleMs(ms) if *ms > 0 => Some(u64::from(*ms)),
+                    _ => None,
+                }),
+            });
+        }
+        if plans.is_empty() && !device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(
+                "Matter target has no valid endpoint plans".to_string(),
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn turn_off_plans(
+        &self,
+        device_ids: &[String],
+    ) -> LightControlResult<Vec<MatterEndpointCommandPlan>> {
+        let plans: Vec<_> = device_ids
+            .iter()
+            .filter_map(|device_id| {
+                let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
+                    warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
+                    return None;
+                };
+                Some(MatterEndpointCommandPlan {
+                    command_id: self.next_command_id(),
+                    node_id,
+                    endpoint,
+                    steps: vec![MatterCommandStep::SetOnOff { on: false }],
+                    inter_step_delay_ms: None,
+                })
+            })
+            .collect();
+        if plans.is_empty() && !device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(
+                "Matter target has no valid endpoint plans".to_string(),
+            ));
+        }
+        Ok(plans)
+    }
+
+    fn submit_turn_on_devices(
+        &self,
+        target_label: &str,
+        device_ids: &[String],
+        command: &LightingCommand,
+    ) -> LightControlResult<HubCommandReceipt> {
+        if device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter target {target_label} has no member endpoints"
+            )));
+        }
+        self.submit_plans(target_label, self.turn_on_plans(device_ids, command)?)
+    }
+
+    fn submit_turn_off_devices(
+        &self,
+        target_label: &str,
+        device_ids: &[String],
+    ) -> LightControlResult<HubCommandReceipt> {
+        if device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter target {target_label} has no member endpoints"
+            )));
+        }
+        self.submit_plans(target_label, self.turn_off_plans(device_ids)?)
     }
 
     /// Parse a Matter device ID string into `(node_id, endpoint)`.
@@ -179,15 +366,6 @@ impl MatterLightController {
             HubDispatchTarget::Group { control_id, .. } => parse_group_control_id(control_id),
             HubDispatchTarget::Devices { .. } => None,
         }
-    }
-
-    fn group_id_for_room(&self, room_id: &str) -> Option<u16> {
-        self.hub_data
-            .registry
-            .lock()
-            .ok()
-            .and_then(|registry| registry.get_grouped_light_id(room_id))
-            .and_then(|control_id| parse_group_control_id(&control_id))
     }
 
     fn group_fallback_target_label(target_label: &str, group_id: u16) -> String {
@@ -313,27 +491,6 @@ impl MatterLightController {
         }
     }
 
-    fn common_metadata_for_devices(
-        &self,
-        device_ids: &[String],
-    ) -> (LightCapabilities, Vec<DeviceQuirk>) {
-        let mut capabilities = Vec::new();
-        let mut quirks = Vec::new();
-
-        for device_id in device_ids {
-            let Some((node_id, _endpoint)) = Self::parse_device_id(device_id) else {
-                continue;
-            };
-            let (caps, device_quirks) = self.device_metadata(device_id, node_id);
-            capabilities.push(caps);
-            quirks.extend(device_quirks);
-        }
-
-        let common = LightCapabilities::common_for(capabilities.iter())
-            .unwrap_or_else(|| LightCapabilities::defaults_for(LightType::ExtendedColor));
-        (common, quirks)
-    }
-
     fn cache_device_metadata(
         &self,
         requested_id: &str,
@@ -378,12 +535,6 @@ impl MatterLightController {
             .any(|quirk| matches!(quirk, DeviceQuirk::NeedsExplicitOn))
     }
 
-    fn maybe_throttle(throttle_ms: Option<u32>) {
-        if let Some(throttle_ms) = throttle_ms.filter(|ms| *ms > 0) {
-            std::thread::sleep(Duration::from_millis(throttle_ms as u64));
-        }
-    }
-
     fn clear_connectivity_backoff(&self, node_id: u64, endpoint: u16) {
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.remove(&(node_id, endpoint));
@@ -391,42 +542,21 @@ impl MatterLightController {
         self.hub_data.record_node_proof_of_life(node_id);
     }
 
-    fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16, suppress_commands: bool) {
+    fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16) {
         let marked_at = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
-            let consecutive_command_failures = if suppress_commands {
-                backoff
-                    .get(&(node_id, endpoint))
-                    .map(|entry| entry.consecutive_command_failures.saturating_add(1))
-                    .unwrap_or(1)
-            } else {
-                0
-            };
-            let command_retry_backoff = if consecutive_command_failures <= 1 {
-                MATTER_FIRST_COMMAND_RETRY_BACKOFF
-            } else {
-                MATTER_REPEATED_COMMAND_RETRY_BACKOFF
-            };
             backoff.insert(
                 (node_id, endpoint),
                 MatterOnOffReadBackoff {
                     marked_at,
                     suppress_until: marked_at + MATTER_ON_OFF_READ_BACKOFF,
-                    command_retry_after: marked_at + command_retry_backoff,
-                    consecutive_command_failures,
-                    suppress_commands,
                 },
             );
         }
         self.hub_data.mark_node_reachable(node_id, false);
     }
 
-    fn connectivity_backoff_active(
-        &self,
-        node_id: u64,
-        endpoint: u16,
-        include_read_only: bool,
-    ) -> bool {
+    fn read_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
         let now = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             match backoff.get(&(node_id, endpoint)).copied() {
@@ -438,11 +568,7 @@ impl MatterLightController {
                         backoff.remove(&(node_id, endpoint));
                         return false;
                     }
-                    return if include_read_only {
-                        true
-                    } else {
-                        entry.suppress_commands && entry.command_retry_after > now
-                    };
+                    return true;
                 }
                 Some(_) => {
                     backoff.remove(&(node_id, endpoint));
@@ -453,24 +579,15 @@ impl MatterLightController {
         false
     }
 
-    fn read_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
-        self.connectivity_backoff_active(node_id, endpoint, true)
-    }
-
-    fn command_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
-        self.connectivity_backoff_active(node_id, endpoint, false)
-    }
-
     fn note_connectivity_failure(
         &self,
         node_id: u64,
         endpoint: u16,
         error: &anyhow::Error,
-        suppress_commands: bool,
     ) -> bool {
         let connectivity_timeout = Self::looks_like_connectivity_timeout(error);
         if connectivity_timeout {
-            self.mark_connectivity_failed(node_id, endpoint, suppress_commands);
+            self.mark_connectivity_failed(node_id, endpoint);
         }
         connectivity_timeout
     }
@@ -490,7 +607,7 @@ impl MatterLightController {
                 Ok(MatterOnOffRead::Off)
             }
             Err(e) => {
-                self.note_connectivity_failure(node_id, endpoint, &e, false);
+                self.note_connectivity_failure(node_id, endpoint, &e);
                 Err(e)
             }
         }
@@ -502,751 +619,6 @@ impl MatterLightController {
             || lower.contains("timed out")
             || lower.contains("chip error 0x32")
             || lower.contains("failed to connect")
-    }
-
-    /// Run one operation per Matter endpoint concurrently while preserving
-    /// the caller's input order in the returned outcomes. `rhythm-chipd`
-    /// handles control requests concurrently, so serial fan-out here only
-    /// stacks cold CASE-session latency across otherwise independent bulbs.
-    /// Keep the fan-out bounded below chipd's connection limit so unusually
-    /// large rooms cannot crowd out unrelated controller work.
-    fn parallel_device_fanout<T, F>(&self, device_ids: &[String], operation: F) -> Vec<T>
-    where
-        T: Send,
-        F: Fn(&str) -> T + Sync,
-    {
-        let mut outcomes = Vec::with_capacity(device_ids.len());
-        for chunk in device_ids.chunks(MATTER_DEVICE_FANOUT_CONCURRENCY) {
-            let mut chunk_outcomes = std::thread::scope(|scope| {
-                let operation = &operation;
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|device_id| scope.spawn(move || operation(device_id)))
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle
-                            .join()
-                            .expect("Matter device fan-out worker panicked")
-                    })
-                    .collect::<Vec<_>>()
-            });
-            outcomes.append(&mut chunk_outcomes);
-        }
-        outcomes
-    }
-
-    /// Apply one complete lighting command to one endpoint. Commands within a
-    /// bulb remain ordered (color before brightness); only independent bulbs
-    /// run concurrently.
-    fn turn_on_device(
-        &self,
-        device_id: &str,
-        command: &LightingCommand,
-    ) -> MatterDeviceCommandOutcome {
-        let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
-            warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
-            return MatterDeviceCommandOutcome {
-                successes: 0,
-                failures: 1,
-            };
-        };
-        if self.command_backoff_active(node_id, endpoint) {
-            tracing::debug!(
-                target: "cmd",
-                event = "matter_command_backoff_skip",
-                node_id,
-                endpoint,
-                backoff_max_secs = MATTER_REPEATED_COMMAND_RETRY_BACKOFF.as_secs(),
-                "Matter write skipped while endpoint is in connectivity backoff"
-            );
-            return MatterDeviceCommandOutcome {
-                successes: 0,
-                failures: 1,
-            };
-        }
-
-        let (caps, quirks) = self.device_metadata(device_id, node_id);
-        let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
-            &caps,
-            command,
-            Self::color_preference(&quirks),
-        );
-        let throttle_ms = quirks.iter().find_map(|quirk| match quirk {
-            DeviceQuirk::CommandThrottleMs(ms) => Some(*ms),
-            _ => None,
-        });
-        let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
-
-        let mut outcome = MatterDeviceCommandOutcome::default();
-        let mut already_sent_on = false;
-        // Once a write to this device fails with a connectivity timeout,
-        // stop sending its remaining attribute commands. Other bulbs keep
-        // running in their own fan-out workers.
-        let mut unreachable = false;
-
-        if needs_explicit_on {
-            if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
-                warn!(
-                    target: "cmd",
-                    "Matter: explicit on command failed for node {}: {}",
-                    node_id,
-                    e
-                );
-                outcome.failures += 1;
-                unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-            } else {
-                outcome.successes += 1;
-                already_sent_on = true;
-            }
-            Self::maybe_throttle(throttle_ms);
-        }
-
-        // Color attributes are sent before brightness so bulbs that treat a
-        // color command as a state reload cannot clobber the requested level.
-        if !unreachable {
-            if let Some((hue, saturation)) = adapted.hue_saturation {
-                if let Err(e) = self.transport.set_hue_saturation(
-                    node_id,
-                    endpoint,
-                    hue,
-                    saturation,
-                    adapted.transition_ms,
-                ) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: hue/saturation command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    outcome.failures += 1;
-                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                } else {
-                    outcome.successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            } else if let Some((x, y)) = adapted.xy {
-                if let Err(e) =
-                    self.transport
-                        .set_xy(node_id, endpoint, x, y, adapted.transition_ms)
-                {
-                    warn!(
-                        target: "cmd",
-                        "Matter: xy command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    outcome.failures += 1;
-                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                } else {
-                    outcome.successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            } else if let Some(kelvin) = adapted.kelvin {
-                if let Err(e) = self.transport.set_color_temperature(
-                    node_id,
-                    endpoint,
-                    kelvin,
-                    adapted.transition_ms,
-                ) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: color temperature command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    outcome.failures += 1;
-                    unreachable |= self.note_connectivity_failure(node_id, endpoint, &e, true);
-                } else {
-                    outcome.successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            }
-        }
-
-        if !unreachable {
-            if let Some(brightness) = adapted.brightness {
-                let level = clusters::brightness_to_level(brightness);
-                if let Err(e) =
-                    self.transport
-                        .set_brightness(node_id, endpoint, level, adapted.transition_ms)
-                {
-                    warn!(
-                        target: "cmd",
-                        "Matter: brightness command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    outcome.failures += 1;
-                    self.note_connectivity_failure(node_id, endpoint, &e, true);
-                } else {
-                    outcome.successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            } else if adapted.on && !already_sent_on {
-                if let Err(e) = self.transport.set_on_off(node_id, endpoint, true) {
-                    warn!(
-                        target: "cmd",
-                        "Matter: on command failed for node {}: {}",
-                        node_id,
-                        e
-                    );
-                    outcome.failures += 1;
-                    self.note_connectivity_failure(node_id, endpoint, &e, true);
-                } else {
-                    outcome.successes += 1;
-                }
-                Self::maybe_throttle(throttle_ms);
-            }
-        }
-
-        if outcome.successes > 0 {
-            self.clear_connectivity_backoff(node_id, endpoint);
-        }
-        if outcome.successes > 0 && outcome.failures > 0 {
-            warn!(
-                target: "cmd",
-                "Matter turn_on partial for device {}: successes={} failures={}",
-                device_id,
-                outcome.successes,
-                outcome.failures
-            );
-        }
-
-        outcome
-    }
-
-    fn turn_on_devices(
-        &self,
-        target_label: &str,
-        device_ids: &[String],
-        command: LightingCommand,
-    ) -> LightControlResult<()> {
-        let started = Instant::now();
-        let mut successful_devices = 0usize;
-        let mut partial_devices = 0usize;
-        let mut failed_devices = 0usize;
-
-        let outcomes = self.parallel_device_fanout(device_ids, |device_id| {
-            self.turn_on_device(device_id, &command)
-        });
-        for outcome in outcomes {
-            match (outcome.successes, outcome.failures) {
-                (0, _) => failed_devices += 1,
-                (_, 0) => successful_devices += 1,
-                _ => partial_devices += 1,
-            }
-        }
-
-        if successful_devices == 0 && partial_devices == 0 && !device_ids.is_empty() {
-            return Err(LightControlError::CommandFailed(format!(
-                "Matter turn_on failed for target {} ({} target devices)",
-                target_label, failed_devices,
-            )));
-        }
-
-        if successful_devices == 0 && partial_devices > 0 {
-            return Err(LightControlError::CommandFailed(format!(
-                "Matter turn_on partially failed for target {} ({} partial, {} failed)",
-                target_label, partial_devices, failed_devices,
-            )));
-        }
-
-        let latency_ms = started.elapsed().as_millis();
-        if partial_devices > 0 || failed_devices > 0 {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_turn_on_partial",
-                target = %target_label,
-                latency_ms,
-                ok = successful_devices,
-                partial = partial_devices,
-                failed = failed_devices,
-                device_count = device_ids.len(),
-                "Matter turn_on partial"
-            );
-        } else if latency_ms >= DISPATCH_WARN_MS {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_turn_on",
-                target = %target_label,
-                latency_ms,
-                brightness = command.brightness,
-                kelvin = command.kelvin,
-                direct_color = command.is_direct_color,
-                device_count = device_ids.len(),
-                "Matter turn_on slow"
-            );
-        } else if latency_ms >= DISPATCH_INFO_MS {
-            tracing::info!(
-                target: "cmd",
-                event = "matter_turn_on",
-                target = %target_label,
-                latency_ms,
-                brightness = command.brightness,
-                kelvin = command.kelvin,
-                direct_color = command.is_direct_color,
-                device_count = device_ids.len(),
-                "Matter turn_on"
-            );
-        } else {
-            debug!(
-                target: "cmd",
-                "Matter turn_on: target={} bri={} kelvin={} devices={} latency_ms={}",
-                target_label,
-                command.brightness,
-                command.kelvin,
-                device_ids.len(),
-                latency_ms
-            );
-        }
-
-        Ok(())
-    }
-
-    fn turn_on_group(
-        &self,
-        target_label: &str,
-        group_id: u16,
-        device_ids: &[String],
-        command: LightingCommand,
-    ) -> LightControlResult<()> {
-        if self.group_fanout_only {
-            if device_ids.is_empty() {
-                return Err(LightControlError::CommandFailed(format!(
-                    "Matter group turn_on fan-out-only mode has no members for target {} (group {})",
-                    target_label, group_id,
-                )));
-            }
-
-            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
-            Self::log_group_fanout_only(
-                "turn_on",
-                target_label,
-                &fallback_target_label,
-                group_id,
-                device_ids.len(),
-            );
-            return self.turn_on_devices(&fallback_target_label, device_ids, command);
-        }
-
-        let started = Instant::now();
-        let (caps, quirks) = self.common_metadata_for_devices(device_ids);
-        let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
-            &caps,
-            &command,
-            Self::color_preference(&quirks),
-        );
-        let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
-        let mut planned_commands = Vec::new();
-        if needs_explicit_on {
-            planned_commands.push("OnOff.On");
-        }
-        if adapted.hue_saturation.is_some() {
-            planned_commands.push("ColorControl.MoveToHueAndSaturation");
-        } else if adapted.xy.is_some() {
-            planned_commands.push("ColorControl.MoveToColor");
-        } else if adapted.kelvin.is_some() {
-            planned_commands.push("ColorControl.MoveToColorTemperature");
-        }
-        if adapted.brightness.is_some() {
-            planned_commands.push("LevelControl.MoveToLevelWithOnOff");
-        } else if adapted.on && !needs_explicit_on {
-            planned_commands.push("OnOff.On");
-        }
-        let planned_commands = planned_commands.join(",");
-        let mut command_successes = 0usize;
-        let mut command_failures = 0usize;
-        let mut already_sent_on = false;
-
-        info!(
-            target: "cmd",
-            "Matter group turn_on dispatch: target={} group_id={} members={} commands={} brightness={} kelvin={} direct_color={} transition_ms={:?}",
-            target_label,
-            group_id,
-            device_ids.len(),
-            planned_commands,
-            command.brightness,
-            command.kelvin,
-            command.is_direct_color,
-            command.transition_ms
-        );
-
-        if needs_explicit_on {
-            if let Err(e) = self.transport.set_group_on_off(group_id, true) {
-                warn!(
-                    target: "cmd",
-                    "Matter: explicit group on command failed for group {}: {}",
-                    group_id,
-                    e
-                );
-                command_failures += 1;
-            } else {
-                command_successes += 1;
-                already_sent_on = true;
-            }
-        }
-
-        if let Some((hue, saturation)) = adapted.hue_saturation {
-            if let Err(e) = self.transport.set_group_hue_saturation(
-                group_id,
-                hue,
-                saturation,
-                adapted.transition_ms,
-            ) {
-                warn!(
-                    target: "cmd",
-                    "Matter: group hue/saturation command failed for group {}: {}",
-                    group_id,
-                    e
-                );
-                command_failures += 1;
-            } else {
-                command_successes += 1;
-            }
-        } else if let Some((x, y)) = adapted.xy {
-            if let Err(e) = self
-                .transport
-                .set_group_xy(group_id, x, y, adapted.transition_ms)
-            {
-                warn!(
-                    target: "cmd",
-                    "Matter: group xy command failed for group {}: {}",
-                    group_id,
-                    e
-                );
-                command_failures += 1;
-            } else {
-                command_successes += 1;
-            }
-        } else if let Some(kelvin) = adapted.kelvin {
-            if let Err(e) =
-                self.transport
-                    .set_group_color_temperature(group_id, kelvin, adapted.transition_ms)
-            {
-                warn!(
-                    target: "cmd",
-                    "Matter: group color temperature command failed for group {}: {}",
-                    group_id,
-                    e
-                );
-                command_failures += 1;
-            } else {
-                command_successes += 1;
-            }
-        }
-
-        if let Some(brightness) = adapted.brightness {
-            let level = clusters::brightness_to_level(brightness);
-            if let Err(e) =
-                self.transport
-                    .set_group_brightness(group_id, level, adapted.transition_ms)
-            {
-                warn!(
-                    target: "cmd",
-                    "Matter: group brightness command failed for group {}: {}",
-                    group_id,
-                    e
-                );
-                command_failures += 1;
-            } else {
-                command_successes += 1;
-            }
-        } else if adapted.on && !already_sent_on {
-            if let Err(e) = self.transport.set_group_on_off(group_id, true) {
-                warn!(
-                    target: "cmd",
-                    "Matter: group on command failed for group {}: {}",
-                    group_id,
-                    e
-                );
-                command_failures += 1;
-            } else {
-                command_successes += 1;
-            }
-        }
-
-        if command_successes == 0 {
-            if device_ids.is_empty() {
-                return Err(LightControlError::CommandFailed(format!(
-                    "Matter group turn_on failed for target {} (group {}, {} failures, no fallback members)",
-                    target_label, group_id, command_failures,
-                )));
-            }
-
-            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_group_turn_on_fallback",
-                target = %target_label,
-                fallback_target = %fallback_target_label,
-                group_id,
-                failed = command_failures,
-                member_count = device_ids.len(),
-                "Matter group turn_on failed; falling back to member fan-out"
-            );
-            return self.turn_on_devices(&fallback_target_label, device_ids, command);
-        }
-
-        let latency_ms = started.elapsed().as_millis();
-        if command_failures > 0 {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_group_turn_on_partial",
-                target = %target_label,
-                group_id,
-                latency_ms,
-                ok = command_successes,
-                failed = command_failures,
-                member_count = device_ids.len(),
-                "Matter group turn_on partial"
-            );
-        } else if latency_ms >= DISPATCH_WARN_MS {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_group_turn_on",
-                target = %target_label,
-                group_id,
-                latency_ms,
-                brightness = command.brightness,
-                kelvin = command.kelvin,
-                direct_color = command.is_direct_color,
-                member_count = device_ids.len(),
-                "Matter group turn_on slow"
-            );
-        } else if latency_ms >= DISPATCH_INFO_MS {
-            tracing::info!(
-                target: "cmd",
-                event = "matter_group_turn_on",
-                target = %target_label,
-                group_id,
-                latency_ms,
-                brightness = command.brightness,
-                kelvin = command.kelvin,
-                direct_color = command.is_direct_color,
-                member_count = device_ids.len(),
-                "Matter group turn_on"
-            );
-        } else {
-            info!(
-                target: "cmd",
-                "Matter group turn_on sent: target={} group_id={} members={} commands={} brightness={} kelvin={} latency_ms={}",
-                target_label,
-                group_id,
-                device_ids.len(),
-                planned_commands,
-                command.brightness,
-                command.kelvin,
-                latency_ms
-            );
-        }
-
-        if Self::group_safety_fanout_enabled() && !device_ids.is_empty() {
-            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
-            Self::log_group_safety_fanout(
-                "turn_on",
-                target_label,
-                &fallback_target_label,
-                group_id,
-                device_ids.len(),
-                command_successes,
-                command_failures,
-            );
-            return self.turn_on_devices(&fallback_target_label, device_ids, command);
-        }
-
-        Ok(())
-    }
-
-    fn turn_off_devices(
-        &self,
-        target_label: &str,
-        device_ids: &[String],
-    ) -> LightControlResult<()> {
-        let started = Instant::now();
-        let mut successful_devices = 0usize;
-        let mut failed_devices = 0usize;
-
-        let outcomes = self.parallel_device_fanout(device_ids, |device_id| {
-            let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
-                return false;
-            };
-            if self.command_backoff_active(node_id, endpoint) {
-                tracing::debug!(
-                    target: "cmd",
-                    event = "matter_command_backoff_skip",
-                    node_id,
-                    endpoint,
-                    backoff_max_secs = MATTER_REPEATED_COMMAND_RETRY_BACKOFF.as_secs(),
-                    "Matter off skipped while endpoint is in connectivity backoff"
-                );
-                return false;
-            }
-
-            if let Err(e) = self.transport.set_on_off(node_id, endpoint, false) {
-                warn!(target: "cmd", "Matter: off command failed for node {}: {}", node_id, e);
-                self.note_connectivity_failure(node_id, endpoint, &e, true);
-                false
-            } else {
-                self.clear_connectivity_backoff(node_id, endpoint);
-                true
-            }
-        });
-        for succeeded in outcomes {
-            if succeeded {
-                successful_devices += 1;
-            } else {
-                failed_devices += 1;
-            }
-        }
-
-        if successful_devices == 0 && !device_ids.is_empty() {
-            return Err(LightControlError::CommandFailed(format!(
-                "Matter turn_off failed for target {} ({} target devices)",
-                target_label, failed_devices,
-            )));
-        }
-
-        let latency_ms = started.elapsed().as_millis();
-        if failed_devices > 0 {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_turn_off_partial",
-                target = %target_label,
-                latency_ms,
-                ok = successful_devices,
-                failed = failed_devices,
-                device_count = device_ids.len(),
-                "Matter turn_off partial"
-            );
-        } else if latency_ms >= DISPATCH_WARN_MS {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_turn_off",
-                target = %target_label,
-                latency_ms,
-                device_count = device_ids.len(),
-                "Matter turn_off slow"
-            );
-        } else if latency_ms >= DISPATCH_INFO_MS {
-            tracing::info!(
-                target: "cmd",
-                event = "matter_turn_off",
-                target = %target_label,
-                latency_ms,
-                device_count = device_ids.len(),
-                "Matter turn_off"
-            );
-        } else {
-            debug!(
-                target: "cmd",
-                "Matter turn_off: target={} devices={} latency_ms={}",
-                target_label,
-                device_ids.len(),
-                latency_ms
-            );
-        }
-
-        Ok(())
-    }
-
-    fn turn_off_group(
-        &self,
-        target_label: &str,
-        group_id: u16,
-        device_ids: &[String],
-    ) -> LightControlResult<()> {
-        if self.group_fanout_only {
-            if device_ids.is_empty() {
-                return Err(LightControlError::CommandFailed(format!(
-                    "Matter group turn_off fan-out-only mode has no members for target {} (group {})",
-                    target_label, group_id,
-                )));
-            }
-
-            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
-            Self::log_group_fanout_only(
-                "turn_off",
-                target_label,
-                &fallback_target_label,
-                group_id,
-                device_ids.len(),
-            );
-            return self.turn_off_devices(&fallback_target_label, device_ids);
-        }
-
-        let started = Instant::now();
-        info!(
-            target: "cmd",
-            "Matter group turn_off dispatch: target={} group_id={} command=OnOff.Off",
-            target_label,
-            group_id
-        );
-        if let Err(e) = self.transport.set_group_on_off(group_id, false) {
-            if device_ids.is_empty() {
-                return Err(LightControlError::CommandFailed(format!(
-                    "Matter group turn_off failed for target {} (group {}, no fallback members): {}",
-                    target_label, group_id, e
-                )));
-            }
-
-            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_group_turn_off_fallback",
-                target = %target_label,
-                fallback_target = %fallback_target_label,
-                group_id,
-                member_count = device_ids.len(),
-                error = %e,
-                "Matter group turn_off failed; falling back to member fan-out"
-            );
-            return self.turn_off_devices(&fallback_target_label, device_ids);
-        }
-
-        let latency_ms = started.elapsed().as_millis();
-        if latency_ms >= DISPATCH_WARN_MS {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_group_turn_off",
-                target = %target_label,
-                group_id,
-                latency_ms,
-                "Matter group turn_off slow"
-            );
-        } else if latency_ms >= DISPATCH_INFO_MS {
-            tracing::info!(
-                target: "cmd",
-                event = "matter_group_turn_off",
-                target = %target_label,
-                group_id,
-                latency_ms,
-                "Matter group turn_off"
-            );
-        } else {
-            info!(
-                target: "cmd",
-                "Matter group turn_off sent: target={} group_id={} latency_ms={}",
-                target_label, group_id, latency_ms
-            );
-        }
-
-        if Self::group_safety_fanout_enabled() && !device_ids.is_empty() {
-            let fallback_target_label = Self::group_fallback_target_label(target_label, group_id);
-            Self::log_group_safety_fanout(
-                "turn_off",
-                target_label,
-                &fallback_target_label,
-                group_id,
-                device_ids.len(),
-                1,
-                0,
-            );
-            return self.turn_off_devices(&fallback_target_label, device_ids);
-        }
-
-        Ok(())
     }
 
     fn identify_devices(
@@ -1276,7 +648,7 @@ impl MatterLightController {
                     e
                 );
                 failed_devices += 1;
-                self.note_connectivity_failure(node_id, endpoint, &e, true);
+                self.note_connectivity_failure(node_id, endpoint, &e);
             } else {
                 successful_devices += 1;
                 self.clear_connectivity_backoff(node_id, endpoint);
@@ -1443,12 +815,8 @@ impl HubLightController for MatterLightController {
         target: &HubDispatchTarget,
         command: LightingCommand,
     ) -> LightControlResult<()> {
-        let target_label = target.label();
-        let device_ids = self.target_device_ids_for_target(target)?;
-        if let Some(group_id) = Self::group_id_for_target(target) {
-            return self.turn_on_group(&target_label, group_id, &device_ids, command);
-        }
-        self.turn_on_devices(&target_label, &device_ids, command)
+        self.turn_on_target_with_receipt(target, command).await?;
+        Ok(())
     }
 
     async fn turn_off_target(
@@ -1456,12 +824,39 @@ impl HubLightController for MatterLightController {
         target: &HubDispatchTarget,
         _transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
+        self.turn_off_target_with_receipt(target, _transition_ms)
+            .await?;
+        Ok(())
+    }
+
+    async fn turn_on_target_with_receipt(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<HubCommandReceipt> {
         let target_label = target.label();
         let device_ids = self.target_device_ids_for_target(target)?;
-        if let Some(group_id) = Self::group_id_for_target(target) {
-            return self.turn_off_group(&target_label, group_id, &device_ids);
+        if device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter target {target_label} has no member endpoints"
+            )));
         }
-        self.turn_off_devices(&target_label, &device_ids)
+        self.submit_turn_on_devices(&target_label, &device_ids, &command)
+    }
+
+    async fn turn_off_target_with_receipt(
+        &self,
+        target: &HubDispatchTarget,
+        _transition_ms: Option<u32>,
+    ) -> LightControlResult<HubCommandReceipt> {
+        let target_label = target.label();
+        let device_ids = self.target_device_ids_for_target(target)?;
+        if device_ids.is_empty() {
+            return Err(LightControlError::CommandFailed(format!(
+                "Matter target {target_label} has no member endpoints"
+            )));
+        }
+        self.submit_turn_off_devices(&target_label, &device_ids)
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
@@ -1531,20 +926,16 @@ impl LightController for MatterLightController {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
         let device_ids = self.target_device_ids(room_id)?;
-        if let Some(group_id) = self.group_id_for_room(room_id) {
-            return self.turn_on_group(&room_label, group_id, &device_ids, command);
-        }
-        self.turn_on_devices(&room_label, &device_ids, command)
+        self.submit_turn_on_devices(&room_label, &device_ids, &command)?;
+        Ok(())
     }
 
     async fn turn_off(&self, room_id: &str, _transition_ms: Option<u32>) -> LightControlResult<()> {
         let room_label =
             rhythm_os::controller_helpers::format_room_label(&self.hub_data.registry, room_id);
         let device_ids = self.target_device_ids(room_id)?;
-        if let Some(group_id) = self.group_id_for_room(room_id) {
-            return self.turn_off_group(&room_label, group_id, &device_ids);
-        }
-        self.turn_off_devices(&room_label, &device_ids)
+        self.submit_turn_off_devices(&room_label, &device_ids)?;
+        Ok(())
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
@@ -2004,11 +1395,10 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_group_target_falls_back_when_groupcast_enabled_and_group_fails() {
+    fn turn_on_group_target_uses_authoritative_endpoint_plans() {
         let (mut controller, spy, _) = make_controller();
         controller.group_fanout_only = false;
         let group_id = 4097;
-        spy.fail_group_commands(group_id);
 
         block_on(controller.turn_on_target(
             &HubDispatchTarget::Group {
@@ -2020,21 +1410,11 @@ mod tests {
         .unwrap();
 
         let operations = spy.operations();
-        assert_eq!(
-            &operations[..2],
-            &[
-                RecordedOperation::SetGroupColorTemperature {
-                    group_id,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetGroupBrightness {
-                    group_id,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
-            ]
-        );
+        assert!(!operations.iter().any(|operation| matches!(
+            operation,
+            RecordedOperation::SetGroupColorTemperature { .. }
+                | RecordedOperation::SetGroupBrightness { .. }
+        )));
         for node_id in [42, 43] {
             assert_eq!(
                 operations_for_node(&operations, node_id),
@@ -2057,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn group_only_targets_can_use_groupcast_when_fanout_only_is_disabled() {
+    fn group_only_targets_require_endpoints_for_verifiable_delivery() {
         let (mut controller, spy, registry) = make_controller();
         controller.group_fanout_only = false;
         let group_id = 4097;
@@ -2068,8 +1448,14 @@ mod tests {
             &[],
         );
 
-        block_on(controller.turn_on("group-only", LightingCommand::new(80, 4000))).unwrap();
-        block_on(controller.turn_off("group-only", None)).unwrap();
+        assert!(matches!(
+            block_on(controller.turn_on("group-only", LightingCommand::new(80, 4000))),
+            Err(LightControlError::CommandFailed(_))
+        ));
+        assert!(matches!(
+            block_on(controller.turn_off("group-only", None)),
+            Err(LightControlError::CommandFailed(_))
+        ));
         block_on(controller.flash_target(&HubDispatchTarget::Group {
             room_id: "group-only".to_string(),
             control_id: format_group_control_id(group_id),
@@ -2078,26 +1464,10 @@ mod tests {
 
         assert_eq!(
             spy.operations(),
-            vec![
-                RecordedOperation::SetGroupColorTemperature {
-                    group_id,
-                    kelvin: 4000,
-                    transition_ms: None,
-                },
-                RecordedOperation::SetGroupBrightness {
-                    group_id,
-                    level: clusters::brightness_to_level(80),
-                    transition_ms: None,
-                },
-                RecordedOperation::SetGroupOnOff {
-                    group_id,
-                    on: false,
-                },
-                RecordedOperation::IdentifyGroup {
-                    group_id,
-                    duration_secs: MATTER_IDENTIFY_DURATION_SECS,
-                },
-            ]
+            vec![RecordedOperation::IdentifyGroup {
+                group_id,
+                duration_secs: MATTER_IDENTIFY_DURATION_SECS,
+            }]
         );
     }
 
@@ -2280,11 +1650,10 @@ mod tests {
     }
 
     #[test]
-    fn turn_off_group_target_falls_back_when_groupcast_enabled_and_group_fails() {
+    fn turn_off_group_target_uses_authoritative_endpoint_plans() {
         let (mut controller, spy, _) = make_controller();
         controller.group_fanout_only = false;
         let group_id = 4097;
-        spy.fail_group_commands(group_id);
 
         block_on(controller.turn_off_target(
             &HubDispatchTarget::Group {
@@ -2296,14 +1665,7 @@ mod tests {
         .unwrap();
 
         let operations = spy.operations();
-        assert_eq!(
-            operations[0],
-            RecordedOperation::SetGroupOnOff {
-                group_id,
-                on: false,
-            }
-        );
-        assert_eq!(operations.len(), 3);
+        assert_eq!(operations.len(), 2);
         for node_id in [42, 43] {
             assert_eq!(
                 operations_for_node(&operations, node_id),
@@ -2542,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_of_life_clears_command_backoff_before_next_write() {
+    fn controller_does_not_back_off_new_desired_state_after_write_failure() {
         let (controller, spy, _) = make_controller();
         let target = HubDispatchTarget::Devices {
             native_ids: vec!["matter-42".to_string()],
@@ -2558,15 +1920,13 @@ mod tests {
         );
 
         spy.allow_node_commands(42);
-        controller.hub_data.record_node_proof_of_life(42);
-
         block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000))).unwrap();
 
         let operations = spy.operations();
         assert_eq!(
             write_count_for_node(&operations, 42),
             3,
-            "proof of life should break the command backoff before the next write"
+            "new desired state should submit immediately after the failed plan retires"
         );
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2575,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn command_retry_backoff_expires_before_read_backoff() {
+    fn write_failure_does_not_delay_the_next_controller_plan() {
         let (controller, spy, _) = make_controller();
         let target = HubDispatchTarget::Devices {
             native_ids: vec!["matter-42".to_string()],
@@ -2587,64 +1947,12 @@ mod tests {
         assert_eq!(write_count_for_node(&spy.operations(), 42), 1);
 
         spy.allow_node_commands(42);
-        let premature_retry =
-            block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000)));
-        assert!(matches!(
-            premature_retry,
-            Err(LightControlError::CommandFailed(_))
-        ));
-        assert_eq!(
-            write_count_for_node(&spy.operations(), 42),
-            1,
-            "the first retry must wait for chipd to retire the stale CASE session"
-        );
-
-        let mut backoff = controller.on_off_read_backoff.lock().unwrap();
-        let entry = backoff.get_mut(&(42, 1)).unwrap();
-        entry.command_retry_after = Instant::now() - Duration::from_millis(1);
-        assert!(entry.suppress_until > Instant::now());
-        drop(backoff);
-
         block_on(controller.turn_on_target(&target, LightingCommand::new(50, 3000))).unwrap();
 
         assert_eq!(
             write_count_for_node(&spy.operations(), 42),
             3,
-            "a recovered session should be retried without waiting for the two-minute read backoff"
-        );
-    }
-
-    #[test]
-    fn first_command_timeout_waits_for_session_retirement_before_repeated_backoff() {
-        let (controller, _, _) = make_controller();
-
-        controller.mark_connectivity_failed(42, 1, true);
-        let first = controller
-            .on_off_read_backoff
-            .lock()
-            .unwrap()
-            .get(&(42, 1))
-            .copied()
-            .unwrap();
-        assert_eq!(first.consecutive_command_failures, 1);
-        assert!(
-            first.command_retry_after
-                > Instant::now() + MATTER_FIRST_COMMAND_RETRY_BACKOFF - Duration::from_millis(100),
-            "the first cold-session timeout must leave time for native session retirement"
-        );
-
-        controller.mark_connectivity_failed(42, 1, true);
-        let repeated = controller
-            .on_off_read_backoff
-            .lock()
-            .unwrap()
-            .get(&(42, 1))
-            .copied()
-            .unwrap();
-        assert_eq!(repeated.consecutive_command_failures, 2);
-        assert!(
-            repeated.command_retry_after > Instant::now() + MATTER_FIRST_COMMAND_RETRY_BACKOFF,
-            "repeated failures should retain the longer dead-device protection"
+            "controller lanes serialize on completion rather than a wall-clock backoff"
         );
     }
 
@@ -3222,7 +2530,7 @@ mod tests {
 
         let result = block_on(controller.turn_on("r1", LightingCommand::new(50, 3000)));
         assert!(matches!(result, Err(LightControlError::CommandFailed(_))));
-        assert!(transport.operations().iter().any(|operation| matches!(
+        assert!(!transport.operations().iter().any(|operation| matches!(
             operation,
             RecordedOperation::SetBrightness { node_id: 42, .. }
         )));
@@ -3443,8 +2751,8 @@ mod tests {
         let operations_after_retry = transport.operations.lock().unwrap().clone();
         assert_eq!(
             operations_after_retry.len(),
-            1,
-            "write retry should be skipped while endpoint is in backoff, got {:?}",
+            2,
+            "a new desired state should enter the endpoint lane without a time backoff, got {:?}",
             operations_after_retry
         );
     }

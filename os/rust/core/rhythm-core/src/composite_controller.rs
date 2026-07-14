@@ -58,7 +58,8 @@ use log::warn;
 use tokio::sync::Notify;
 
 use crate::controller::{
-    HubDispatchTarget, HubLightController, LightControlError, LightControlResult, LightController,
+    HubCommandDelivery, HubCommandReceipt, HubDispatchTarget, HubLightController,
+    LightControlError, LightControlResult, LightController,
 };
 use crate::lighting::LightingCommand;
 use crate::room::Room;
@@ -252,6 +253,12 @@ impl HubDispatchKind {
 pub enum HubDispatchStatus {
     /// The hub transport accepted the command.
     Succeeded,
+    /// A controller service accepted the command and will publish its
+    /// terminal physical outcome separately.
+    Accepted {
+        command_ids: Vec<u64>,
+        controller_stream_id: String,
+    },
     /// The hub transport reported an error.
     Failed { error: String },
     /// The dispatch exceeded the policy timeout; a cooldown was applied.
@@ -265,12 +272,13 @@ pub enum HubDispatchStatus {
 
 impl HubDispatchStatus {
     pub fn is_success(&self) -> bool {
-        matches!(self, Self::Succeeded)
+        matches!(self, Self::Succeeded | Self::Accepted { .. })
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
+            Self::Accepted { .. } => "accepted",
             Self::Failed { .. } => "failed",
             Self::TimedOut { .. } => "timed_out",
             Self::SkippedCooldown { .. } => "skipped_cooldown",
@@ -281,6 +289,14 @@ impl HubDispatchStatus {
     pub fn detail(&self) -> Option<String> {
         match self {
             Self::Succeeded => None,
+            Self::Accepted { command_ids, .. } => Some(format!(
+                "controller command ids {}",
+                command_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
             Self::Failed { error } => Some(error.clone()),
             Self::TimedOut { timeout_ms } => Some(format!("exceeded {}ms", timeout_ms)),
             Self::SkippedCooldown { remaining_ms } => {
@@ -407,13 +423,24 @@ impl HubDispatchAction {
         }
     }
 
-    async fn dispatch(self, controller: Arc<dyn HubLightController>) -> LightControlResult<()> {
+    async fn dispatch(
+        self,
+        controller: Arc<dyn HubLightController>,
+    ) -> LightControlResult<HubCommandReceipt> {
         match self {
-            Self::TurnOn { target, command } => controller.turn_on_target(&target, command).await,
+            Self::TurnOn { target, command } => {
+                controller
+                    .turn_on_target_with_receipt(&target, command)
+                    .await
+            }
             Self::TurnOff {
                 target,
                 transition_ms,
-            } => controller.turn_off_target(&target, transition_ms).await,
+            } => {
+                controller
+                    .turn_off_target_with_receipt(&target, transition_ms)
+                    .await
+            }
         }
     }
 }
@@ -516,7 +543,7 @@ struct DispatcherShared {
 impl DispatcherShared {
     fn emit(&self, outcome: HubDispatchOutcome) {
         match &outcome.status {
-            HubDispatchStatus::Succeeded => {
+            HubDispatchStatus::Succeeded | HubDispatchStatus::Accepted { .. } => {
                 if outcome.dispatch_ms as u128 >= DISPATCH_WARN_MS {
                     tracing::warn!(
                         target: "cmd",
@@ -900,7 +927,16 @@ async fn supervise_dispatch(shared: Arc<DispatcherShared>, ready: ReadyJob) {
         Ok(join_result) => {
             let dispatch_ms = started.elapsed().as_millis() as u64;
             let status = match join_result {
-                Ok(Ok(())) => HubDispatchStatus::Succeeded,
+                Ok(Ok(receipt)) => match receipt.delivery {
+                    HubCommandDelivery::Delivered => HubDispatchStatus::Succeeded,
+                    HubCommandDelivery::Accepted {
+                        command_ids,
+                        controller_stream_id,
+                    } => HubDispatchStatus::Accepted {
+                        command_ids,
+                        controller_stream_id,
+                    },
+                },
                 Ok(Err(error)) => HubDispatchStatus::Failed {
                     error: error.to_string(),
                 },
@@ -934,7 +970,7 @@ async fn supervise_dispatch(shared: Arc<DispatcherShared>, ready: ReadyJob) {
             // the in-flight budget stay honest. The wait is bounded by the
             // transport's own timeouts.
             let late = transport_call.await;
-            let late_succeeded = matches!(&late, Ok(Ok(())));
+            let late_succeeded = matches!(&late, Ok(Ok(_)));
             if late_succeeded {
                 if let Some(cooldown_until) = cooldown_until {
                     shared.clear_timeout_cooldown(&key, cooldown_until);
@@ -1559,6 +1595,7 @@ mod tests {
         turn_off_calls: Mutex<Vec<(String, Option<u32>)>>,
         lights_on: AtomicBool,
         rooms: Mutex<Vec<Room>>,
+        accepted_receipt: Mutex<Option<HubCommandReceipt>>,
     }
 
     impl MockController {
@@ -1570,6 +1607,7 @@ mod tests {
                 turn_off_calls: Mutex::new(Vec::new()),
                 lights_on: AtomicBool::new(false),
                 rooms: Mutex::new(Vec::new()),
+                accepted_receipt: Mutex::new(None),
             }
         }
 
@@ -1585,6 +1623,13 @@ mod tests {
 
         fn set_lights_on(&self, on: bool) {
             self.lights_on.store(on, Ordering::Relaxed);
+        }
+
+        fn set_accepted_receipt(&self, command_ids: Vec<u64>, stream_id: &str) {
+            *self.accepted_receipt.lock().unwrap() = Some(HubCommandReceipt::accepted(
+                command_ids,
+                stream_id.to_string(),
+            ));
         }
 
         fn turn_on_count(&self) -> usize {
@@ -1630,6 +1675,20 @@ mod tests {
                 .unwrap()
                 .push((target.label(), transition_ms));
             Ok(())
+        }
+
+        async fn turn_on_target_with_receipt(
+            &self,
+            target: &HubDispatchTarget,
+            command: LightingCommand,
+        ) -> LightControlResult<HubCommandReceipt> {
+            self.turn_on_target(target, command).await?;
+            Ok(self
+                .accepted_receipt
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(HubCommandReceipt::delivered))
         }
 
         async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
@@ -2631,5 +2690,29 @@ mod tests {
         failing.set_fail(true);
         lonely.register_controller("hub_x", failing);
         assert!(!block_on(lonely.is_connected()));
+    }
+
+    #[test]
+    fn asynchronous_controller_receipt_is_preserved_in_dispatch_outcome() {
+        let controller = Arc::new(MockController::new("matter"));
+        controller.set_accepted_receipt(vec![41, 42], "stream-a");
+        let composite = CompositeController::new();
+        let outcomes = OutcomeCollector::install(&composite);
+        composite.register_controller("matter@local", controller);
+        composite.update_routing(route(&[("room1", "matter@local", group_target("room1"))]));
+
+        block_on(composite.turn_on("room1", LightingCommand::new(50, 3000))).unwrap();
+        let outcome = outcomes
+            .wait_for(Duration::from_secs(1), |outcome| {
+                matches!(outcome.status, HubDispatchStatus::Accepted { .. })
+            })
+            .expect("accepted outcome");
+        assert_eq!(
+            outcome.status,
+            HubDispatchStatus::Accepted {
+                command_ids: vec![41, 42],
+                controller_stream_id: "stream-a".to_string(),
+            }
+        );
     }
 }

@@ -1819,6 +1819,108 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
         }
 
+        HubEvent::CommandOutcome {
+            ref hub_key,
+            ref controller_stream_id,
+            command_id,
+            ref device_id,
+            status,
+            ref detail,
+        } => {
+            let Some(key) = hub_key.as_ref() else {
+                warn!(target: "evt", "Controller command {command_id} outcome has no hub key");
+                return;
+            };
+            let key_string = key.to_string();
+            let disposition = match commands::reconcile_integration_outcome(
+                state,
+                &key_string,
+                controller_stream_id,
+                command_id,
+                crate::state::EarlyIntegrationOutcome {
+                    device_id: device_id.clone(),
+                    status,
+                    detail: detail.clone(),
+                },
+            ) {
+                Ok(disposition) => disposition,
+                Err(error) => {
+                    warn!(target: "evt", "Could not reconcile controller command {command_id}: {error}");
+                    return;
+                }
+            };
+            let commands::IntegrationOutcomeDisposition::Resolved {
+                node_id,
+                dispatch_complete,
+            } = disposition
+            else {
+                debug!(
+                    target: "evt",
+                    "Controller command {} on {} completed before its acceptance receipt",
+                    command_id,
+                    key
+                );
+                return;
+            };
+
+            if !matches!(status, crate::hub::HubCommandOutcomeStatus::Succeeded) {
+                crate::state::emit_server_event(
+                    state,
+                    crate::server_event::ServerEvent::DispatchFailure {
+                        hub_type: key.hub_type.as_str().to_string(),
+                        hub_key: key_string.clone(),
+                        node_id: node_id.clone(),
+                        target: device_id.clone(),
+                        kind: "matter_controller_command".to_string(),
+                        status: status.as_str().to_string(),
+                        detail: detail.clone(),
+                        queued_ms: 0,
+                        dispatch_ms: 0,
+                        epoch_ms: chrono::Utc::now().timestamp_millis(),
+                    },
+                );
+            }
+            if dispatch_complete {
+                commands::clear_node_dispatch_pending(state, &node_id);
+            }
+        }
+
+        HubEvent::CommandStreamReset {
+            ref hub_key,
+            ref stream_id,
+            history_gap,
+            ref reason,
+        } => {
+            let Some(key) = hub_key.as_ref() else {
+                return;
+            };
+            let key_string = key.to_string();
+            let nodes = commands::reset_integration_dispatches_for_hub(
+                state,
+                &key_string,
+                stream_id,
+                history_gap,
+            );
+            for node_id in nodes {
+                crate::state::emit_server_event(
+                    state,
+                    crate::server_event::ServerEvent::DispatchFailure {
+                        hub_type: key.hub_type.as_str().to_string(),
+                        hub_key: key_string.clone(),
+                        node_id: node_id.clone(),
+                        target: "matter-controller".to_string(),
+                        kind: "matter_controller_stream".to_string(),
+                        status: "indeterminate".to_string(),
+                        detail: Some(format!("{reason} (stream {stream_id})")),
+                        queued_ms: 0,
+                        dispatch_ms: 0,
+                        epoch_ms: chrono::Utc::now().timestamp_millis(),
+                    },
+                );
+                commands::clear_node_dispatch_pending(state, &node_id);
+            }
+        }
+
         HubEvent::Heartbeat { .. } => {
             let on_heartbeat = {
                 let Ok(s) = state.lock() else { return };

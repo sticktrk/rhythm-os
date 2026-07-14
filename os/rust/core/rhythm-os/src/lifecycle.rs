@@ -53,6 +53,64 @@ pub fn install_dispatch_outcome_listener(
 
     let state = state.clone();
     composite.set_outcome_listener(Arc::new(move |outcome| {
+        if let rhythm_core::HubDispatchStatus::Accepted {
+            command_ids,
+            controller_stream_id,
+        } = &outcome.status
+        {
+            match crate::commands::register_integration_dispatch(
+                &state,
+                &outcome.hub_key,
+                &outcome.node_id,
+                controller_stream_id,
+                command_ids,
+            ) {
+                Ok(registration) => {
+                    for early in registration.early_outcomes {
+                        if !matches!(early.status, crate::hub::HubCommandOutcomeStatus::Succeeded) {
+                            crate::state::emit_server_event(
+                                &state,
+                                crate::server_event::ServerEvent::DispatchFailure {
+                                    hub_type: outcome.hub_type.clone(),
+                                    hub_key: outcome.hub_key.clone(),
+                                    node_id: outcome.node_id.clone(),
+                                    target: early.device_id,
+                                    kind: "matter_controller_command".to_string(),
+                                    status: early.status.as_str().to_string(),
+                                    detail: early.detail,
+                                    queued_ms: outcome.queued_ms,
+                                    dispatch_ms: outcome.dispatch_ms,
+                                    epoch_ms: chrono::Utc::now().timestamp_millis(),
+                                },
+                            );
+                        }
+                    }
+                    if registration.complete {
+                        crate::commands::clear_node_dispatch_pending(&state, &outcome.node_id);
+                    }
+                }
+                Err(error) => {
+                    crate::state::emit_server_event(
+                        &state,
+                        crate::server_event::ServerEvent::DispatchFailure {
+                            hub_type: outcome.hub_type.clone(),
+                            hub_key: outcome.hub_key.clone(),
+                            node_id: outcome.node_id.clone(),
+                            target: outcome.target_label.clone(),
+                            kind: outcome.kind.as_str().to_string(),
+                            status: "acceptance_invalid".to_string(),
+                            detail: Some(error),
+                            queued_ms: outcome.queued_ms,
+                            dispatch_ms: outcome.dispatch_ms,
+                            epoch_ms: chrono::Utc::now().timestamp_millis(),
+                        },
+                    );
+                    crate::commands::clear_node_dispatch_pending(&state, &outcome.node_id);
+                }
+            }
+            return;
+        }
+
         if !outcome.status.is_success() {
             // Broadcast the failure before clearing pending so clients hold
             // the failure by the time the spinner flag drops.

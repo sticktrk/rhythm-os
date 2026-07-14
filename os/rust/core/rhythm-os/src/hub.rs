@@ -66,6 +66,25 @@ pub enum HubEvent {
         device_id: String,
         lights_on: bool,
     },
+    /// Terminal outcome for controller-owned asynchronous physical work.
+    CommandOutcome {
+        hub_key: Option<HubKey>,
+        controller_stream_id: String,
+        command_id: u64,
+        device_id: String,
+        status: HubCommandOutcomeStatus,
+        detail: Option<String>,
+    },
+    /// The controller event stream restarted or lost retained events. Any
+    /// accepted command without a terminal outcome is now indeterminate.
+    CommandStreamReset {
+        hub_key: Option<HubKey>,
+        stream_id: String,
+        /// A retention gap invalidates commands accepted by the current
+        /// process too. A process restart invalidates only older stream ids.
+        history_gap: bool,
+        reason: String,
+    },
     /// Connection heartbeat.
     Heartbeat { hub_key: Option<HubKey> },
     /// Connection lost.
@@ -94,6 +113,23 @@ pub enum HubEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubCommandOutcomeStatus {
+    Succeeded,
+    Failed,
+    Superseded,
+}
+
+impl HubCommandOutcomeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
 impl HubEvent {
     /// Get the hub key for this event, if tagged.
     pub fn hub_key(&self) -> Option<&HubKey> {
@@ -103,6 +139,8 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Contact { hub_key, .. } => hub_key.as_ref(),
             HubEvent::LightPower { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::CommandOutcome { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::CommandStreamReset { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
             HubEvent::Disconnected { hub_key, .. } => hub_key.as_ref(),
             HubEvent::DevicePaired { hub_key, .. } => hub_key.as_ref(),
@@ -118,6 +156,8 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Contact { hub_key, .. } => *hub_key = Some(key),
             HubEvent::LightPower { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::CommandOutcome { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::CommandStreamReset { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),
             HubEvent::Disconnected { hub_key, .. } => *hub_key = Some(key),
             HubEvent::DevicePaired { hub_key, .. } => *hub_key = Some(key),

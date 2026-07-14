@@ -257,6 +257,27 @@ pub struct MotionSnapshot {
     pub warning_active: bool,
 }
 
+/// One hub dispatch whose controller accepted asynchronous physical work.
+/// The corresponding visible pending count is cleared exactly once after all
+/// accepted command ids reach a terminal outcome (or the stream resets).
+#[derive(Clone, Debug)]
+pub struct PendingIntegrationDispatch {
+    pub node_id: String,
+    pub hub_key: String,
+    pub controller_stream_id: String,
+    pub remaining_command_ids: HashSet<u64>,
+}
+
+/// Terminal controller event that arrived before its acceptance receipt was
+/// registered. Kept briefly by identity so the two asynchronous channels can
+/// reconcile without imposing an ordering dependency.
+#[derive(Clone, Debug)]
+pub struct EarlyIntegrationOutcome {
+    pub device_id: String,
+    pub status: crate::hub::HubCommandOutcomeStatus,
+    pub detail: Option<String>,
+}
+
 /// Where the current observed power state came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservedPowerSource {
@@ -453,6 +474,13 @@ pub struct AppState {
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
     /// Queued or running light-dispatch work count per topology node.
     pub pending_node_dispatches: HashMap<String, usize>,
+    /// Asynchronous controller dispatches keyed by local dispatch token.
+    pub pending_integration_dispatches: HashMap<u64, PendingIntegrationDispatch>,
+    /// `(hub key, controller stream id, command id)` to local dispatch token.
+    pub pending_integration_commands: HashMap<(String, String, u64), u64>,
+    /// Terminal events that won the race against their acceptance receipt.
+    pub early_integration_outcomes: HashMap<(String, String, u64), EarlyIntegrationOutcome>,
+    pub next_integration_dispatch_id: u64,
     /// Set when a mode change wanted to apply room defaults but no runtime
     /// was available (e.g. periodic replayed a missed scheduled transition
     /// before hub bootstrap). Drained by `reconcile_runtime_from_state` once
@@ -804,6 +832,10 @@ impl Default for AppState {
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
             pending_node_dispatches: HashMap::new(),
+            pending_integration_dispatches: HashMap::new(),
+            pending_integration_commands: HashMap::new(),
+            early_integration_outcomes: HashMap::new(),
+            next_integration_dispatch_id: 1,
             pending_mode_output_apply: false,
             last_check_hour: None,
             last_check_instant: None,

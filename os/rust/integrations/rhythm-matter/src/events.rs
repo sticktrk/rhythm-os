@@ -5,11 +5,31 @@
 //! SSE or WebSocket events.
 
 use rhythm_core::runtime::hub_registry::DeviceType;
-use rhythm_os::hub::HubEvent;
+use rhythm_os::hub::{HubCommandOutcomeStatus, HubEvent};
 
 use crate::clusters;
 use crate::lifecycle::format_device_id;
-use crate::transport::{MatterAttributeReport, MatterAttributeValue};
+use crate::transport::{
+    MatterAttributeReport, MatterAttributeValue, MatterCommandOutcome, MatterCommandOutcomeStatus,
+};
+
+pub fn translate_command_outcome(
+    controller_stream_id: String,
+    outcome: MatterCommandOutcome,
+) -> HubEvent {
+    HubEvent::CommandOutcome {
+        hub_key: None,
+        controller_stream_id,
+        command_id: outcome.command_id,
+        device_id: format_device_id(outcome.node_id, outcome.endpoint),
+        status: match outcome.status {
+            MatterCommandOutcomeStatus::Succeeded => HubCommandOutcomeStatus::Succeeded,
+            MatterCommandOutcomeStatus::Failed => HubCommandOutcomeStatus::Failed,
+            MatterCommandOutcomeStatus::Superseded => HubCommandOutcomeStatus::Superseded,
+        },
+        detail: outcome.detail,
+    }
+}
 
 /// Translate a Matter attribute report into a HubEvent.
 ///

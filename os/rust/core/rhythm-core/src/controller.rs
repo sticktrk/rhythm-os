@@ -47,6 +47,40 @@ pub enum LightControlError {
 /// Result type for light controller operations.
 pub type LightControlResult<T> = Result<T, LightControlError>;
 
+/// Delivery boundary for a hub command. Most integrations complete their
+/// transport call inline. Controller services such as Matter can accept a
+/// controller-owned job and report its physical terminal outcome later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HubCommandDelivery {
+    Delivered,
+    Accepted {
+        command_ids: Vec<u64>,
+        controller_stream_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubCommandReceipt {
+    pub delivery: HubCommandDelivery,
+}
+
+impl HubCommandReceipt {
+    pub fn delivered() -> Self {
+        Self {
+            delivery: HubCommandDelivery::Delivered,
+        }
+    }
+
+    pub fn accepted(command_ids: Vec<u64>, controller_stream_id: String) -> Self {
+        Self {
+            delivery: HubCommandDelivery::Accepted {
+                command_ids,
+                controller_stream_id,
+            },
+        }
+    }
+}
+
 const IDENTIFY_FLASH_PULSES: usize = 1;
 const IDENTIFY_FLASH_ON_MS: u64 = 220;
 const IDENTIFY_FLASH_OFF_MS: u64 = 180;
@@ -203,6 +237,28 @@ pub trait HubLightController: Send + Sync {
         transition_ms: Option<u32>,
     ) -> LightControlResult<()>;
 
+    /// Dispatch with an explicit delivery receipt. The default preserves the
+    /// existing synchronous controller contract.
+    async fn turn_on_target_with_receipt(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<HubCommandReceipt> {
+        self.turn_on_target(target, command).await?;
+        Ok(HubCommandReceipt::delivered())
+    }
+
+    /// Dispatch with an explicit delivery receipt. The default preserves the
+    /// existing synchronous controller contract.
+    async fn turn_off_target_with_receipt(
+        &self,
+        target: &HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<HubCommandReceipt> {
+        self.turn_off_target(target, transition_ms).await?;
+        Ok(HubCommandReceipt::delivered())
+    }
+
     /// Get all available rooms from the backend.
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>>;
 
@@ -274,6 +330,24 @@ where
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
         (**self).turn_off_target(target, transition_ms).await
+    }
+
+    async fn turn_on_target_with_receipt(
+        &self,
+        target: &HubDispatchTarget,
+        command: LightingCommand,
+    ) -> LightControlResult<HubCommandReceipt> {
+        (**self).turn_on_target_with_receipt(target, command).await
+    }
+
+    async fn turn_off_target_with_receipt(
+        &self,
+        target: &HubDispatchTarget,
+        transition_ms: Option<u32>,
+    ) -> LightControlResult<HubCommandReceipt> {
+        (**self)
+            .turn_off_target_with_receipt(target, transition_ms)
+            .await
     }
 
     async fn get_rooms(&self) -> LightControlResult<Vec<Room>> {
