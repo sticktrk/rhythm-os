@@ -45,3 +45,11 @@ curl -s http://127.0.0.1:8787/ready
 `/health` is the liveness check. `/ready` returns HTTP 503 until remote support
 dependencies such as `SUPABASE_SERVICE_ROLE_KEY` and
 `SUPPORT_ACCESS_ENCRYPTION_KEY` are configured.
+
+## Destructive actions
+
+`DELETE /api/hubs/:hubId` is restricted to enabled staff with the `admin` role
+and requires `SUPABASE_SERVICE_ROLE_KEY`. It removes only the matching Rhythm
+`server` hub plus its hub-scoped cascade records. It does not delete the Home or
+send a reset command to the physical Light Box. A customer app that still has
+the hub locally may recreate the cloud record during a later sync.

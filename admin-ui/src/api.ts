@@ -2,6 +2,7 @@ import type {
   AdminApiHealth,
   AdminApiReadiness,
   DebugBundleDownload,
+  DeleteHubResult,
   DeviceLogSources,
   DeviceLogTail,
   DeviceOtaAction,
@@ -51,6 +52,17 @@ export async function fetchSupportSnapshot(
   accessToken: string
 ): Promise<SupportSnapshot> {
   return apiFetch<SupportSnapshot>('/api/support/snapshot', accessToken);
+}
+
+export async function deleteHub(
+  accessToken: string,
+  hubId: string
+): Promise<DeleteHubResult> {
+  return apiFetch<DeleteHubResult>(
+    `/api/hubs/${encodeURIComponent(hubId)}`,
+    accessToken,
+    { method: 'DELETE' }
+  );
 }
 
 export async function probeHub(

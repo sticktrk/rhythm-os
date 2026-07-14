@@ -4,6 +4,7 @@ import type { Session } from '@supabase/supabase-js';
 import { AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
 
 import { AppRoutes } from './router';
+import { ConfirmProvider } from './components/ui/ConfirmDialog';
 import { isSupabaseConfigured, supabase } from './supabaseClient';
 import { SessionProvider } from './state/SessionContext';
 import { SnapshotProvider } from './state/SnapshotContext';
@@ -87,7 +88,9 @@ export default function App() {
           and per-hub state instead of showing the previous user's data. */}
       <SnapshotProvider key={session.user.id}>
         <BrowserRouter>
-          <AppRoutes />
+          <ConfirmProvider>
+            <AppRoutes />
+          </ConfirmProvider>
         </BrowserRouter>
       </SnapshotProvider>
     </SessionProvider>

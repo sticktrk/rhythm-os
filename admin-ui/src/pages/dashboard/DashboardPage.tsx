@@ -15,6 +15,7 @@ import {
   Search,
   Server,
   ShieldCheck,
+  Trash2,
   Users,
   Wifi
 } from 'lucide-react';
@@ -22,12 +23,14 @@ import {
 import {
   applyHubUpdate,
   checkHubUpdate,
+  deleteHub,
   downloadDebugBundle,
   fetchHubStatus,
   fetchHubLogSources,
   fetchHubLogTail,
   probeHub
 } from '../../api';
+import { useConfirm } from '../../components/ui/ConfirmDialog';
 import {
   LogPanel,
   preferredLogSourceId,
@@ -77,10 +80,16 @@ type OtaState = {
   result?: DeviceOtaAction;
 };
 
+type DeleteState = {
+  loading: boolean;
+  error?: string;
+};
+
 const HUB_PROBE_STAGGER_MS = 350;
 
 export default function DashboardPage() {
   const { accessToken, signOut } = useSession();
+  const confirm = useConfirm();
   const {
     snapshot,
     me,
@@ -98,6 +107,9 @@ export default function DashboardPage() {
   const [logStates, setLogStates] = useState<Record<string, LogState>>({});
   const [statusStates, setStatusStates] = useState<Record<string, StatusState>>({});
   const [otaStates, setOtaStates] = useState<Record<string, OtaState>>({});
+  const [deleteStates, setDeleteStates] = useState<Record<string, DeleteState>>(
+    {}
+  );
   const probeStatesRef = useRef(probeStates);
   const autoProbeHubIdsRef = useRef<Set<string>>(new Set());
 
@@ -344,6 +356,41 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleDeleteHub(hub: SupportHub) {
+    if (deleteStates[hub.id]?.loading) return;
+    const requiredText = `DELETE ${hub.name}`;
+    const accepted = await confirm({
+      title: `Delete ${hub.name}?`,
+      message:
+        'This deletes only this cloud hub record and its hub-scoped remote access, support, and activity data. The Home and physical Light Box are preserved and the device is not reset. A signed-in customer app that still has this Light Box locally may sync it back.',
+      confirmLabel: 'Delete hub',
+      danger: true,
+      requireTypedText: requiredText
+    });
+    if (!accepted) return;
+
+    setDeleteStates((current) => ({
+      ...current,
+      [hub.id]: { loading: true }
+    }));
+    try {
+      await deleteHub(accessToken, hub.id);
+      await refresh();
+      setDeleteStates((current) => ({
+        ...current,
+        [hub.id]: { loading: false }
+      }));
+    } catch (error) {
+      setDeleteStates((current) => ({
+        ...current,
+        [hub.id]: {
+          loading: false,
+          error: errorMessage(error)
+        }
+      }));
+    }
+  }
+
   function mergeOtaResultIntoStatus(hubId: string, action: DeviceOtaAction) {
     setStatusStates((current) => {
       const existing = current[hubId];
@@ -502,12 +549,15 @@ export default function DashboardPage() {
               bundleStates={bundleStates}
               statusStates={statusStates}
               otaStates={otaStates}
+              deleteStates={deleteStates}
               logStates={logStates}
+              canDelete={me?.staffStatus.isAdmin === true}
               onProbe={handleProbe}
               onDownloadBundle={handleDownloadBundle}
               onLoadStatus={handleLoadStatus}
               onCheckUpdate={handleCheckUpdate}
               onApplyUpdate={handleApplyUpdate}
+              onDeleteHub={handleDeleteHub}
               onLoadLogs={handleLoadLogs}
             />
           ) : (
@@ -636,12 +686,15 @@ function HomeDetail({
   bundleStates,
   statusStates,
   otaStates,
+  deleteStates,
   logStates,
+  canDelete,
   onProbe,
   onDownloadBundle,
   onLoadStatus,
   onCheckUpdate,
   onApplyUpdate,
+  onDeleteHub,
   onLoadLogs
 }: {
   item: HomeListItem;
@@ -649,12 +702,15 @@ function HomeDetail({
   bundleStates: Record<string, BundleState>;
   statusStates: Record<string, StatusState>;
   otaStates: Record<string, OtaState>;
+  deleteStates: Record<string, DeleteState>;
   logStates: Record<string, LogState>;
+  canDelete: boolean;
   onProbe: (hub: SupportHub) => void;
   onDownloadBundle: (hub: SupportHub) => void;
   onLoadStatus: (hub: SupportHub) => void;
   onCheckUpdate: (hub: SupportHub) => void;
   onApplyUpdate: (hub: SupportHub) => void;
+  onDeleteHub: (hub: SupportHub) => void;
   onLoadLogs: (hub: SupportHub, sourceId?: string) => void;
 }) {
   const customerEmail = visibleCustomerEmail(item.customer);
@@ -705,12 +761,15 @@ function HomeDetail({
               bundleState={bundleStates[hub.id]}
               statusState={statusStates[hub.id]}
               otaState={otaStates[hub.id]}
+              deleteState={deleteStates[hub.id]}
               logState={logStates[hub.id]}
+              canDelete={canDelete}
               onProbe={() => onProbe(hub)}
               onDownloadBundle={() => onDownloadBundle(hub)}
               onLoadStatus={() => onLoadStatus(hub)}
               onCheckUpdate={() => onCheckUpdate(hub)}
               onApplyUpdate={() => onApplyUpdate(hub)}
+              onDelete={() => onDeleteHub(hub)}
               onLoadLogs={(sourceId) => onLoadLogs(hub, sourceId)}
             />
           ))}
@@ -726,12 +785,15 @@ function HubRow({
   bundleState,
   statusState,
   otaState,
+  deleteState,
   logState,
+  canDelete,
   onProbe,
   onDownloadBundle,
   onLoadStatus,
   onCheckUpdate,
   onApplyUpdate,
+  onDelete,
   onLoadLogs
 }: {
   hub: SupportHub;
@@ -739,12 +801,15 @@ function HubRow({
   bundleState?: BundleState;
   statusState?: StatusState;
   otaState?: OtaState;
+  deleteState?: DeleteState;
   logState?: LogState;
+  canDelete: boolean;
   onProbe: () => void;
   onDownloadBundle: () => void;
   onLoadStatus: () => void;
   onCheckUpdate: () => void;
   onApplyUpdate: () => void;
+  onDelete: () => void;
   onLoadLogs: (sourceId?: string) => void;
 }) {
   const result = probeState?.result;
@@ -835,6 +900,21 @@ function HubRow({
           <Server size={16} />
           <span>Enter</span>
         </Link>
+        {canDelete ? (
+          <button
+            className="probeButton danger"
+            type="button"
+            onClick={onDelete}
+            disabled={deleteState?.loading}
+          >
+            {deleteState?.loading ? (
+              <Loader2 className="spin" size={16} />
+            ) : (
+              <Trash2 size={16} />
+            )}
+            <span>{deleteState?.loading ? 'Deleting' : 'Delete'}</span>
+          </button>
+        ) : null}
       </div>
 
       {result ? (
@@ -852,9 +932,9 @@ function HubRow({
         </div>
       ) : null}
 
-      {probeState?.error || result?.message || bundleState?.error || otaState?.error ? (
+      {deleteState?.error || probeState?.error || result?.message || bundleState?.error || otaState?.error ? (
         <div className="hubMessage">
-          {otaState?.error ?? bundleState?.error ?? probeState?.error ?? result?.message}
+          {deleteState?.error ?? otaState?.error ?? bundleState?.error ?? probeState?.error ?? result?.message}
         </div>
       ) : null}
 

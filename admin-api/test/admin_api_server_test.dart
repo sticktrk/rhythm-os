@@ -649,6 +649,191 @@ void main() {
     expect(ready['missing'], isEmpty);
     expect(deviceRequests, hasLength(14));
   });
+
+  test('admin deletes exactly one server hub and preserves its home', () async {
+    final deleteRequests = <http.BaseRequest>[];
+    final client = _HandlerClient((request) async {
+      final authResponse = _staffAuthResponse(request, role: 'admin');
+      if (authResponse != null) return authResponse;
+
+      if (request.url.path == '/rest/v1/hubs') {
+        deleteRequests.add(request);
+        expect(request.method, 'DELETE');
+        expect(request.headers['apikey'], 'service-role-key');
+        expect(request.headers['Authorization'], 'Bearer service-role-key');
+        expect(request.headers['Prefer'], 'return=representation');
+        expect(request.url.queryParameters['select'], 'id,home_id,name');
+        expect(request.url.queryParameters['id'], 'eq.hub-1');
+        expect(request.url.queryParameters['type'], 'eq.server');
+        return _jsonResponse([
+          {'id': 'hub-1', 'home_id': 'home-1', 'name': 'Kitchen Light Box'},
+        ]);
+      }
+
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+
+    final response = await server.handler(
+      Request(
+        'DELETE',
+        Uri.parse('http://admin.test/api/hubs/hub-1'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'origin': 'http://127.0.0.1:5173',
+        },
+      ),
+    );
+
+    expect(response.statusCode, 200);
+    expect(
+      _header(response, 'access-control-allow-methods'),
+      contains('DELETE'),
+    );
+    expect(deleteRequests, hasLength(1));
+    expect(jsonDecode(await response.readAsString()), {
+      'deleted': true,
+      'hub': {'id': 'hub-1', 'homeId': 'home-1', 'name': 'Kitchen Light Box'},
+      'homeDeleted': false,
+    });
+  });
+
+  test('hub deletion requires an admin role before mutation', () async {
+    var deleteAttempted = false;
+    final client = _HandlerClient((request) async {
+      final authResponse = _staffAuthResponse(request, role: 'support');
+      if (authResponse != null) return authResponse;
+      if (request.url.path == '/rest/v1/hubs') deleteAttempted = true;
+      return http.Response('unexpected request', 500);
+    });
+    final server = _testServer(client: client);
+
+    final response = await server.handler(
+      Request(
+        'DELETE',
+        Uri.parse('http://admin.test/api/hubs/hub-1'),
+        headers: {'authorization': 'Bearer staff-session'},
+      ),
+    );
+
+    expect(response.statusCode, 403);
+    expect(deleteAttempted, isFalse);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      'An enabled Rhythm admin account is required to delete a hub.',
+    );
+  });
+
+  test('hub deletion requires service role configuration', () async {
+    var deleteAttempted = false;
+    final client = _HandlerClient((request) async {
+      final authResponse = _staffAuthResponse(request, role: 'admin');
+      if (authResponse != null) return authResponse;
+      if (request.url.path == '/rest/v1/hubs') deleteAttempted = true;
+      return http.Response('unexpected request', 500);
+    });
+    final server = _testServer(client: client, serviceRoleKey: null);
+
+    final response = await server.handler(
+      Request(
+        'DELETE',
+        Uri.parse('http://admin.test/api/hubs/hub-1'),
+        headers: {'authorization': 'Bearer staff-session'},
+      ),
+    );
+
+    expect(response.statusCode, 503);
+    expect(deleteAttempted, isFalse);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      'Hub deletion requires SUPABASE_SERVICE_ROLE_KEY.',
+    );
+  });
+
+  test('hub deletion reports an already missing or non-server hub', () async {
+    final client = _HandlerClient((request) async {
+      final authResponse = _staffAuthResponse(request, role: 'admin');
+      if (authResponse != null) return authResponse;
+      if (request.url.path == '/rest/v1/hubs') {
+        expect(request.method, 'DELETE');
+        return _jsonResponse([]);
+      }
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+
+    final response = await server.handler(
+      Request(
+        'DELETE',
+        Uri.parse('http://admin.test/api/hubs/missing-hub'),
+        headers: {'authorization': 'Bearer staff-session'},
+      ),
+    );
+
+    expect(response.statusCode, 404);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      'Server hub was not found or was already deleted.',
+    );
+  });
+}
+
+AdminApiServer _testServer({
+  required http.Client client,
+  String? serviceRoleKey = 'service-role-key',
+}) {
+  final config = AdminApiConfig(
+    supabaseUrl: Uri.parse('https://supabase.test'),
+    supabaseAnonKey: 'anon-key',
+    supabaseServiceRoleKey: serviceRoleKey,
+    supportAccessEncryptionKey: 'support-key',
+    supportAccessKeyId: 'default',
+    host: '127.0.0.1',
+    port: 8787,
+    allowedOrigins: {'http://127.0.0.1:5173'},
+  );
+  final supabase = SupabaseRestClient(config: config, httpClient: client);
+  final supportAccess = SupportAccessService(
+    config: config,
+    supabase: supabase,
+    httpClient: client,
+  );
+  final support = SupportService(supabase: supabase);
+  final probes = DeviceProbeService(
+    supabase: supabase,
+    supportAccess: supportAccess,
+    httpClient: client,
+  );
+  return AdminApiServer(
+    config: config,
+    supabase: supabase,
+    support: support,
+    probes: probes,
+    fleetReports: FleetReportService(
+      supabase: supabase,
+      support: support,
+      probes: probes,
+    ),
+  );
+}
+
+http.Response? _staffAuthResponse(
+  http.BaseRequest request, {
+  required String role,
+}) {
+  if (request.url.path == '/auth/v1/user') {
+    expect(request.headers['apikey'], 'anon-key');
+    expect(request.headers['Authorization'], 'Bearer staff-session');
+    return _jsonResponse({'id': 'staff-user', 'email': 'staff@example.com'});
+  }
+  if (request.url.path == '/rest/v1/rhythm_staff') {
+    expect(request.headers['apikey'], 'anon-key');
+    expect(request.headers['Authorization'], 'Bearer staff-session');
+    return _jsonResponse([
+      {'role': role, 'enabled': true},
+    ]);
+  }
+  return null;
 }
 
 http.Response _supabaseResponse(http.BaseRequest request) {
