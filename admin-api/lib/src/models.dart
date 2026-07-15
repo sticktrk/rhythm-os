@@ -70,6 +70,36 @@ class AdminSession {
   final StaffStatus staff;
 }
 
+class DeletedHubDto {
+  const DeletedHubDto({
+    required this.id,
+    required this.homeId,
+    required this.name,
+  });
+
+  final String id;
+  final String homeId;
+  final String name;
+
+  factory DeletedHubDto.fromSupabase(Map<String, dynamic> row) {
+    return DeletedHubDto(
+      id: cleanString(row['id']) ?? '',
+      homeId: cleanString(row['home_id']) ?? '',
+      name: cleanString(row['name']) ?? 'Unnamed Light Box',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'deleted': true,
+        'hub': {
+          'id': id,
+          'homeId': homeId,
+          'name': name,
+        },
+        'homeDeleted': false,
+      };
+}
+
 class HubEndpointDto {
   const HubEndpointDto({
     required this.host,

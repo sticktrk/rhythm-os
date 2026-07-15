@@ -36,6 +36,7 @@ class AdminApiServer {
       ..get('/api/me', _me)
       ..get('/api/support/snapshot', _supportSnapshot)
       ..get('/api/fleet/hubs', _fleetHubs)
+      ..delete('/api/hubs/<hubId>', _deleteHub)
       ..post('/api/hubs/<hubId>/probe', _probeHub)
       ..get('/api/hubs/<hubId>/status', _hubStatus)
       ..post('/api/hubs/<hubId>/ota/check', _checkHubUpdate)
@@ -114,6 +115,18 @@ class AdminApiServer {
       'total': hubs.length,
       'hubs': hubs.map((hub) => hub.toJson()).toList(growable: false),
     });
+  }
+
+  Future<Response> _deleteHub(Request request, String hubId) async {
+    final session = await _requireStaff(request);
+    if (!session.staff.isAdmin) {
+      throw const AdminApiException(
+        403,
+        'An enabled Rhythm admin account is required to delete a hub.',
+      );
+    }
+    final deletedHub = await _support.deleteServerHub(hubId);
+    return _json(deletedHub.toJson());
   }
 
   Future<Response> _probeHub(Request request, String hubId) async {
@@ -313,7 +326,7 @@ class AdminApiServer {
     return response.change(
       headers: {
         'Access-Control-Allow-Origin': allowedOrigin,
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
         'Access-Control-Allow-Headers': 'Authorization,Content-Type',
         'Access-Control-Expose-Headers':
             'Content-Disposition,Content-Length,X-Rhythm-Route,X-Rhythm-Base-Url',

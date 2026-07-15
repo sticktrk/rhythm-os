@@ -131,6 +131,50 @@ class SupabaseRestClient {
         .map((key, value) => MapEntry(key.toString(), value));
   }
 
+  Future<List<Map<String, dynamic>>> deleteRows({
+    required String table,
+    required String select,
+    required Map<String, String> filters,
+    bool serviceRole = false,
+    String? accessToken,
+  }) async {
+    if (filters.isEmpty) {
+      throw const AdminApiException(
+        500,
+        'Refusing an unfiltered Supabase delete.',
+      );
+    }
+    final credentials = _credentials(
+      serviceRole: serviceRole,
+      accessToken: accessToken,
+    );
+    final response = await _http.delete(
+      _supabaseUri('rest/v1/$table', {
+        'select': select,
+        ...filters,
+      }),
+      headers: {
+        ...credentials.headers,
+        'Accept': 'application/json',
+        'Prefer': 'return=representation',
+      },
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw AdminApiException(response.statusCode, _supabaseError(response));
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      throw const AdminApiException(
+        502,
+        'Supabase returned an invalid delete result.',
+      );
+    }
+    return decoded
+        .whereType<Map>()
+        .map((row) => row.map((key, value) => MapEntry(key.toString(), value)))
+        .toList(growable: false);
+  }
+
   Future<void> uploadStorageObject({
     required String bucket,
     required String path,

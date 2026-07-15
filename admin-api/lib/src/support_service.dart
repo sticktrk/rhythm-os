@@ -7,6 +7,50 @@ class SupportService {
 
   final SupabaseRestClient _supabase;
 
+  Future<DeletedHubDto> deleteServerHub(String hubId) async {
+    final normalizedHubId = hubId.trim();
+    if (normalizedHubId.isEmpty) {
+      throw const AdminApiException(400, 'Hub id is required.');
+    }
+    if (!_supabase.canUseServiceRole) {
+      throw const AdminApiException(
+        503,
+        'Hub deletion requires SUPABASE_SERVICE_ROLE_KEY.',
+      );
+    }
+
+    final deletedRows = await _supabase.deleteRows(
+      table: 'hubs',
+      select: 'id,home_id,name',
+      serviceRole: true,
+      filters: {
+        'id': 'eq.$normalizedHubId',
+        'type': 'eq.server',
+      },
+    );
+    if (deletedRows.isEmpty) {
+      throw const AdminApiException(
+        404,
+        'Server hub was not found or was already deleted.',
+      );
+    }
+    if (deletedRows.length != 1) {
+      throw const AdminApiException(
+        409,
+        'Hub deletion affected an unexpected number of rows.',
+      );
+    }
+
+    final deletedHub = DeletedHubDto.fromSupabase(deletedRows.single);
+    if (deletedHub.id.isEmpty || deletedHub.homeId.isEmpty) {
+      throw const AdminApiException(
+        502,
+        'Supabase returned an invalid deleted hub.',
+      );
+    }
+    return deletedHub;
+  }
+
   Future<List<SupportHubDto>> loadFleetHubs(AdminSession session) async {
     final hubRows = await _loadActiveServerHubs(session);
     return hubRows

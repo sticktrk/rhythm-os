@@ -91,6 +91,16 @@ export type SupportSnapshot = {
   customers: SupportCustomer[];
 };
 
+export type DeleteHubResult = {
+  deleted: true;
+  hub: {
+    id: string;
+    homeId: string;
+    name: string;
+  };
+  homeDeleted: false;
+};
+
 export type ProbeInventory = {
   lights: number;
   buttons: number;
