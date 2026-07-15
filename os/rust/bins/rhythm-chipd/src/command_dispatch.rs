@@ -518,6 +518,44 @@ mod tests {
         }
     }
 
+    fn wait_for_outcomes(
+        broker: &ControllerEventBroker,
+        expected_command_ids: &[u64],
+    ) -> Vec<(u64, MatterCommandOutcomeStatus)> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut cursor: Option<MatterControllerEventCursor> = None;
+        let mut outcomes: Vec<(u64, MatterCommandOutcomeStatus)> = Vec::new();
+
+        while !expected_command_ids
+            .iter()
+            .all(|command_id| outcomes.iter().any(|outcome| outcome.0 == *command_id))
+        {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for command outcomes {expected_command_ids:?}; received {outcomes:?}"
+            );
+            let batch = broker.wait(cursor.as_ref(), remaining);
+            let mut last_sequence = cursor
+                .as_ref()
+                .filter(|cursor| cursor.stream_id == batch.stream_id)
+                .map(|cursor| cursor.sequence)
+                .unwrap_or(0);
+            for envelope in batch.events {
+                last_sequence = last_sequence.max(envelope.sequence);
+                if let MatterControllerEvent::CommandOutcome(outcome) = envelope.event {
+                    outcomes.push((outcome.command_id, outcome.status));
+                }
+            }
+            cursor = Some(MatterControllerEventCursor {
+                stream_id: batch.stream_id,
+                sequence: last_sequence,
+            });
+        }
+
+        outcomes
+    }
+
     #[test]
     fn submissions_are_non_blocking_latest_wins_and_endpoint_isolated() {
         let blocking = Arc::new(BlockingState::default());
@@ -547,23 +585,8 @@ mod tests {
         assert!(blocking.second_endpoint_ran.load(Ordering::SeqCst));
 
         blocking.release_first.store(true, Ordering::SeqCst);
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while blocking.calls.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
+        let outcomes = wait_for_outcomes(&broker, &[1, 2, 3, 4]);
         assert_eq!(blocking.calls.load(Ordering::SeqCst), 3);
-
-        let batch = broker.wait(None, Duration::ZERO);
-        let outcomes: Vec<_> = batch
-            .events
-            .into_iter()
-            .filter_map(|event| match event.event {
-                MatterControllerEvent::CommandOutcome(outcome) => {
-                    Some((outcome.command_id, outcome.status))
-                }
-                _ => None,
-            })
-            .collect();
         assert!(outcomes.contains(&(2, MatterCommandOutcomeStatus::Superseded)));
         assert!(outcomes.contains(&(1, MatterCommandOutcomeStatus::Succeeded)));
         assert!(outcomes.contains(&(3, MatterCommandOutcomeStatus::Succeeded)));
@@ -587,22 +610,8 @@ mod tests {
             std::thread::yield_now();
         }
         dispatcher.submit(vec![plan(11, 1, false)]).unwrap();
-        while blocking.calls.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
+        let outcomes = wait_for_outcomes(&broker, &[10, 11]);
         assert_eq!(blocking.calls.load(Ordering::SeqCst), 2);
-
-        let batch = broker.wait(None, Duration::ZERO);
-        let outcomes: Vec<_> = batch
-            .events
-            .into_iter()
-            .filter_map(|event| match event.event {
-                MatterControllerEvent::CommandOutcome(outcome) => {
-                    Some((outcome.command_id, outcome.status))
-                }
-                _ => None,
-            })
-            .collect();
         assert!(outcomes.contains(&(10, MatterCommandOutcomeStatus::Failed)));
         assert!(outcomes.contains(&(11, MatterCommandOutcomeStatus::Succeeded)));
     }
