@@ -1,11 +1,13 @@
 //! Matter hub lifecycle — connect, disconnect, runtime creation.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
@@ -13,7 +15,186 @@ use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
-use crate::transport::{CommissionedDevice, MatterDeviceInfo, MatterTransport};
+use crate::transport::{
+    CommissionedDevice, MatterControllerEvent, MatterControllerEventCursor, MatterDeviceInfo,
+    MatterSubscriptionTarget, MatterTransport, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+};
+
+const MATTER_EVENT_LONG_POLL: Duration = Duration::from_secs(1);
+const MATTER_EVENT_RETRY_INITIAL: Duration = Duration::from_millis(250);
+const MATTER_EVENT_RETRY_MAX: Duration = Duration::from_secs(5);
+const MATTER_EVENT_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+
+fn next_controller_event_retry_delay(current: Duration) -> Duration {
+    current.saturating_mul(2).min(MATTER_EVENT_RETRY_MAX)
+}
+
+fn wait_for_controller_event_retry(
+    shutdown: &std::sync::atomic::AtomicBool,
+    delay: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + delay;
+    while !shutdown.load(Ordering::Relaxed) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(remaining.min(MATTER_EVENT_SHUTDOWN_POLL));
+    }
+    true
+}
+
+fn subscription_targets(transport: &dyn MatterTransport) -> Vec<MatterSubscriptionTarget> {
+    match transport.list_commissioned_devices() {
+        Ok(devices) if !devices.is_empty() => devices
+            .into_iter()
+            .map(|device| MatterSubscriptionTarget {
+                node_id: device.node_id,
+                endpoint: device.light_endpoint,
+            })
+            .collect(),
+        _ => transport
+            .list_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|device| MatterSubscriptionTarget {
+                node_id: device.node_id,
+                endpoint: 1,
+            })
+            .collect(),
+    }
+}
+
+fn subscribe_to_observed_state(transport: &dyn MatterTransport) {
+    let targets = subscription_targets(transport);
+    if targets.is_empty() {
+        return;
+    }
+    if let Err(error) = transport.subscribe_on_off(
+        &targets,
+        DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+        DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+    ) {
+        warn!(
+            target: "evt",
+            "Matter observed-state subscription unavailable: {error:#}"
+        );
+    }
+}
+
+fn start_controller_event_stream(
+    transport: Arc<dyn MatterTransport>,
+    event_tx: std::sync::mpsc::Sender<HubEvent>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    node_proof_of_life: Arc<Mutex<HashMap<u64, std::time::Instant>>>,
+) {
+    let spawn_result = std::thread::Builder::new()
+        .name("matter-controller-events".to_string())
+        .spawn(move || {
+            subscribe_to_observed_state(transport.as_ref());
+            let mut cursor: Option<MatterControllerEventCursor> = None;
+            let mut connection_state: Option<bool> = None;
+            let mut retry_delay = MATTER_EVENT_RETRY_INITIAL;
+
+            while !shutdown.load(Ordering::Relaxed) {
+                // Bootstrap without a long poll so the stream identity is known
+                // before Connected allows callers to admit controller-owned work.
+                let max_wait = if cursor.is_some() {
+                    MATTER_EVENT_LONG_POLL
+                } else {
+                    Duration::ZERO
+                };
+                let batch = match transport.wait_controller_events(cursor.as_ref(), max_wait) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        if connection_state != Some(false) {
+                            let _ = event_tx.send(HubEvent::Disconnected {
+                                hub_key: None,
+                                reason: format!("Matter controller event stream: {error:#}"),
+                            });
+                        }
+                        connection_state = Some(false);
+                        if wait_for_controller_event_retry(shutdown.as_ref(), retry_delay) {
+                            break;
+                        }
+                        retry_delay = next_controller_event_retry_delay(retry_delay);
+                        continue;
+                    }
+                };
+                retry_delay = MATTER_EVENT_RETRY_INITIAL;
+
+                let stream_changed = cursor
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.stream_id != batch.stream_id);
+                let history_gap = cursor.as_ref().is_some_and(|cursor| {
+                    cursor.stream_id == batch.stream_id
+                        && cursor.sequence.saturating_add(1) < batch.oldest_sequence
+                });
+                if stream_changed || history_gap {
+                    let reason = if stream_changed {
+                        "Matter controller sidecar restarted"
+                    } else {
+                        "Matter controller event history gap"
+                    };
+                    let _ = event_tx.send(HubEvent::CommandStreamReset {
+                        hub_key: None,
+                        stream_id: batch.stream_id.clone(),
+                        history_gap,
+                        reason: reason.to_string(),
+                    });
+                    subscribe_to_observed_state(transport.as_ref());
+                }
+                let mut last_sequence = cursor
+                    .as_ref()
+                    .filter(|cursor| cursor.stream_id == batch.stream_id)
+                    .map(|cursor| cursor.sequence)
+                    .unwrap_or(0);
+                let event_stream_id = batch.stream_id.clone();
+                for envelope in batch.events {
+                    last_sequence = last_sequence.max(envelope.sequence);
+                    let event = match envelope.event {
+                        MatterControllerEvent::CommandOutcome(outcome) => {
+                            if matches!(
+                                outcome.status,
+                                crate::transport::MatterCommandOutcomeStatus::Succeeded
+                            ) {
+                                if let Ok(mut proof) = node_proof_of_life.lock() {
+                                    proof.insert(outcome.node_id, std::time::Instant::now());
+                                }
+                            }
+                            Some(crate::events::translate_command_outcome(
+                                event_stream_id.clone(),
+                                outcome,
+                            ))
+                        }
+                        MatterControllerEvent::AttributeReport(report) => {
+                            if let Ok(mut proof) = node_proof_of_life.lock() {
+                                proof.insert(report.node_id, std::time::Instant::now());
+                            }
+                            crate::events::translate_report(&report)
+                        }
+                    };
+                    if let Some(event) = event {
+                        if event_tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+                cursor = Some(MatterControllerEventCursor {
+                    stream_id: batch.stream_id,
+                    sequence: last_sequence,
+                });
+                if connection_state != Some(true) {
+                    let _ = event_tx.send(HubEvent::Connected { hub_key: None });
+                    connection_state = Some(true);
+                }
+            }
+        });
+    if let Err(error) = spawn_result {
+        warn!(target: "evt", "Failed to start Matter controller event stream: {error}");
+    }
+}
 
 /// Connect to the local Matter fabric.
 pub fn connect_matter(
@@ -62,11 +243,11 @@ pub fn connect_matter(
     let cloud_profiles_for_hub_data = cloud_profiles.clone();
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
     let node_proof_of_life_for_closure = node_proof_of_life.clone();
+    let node_proof_of_life_for_events = node_proof_of_life.clone();
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let _ = event_tx.send(HubEvent::Connected {
-        hub_key: Some(hub_key.clone()),
-    });
+    let hub_data_event_tx = event_tx.clone();
+    let event_transport = transport.clone();
 
     let (hub, event_rx) = rhythm_os::lifecycle::connect_hub(
         state,
@@ -94,10 +275,18 @@ pub fn connect_matter(
                 decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
                 recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
                 node_proof_of_life: node_proof_of_life_for_closure.clone(),
-                event_tx,
+                event_tx: hub_data_event_tx,
             }))
         },
-        move |_registry, _shutdown| event_rx,
+        move |_registry, shutdown| {
+            start_controller_event_stream(
+                event_transport,
+                event_tx,
+                shutdown,
+                node_proof_of_life_for_events,
+            );
+            event_rx
+        },
     )?;
 
     Ok((hub, event_rx))
@@ -300,7 +489,7 @@ pub fn parse_device_id(device_id: &str) -> Option<(u64, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use rhythm_core::runtime::hub_registry::DeviceType;
     use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
@@ -319,6 +508,9 @@ mod tests {
         persisted_devices: Vec<CommissionedDevice>,
         probe_calls: AtomicUsize,
         subscribe_calls: AtomicUsize,
+        event_wait_calls: AtomicUsize,
+        block_initial_event_wait: AtomicBool,
+        release_initial_event_wait: AtomicBool,
     }
 
     impl FakeMatterTransport {
@@ -328,6 +520,9 @@ mod tests {
                 persisted_devices,
                 probe_calls: AtomicUsize::new(0),
                 subscribe_calls: AtomicUsize::new(0),
+                event_wait_calls: AtomicUsize::new(0),
+                block_initial_event_wait: AtomicBool::new(false),
+                release_initial_event_wait: AtomicBool::new(false),
             }
         }
     }
@@ -427,6 +622,29 @@ mod tests {
         ) -> Result<()> {
             self.subscribe_calls.fetch_add(1, Ordering::SeqCst);
             anyhow::bail!("automatic subscriptions are disabled")
+        }
+
+        fn wait_controller_events(
+            &self,
+            cursor: Option<&MatterControllerEventCursor>,
+            max_wait: Duration,
+        ) -> Result<crate::transport::MatterControllerEventBatch> {
+            let call_index = self.event_wait_calls.fetch_add(1, Ordering::SeqCst);
+            if call_index == 0 && self.block_initial_event_wait.load(Ordering::SeqCst) {
+                while !self.release_initial_event_wait.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }
+            if !max_wait.is_zero() {
+                std::thread::sleep(max_wait);
+            }
+            Ok(crate::transport::MatterControllerEventBatch {
+                stream_id: cursor
+                    .map(|cursor| cursor.stream_id.clone())
+                    .unwrap_or_else(|| "fake-controller".to_string()),
+                oldest_sequence: cursor.map(|cursor| cursor.sequence + 1).unwrap_or(1),
+                events: Vec::new(),
+            })
         }
     }
 
@@ -696,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_matter_uses_persisted_records_without_probing_or_subscribing_and_tags_events() {
+    fn connect_matter_uses_persisted_records_without_probing_and_starts_subscription_stream() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("RHYTHM_MATTER_PROFILE_SYNC", "disabled");
         let state = shared_state("connect");
@@ -737,8 +955,69 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(event.hub_key(), Some(&key));
-        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
+    }
+
+    #[test]
+    fn controller_stream_identity_is_known_before_connected_is_emitted() {
+        let transport = Arc::new(FakeMatterTransport::new(Vec::new(), Vec::new()));
+        transport
+            .block_initial_event_wait
+            .store(true, Ordering::SeqCst);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+
+        start_controller_event_stream(
+            transport.clone(),
+            event_tx,
+            shutdown.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while transport.event_wait_calls.load(Ordering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(transport.event_wait_calls.load(Ordering::SeqCst), 1);
+        assert!(event_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        transport
+            .release_initial_event_wait
+            .store(true, Ordering::SeqCst);
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            HubEvent::Connected { .. }
+        ));
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn controller_event_retry_is_bounded_and_shutdown_aware() {
+        let mut delay = MATTER_EVENT_RETRY_INITIAL;
+        assert_eq!(delay, Duration::from_millis(250));
+        delay = next_controller_event_retry_delay(delay);
+        assert_eq!(delay, Duration::from_millis(500));
+        delay = next_controller_event_retry_delay(delay);
+        assert_eq!(delay, Duration::from_secs(1));
+        for _ in 0..8 {
+            delay = next_controller_event_retry_delay(delay);
+        }
+        assert_eq!(delay, MATTER_EVENT_RETRY_MAX);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_for_thread = shutdown.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            shutdown_for_thread.store(true, Ordering::SeqCst);
+        });
+        assert!(wait_for_controller_event_retry(
+            shutdown.as_ref(),
+            MATTER_EVENT_RETRY_INITIAL
+        ));
+        setter.join().unwrap();
     }
 
     #[test]
@@ -761,7 +1040,7 @@ mod tests {
             ])
         );
         assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 }

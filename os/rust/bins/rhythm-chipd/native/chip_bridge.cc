@@ -62,10 +62,10 @@ using chip::Controller::DiscoveryType;
 using chip::Controller::OnNOCChainGeneration;
 using chip::Controller::WiFiCredentials;
 
-// Must stay below the 8s control-RPC socket timeout in chip_transport.rs so a
-// slow/unreachable bulb produces a real CHIP error response instead of the
-// caller abandoning the socket while this operation keeps a thread pinned.
-constexpr std::chrono::seconds kOperationTimeout(7);
+// Device operations are owned by chipd endpoint lanes. Their callback context
+// stays alive until CHIP itself reports a terminal interaction-model result;
+// no host wall-clock deadline is allowed to destroy controller-owned state or
+// restart unrelated healthy endpoints.
 constexpr std::chrono::seconds kCommissioningTimeout(180);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
@@ -555,13 +555,10 @@ CHIP_ERROR ExecuteOnMatterThread(const std::function<void()> & callback)
 class BlockingOperationBase
 {
 public:
-    CHIP_ERROR WaitForCompletion(std::chrono::seconds timeout)
+    CHIP_ERROR WaitForCompletion()
     {
         std::unique_lock<std::mutex> lock(mMutex);
-        if (!mCondition.wait_for(lock, timeout, [this] { return mDone; }))
-        {
-            return CHIP_ERROR_TIMEOUT;
-        }
+        mCondition.wait(lock, [this] { return mDone; });
         return mStatus;
     }
 
@@ -1989,14 +1986,14 @@ private:
     }
 
     template <typename OperationT>
-    CHIP_ERROR RunConnectionOperation(OperationT & operation, std::chrono::seconds timeout = kOperationTimeout)
+    CHIP_ERROR RunConnectionOperation(OperationT & operation)
     {
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
 
         CHIP_ERROR err = CHIP_NO_ERROR;
         ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, &operation]() { err = operation.Start(*mCommissioner); }));
         ReturnErrorOnFailure(err);
-        return operation.WaitForCompletion(timeout);
+        return operation.WaitForCompletion();
     }
 
     template <typename RequestT>

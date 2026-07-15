@@ -15,15 +15,17 @@ use anyhow::{Context, Result};
 
 use crate::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
-    ChipRpcCommissionLightResponse, ChipRpcError, ChipRpcJsonValueResponse,
-    ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse, ChipRpcProbeLightResponse,
-    ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope, ChipRpcResponseEnvelope,
+    ChipRpcCommissionLightResponse, ChipRpcControllerEventsResponse, ChipRpcError,
+    ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse,
+    ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest, ChipRpcRequestEnvelope,
+    ChipRpcResponseEnvelope, ChipRpcSubmitEndpointPlansResponse,
 };
 use crate::fabric::MatterFabricIdentity;
 use crate::transport::{
-    CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterDeviceInfo,
-    MatterGroup, MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
-    MatterSubscriptionTarget, MatterTransport,
+    CommissionedDevice, MatterAttributeReport, MatterCommandSubmission, MatterCommissionRequest,
+    MatterControllerEventBatch, MatterControllerEventCursor, MatterDeviceInfo,
+    MatterEndpointCommandPlan, MatterGroup, MatterGroupMember, MatterLevelCommandVariant,
+    MatterLevelStepMode, MatterSubscriptionTarget, MatterTransport,
 };
 
 const SOCKET_NAME: &str = "chip-controller.sock";
@@ -54,6 +56,10 @@ const BLE_AUTO_RETRY_FIRST_ATTEMPT_BUDGET: Duration = Duration::from_secs(45);
 
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
     match request {
+        ChipRpcRequest::WaitControllerEvents { max_wait_ms, .. } => {
+            Duration::from_millis((*max_wait_ms).min(30_000)).saturating_add(Duration::from_secs(5))
+        }
+        ChipRpcRequest::SubmitEndpointPlans { .. } => RPC_CONTROL_TIMEOUT,
         ChipRpcRequest::SetOnOff { .. }
         | ChipRpcRequest::SetGroupOnOff { .. }
         | ChipRpcRequest::IdentifyGroup { .. }
@@ -516,7 +522,10 @@ impl ChipTransport {
     /// recovery that can still turn a post-join mDNS timeout into a success.
     /// BLE stack failures are left for the caller, which owns sidecar
     /// recovery and the single automatic retry.
-    fn commission_light_once(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
+    fn commission_light_once(
+        &self,
+        request: &MatterCommissionRequest,
+    ) -> Result<CommissionedDevice> {
         let result: Result<ChipRpcCommissionLightResponse> =
             self.call(ChipRpcRequest::CommissionLight(request.clone()));
         match result {
@@ -820,9 +829,7 @@ impl SidecarLogSinks {
     fn open(log_path: &Path) -> Result<Self> {
         Ok(Self {
             main: Mutex::new(open_sidecar_log_file(log_path)?),
-            verbose: Mutex::new(open_sidecar_log_file(&verbose_sidecar_log_path(
-                log_path,
-            ))?),
+            verbose: Mutex::new(open_sidecar_log_file(&verbose_sidecar_log_path(log_path))?),
         })
     }
 
@@ -993,6 +1000,30 @@ impl Drop for ChipTransport {
 }
 
 impl MatterTransport for ChipTransport {
+    fn submit_endpoint_plans(
+        &self,
+        plans: &[MatterEndpointCommandPlan],
+    ) -> Result<Vec<MatterCommandSubmission>> {
+        let response: ChipRpcSubmitEndpointPlansResponse =
+            self.call(ChipRpcRequest::SubmitEndpointPlans {
+                plans: plans.to_vec(),
+            })?;
+        Ok(response.submissions)
+    }
+
+    fn wait_controller_events(
+        &self,
+        cursor: Option<&MatterControllerEventCursor>,
+        max_wait: Duration,
+    ) -> Result<MatterControllerEventBatch> {
+        let response: ChipRpcControllerEventsResponse =
+            self.call(ChipRpcRequest::WaitControllerEvents {
+                cursor: cursor.cloned(),
+                max_wait_ms: max_wait.as_millis().try_into().unwrap_or(u64::MAX),
+            })?;
+        Ok(response.batch)
+    }
+
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
         let _guard = self
             .commissioning_lock
@@ -1418,8 +1449,10 @@ mod tests {
         ChipRpcResponseEnvelope,
     };
     use crate::transport::{
-        MatterAttributeValue, MatterColorMode, MatterCommissioningNetwork,
-        MatterCommissioningRendezvous, MatterCommissioningWifiCredentials,
+        MatterAttributeValue, MatterColorMode, MatterCommandStep, MatterCommandSubmission,
+        MatterCommissioningNetwork, MatterCommissioningRendezvous,
+        MatterCommissioningWifiCredentials, MatterControllerEventBatch,
+        MatterControllerEventCursor, MatterEndpointCommandPlan,
     };
 
     fn test_temp_root() -> PathBuf {
@@ -1990,6 +2023,84 @@ mod tests {
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn async_command_submission_and_event_wait_use_rpc_contract() {
+        let submit_socket = temp_socket_path("submit-endpoint-plans");
+        let plan = MatterEndpointCommandPlan {
+            command_id: 91,
+            node_id: 7,
+            endpoint: 2,
+            steps: vec![MatterCommandStep::SetOnOff { on: true }],
+            inter_step_delay_ms: None,
+        };
+        let expected_plan = plan.clone();
+        let server = spawn_fake_server(submit_socket.clone(), move |request| {
+            match request.request {
+                ChipRpcRequest::SubmitEndpointPlans { plans } => {
+                    assert_eq!(plans, vec![expected_plan.clone()]);
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipRpcSubmitEndpointPlansResponse {
+                    submissions: vec![MatterCommandSubmission {
+                        command_id: 91,
+                        completed: false,
+                        controller_stream_id: Some("stream-a".to_string()),
+                    }],
+                },
+            )
+        });
+        let transport = ChipTransport::for_test(submit_socket.clone());
+        assert_eq!(
+            transport.submit_endpoint_plans(&[plan]).unwrap(),
+            vec![MatterCommandSubmission {
+                command_id: 91,
+                completed: false,
+                controller_stream_id: Some("stream-a".to_string()),
+            }]
+        );
+        server.join().unwrap();
+        let _ = fs::remove_file(submit_socket);
+
+        let wait_socket = temp_socket_path("wait-controller-events");
+        let cursor = MatterControllerEventCursor {
+            stream_id: "stream-a".to_string(),
+            sequence: 8,
+        };
+        let expected_cursor = cursor.clone();
+        let server = spawn_fake_server(wait_socket.clone(), move |request| {
+            match request.request {
+                ChipRpcRequest::WaitControllerEvents {
+                    cursor,
+                    max_wait_ms,
+                } => {
+                    assert_eq!(cursor, Some(expected_cursor.clone()));
+                    assert_eq!(max_wait_ms, 250);
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipRpcControllerEventsResponse {
+                    batch: MatterControllerEventBatch {
+                        stream_id: "stream-a".to_string(),
+                        oldest_sequence: 9,
+                        events: Vec::new(),
+                    },
+                },
+            )
+        });
+        let transport = ChipTransport::for_test(wait_socket.clone());
+        let batch = transport
+            .wait_controller_events(Some(&cursor), Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(batch.oldest_sequence, 9);
+        server.join().unwrap();
+        let _ = fs::remove_file(wait_socket);
     }
 
     #[test]

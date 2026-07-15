@@ -6,6 +6,8 @@
 //! a native daemon; future board-specific targets can provide their own
 //! controller implementation later.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +16,128 @@ use serde_json::Value;
 pub const DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS: u16 = 1;
 /// Default maximum interval for Matter attribute subscriptions.
 pub const DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS: u16 = 60;
+
+/// An ordered operation in a desired-state update for one Matter endpoint.
+///
+/// The complete plan is submitted to the controller sidecar as one owned
+/// job. This keeps command ordering and recovery below the application RPC
+/// boundary instead of making Rhythm OS synchronously shepherd each cluster
+/// command.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum MatterCommandStep {
+    SetOnOff {
+        on: bool,
+    },
+    Identify {
+        duration_secs: u16,
+    },
+    SetBrightness {
+        level: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    RunLevel {
+        command: MatterLevelCommandVariant,
+        level_or_step: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step_mode: Option<MatterLevelStepMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    SetColorTemperature {
+        kelvin: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    SetXy {
+        x: f32,
+        y: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+    SetHueSaturation {
+        hue: u8,
+        saturation: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition_ms: Option<u32>,
+    },
+}
+
+/// Latest desired state for one Matter endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatterEndpointCommandPlan {
+    /// Stable application-generated identifier used for terminal outcomes.
+    pub command_id: u64,
+    pub node_id: u64,
+    pub endpoint: u16,
+    pub steps: Vec<MatterCommandStep>,
+    /// Device-profile pacing between steps. This is not retry backoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_step_delay_ms: Option<u64>,
+}
+
+/// How a transport handled a command plan submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterCommandSubmission {
+    pub command_id: u64,
+    /// `true` for compatibility transports which completed inline. Native
+    /// chipd returns `false` and publishes a terminal controller event later.
+    pub completed: bool,
+    /// Identifies the chipd process that owns an accepted command. This lets
+    /// the OS distinguish commands accepted after a sidecar restart from
+    /// indeterminate work owned by the previous process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_stream_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatterCommandOutcomeStatus {
+    Succeeded,
+    Failed,
+    Superseded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterCommandOutcome {
+    pub command_id: u64,
+    pub node_id: u64,
+    pub endpoint: u16,
+    pub status: MatterCommandOutcomeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum MatterControllerEvent {
+    CommandOutcome(MatterCommandOutcome),
+    AttributeReport(MatterAttributeReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatterControllerEventEnvelope {
+    pub sequence: u64,
+    pub event: MatterControllerEvent,
+}
+
+/// Cursor into one chipd process's event stream. A changed stream id tells the
+/// client that the sidecar restarted and in-flight outcomes were lost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterControllerEventCursor {
+    pub stream_id: String,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatterControllerEventBatch {
+    pub stream_id: String,
+    /// Oldest sequence still retained by the sidecar. A cursor below this
+    /// value has a gap and its pending commands must be treated as unknown.
+    pub oldest_sequence: u64,
+    pub events: Vec<MatterControllerEventEnvelope>,
+}
 
 /// Matter network type for commissioning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +183,129 @@ pub struct MatterCommissionRequest {
 
 /// Platform-agnostic typed interface to a Matter light controller.
 pub trait MatterTransport: Send + Sync {
+    /// Submit complete desired-state plans for controller-owned execution.
+    ///
+    /// Compatibility transports execute inline. Native chipd overrides this
+    /// method to accept immediately, coalesce by endpoint, and publish terminal
+    /// outcomes through [`Self::wait_controller_events`].
+    fn submit_endpoint_plans(
+        &self,
+        plans: &[MatterEndpointCommandPlan],
+    ) -> Result<Vec<MatterCommandSubmission>> {
+        let results = std::thread::scope(|scope| {
+            plans
+                .iter()
+                .map(|plan| {
+                    scope.spawn(move || -> Result<MatterCommandSubmission> {
+                        for (index, step) in plan.steps.iter().enumerate() {
+                            self.execute_command_step(plan.node_id, plan.endpoint, step)?;
+                            if index + 1 < plan.steps.len() {
+                                if let Some(delay_ms) =
+                                    plan.inter_step_delay_ms.filter(|delay| *delay > 0)
+                                {
+                                    std::thread::sleep(Duration::from_millis(delay_ms));
+                                }
+                            }
+                        }
+                        Ok(MatterCommandSubmission {
+                            command_id: plan.command_id,
+                            completed: true,
+                            controller_stream_id: None,
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("Matter endpoint plan worker panicked"))?
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut submissions = Vec::with_capacity(results.len());
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok(submission) => submissions.push(submission),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(submissions),
+        }
+    }
+
+    /// Wait for controller events newer than `cursor`. The default keeps
+    /// additive compatibility with transports that have no event stream.
+    fn wait_controller_events(
+        &self,
+        cursor: Option<&MatterControllerEventCursor>,
+        max_wait: Duration,
+    ) -> Result<MatterControllerEventBatch> {
+        if !max_wait.is_zero() {
+            std::thread::sleep(max_wait);
+        }
+        Ok(MatterControllerEventBatch {
+            stream_id: cursor
+                .map(|cursor| cursor.stream_id.clone())
+                .unwrap_or_else(|| "inline".to_string()),
+            oldest_sequence: cursor.map(|cursor| cursor.sequence + 1).unwrap_or(1),
+            events: Vec::new(),
+        })
+    }
+
+    /// Execute one plan step for the synchronous compatibility path.
+    fn execute_command_step(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        step: &MatterCommandStep,
+    ) -> Result<()> {
+        match *step {
+            MatterCommandStep::SetOnOff { on } => self.set_on_off(node_id, endpoint, on),
+            MatterCommandStep::Identify { duration_secs } => {
+                self.identify_light(node_id, endpoint, duration_secs)
+            }
+            MatterCommandStep::SetBrightness {
+                level,
+                transition_ms,
+            } => self.set_brightness(node_id, endpoint, level, transition_ms),
+            MatterCommandStep::RunLevel {
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            } => self.run_level_command(
+                node_id,
+                endpoint,
+                command,
+                level_or_step,
+                step_mode,
+                transition_ms,
+            ),
+            MatterCommandStep::SetColorTemperature {
+                kelvin,
+                transition_ms,
+            } => self.set_color_temperature(node_id, endpoint, kelvin, transition_ms),
+            MatterCommandStep::SetXy {
+                x,
+                y,
+                transition_ms,
+            } => self.set_xy(node_id, endpoint, x, y, transition_ms),
+            MatterCommandStep::SetHueSaturation {
+                hue,
+                saturation,
+                transition_ms,
+            } => self.set_hue_saturation(node_id, endpoint, hue, saturation, transition_ms),
+        }
+    }
+
     /// Commission a light and return the fully probed device description.
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice>;
 

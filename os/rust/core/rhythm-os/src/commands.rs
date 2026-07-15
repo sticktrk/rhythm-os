@@ -5300,6 +5300,196 @@ pub(crate) fn clear_node_dispatch_pending(state: &SharedState, node_id: &str) {
     }
 }
 
+/// Register one composite outcome that was accepted by an asynchronous hub
+/// controller. The composite's pending mark remains held until every command
+/// id resolves.
+#[derive(Debug)]
+pub(crate) struct IntegrationDispatchRegistration {
+    pub early_outcomes: Vec<crate::state::EarlyIntegrationOutcome>,
+    pub complete: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IntegrationOutcomeDisposition {
+    Deferred,
+    Resolved {
+        node_id: String,
+        dispatch_complete: bool,
+    },
+}
+
+const EARLY_INTEGRATION_OUTCOME_CAPACITY: usize = 2_048;
+
+pub(crate) fn register_integration_dispatch(
+    state: &SharedState,
+    hub_key: &str,
+    node_id: &str,
+    controller_stream_id: &str,
+    command_ids: &[u64],
+) -> Result<IntegrationDispatchRegistration, String> {
+    if command_ids.is_empty() {
+        return Err("controller accepted a dispatch without command ids".to_string());
+    }
+    if controller_stream_id.is_empty() {
+        return Err("controller accepted a dispatch without a stream identity".to_string());
+    }
+    let mut unique = std::collections::HashSet::new();
+    if command_ids.iter().any(|id| *id == 0 || !unique.insert(*id)) {
+        return Err("controller returned invalid or duplicate command ids".to_string());
+    }
+
+    let mut s = state
+        .lock()
+        .map_err(|_| "application state lock poisoned".to_string())?;
+    for command_id in command_ids {
+        if s.pending_integration_commands.contains_key(&(
+            hub_key.to_string(),
+            controller_stream_id.to_string(),
+            *command_id,
+        )) {
+            return Err(format!(
+                "controller command id {command_id} is already pending for {hub_key}"
+            ));
+        }
+    }
+
+    let mut early_outcomes = Vec::new();
+    for command_id in command_ids {
+        if let Some(outcome) = s.early_integration_outcomes.remove(&(
+            hub_key.to_string(),
+            controller_stream_id.to_string(),
+            *command_id,
+        )) {
+            unique.remove(command_id);
+            early_outcomes.push(outcome);
+        }
+    }
+    if unique.is_empty() {
+        return Ok(IntegrationDispatchRegistration {
+            early_outcomes,
+            complete: true,
+        });
+    }
+
+    let dispatch_id = s.next_integration_dispatch_id.max(1);
+    s.next_integration_dispatch_id = dispatch_id.saturating_add(1).max(1);
+    for command_id in &unique {
+        s.pending_integration_commands.insert(
+            (
+                hub_key.to_string(),
+                controller_stream_id.to_string(),
+                *command_id,
+            ),
+            dispatch_id,
+        );
+    }
+    s.pending_integration_dispatches.insert(
+        dispatch_id,
+        crate::state::PendingIntegrationDispatch {
+            node_id: node_id.to_string(),
+            hub_key: hub_key.to_string(),
+            controller_stream_id: controller_stream_id.to_string(),
+            remaining_command_ids: unique,
+        },
+    );
+    Ok(IntegrationDispatchRegistration {
+        early_outcomes,
+        complete: false,
+    })
+}
+
+/// Reconcile a terminal controller event with its acceptance receipt. The two
+/// arrive on independent channels, so an event that arrives first is retained
+/// and consumed atomically when registration follows.
+pub(crate) fn reconcile_integration_outcome(
+    state: &SharedState,
+    hub_key: &str,
+    controller_stream_id: &str,
+    command_id: u64,
+    outcome: crate::state::EarlyIntegrationOutcome,
+) -> Result<IntegrationOutcomeDisposition, String> {
+    let mut s = state
+        .lock()
+        .map_err(|_| "application state lock poisoned".to_string())?;
+    let command_key = (
+        hub_key.to_string(),
+        controller_stream_id.to_string(),
+        command_id,
+    );
+    let Some(dispatch_id) = s.pending_integration_commands.remove(&command_key) else {
+        if s.early_integration_outcomes.len() >= EARLY_INTEGRATION_OUTCOME_CAPACITY
+            && !s.early_integration_outcomes.contains_key(&command_key)
+        {
+            if let Some(oldest_available) = s.early_integration_outcomes.keys().next().cloned() {
+                s.early_integration_outcomes.remove(&oldest_available);
+            }
+        }
+        s.early_integration_outcomes.insert(command_key, outcome);
+        return Ok(IntegrationOutcomeDisposition::Deferred);
+    };
+    let dispatch = s
+        .pending_integration_dispatches
+        .get_mut(&dispatch_id)
+        .ok_or_else(|| format!("controller dispatch {dispatch_id} is missing"))?;
+    dispatch.remaining_command_ids.remove(&command_id);
+    let node_id = dispatch.node_id.clone();
+    if !dispatch.remaining_command_ids.is_empty() {
+        return Ok(IntegrationOutcomeDisposition::Resolved {
+            node_id,
+            dispatch_complete: false,
+        });
+    }
+    let node_id = s
+        .pending_integration_dispatches
+        .remove(&dispatch_id)
+        .map(|dispatch| dispatch.node_id)
+        .ok_or_else(|| format!("controller dispatch {dispatch_id} disappeared"))?;
+    Ok(IntegrationOutcomeDisposition::Resolved {
+        node_id,
+        dispatch_complete: true,
+    })
+}
+
+/// Fail every accepted dispatch for a controller whose event stream restarted
+/// or lost retained events. Returns one node per held composite pending mark.
+pub(crate) fn reset_integration_dispatches_for_hub(
+    state: &SharedState,
+    hub_key: &str,
+    current_stream_id: &str,
+    include_current_stream: bool,
+) -> Vec<String> {
+    let Ok(mut s) = state.lock() else {
+        return Vec::new();
+    };
+    let dispatch_ids: Vec<u64> = s
+        .pending_integration_dispatches
+        .iter()
+        .filter_map(|(dispatch_id, dispatch)| {
+            (dispatch.hub_key == hub_key
+                && (include_current_stream || dispatch.controller_stream_id != current_stream_id))
+                .then_some(*dispatch_id)
+        })
+        .collect();
+    let mut nodes = Vec::with_capacity(dispatch_ids.len());
+    for dispatch_id in dispatch_ids {
+        if let Some(dispatch) = s.pending_integration_dispatches.remove(&dispatch_id) {
+            for command_id in dispatch.remaining_command_ids {
+                s.pending_integration_commands.remove(&(
+                    hub_key.to_string(),
+                    dispatch.controller_stream_id.clone(),
+                    command_id,
+                ));
+            }
+            nodes.push(dispatch.node_id);
+        }
+    }
+    s.early_integration_outcomes
+        .retain(|(event_hub, event_stream, _), _| {
+            event_hub != hub_key || (!include_current_stream && event_stream == current_stream_id)
+        });
+    nodes
+}
+
 pub(crate) fn try_send_work_item_with_pending(
     state: &SharedState,
     tx: &std::sync::mpsc::SyncSender<WorkItem>,
@@ -24585,5 +24775,135 @@ mod tests {
                 .is_empty(),
             "silent migration must not queue triage"
         );
+    }
+
+    #[test]
+    fn accepted_controller_commands_hold_one_pending_mark_until_all_terminal() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        mark_node_dispatch_pending(&state, "room-a");
+        register_integration_dispatch(&state, "matter@local", "room-a", "stream-a", &[10, 11])
+            .unwrap();
+
+        assert_eq!(
+            reconcile_integration_outcome(
+                &state,
+                "matter@local",
+                "stream-a",
+                10,
+                crate::state::EarlyIntegrationOutcome {
+                    device_id: "matter:1:1".to_string(),
+                    status: crate::hub::HubCommandOutcomeStatus::Succeeded,
+                    detail: None,
+                },
+            )
+            .unwrap(),
+            IntegrationOutcomeDisposition::Resolved {
+                node_id: "room-a".to_string(),
+                dispatch_complete: false,
+            }
+        );
+        assert_eq!(
+            state.lock().unwrap().pending_node_dispatches.get("room-a"),
+            Some(&1)
+        );
+        assert_eq!(
+            reconcile_integration_outcome(
+                &state,
+                "matter@local",
+                "stream-a",
+                11,
+                crate::state::EarlyIntegrationOutcome {
+                    device_id: "matter:1:2".to_string(),
+                    status: crate::hub::HubCommandOutcomeStatus::Succeeded,
+                    detail: None,
+                },
+            )
+            .unwrap(),
+            IntegrationOutcomeDisposition::Resolved {
+                node_id: "room-a".to_string(),
+                dispatch_complete: true,
+            }
+        );
+        clear_node_dispatch_pending(&state, "room-a");
+
+        let state = state.lock().unwrap();
+        assert!(state.pending_node_dispatches.is_empty());
+        assert!(state.pending_integration_dispatches.is_empty());
+        assert!(state.pending_integration_commands.is_empty());
+    }
+
+    #[test]
+    fn controller_stream_reset_releases_each_accepted_dispatch_once() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        for node in ["room-a", "room-b"] {
+            mark_node_dispatch_pending(&state, node);
+        }
+        register_integration_dispatch(&state, "matter@local", "room-a", "old", &[20]).unwrap();
+        register_integration_dispatch(&state, "matter@local", "room-b", "old", &[21, 22]).unwrap();
+
+        let mut nodes = reset_integration_dispatches_for_hub(&state, "matter@local", "new", false);
+        nodes.sort();
+        assert_eq!(nodes, vec!["room-a".to_string(), "room-b".to_string()]);
+        for node in nodes {
+            clear_node_dispatch_pending(&state, &node);
+        }
+
+        let state = state.lock().unwrap();
+        assert!(state.pending_node_dispatches.is_empty());
+        assert!(state.pending_integration_dispatches.is_empty());
+        assert!(state.pending_integration_commands.is_empty());
+    }
+
+    #[test]
+    fn terminal_outcome_before_acceptance_receipt_is_reconciled_without_leaking_pending() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        mark_node_dispatch_pending(&state, "room-a");
+        assert_eq!(
+            reconcile_integration_outcome(
+                &state,
+                "matter@local",
+                "stream-a",
+                30,
+                crate::state::EarlyIntegrationOutcome {
+                    device_id: "matter:7:1".to_string(),
+                    status: crate::hub::HubCommandOutcomeStatus::Succeeded,
+                    detail: None,
+                },
+            )
+            .unwrap(),
+            IntegrationOutcomeDisposition::Deferred
+        );
+
+        let registration =
+            register_integration_dispatch(&state, "matter@local", "room-a", "stream-a", &[30])
+                .unwrap();
+        assert!(registration.complete);
+        assert_eq!(registration.early_outcomes.len(), 1);
+        clear_node_dispatch_pending(&state, "room-a");
+
+        let state = state.lock().unwrap();
+        assert!(state.pending_node_dispatches.is_empty());
+        assert!(state.pending_integration_dispatches.is_empty());
+        assert!(state.pending_integration_commands.is_empty());
+        assert!(state.early_integration_outcomes.is_empty());
+    }
+
+    #[test]
+    fn sidecar_restart_preserves_commands_already_accepted_by_new_stream() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        register_integration_dispatch(&state, "matter@local", "old-room", "old", &[40]).unwrap();
+        register_integration_dispatch(&state, "matter@local", "new-room", "new", &[41]).unwrap();
+
+        assert_eq!(
+            reset_integration_dispatches_for_hub(&state, "matter@local", "new", false),
+            vec!["old-room".to_string()]
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(state.pending_integration_dispatches.len(), 1);
+        assert!(state.pending_integration_commands.contains_key(&(
+            "matter@local".to_string(),
+            "new".to_string(),
+            41
+        )));
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,13 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use rhythm_matter::chip_rpc::{
     ChipInitControllerRequest, ChipInitControllerResponse, ChipRpcAttributeReportsResponse,
-    ChipRpcCommissionLightResponse, ChipRpcEmpty, ChipRpcJsonValueResponse,
-    ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse, ChipRpcProbeLightResponse,
-    ChipRpcReadOnOffResponse, ChipRpcRequest,
+    ChipRpcCommissionLightResponse, ChipRpcControllerEventsResponse, ChipRpcEmpty,
+    ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse,
+    ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest,
+    ChipRpcSubmitEndpointPlansResponse,
 };
-use rhythm_matter::transport::{CommissionedDevice, MatterDeviceInfo};
+use rhythm_matter::transport::{CommissionedDevice, MatterControllerEvent};
+use rhythm_matter::transport::{MatterDeviceInfo, MatterSubscriptionTarget};
 
 use crate::backend::ChipControllerBackend;
+use crate::command_dispatch::{CommandDispatcher, ControllerEventBroker};
 
 const DEVICE_STORE_SCHEMA_VERSION: u32 = 1;
 const MATTER_OPERATIONAL_SERVICE_TYPE: &str = "_matter._tcp.local.";
@@ -50,7 +53,9 @@ impl CommissioningState {
 /// controller (re)initialization is exclusive, and lifecycle operations that
 /// mutate shared fabric/group/device tables serialize among themselves.
 pub struct ChipControllerService {
-    backend: RwLock<Box<dyn ChipControllerBackend>>,
+    backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
+    command_dispatcher: Arc<CommandDispatcher>,
+    event_broker: Arc<ControllerEventBroker>,
     device_store: Mutex<DeviceStore>,
     state: RwLock<Option<CommissioningState>>,
     /// Serializes commissioning/decommissioning/probing/group config —
@@ -60,8 +65,13 @@ pub struct ChipControllerService {
 
 impl ChipControllerService {
     pub fn new(backend: Box<dyn ChipControllerBackend>) -> Self {
+        let backend = Arc::new(RwLock::new(backend));
+        let event_broker = Arc::new(ControllerEventBroker::new());
+        let command_dispatcher = CommandDispatcher::new(backend.clone(), event_broker.clone());
         Self {
-            backend: RwLock::new(backend),
+            backend,
+            command_dispatcher,
+            event_broker,
             device_store: Mutex::new(DeviceStore::default()),
             state: RwLock::new(None),
             lifecycle_lock: Mutex::new(()),
@@ -89,6 +99,21 @@ impl ChipControllerService {
                 let _lifecycle = self.lifecycle_lock.lock();
                 let device = self.backend().commission_light(&request)?;
                 self.device_store().upsert(device.clone())?;
+                // Keep newly commissioned endpoints inside the same
+                // authoritative observed-state stream as restored devices.
+                if let Err(error) = self.backend().subscribe_on_off(
+                    &[MatterSubscriptionTarget {
+                        node_id: device.node_id,
+                        endpoint: device.light_endpoint,
+                    }],
+                    rhythm_matter::transport::DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                    rhythm_matter::transport::DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                ) {
+                    eprintln!(
+                        "rhythm-chipd could not establish the initial subscription for node {} endpoint {}: {error:#}",
+                        device.node_id, device.light_endpoint
+                    );
+                }
                 Ok(serde_json::to_value(ChipRpcCommissionLightResponse {
                     device,
                 })?)
@@ -326,6 +351,37 @@ impl ChipControllerService {
                 Ok(serde_json::to_value(ChipRpcAttributeReportsResponse {
                     reports,
                 })?)
+            }
+            ChipRpcRequest::SubmitEndpointPlans { plans } => {
+                self.require_initialized()?;
+                let submissions = self.command_dispatcher.submit(plans)?;
+                Ok(serde_json::to_value(ChipRpcSubmitEndpointPlansResponse {
+                    submissions,
+                })?)
+            }
+            ChipRpcRequest::WaitControllerEvents {
+                cursor,
+                max_wait_ms,
+            } => {
+                self.require_initialized()?;
+                let max_wait = Duration::from_millis(max_wait_ms.min(30_000));
+                let deadline = Instant::now() + max_wait;
+                loop {
+                    for report in self.backend().drain_attribute_reports()? {
+                        self.event_broker
+                            .publish(MatterControllerEvent::AttributeReport(report));
+                    }
+
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let batch = self
+                        .event_broker
+                        .wait(cursor.as_ref(), remaining.min(Duration::from_millis(500)));
+                    if !batch.events.is_empty() || remaining.is_zero() {
+                        break Ok(serde_json::to_value(ChipRpcControllerEventsResponse {
+                            batch,
+                        })?);
+                    }
+                }
             }
         }
     }

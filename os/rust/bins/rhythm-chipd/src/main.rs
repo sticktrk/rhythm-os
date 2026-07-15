@@ -1,4 +1,5 @@
 mod backend;
+mod command_dispatch;
 mod service;
 
 use std::fs;
