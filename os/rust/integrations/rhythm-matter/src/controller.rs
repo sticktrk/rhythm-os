@@ -614,11 +614,19 @@ impl MatterLightController {
     }
 
     fn looks_like_connectivity_timeout(error: &anyhow::Error) -> bool {
-        let lower = error.to_string().to_ascii_lowercase();
-        lower.contains("timeout")
-            || lower.contains("timed out")
-            || lower.contains("chip error 0x32")
-            || lower.contains("failed to connect")
+        error.chain().any(|cause| {
+            let lower = cause.to_string().to_ascii_lowercase();
+            lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("chip error 0x32")
+                || lower.contains("failed to connect")
+                || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                })
+        })
     }
 
     fn identify_devices(
@@ -891,13 +899,14 @@ impl HubLightController for MatterLightController {
                 Ok(MatterOnOffRead::On) => return Ok(true),
                 Ok(MatterOnOffRead::Off) | Ok(MatterOnOffRead::Suppressed) => {}
                 Err(e) => {
+                    let connectivity_timeout = Self::looks_like_connectivity_timeout(&e);
                     warn!(
                         target: "cmd",
-                        "Matter: failed to read on/off state for node {}: {}",
+                        "Matter: failed to read on/off state for node {}: {:#}",
                         node_id,
                         e
                     );
-                    if Self::looks_like_connectivity_timeout(&e) {
+                    if connectivity_timeout {
                         tracing::debug!(
                             target: "cmd",
                             event = "matter_on_off_read_backoff",
