@@ -1030,7 +1030,7 @@ mod tests {
             Vec::new(),
         ));
 
-        let (hub, _event_rx) = connect_matter(&state, transport.clone()).unwrap();
+        let (hub, event_rx) = connect_matter(&state, transport.clone()).unwrap();
         let data = hub.data::<Arc<MatterHubData>>().unwrap();
         assert_eq!(
             data.device_quirks.lock().unwrap().get("matter-107"),
@@ -1040,6 +1040,11 @@ mod tests {
             ])
         );
         assert_eq!(transport.probe_calls.load(Ordering::SeqCst), 0);
+
+        let event = event_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(event.hub_key(), Some(&hub.hub_key));
         assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
