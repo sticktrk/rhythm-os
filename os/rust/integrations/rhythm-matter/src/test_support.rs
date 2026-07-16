@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::transport::{
     CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterDeviceInfo, MatterGroup,
@@ -750,10 +750,9 @@ impl MatterTransport for SpyTransport {
     fn read_on_off(&self, node_id: u64, endpoint: u16) -> Result<bool> {
         self.record(RecordedOperation::ReadOnOff { node_id, endpoint });
         if self.should_fail(node_id) || self.should_fail_read(node_id) {
-            anyhow::bail!(
-                "CHIP Error 0x32: Timeout reading on/off for node {}",
-                node_id
-            );
+            return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)).with_context(|| {
+                format!("reading CHIP RPC response for node {node_id} (chipd status: running)")
+            });
         }
         Ok(self
             .on_off_state
