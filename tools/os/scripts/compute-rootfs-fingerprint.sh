@@ -23,9 +23,16 @@
 #   - Wi-Fi embed envs (RHYTHM_WIFI_*) — bench-only convenience
 #   - check-rpiz-image-mode.sh (a post-build assertion, not an input)
 #
-# Output: v1-<mode>-<12 hex chars>, e.g. v1-prod-3fa9c2d4e1b0
+# File ordering is canonicalized to the C locale so macOS and Linux compute
+# the same digest regardless of the caller's locale.
+#
+# Output: v2-<mode>-<12 hex chars>, e.g. v2-prod-3fa9c2d4e1b0
 
 set -euo pipefail
+
+# sort order is part of the fingerprint contract. Locale-sensitive collation
+# previously produced different hashes for the same checkout on macOS and CI.
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../os" && pwd)"
@@ -107,11 +114,11 @@ builder_hash() {
 }
 
 digest="$({
-    echo "schema v1"
+    echo "schema v2"
     echo "builder $(builder_hash)"
     echo "br-external $(sha_dir_tree "$PROJECT_ROOT/install/rpiz/buildroot")"
     echo "image-script $(sha_file "$SCRIPT_DIR/build-rpiz-image.sh")"
     echo "mode $IMAGE_MODE"
 } | sha_stream | cut -c1-12)"
 
-echo "v1-$IMAGE_MODE-$digest"
+echo "v2-$IMAGE_MODE-$digest"

@@ -73,6 +73,9 @@ everything that bakes into the rootfs:
 Rust sources are deliberately **not** hashed: the OTA package overlay
 refreshes the binaries on any rootfs, so they don't define the base.
 
+The input tree is sorted with bytewise `LC_ALL=C` collation, making the `v2`
+fingerprint identical across macOS and Linux regardless of caller locale.
+
 The fingerprint is stamped into the image at `/etc/rhythm-image-fingerprint`
 (next to `/etc/rhythm-image-version`) and recorded on each fresh
 `images[]` entry in the feed manifest.
@@ -124,7 +127,7 @@ https://dl.rhythm.lighting/server/
                "sha256": "…", "size": 123, "install": [ … slots: self|sibling|absolute … ] },
   "images": [ { "kind": "rootfs_image", "url": "v0.6.9-beta/rootfs.ext2.gz",
                 "version": "0.6.9-beta", "sha256": "…", "size": 456,
-                "fingerprint": "v1-dev-a1b2c3d4e5f6", "compression": "gzip" } ]
+                "fingerprint": "v2-dev-a1b2c3d4e5f6", "compression": "gzip" } ]
 }
 ```
 
