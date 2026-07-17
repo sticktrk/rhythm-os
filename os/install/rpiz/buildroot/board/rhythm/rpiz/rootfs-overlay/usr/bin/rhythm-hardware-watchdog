@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Keep the independent BCM2835 watchdog alive while userspace is scheduling.
+# The in-process Rhythm watchdog handles a stalled server; this one recovers
+# the appliance when the whole host stops scheduling and cannot reboot itself.
+
+WATCHDOG_DEVICE="${RHYTHM_HARDWARE_WATCHDOG_DEVICE:-/dev/watchdog}"
+HEARTBEAT_SECS="${RHYTHM_HARDWARE_WATCHDOG_INTERVAL_SECS:-5}"
+ALLOW_REGULAR="${RHYTHM_HARDWARE_WATCHDOG_ALLOW_REGULAR:-0}"
+
+watchdog_available() {
+    [ -c "$WATCHDOG_DEVICE" ] || {
+        [ "$ALLOW_REGULAR" = "1" ] && [ -e "$WATCHDOG_DEVICE" ]
+    }
+}
+
+while ! watchdog_available; do
+    sleep 1
+done
+
+if ! exec 3>"$WATCHDOG_DEVICE"; then
+    echo "rhythm-hardware-watchdog: cannot open $WATCHDOG_DEVICE" >&2
+    exit 1
+fi
+
+disarm_watchdog() {
+    # Linux watchdog drivers recognize a final V before close as a deliberate
+    # shutdown. A crash or host stall omits it and leaves the reset armed.
+    printf 'V' >&3 || true
+    exec 3>&-
+    exit 0
+}
+
+trap disarm_watchdog HUP INT TERM
+
+while :; do
+    # Any write is a keepalive under the Linux watchdog userspace contract.
+    printf '\0' >&3 || exit 1
+    sleep "$HEARTBEAT_SECS" &
+    wait "$!"
+done

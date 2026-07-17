@@ -10,6 +10,7 @@ null::sysinit:/bin/ln -sf /proc/self/fd/1 /dev/stdout
 null::sysinit:/bin/ln -sf /proc/self/fd/2 /dev/stderr
 ::sysinit:/bin/hostname -F /etc/hostname
 ::sysinit:/etc/init.d/rcS
+::respawn:/usr/bin/rhythm-hardware-watchdog
 ::respawn:/usr/bin/rhythm-launch
 ::restart:/sbin/init
 ::ctrlaltdel:/sbin/reboot
