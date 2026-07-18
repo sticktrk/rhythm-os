@@ -49,6 +49,7 @@ Mostly invoked by the main flows above, but usable standalone:
 | `resolve-version.sh` | Resolve the current version for a shipped Rhythm artifact from Git tags |
 | `lib/` | Shared helpers sourced by the scripts above (`version.sh` semver/channel/feed, `artifact.sh` sha256/size/json) |
 | `tests/package-feed-sim.sh` | Local OTA feed lifecycle simulation (image release → binary carry-forward → dry-run); runs in CI |
+| `tests/rpiz-hardware-watchdog-sim.sh` | Verify the rpiz watchdog starts from init, emits keepalives, and disarms cleanly; runs in CI |
 
 Triage scripts are intentionally not duplicated under `tools/os/scripts`. Use
 the canonical CROSS root entrypoints: `./tools/triage-bug.sh` and
