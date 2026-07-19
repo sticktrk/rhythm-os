@@ -176,9 +176,6 @@ impl RingWriter {
         let append_result = (|| -> io::Result<()> {
             let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
             file.write_all(&bytes)?;
-            if sync_now {
-                file.sync_data()?;
-            }
             Ok(())
         })();
         if let Err(error) = append_result {
@@ -189,33 +186,43 @@ impl RingWriter {
 
         self.manifest.next_sequence = self.manifest.next_sequence.saturating_add(1);
         if sync_now {
-            self.manifest.last_sync_at = Some(Utc::now().to_rfc3339());
-            self.write_manifest()?;
+            self.sync()?;
         }
         Ok(Some(sequence))
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
-        let path = self.active_segment_path();
-        let result = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .and_then(|file| file.sync_data());
-        if let Err(error) = result {
-            self.manifest.health.sync_failures =
-                self.manifest.health.sync_failures.saturating_add(1);
-            self.manifest.health.last_error = Some(format!("sync {}: {error}", path.display()));
-            let _ = self.write_manifest();
-            return Err(error);
+        for index in 0..self.manifest.segment_count {
+            let path = self.dir.join(segment_name(index));
+            if !path.is_file() {
+                continue;
+            }
+            if let Err(error) = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.sync_data())
+            {
+                self.manifest.health.sync_failures =
+                    self.manifest.health.sync_failures.saturating_add(1);
+                self.manifest.health.last_error = Some(format!("sync {}: {error}", path.display()));
+                let _ = self.write_manifest();
+                return Err(error);
+            }
         }
         self.manifest.last_sync_at = Some(Utc::now().to_rfc3339());
         self.write_manifest()
     }
 
     fn rotate(&mut self) -> io::Result<()> {
+        let old_active = self.active_segment_path();
+        if old_active.is_file() {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&old_active)?
+                .sync_data()?;
+        }
         self.manifest.active_segment =
             (self.manifest.active_segment + 1) % self.manifest.segment_count;
         let path = self.active_segment_path();
@@ -270,6 +277,7 @@ pub fn archive_current_boot(data_dir: &Path) -> io::Result<ArchiveResult> {
             fs::remove_dir_all(&previous)?;
         }
         fs::rename(&pending, &previous)?;
+        sync_directory(&root)?;
     }
 
     if !current.is_dir() {
@@ -287,10 +295,12 @@ pub fn archive_current_boot(data_dir: &Path) -> io::Result<ArchiveResult> {
     let archived_boot_id = read_json::<RecorderManifest>(&current.join("manifest.json"))
         .map(|manifest| manifest.boot_id);
     fs::rename(&current, &pending)?;
+    sync_directory(&root)?;
     if previous.is_dir() {
         fs::remove_dir_all(&previous)?;
     }
     fs::rename(&pending, &previous)?;
+    sync_directory(&root)?;
 
     Ok(ArchiveResult {
         status: SourceStatus::Ok,
@@ -402,6 +412,17 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_data()?;
     fs::rename(&temp, path)?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 

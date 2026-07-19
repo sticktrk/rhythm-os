@@ -80,6 +80,8 @@ fn run_daemon(options: Options) -> Result<(), String> {
     while !STOP.load(Ordering::Relaxed) {
         let cycle_started = Instant::now();
         let (monotonic_ms, sample) = collect_summary(&options.paths, writer.health());
+        writer.health_mut().truncated_sources = sample.recorder_health.truncated_sources;
+        writer.health_mut().timed_out_sources = sample.recorder_health.timed_out_sources;
         if cycle_started > next_cycle + Duration::from_secs(2) {
             let late_cycles = writer.health().late_cycles.saturating_add(1);
             writer.health_mut().late_cycles = late_cycles;

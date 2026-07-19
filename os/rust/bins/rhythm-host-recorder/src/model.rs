@@ -311,6 +311,10 @@ pub struct BootSynthesis {
     pub last_sample_at: Option<String>,
     pub cadence_gap_count: u64,
     pub max_cadence_gap_ms: u64,
+    pub dropped_samples: u64,
+    pub late_cycles: u64,
+    pub write_failures: u64,
+    pub sync_failures: u64,
     pub escalation_triggers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_summary: Option<serde_json::Value>,

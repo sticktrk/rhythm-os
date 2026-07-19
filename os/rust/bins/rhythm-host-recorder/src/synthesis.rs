@@ -6,8 +6,8 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::model::{
-    BootSynthesis, EarlyBootSnapshot, FlightRecorderSynthesis, RingReadReport, SourceStatus,
-    SCHEMA_VERSION,
+    BootSynthesis, EarlyBootSnapshot, FlightRecorderSynthesis, RecorderManifest, RingReadReport,
+    SourceStatus, SCHEMA_VERSION,
 };
 use crate::ring::{
     read_json, read_ring, recorder_root, CURRENT_DIR, EARLY_BOOT_FILE, PREVIOUS_DIR,
@@ -20,10 +20,14 @@ pub fn build_synthesis(data_dir: &Path) -> io::Result<String> {
     let root = recorder_root(data_dir);
     let current_report = read_ring(&root.join(CURRENT_DIR))?;
     let previous_report = read_ring(&root.join(PREVIOUS_DIR))?;
+    let current_manifest =
+        read_json::<RecorderManifest>(&root.join(CURRENT_DIR).join("manifest.json"));
+    let previous_manifest =
+        read_json::<RecorderManifest>(&root.join(PREVIOUS_DIR).join("manifest.json"));
     let early_boot = read_json::<EarlyBootSnapshot>(&root.join(EARLY_BOOT_FILE));
     let (restart_classification, classification_basis) = classify_restart(early_boot.as_ref());
-    let current = summarize_boot("current", &current_report);
-    let previous = summarize_boot("previous", &previous_report);
+    let current = summarize_boot("current", &current_report, current_manifest.as_ref());
+    let previous = summarize_boot("previous", &previous_report, previous_manifest.as_ref());
     let mut source_status_counts = BTreeMap::new();
     for record in current_report
         .records
@@ -55,7 +59,11 @@ pub fn build_synthesis(data_dir: &Path) -> io::Result<String> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn summarize_boot(name: &str, report: &RingReadReport) -> BootSynthesis {
+fn summarize_boot(
+    name: &str,
+    report: &RingReadReport,
+    manifest: Option<&RecorderManifest>,
+) -> BootSynthesis {
     let mut summary_times = report
         .records
         .iter()
@@ -95,6 +103,14 @@ fn summarize_boot(name: &str, report: &RingReadReport) -> BootSynthesis {
         .rev()
         .find(|record| record.kind == "summary")
         .map(|record| record.payload.clone());
+    let health_value = |field: &str| {
+        final_summary
+            .as_ref()
+            .and_then(|summary| summary.get("recorder_health"))
+            .and_then(|health| health.get(field))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
     BootSynthesis {
         boot: name.to_string(),
         boot_id: report.records.first().map(|record| record.boot_id.clone()),
@@ -108,6 +124,22 @@ fn summarize_boot(name: &str, report: &RingReadReport) -> BootSynthesis {
         last_sample_at: report.records.last().map(|record| record.wall_time.clone()),
         cadence_gap_count,
         max_cadence_gap_ms,
+        dropped_samples: manifest
+            .map(|manifest| manifest.health.dropped_samples)
+            .unwrap_or(0)
+            .max(health_value("dropped_samples")),
+        late_cycles: manifest
+            .map(|manifest| manifest.health.late_cycles)
+            .unwrap_or(0)
+            .max(health_value("late_cycles")),
+        write_failures: manifest
+            .map(|manifest| manifest.health.write_failures)
+            .unwrap_or(0)
+            .max(health_value("write_failures")),
+        sync_failures: manifest
+            .map(|manifest| manifest.health.sync_failures)
+            .unwrap_or(0)
+            .max(health_value("sync_failures")),
         escalation_triggers,
         final_summary,
     }
@@ -305,6 +337,56 @@ mod tests {
             .unwrap()
             .contains("cannot prove"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restart_classification_prefers_intent_then_pstore_then_watchdog() {
+        let mut snapshot = EarlyBootSnapshot {
+            schema_version: SCHEMA_VERSION,
+            captured_at: Utc::now().to_rfc3339(),
+            capture_order: Vec::new(),
+            boot_id: Observation::ok("boot-b".to_string()),
+            uptime_secs: Observation::ok(3.0),
+            inferred_boot_at: Observation::ok(Utc::now().to_rfc3339()),
+            prior_restart_intent: Observation::ok(serde_json::json!({
+                "category": "manual_restart",
+                "reason": "user request"
+            })),
+            pstore: Observation::ok(vec![PstoreEntry {
+                name: "dmesg-ramoops-0".to_string(),
+                status: SourceStatus::Ok,
+                source_bytes: 5,
+                captured_bytes: 5,
+            }]),
+            watchdog: Observation::ok(WatchdogSnapshot {
+                values: BTreeMap::from([(
+                    "bootstatus".to_string(),
+                    Observation::ok("1".to_string()),
+                )]),
+            }),
+            firmware_reset_power: Observation::ok(PowerSnapshot {
+                values: BTreeMap::new(),
+            }),
+            archive: ArchiveResult {
+                status: SourceStatus::Ok,
+                archived_boot_id: Some("boot-a".to_string()),
+                valid_records: 1,
+                torn_records: 0,
+                corrupt_records: 0,
+                detail: None,
+            },
+            late_fallback_capture: false,
+        };
+        assert_eq!(classify_restart(Some(&snapshot)).0, "manual_restart");
+
+        snapshot.prior_restart_intent = Observation::unsupported("missing");
+        assert_eq!(classify_restart(Some(&snapshot)).0, "kernel_crash_evidence");
+
+        snapshot.pstore = Observation::ok(Vec::new());
+        assert_eq!(
+            classify_restart(Some(&snapshot)).0,
+            "hardware_watchdog_reset"
+        );
     }
 
     use std::io::Write;

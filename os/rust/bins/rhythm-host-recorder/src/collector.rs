@@ -17,7 +17,7 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::ring::{
-    archive_current_boot, atomic_write_json, recorder_root, RingConfig, RingWriter,
+    archive_current_boot, atomic_write, atomic_write_json, recorder_root, RingConfig, RingWriter,
     EARLY_BOOT_FILE, PREVIOUS_EARLY_BOOT_FILE, PSTORE_CURRENT_DIR, PSTORE_PREVIOUS_DIR,
 };
 
@@ -730,9 +730,9 @@ pub fn boot_capture(
         OPTIONAL_SOURCE_TIMEOUT,
         true,
     ));
+    let pstore = rotate_and_capture_pstore(paths)?;
     let watchdog = collect_watchdog(paths);
     let firmware_reset_power = collect_power(paths);
-    let pstore = rotate_and_capture_pstore(paths)?;
     let archive = archive_current_boot(&paths.data_dir).unwrap_or_else(|error| ArchiveResult {
         status: SourceStatus::Unavailable,
         archived_boot_id: None,
@@ -820,7 +820,7 @@ fn rotate_and_capture_pstore(paths: &CollectorPaths) -> io::Result<Observation<V
         let BytesObservation { status, bytes, .. } = read;
         let bytes = bytes.unwrap_or_default();
         if !bytes.is_empty() || status == SourceStatus::Ok || status == SourceStatus::Truncated {
-            fs::write(current.join(&name), &bytes)?;
+            atomic_write(&current.join(&name), &bytes)?;
             remaining = remaining.saturating_sub(bytes.len());
         }
         captured.push(PstoreEntry {
