@@ -7,6 +7,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../backend/backend.dart';
 import 'account_cloud_sync_service.dart';
 import 'auth_service.dart';
+import 'server_identity.dart';
 
 class ServerActivityCloudProvisioningService {
   ServerActivityCloudProvisioningService._();
@@ -58,11 +59,15 @@ class ServerActivityCloudProvisioningService {
     required Home? home,
     required String? serverInstanceId,
   }) async {
+    final effectiveServerInstanceId = preferredServerIdentity(
+      existing: serverHub.serverInstanceId,
+      candidate: serverInstanceId,
+    );
     final status = await runtimeApi.getActivityCloudConfig();
     if (_statusMatchesHub(
       status,
       serverHub,
-      expectedServerInstanceId: serverInstanceId ?? serverHub.serverInstanceId,
+      expectedServerInstanceId: effectiveServerInstanceId,
     )) {
       return;
     }
@@ -71,10 +76,10 @@ class ServerActivityCloudProvisioningService {
         (BackendProvider.instance.auth as SupabaseAuthBackend).client;
     final response = await client.functions.invoke(
       bootstrapFunctionName,
-      body: _bootstrapBody(
+      body: buildBootstrapBody(
         serverHub: serverHub,
         home: home,
-        serverInstanceId: serverInstanceId ?? serverHub.serverInstanceId,
+        serverInstanceId: effectiveServerInstanceId,
       ),
     );
     final data = Map<String, dynamic>.from(response.data as Map);
@@ -124,12 +129,16 @@ class ServerActivityCloudProvisioningService {
     return true;
   }
 
-  Map<String, dynamic> _bootstrapBody({
+  @visibleForTesting
+  static Map<String, dynamic> buildBootstrapBody({
     required Hub serverHub,
     required Home? home,
     required String? serverInstanceId,
   }) {
-    final normalizedServerInstanceId = serverInstanceId?.trim();
+    final normalizedServerInstanceId = preferredServerIdentity(
+      existing: serverHub.serverInstanceId,
+      candidate: serverInstanceId,
+    );
     final snapshotHub = normalizedServerInstanceId != null &&
             normalizedServerInstanceId.isNotEmpty
         ? serverHub.copyWith(serverInstanceId: normalizedServerInstanceId)

@@ -169,6 +169,44 @@ void main() {
       expect(grants.single.token, 'owner-token');
     });
 
+    test('enable preserves a known durable identity when probes fail',
+        () async {
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(baseUrl: baseUrl);
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          throw const RhythmApiException('identity probe unavailable');
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(
+        _serverHub(serverInstanceId: 'srv-known'),
+      );
+
+      expect(
+        supabase.functions.invocations.single.body['server_instance_id'],
+        'srv-known',
+      );
+      expect(result.updatedHub.serverInstanceId, 'srv-known');
+    });
+
     test('enable does not wait forever for optional support access grant',
         () async {
       final grantStarted = Completer<void>();

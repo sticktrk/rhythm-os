@@ -11,6 +11,7 @@ import '../config/feature_flags.dart';
 import '../models/plan_tier.dart';
 import 'account_cloud_sync_service.dart';
 import 'entitlements_service.dart';
+import 'server_identity.dart';
 import 'support_access_service.dart';
 
 typedef RemoteAccessApiFactory = RhythmRemoteAccessApi Function({
@@ -266,7 +267,9 @@ class RemoteAccessService {
     );
 
     stableServerInstanceId =
-        serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+        serverIdentityKind(serverInstanceId) == ServerIdentityKind.provisional
+            ? null
+            : serverInstanceId;
     final provisionedHub = serverHub.copyWith(
       remoteEndpoint: remoteEndpoint,
       serverInstanceId: stableServerInstanceId,
@@ -785,7 +788,9 @@ class RemoteAccessService {
     }
 
     final stableServerInstanceId =
-        serverInstanceId.startsWith('endpoint:') ? null : serverInstanceId;
+        serverIdentityKind(serverInstanceId) == ServerIdentityKind.provisional
+            ? null
+            : serverInstanceId;
     return serverHub.copyWith(
       clearRemoteEndpoint: true,
       serverInstanceId: stableServerInstanceId,
@@ -842,7 +847,7 @@ class RemoteAccessService {
 
   Iterable<String> _hubPreferenceIdentities(Hub hub) sync* {
     yield hub.id;
-    final serverInstanceId = hub.serverInstanceId?.trim().toLowerCase();
+    final serverInstanceId = normalizeServerIdentity(hub.serverInstanceId);
     if (serverInstanceId != null &&
         serverInstanceId.isNotEmpty &&
         serverInstanceId != hub.id) {
@@ -1027,9 +1032,14 @@ class RemoteAccessService {
           endpoint: endpoint,
           authToken: serverHub.token,
         );
-        final serverInstanceId = state.serverInstanceId?.trim();
+        final serverInstanceId = normalizeServerIdentity(
+          state.serverInstanceId,
+        );
         if (serverInstanceId != null && serverInstanceId.isNotEmpty) {
-          return serverInstanceId;
+          return preferredServerIdentity(
+            existing: serverHub.serverInstanceId,
+            candidate: serverInstanceId,
+          )!;
         }
       } catch (error) {
         debugPrint(
@@ -1039,7 +1049,10 @@ class RemoteAccessService {
       }
     }
 
-    return _fallbackServerInstanceId(serverHub.endpoint);
+    return preferredServerIdentity(
+      existing: serverHub.serverInstanceId,
+      candidate: _fallbackServerInstanceId(serverHub.endpoint),
+    )!;
   }
 
   static RhythmRemoteAccessApi _defaultApiFactory({
@@ -1086,7 +1099,10 @@ class RemoteAccessService {
     bool clearRemoteEndpoint = false,
     bool explicitUserEnable = false,
   }) {
-    final normalizedServerInstanceId = serverInstanceId?.trim();
+    final normalizedServerInstanceId = preferredServerIdentity(
+      existing: serverHub.serverInstanceId,
+      candidate: serverInstanceId,
+    );
     final snapshotHub = normalizedServerInstanceId != null &&
             normalizedServerInstanceId.isNotEmpty
         ? serverHub.copyWith(serverInstanceId: normalizedServerInstanceId)

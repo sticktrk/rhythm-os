@@ -6,6 +6,7 @@ import {
   type JsonObject,
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
+import { resolveServerIdentity } from '../_shared/server_identity.ts'
 
 type HomeRow = {
   id: string
@@ -24,6 +25,12 @@ type HubRow = {
   updated_at?: string | null
 }
 
+type EnsuredHubRows = {
+  hub: HubRow
+  home: HomeRow
+  serverInstanceId: string | null
+}
+
 Deno.serve((req) =>
   withAuthenticatedRequest(req, async ({ userId, adminClient }) => {
     if (req.method !== 'POST') {
@@ -35,15 +42,16 @@ Deno.serve((req) =>
       const hubId = readString(body, 'hub_id')
       if (!hubId) return jsonResponse({ error: 'Missing hub_id' }, 400)
 
-      const serverInstanceId = readServerInstanceId(body)
+      const requestedServerInstanceId = readServerInstanceId(body)
       const ensured = await ensureServerHubRows(
         adminClient,
         userId,
         hubId,
         body,
-        serverInstanceId,
+        requestedServerInstanceId,
       )
       if (ensured instanceof Response) return ensured
+      const serverInstanceId = ensured.serverInstanceId
 
       const token = randomToken()
       const tokenHash = await sha256Hex(token)
@@ -91,17 +99,33 @@ async function ensureServerHubRows(
   hubId: string,
   body: JsonObject,
   serverInstanceId: string | null,
-): Promise<{ hub: HubRow; home: HomeRow } | Response> {
+): Promise<EnsuredHubRows | Response> {
   const homeSnapshot = readJsonObject(body, 'home')
   const hubSnapshot = readJsonObject(body, 'server_hub')
 
   if (!homeSnapshot && !hubSnapshot) {
-    return await readAuthorizedExistingRows(
+    const existing = await readAuthorizedExistingRows(
       adminClient,
       userId,
       hubId,
       serverInstanceId,
     )
+    if (existing instanceof Response) return existing
+    const identity = await resolveStoredServerIdentity(
+      adminClient,
+      existing.hub.id,
+      existing.hub.server_instance_id,
+      serverInstanceId,
+    )
+    if (identity instanceof Response) return identity
+    if (identity !== existing.hub.server_instance_id) {
+      const { error } = await adminClient
+        .from('hubs')
+        .update({ server_instance_id: identity })
+        .eq('id', existing.hub.id)
+      if (error) throw new Error(error.message)
+    }
+    return { ...existing, serverInstanceId: identity }
   }
   if (!homeSnapshot || !hubSnapshot) {
     return jsonResponse({
@@ -137,6 +161,13 @@ async function ensureServerHubRows(
       existingByServerInstanceId.home.id !== requestedHomeId)
   ) {
     const { hub, home } = existingByServerInstanceId
+    const identity = await resolveStoredServerIdentity(
+      adminClient,
+      hub.id,
+      hub.server_instance_id,
+      serverInstanceId,
+    )
+    if (identity instanceof Response) return identity
     const { error: hubUpdateError } = await adminClient
       .from('hubs')
       .upsert(
@@ -144,12 +175,12 @@ async function ensureServerHubRows(
           hubSnapshot,
           hub.id,
           home.id,
-          serverInstanceId,
+          identity,
         ),
         { onConflict: 'id' },
       )
     if (hubUpdateError) throw new Error(hubUpdateError.message)
-    return { hub, home }
+    return { hub, home, serverInstanceId: identity }
   }
 
   const existingHub = await fetchHub(adminClient, requestedHubId)
@@ -169,6 +200,14 @@ async function ensureServerHubRows(
     return jsonResponse({ error: 'Not authorized for this home' }, 403)
   }
 
+  const identity = await resolveStoredServerIdentity(
+    adminClient,
+    requestedHubId,
+    existingHub?.server_instance_id,
+    serverInstanceId,
+  )
+  if (identity instanceof Response) return identity
+
   const memberIds = memberIdsForUpsert(existingHome, userId)
   const ownerId = existingHome?.owner_id ?? userId
   const { error: homeError } = await adminClient
@@ -185,7 +224,7 @@ async function ensureServerHubRows(
         hubSnapshot,
         requestedHubId,
         requestedHomeId,
-        serverInstanceId,
+        identity,
       ),
       { onConflict: 'id' },
     )
@@ -194,6 +233,7 @@ async function ensureServerHubRows(
   return {
     hub: { id: requestedHubId, home_id: requestedHomeId, type: 'server' },
     home: { id: requestedHomeId, owner_id: ownerId, member_ids: memberIds },
+    serverInstanceId: identity,
   }
 }
 
@@ -357,11 +397,46 @@ function normalizeServerHubSnapshot(
     payload.remote_endpoint = normalizeOptionalEndpoint(hub, 'remote_endpoint')
   }
   const serverInstanceId =
-    readServerInstanceId(hub) ?? serverInstanceIdFallback
+    serverInstanceIdFallback ?? readServerInstanceId(hub)
   if (serverInstanceId) payload.server_instance_id = serverInstanceId
   const lastConnected = readString(hub, 'last_connected')
   if (lastConnected) payload.last_connected = lastConnected
   return payload
+}
+
+function identityConflictResponse(): Response {
+  return jsonResponse({
+    code: 'identity_conflict',
+    error: 'Stored durable server identity differs from the request',
+  }, 409)
+}
+
+async function resolveStoredServerIdentity(
+  adminClient: any,
+  hubId: string,
+  existingHubIdentity: string | null | undefined,
+  candidateIdentity: string | null,
+): Promise<string | null | Response> {
+  const hubResolution = resolveServerIdentity(
+    existingHubIdentity,
+    candidateIdentity,
+  )
+  if (hubResolution.status === 'conflict') return identityConflictResponse()
+
+  const { data, error } = await adminClient
+    .from('server_light_activity_device_tokens')
+    .select('server_instance_id')
+    .eq('hub_id', hubId)
+    .is('revoked_at', null)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  const tokenResolution = resolveServerIdentity(
+    data?.server_instance_id,
+    hubResolution.value,
+  )
+  return tokenResolution.status === 'conflict'
+    ? identityConflictResponse()
+    : tokenResolution.value
 }
 
 function normalizeEndpoint(data: JsonObject, key: string): Record<string, unknown> {

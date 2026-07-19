@@ -587,6 +587,44 @@ void main() {
       expect(updatedHub.token, 'owner-token');
     });
 
+    test('promotes a provisional identity when owner-token evidence matches',
+        () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '100.64.0.12',
+        token: 'owner-token',
+        serverInstanceId: 'endpoint:http://192.168.5.123:54448',
+      );
+      final discovered = DiscoveredHub(
+        host: '192.168.5.99',
+        address: '192.168.5.99',
+        port: rhythmServerDefaultPort,
+        name: 'RhythmServer',
+        type: HubType.server,
+      );
+
+      final entry = rhythmHomeEntryForDiscoveredServerForTesting(
+        server: discovered,
+        homes: [
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ],
+        authToken: 'owner-token',
+        serverInstanceId: 'srv-kitchen',
+      );
+
+      expect(entry, isNotNull);
+      expect(entry!.serverHubs.single.id, hub.id);
+      expect(entry.serverHubs.single.serverInstanceId, 'srv-kitchen');
+      expect(entry.serverHubs.single.endpoint.host, '192.168.5.99');
+    });
+
     test('keeps known-different server identity separate at the same endpoint',
         () {
       final home = Home.create(

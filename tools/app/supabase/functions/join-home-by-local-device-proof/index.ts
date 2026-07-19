@@ -6,6 +6,10 @@ import {
   type JsonObject,
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
+import {
+  isDurableRhythmServerIdentity,
+  resolveServerIdentity,
+} from '../_shared/server_identity.ts'
 
 type HomeRow = {
   id: string
@@ -102,7 +106,9 @@ Deno.serve((req) =>
         adminClient,
         userId,
         tokenRow,
+        proof,
       )
+      if (joined instanceof Response) return joined
       if (!joined) {
         return jsonResponse({ error: 'Home not found for server' }, 404)
       }
@@ -128,8 +134,12 @@ async function verifyJoinProof(
 ): Promise<DeviceTokenRow | null> {
   const rows = await fetchCandidateDeviceTokens(adminClient, proof)
   for (const row of rows) {
-    if (row.server_instance_id !== proof.server_instance_id) continue
     if (row.home_id !== proof.home_id || row.hub_id !== proof.hub_id) continue
+    const identity = resolveServerIdentity(
+      row.server_instance_id,
+      proof.server_instance_id,
+    )
+    if (identity.status === 'conflict') continue
 
     const expected = await joinProofSignature(row.token_hash, proof)
     if (constantTimeEqualHex(expected, proof.signature)) return row
@@ -171,28 +181,49 @@ async function deviceTokenStillAuthorized(
   if (!hub || hub.home_id !== tokenRow.home_id || hub.type !== 'server') {
     return false
   }
-  if (hub.server_instance_id !== proof.server_instance_id) return false
-  return true
+  if (!isDurableRhythmServerIdentity(proof.server_instance_id)) return false
+  return resolveServerIdentity(
+    hub.server_instance_id,
+    proof.server_instance_id,
+  ).status === 'ok'
 }
 
 async function joinHomeFromVerifiedDeviceProof(
   adminClient: any,
   userId: string,
   tokenRow: DeviceTokenRow,
-): Promise<{ home: HomeRow; hub: HubRow; joined: boolean } | null> {
+  proof: JoinProof,
+): Promise<
+  { home: HomeRow; hub: HubRow; joined: boolean } | Response | null
+> {
   const before = await fetchHome(adminClient, tokenRow.home_id)
   if (!before) return null
   const alreadyMember = isHomeMember(before, userId)
 
-  if (!alreadyMember) {
-    const { error } = await adminClient.rpc(
-      'add_verified_device_home_member',
-      {
-        home_uuid: tokenRow.home_id,
-        user_uuid: userId,
-      },
-    )
-    if (error) throw new Error(error.message)
+  const { data, error } = await adminClient.rpc(
+    'join_verified_device_home_with_identity',
+    {
+      home_uuid: tokenRow.home_id,
+      hub_uuid: tokenRow.hub_id,
+      token_uuid: tokenRow.id,
+      user_uuid: userId,
+      actor_uuid: userId,
+      durable_server_instance_id: proof.server_instance_id,
+    },
+  )
+  if (error) throw new Error(error.message)
+  const result = data && typeof data === 'object'
+    ? data as Record<string, unknown>
+    : null
+  if (result?.status === 'identity_conflict') {
+    return jsonResponse({
+      code: 'identity_conflict',
+      error: 'Stored server identity could not be promoted safely',
+      reason: result.reason,
+    }, 409)
+  }
+  if (result?.status !== 'ok') {
+    throw new Error('Identity promotion returned an invalid result')
   }
 
   const home = await fetchHome(adminClient, tokenRow.home_id)
@@ -202,7 +233,7 @@ async function joinHomeFromVerifiedDeviceProof(
   return {
     home,
     hub,
-    joined: !alreadyMember,
+    joined: result.joined === true || !alreadyMember,
   }
 }
 

@@ -50,6 +50,29 @@ void main() {
         isNull,
       );
     });
+
+    test('identity conflicts block Home creation', () {
+      final result = blockedCloudHomeJoinResultForTesting({
+        'code': 'identity_conflict',
+        'error': 'Stored durable identity differs',
+      });
+
+      expect(result.disposition, CloudHomeJoinDisposition.blocked);
+      expect(result.canCreateHome, isFalse);
+      expect(result.code, 'identity_conflict');
+      expect(
+        CloudHomeJoinBlockedException(code: result.code).userMessage,
+        contains('new Home'),
+      );
+    });
+
+    test('only a join that was not attempted permits Home creation', () {
+      const notAttempted = CloudHomeJoinResult.notAttempted();
+      const blocked = CloudHomeJoinResult.blocked(code: 'unavailable');
+
+      expect(notAttempted.canCreateHome, isTrue);
+      expect(blocked.canCreateHome, isFalse);
+    });
   });
 }
 

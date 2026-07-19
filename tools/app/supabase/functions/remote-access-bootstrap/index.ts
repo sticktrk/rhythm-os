@@ -6,6 +6,7 @@ import {
   type JsonObject,
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
+import { resolveServerIdentity } from '../_shared/server_identity.ts'
 
 const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
 const DEFAULT_REMOTE_ACCESS_DOMAIN = 'rhythm.lighting'
@@ -73,6 +74,12 @@ type RemoteAccessMapping = {
   updated_at?: string | null
 }
 
+type EnsuredHubRows = {
+  hub: HubRow
+  home: HomeRow
+  serverInstanceId: string | null
+}
+
 Deno.serve((req) =>
   withAuthenticatedRequest(req, async ({ userId, adminClient }) => {
     if (req.method !== 'POST') {
@@ -88,17 +95,17 @@ Deno.serve((req) =>
     if (actionResult instanceof Response) return actionResult
     const action = actionResult
 
-    const serverInstanceId = readServerInstanceId(body)
+    const requestedServerInstanceId = readServerInstanceId(body)
     const serverEndpoint = readServerEndpoint(body)
     const ensured = await ensureServerHubRows(
       adminClient,
       userId,
       hubId,
       body,
-      serverInstanceId,
+      requestedServerInstanceId,
     )
     if (ensured instanceof Response) return ensured
-    const { hub } = ensured
+    const { hub, serverInstanceId } = ensured
     const explicitEnable = body['explicit_enable'] === true
 
     try {
@@ -313,18 +320,45 @@ async function ensureServerHubRows(
   hubId: string,
   body: JsonObject,
   serverInstanceId: string | null,
-): Promise<{ hub: HubRow; home: HomeRow } | Response> {
+): Promise<EnsuredHubRows | Response> {
   try {
     const homeSnapshot = readJsonObject(body, 'home')
     const hubSnapshot = readJsonObject(body, 'server_hub')
 
     if (!homeSnapshot && !hubSnapshot) {
-      return await readAuthorizedExistingRows(
+      const existing = await readAuthorizedExistingRows(
         adminClient,
         userId,
         hubId,
         serverInstanceId,
       )
+      if (existing instanceof Response) return existing
+      const identity = resolveServerIdentity(
+        existing.hub.server_instance_id,
+        serverInstanceId,
+      )
+      if (identity.status === 'conflict') {
+        return identityConflictResponse()
+      }
+      const mapping = await readExistingMappingByHubId(
+        adminClient,
+        existing.hub.id,
+      )
+      const mappedIdentity = resolveServerIdentity(
+        mapping?.server_instance_id,
+        identity.value,
+      )
+      if (mappedIdentity.status === 'conflict') {
+        return identityConflictResponse()
+      }
+      if (mappedIdentity.value !== existing.hub.server_instance_id) {
+        const { error } = await adminClient
+          .from('hubs')
+          .update({ server_instance_id: mappedIdentity.value })
+          .eq('id', existing.hub.id)
+        if (error) throw new Error(error.message)
+      }
+      return { ...existing, serverInstanceId: mappedIdentity.value }
     }
     if (!homeSnapshot || !hubSnapshot) {
       throw new RequestError(
@@ -363,17 +397,32 @@ async function ensureServerHubRows(
         existingByServerInstanceId.home.id !== requestedHomeId)
     ) {
       const { hub, home } = existingByServerInstanceId
+      const identity = resolveServerIdentity(
+        hub.server_instance_id,
+        serverInstanceId,
+      )
+      if (identity.status === 'conflict') {
+        return identityConflictResponse()
+      }
+      const mapping = await readExistingMappingByHubId(adminClient, hub.id)
+      const mappedIdentity = resolveServerIdentity(
+        mapping?.server_instance_id,
+        identity.value,
+      )
+      if (mappedIdentity.status === 'conflict') {
+        return identityConflictResponse()
+      }
       const hubPayload = normalizeServerHubSnapshot(
         hubSnapshot,
         hub.id,
         home.id,
-        serverInstanceId,
+        mappedIdentity.value,
       )
       const { error: hubUpdateError } = await adminClient
         .from('hubs')
         .upsert(hubPayload, { onConflict: 'id' })
       if (hubUpdateError) throw new Error(hubUpdateError.message)
-      return { hub, home }
+      return { hub, home, serverInstanceId: mappedIdentity.value }
     }
 
     const existingHub = await fetchHub(adminClient, requestedHubId)
@@ -394,6 +443,25 @@ async function ensureServerHubRows(
       return jsonResponse({ error: 'Not authorized for this home' }, 403)
     }
 
+    const identity = resolveServerIdentity(
+      existingHub?.server_instance_id,
+      serverInstanceId,
+    )
+    if (identity.status === 'conflict') {
+      return identityConflictResponse()
+    }
+    const mapping = await readExistingMappingByHubId(
+      adminClient,
+      requestedHubId,
+    )
+    const mappedIdentity = resolveServerIdentity(
+      mapping?.server_instance_id,
+      identity.value,
+    )
+    if (mappedIdentity.status === 'conflict') {
+      return identityConflictResponse()
+    }
+
     const memberIds = memberIdsForUpsert(existingHome, userId)
     const ownerId = existingHome?.owner_id ?? userId
     const homePayload = normalizeHomeSnapshot(
@@ -406,7 +474,7 @@ async function ensureServerHubRows(
       hubSnapshot,
       requestedHubId,
       requestedHomeId,
-      serverInstanceId,
+      mappedIdentity.value,
     )
 
     const { error: homeUpsertError } = await adminClient
@@ -430,6 +498,7 @@ async function ensureServerHubRows(
         owner_id: ownerId,
         member_ids: memberIds,
       },
+      serverInstanceId: mappedIdentity.value,
     }
   } catch (error) {
     if (error instanceof RequestError) {
@@ -591,9 +660,16 @@ function normalizeServerHubSnapshot(
   const lastConnected = readString(hub, 'last_connected')
   if (lastConnected) payload.last_connected = lastConnected
   const serverInstanceId =
-    readServerInstanceId(hub) ?? serverInstanceIdFallback
+    serverInstanceIdFallback ?? readServerInstanceId(hub)
   if (serverInstanceId) payload.server_instance_id = serverInstanceId
   return payload
+}
+
+function identityConflictResponse(): Response {
+  return jsonResponse({
+    code: 'identity_conflict',
+    error: 'Stored durable server identity differs from the request',
+  }, 409)
 }
 
 function normalizeEndpoint(

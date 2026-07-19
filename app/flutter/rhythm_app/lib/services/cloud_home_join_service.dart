@@ -1,10 +1,60 @@
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show FunctionException;
 
 import '../backend/backend.dart';
 import 'account_cloud_sync_service.dart';
 import 'auth_service.dart';
+
+enum CloudHomeJoinDisposition { notAttempted, joined, blocked }
+
+class CloudHomeJoinResult {
+  const CloudHomeJoinResult._({
+    required this.disposition,
+    this.home,
+    this.code,
+  });
+
+  const CloudHomeJoinResult.notAttempted()
+      : this._(disposition: CloudHomeJoinDisposition.notAttempted);
+
+  const CloudHomeJoinResult.joined(AccountHomeServerHubs home)
+      : this._(
+          disposition: CloudHomeJoinDisposition.joined,
+          home: home,
+        );
+
+  const CloudHomeJoinResult.blocked({String? code})
+      : this._(
+          disposition: CloudHomeJoinDisposition.blocked,
+          code: code,
+        );
+
+  final CloudHomeJoinDisposition disposition;
+  final AccountHomeServerHubs? home;
+  final String? code;
+
+  bool get canCreateHome =>
+      disposition == CloudHomeJoinDisposition.notAttempted;
+}
+
+class CloudHomeJoinBlockedException implements Exception {
+  const CloudHomeJoinBlockedException({this.code});
+
+  final String? code;
+
+  String get userMessage => code == 'identity_conflict'
+      ? 'This Box belongs to an existing Home, but its cloud identity could '
+          'not be reconciled safely. No new Home was created; try again or '
+          'contact support.'
+      : 'Could not verify this Box\'s existing Home. Try again; no new Home '
+          'was created.';
+
+  @override
+  String toString() =>
+      'Cloud Home join blocked${code == null ? '' : ': $code'}';
+}
 
 class CloudHomeJoinService {
   CloudHomeJoinService._();
@@ -22,7 +72,7 @@ class CloudHomeJoinService {
         auth.currentUserId != null;
   }
 
-  Future<AccountHomeServerHubs?> joinByLocalDeviceProof({
+  Future<CloudHomeJoinResult> joinByLocalDeviceProof({
     required String? serverInstanceId,
     required RhythmCloudJoinProof? joinProof,
     required String host,
@@ -32,7 +82,7 @@ class CloudHomeJoinService {
   }) async {
     final cleanServerInstanceId = _cleanOptional(serverInstanceId);
     if (!canJoin || cleanServerInstanceId == null || joinProof == null) {
-      return null;
+      return const CloudHomeJoinResult.notAttempted();
     }
 
     try {
@@ -46,28 +96,34 @@ class CloudHomeJoinService {
         },
       );
 
-      if (response.status == 404 || response.status == 403) return null;
       if (response.status < 200 || response.status >= 300) {
-        final data = response.data;
-        final message = data is Map && data['error'] != null
-            ? data['error'].toString()
-            : 'Cloud Home join failed (${response.status})';
-        debugPrint(message);
-        return null;
+        return blockedCloudHomeJoinResultForTesting(response.data);
       }
 
-      return joinedHomeFromFunctionResponseForTesting(
+      final home = joinedHomeFromFunctionResponseForTesting(
         response.data,
         ownerToken: ownerToken,
         lanEndpoint: HubEndpoint(host: host, port: port),
         hubName: hubName,
         serverInstanceId: cleanServerInstanceId,
       );
+      return home == null
+          ? const CloudHomeJoinResult.blocked(code: 'malformed_response')
+          : CloudHomeJoinResult.joined(home);
+    } on FunctionException catch (error) {
+      debugPrint('Cloud Home join rejected: $error');
+      return blockedCloudHomeJoinResultForTesting(error.details);
     } catch (error) {
-      debugPrint('Cloud Home join skipped: $error');
-      return null;
+      debugPrint('Cloud Home join failed safely: $error');
+      return const CloudHomeJoinResult.blocked(code: 'unavailable');
     }
   }
+}
+
+@visibleForTesting
+CloudHomeJoinResult blockedCloudHomeJoinResultForTesting(Object? data) {
+  final code = data is Map ? _cleanOptional(data['code']?.toString()) : null;
+  return CloudHomeJoinResult.blocked(code: code);
 }
 
 @visibleForTesting
