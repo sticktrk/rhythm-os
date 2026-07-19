@@ -625,6 +625,67 @@ void main() {
       expect(entry.serverHubs.single.endpoint.host, '192.168.5.99');
     });
 
+    test('requests signed cloud promotion for a matched provisional Home', () {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'server-1',
+        homeId: home.id,
+        name: 'Kitchen Box',
+        host: '192.168.5.123',
+        token: 'owner-token',
+        serverInstanceId: 'endpoint:http://192.168.5.123:54448',
+      );
+      final discovered = DiscoveredHub(
+        host: '192.168.5.123',
+        address: '192.168.5.123',
+        port: rhythmServerDefaultPort,
+        name: 'RhythmServer',
+        type: HubType.server,
+      );
+      final homes = [
+        AccountHomeServerHubs(home: home, serverHubs: [hub]),
+      ];
+
+      expect(
+        rhythmExistingHomeNeedsCloudIdentityPromotionForTesting(
+          server: discovered,
+          homes: homes,
+          authToken: 'owner-token',
+          serverInstanceId: 'srv-kitchen',
+          hasJoinProof: true,
+        ),
+        isTrue,
+      );
+      expect(
+        rhythmExistingHomeNeedsCloudIdentityPromotionForTesting(
+          server: discovered,
+          homes: homes,
+          authToken: 'owner-token',
+          serverInstanceId: 'srv-kitchen',
+          hasJoinProof: false,
+        ),
+        isFalse,
+      );
+
+      final promotedHub = hub.copyWith(serverInstanceId: 'srv-kitchen');
+      expect(
+        rhythmExistingHomeNeedsCloudIdentityPromotionForTesting(
+          server: discovered,
+          homes: [
+            AccountHomeServerHubs(home: home, serverHubs: [promotedHub]),
+          ],
+          authToken: 'owner-token',
+          serverInstanceId: 'srv-kitchen',
+          hasJoinProof: true,
+        ),
+        isFalse,
+      );
+    });
+
     test('keeps known-different server identity separate at the same endpoint',
         () {
       final home = Home.create(
