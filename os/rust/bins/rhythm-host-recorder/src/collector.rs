@@ -1373,6 +1373,8 @@ mod tests {
         script
             .write_all(b"#!/bin/sh\nprintf '0123456789abcdefghijklmnopqrstuvwxyz'\n")
             .unwrap();
+        script.flush().unwrap();
+        drop(script);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
