@@ -21,6 +21,7 @@ use rhythm_core::{
 };
 use rhythm_runtime_api::{RuntimeEvent, TickContext};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, CurveModifierDto,
@@ -9633,8 +9634,19 @@ pub fn do_config_set(state: &SharedState, config: LightProfileConfig) -> Result<
 /// Update a light profile config, optionally reapplying active-mode outputs.
 pub fn do_config_set_with_options(
     state: &SharedState,
+    config: LightProfileConfig,
+    apply_active_outputs: bool,
+) -> Result<()> {
+    do_config_set_with_options_if_matches(state, config, apply_active_outputs, None)
+}
+
+/// Update a light profile config only when optional live identity and content
+/// preconditions still match inside the same state lock as the mutation.
+pub fn do_config_set_with_options_if_matches(
+    state: &SharedState,
     mut config: LightProfileConfig,
     apply_active_outputs: bool,
+    precondition: Option<(&str, &str)>,
 ) -> Result<()> {
     rhythm_core::normalize_builtin_state_profile_config(&mut config);
 
@@ -9676,6 +9688,23 @@ pub fn do_config_set_with_options(
 
     let (runtime, should_apply_outputs, active_mode, dispatch_generation) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if let Some((expected_server_instance_id, expected_resource_sha256)) = precondition {
+            if s.server_instance_id != expected_server_instance_id {
+                return Err(anyhow::anyhow!(
+                    "config precondition failed: live server identity changed"
+                ));
+            }
+            let current = s
+                .light_profile_config(&config.id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", config.id))?;
+            let current_json = serde_json::to_value(current)
+                .map_err(|error| anyhow::anyhow!("serialize config precondition: {}", error))?;
+            if canonical_json_sha256(&current_json) != expected_resource_sha256 {
+                return Err(anyhow::anyhow!(
+                    "config precondition failed: live config hash changed"
+                ));
+            }
+        }
         if !s.light_profile_configs.contains_key(&config.id) {
             return Err(anyhow::anyhow!("Unknown light profile: {}", config.id));
         }
@@ -9734,6 +9763,30 @@ pub fn do_config_set_with_options(
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     Ok(())
+}
+
+fn canonical_json_sha256(value: &Value) -> String {
+    fn canonicalize(value: &Value) -> Value {
+        match value {
+            Value::Object(values) => {
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort();
+                Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonicalize(&values[key])))
+                        .collect(),
+                )
+            }
+            Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
+            _ => value.clone(),
+        }
+    }
+
+    let canonical = serde_json::to_vec(&canonicalize(value)).unwrap_or_default();
+    Sha256::digest(canonical)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Absorb a time offset into a light profile config by adjusting ramp widths.
@@ -13091,8 +13144,20 @@ mod tests {
         LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
         RuntimeResult, RuntimeSnapshot,
     };
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn canonical_config_hash_matches_cross_language_contract() {
+        assert_eq!(
+            canonical_json_sha256(&json!({
+                "id": "rhythm",
+                "max_brightness": 71,
+            })),
+            "73abd682803fa0866b8220029db8ad171e68d7df8f76477eb0b237e41bc9a3a6"
+        );
+    }
 
     fn wait_for_sync_count(sync_count: &AtomicUsize, expected: usize) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);

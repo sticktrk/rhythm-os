@@ -7,7 +7,7 @@ use std::convert::Infallible;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -426,17 +426,26 @@ async fn get_config(
 async fn put_config(
     State(state): State<SharedState>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResponse {
     let apply_outputs = params
         .get("apply")
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(false);
-    handlers::handle_put_config_with_options(
+    let expected_server_instance_id = headers
+        .get("x-expected-server-instance-id")
+        .and_then(|value| value.to_str().ok());
+    let expected_resource_sha256 = headers
+        .get("x-expected-resource-sha256")
+        .and_then(|value| value.to_str().ok());
+    handlers::handle_put_config_with_options_and_precondition(
         &state,
         params.get("id").map(|s| s.as_str()),
         &body,
         apply_outputs,
+        expected_server_instance_id,
+        expected_resource_sha256,
     )
 }
 
@@ -1524,6 +1533,59 @@ mod tests {
                 .unwrap()
                 .min_brightness,
             factory_rhythm[rhythm_core::RHYTHM_PROFILE_ID].min_brightness
+        );
+    }
+
+    #[tokio::test]
+    async fn guarded_put_config_rejects_a_stale_hash_atomically() {
+        let state = test_state_with_runtime(
+            Arc::new(ThreadRecordingRuntime {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                snapshots: vec![],
+                current_hour: 12.0,
+            }),
+            &[],
+        );
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+        let original_max_brightness = state
+            .lock()
+            .unwrap()
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap()
+            .max_brightness;
+        let app = api_routes().with_state(state.clone());
+        let request = Request::builder()
+            .method(HttpMethod::PUT)
+            .uri("/api/config?id=rhythm")
+            .header("content-type", "application/json")
+            .header("x-expected-server-instance-id", server_instance_id)
+            .header("x-expected-resource-sha256", "0".repeat(64))
+            .body(Body::from(
+                json!({
+                    "id": "rhythm",
+                    "name": "Day",
+                    "curve": { "type": "super-gaussian" },
+                    "min_brightness": 8,
+                    "max_brightness": 33,
+                    "min_color_temp": 1000,
+                    "max_color_temp": 3000,
+                    "max_dim_steps": 4
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                .unwrap()
+                .max_brightness,
+            original_max_brightness
         );
     }
 

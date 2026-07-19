@@ -167,6 +167,62 @@ export async function runDeviceAdminProxy(
   hubId: string,
   request: DeviceAdminProxyRequest
 ): Promise<DeviceAdminProxyResponse> {
+  let guardedRequest = request;
+  if (isDeviceMutation(request)) {
+    const identity = await runDeviceAdminProxyRaw(accessToken, hubId, {
+      method: 'GET',
+      path: 'api/state'
+    });
+    const identityBody = asRecord(identity.body);
+    const serverInstanceId = asNonEmptyString(
+      identityBody.server_instance_id ?? identityBody.serverInstanceId
+    );
+    if (!serverInstanceId) {
+      throw new Error(
+        'The Light Box did not report a durable server identity; no mutation was sent.'
+      );
+    }
+
+    let resourcePrecondition = request.resourcePrecondition;
+    if (
+      request.method === 'PUT' &&
+      normalizedDevicePath(request.path) === 'api/config' &&
+      !resourcePrecondition
+    ) {
+      const current = await runDeviceAdminProxyRaw(accessToken, hubId, {
+        method: 'GET',
+        path: 'api/config',
+        ...(request.query ? { query: request.query } : {})
+      });
+      if (!current.bodySha256) {
+        throw new Error(
+          'The admin API does not support guarded curve writes; no mutation was sent.'
+        );
+      }
+      resourcePrecondition = {
+        path: 'api/config',
+        ...(request.query ? { query: request.query } : {}),
+        bodySha256: current.bodySha256
+      };
+    }
+
+    guardedRequest = {
+      ...request,
+      requestId: request.requestId ?? newDeviceAdminRequestId(),
+      expectedServerInstanceId:
+        request.expectedServerInstanceId ?? serverInstanceId,
+      ...(resourcePrecondition ? { resourcePrecondition } : {})
+    };
+  }
+
+  return runDeviceAdminProxyRaw(accessToken, hubId, guardedRequest);
+}
+
+function runDeviceAdminProxyRaw(
+  accessToken: string,
+  hubId: string,
+  request: DeviceAdminProxyRequest
+): Promise<DeviceAdminProxyResponse> {
   return apiFetch<DeviceAdminProxyResponse>(
     `/api/hubs/${encodeURIComponent(hubId)}/device-admin/proxy`,
     accessToken,
@@ -175,6 +231,37 @@ export async function runDeviceAdminProxy(
       body: JSON.stringify(request)
     }
   );
+}
+
+function isDeviceMutation(request: DeviceAdminProxyRequest): boolean {
+  return !(
+    request.method === 'GET' ||
+    (request.method === 'POST' &&
+      normalizedDevicePath(request.path) === 'api/curve')
+  );
+}
+
+function normalizedDevicePath(path: string): string {
+  return path.trim().replace(/^\/+/, '');
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function newDeviceAdminRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `admin-ui:${crypto.randomUUID()}`;
+  }
+  return `admin-ui:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 }
 
 async function apiFetch<T>(

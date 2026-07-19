@@ -890,6 +890,9 @@ class DeviceAdminProxyRequestDto {
     required this.queryParameters,
     required this.body,
     required this.timeout,
+    required this.requestId,
+    required this.expectedServerInstanceId,
+    required this.resourcePrecondition,
   });
 
   final String method;
@@ -897,6 +900,17 @@ class DeviceAdminProxyRequestDto {
   final Map<String, String> queryParameters;
   final Object? body;
   final Duration timeout;
+  final String? requestId;
+  final String? expectedServerInstanceId;
+  final DeviceAdminResourcePreconditionDto? resourcePrecondition;
+
+  bool get isReadOnly =>
+      method == 'GET' || (method == 'POST' && path == 'api/curve');
+
+  bool get isMutation => !isReadOnly;
+
+  bool get requiresResourcePrecondition =>
+      method == 'PUT' && path == 'api/config';
 
   factory DeviceAdminProxyRequestDto.fromJson(Map<String, dynamic> json) {
     final method = (json['method'] as String? ?? 'GET').trim().toUpperCase();
@@ -923,7 +937,67 @@ class DeviceAdminProxyRequestDto {
       queryParameters: query,
       body: json.containsKey('body') ? json['body'] : null,
       timeout: Duration(seconds: timeoutSeconds),
+      requestId: _parseRequestId(json['requestId'] ?? json['request_id']),
+      expectedServerInstanceId: cleanString(
+        json['expectedServerInstanceId'] ?? json['expected_server_instance_id'],
+      ),
+      resourcePrecondition: json['resourcePrecondition'] == null &&
+              json['resource_precondition'] == null
+          ? null
+          : DeviceAdminResourcePreconditionDto.fromJson(
+              asStringMap(
+                    json['resourcePrecondition'] ??
+                        json['resource_precondition'],
+                  ) ??
+                  (throw const AdminApiException(
+                    400,
+                    'Device admin resource precondition must be an object.',
+                  )),
+            ),
     );
+  }
+
+  void validateMutationGuards() {
+    if (!isMutation) return;
+    if (requestId == null) {
+      throw const AdminApiException(
+        428,
+        'Device admin mutations require a requestId.',
+      );
+    }
+    if (expectedServerInstanceId == null) {
+      throw const AdminApiException(
+        428,
+        'Device admin mutations require expectedServerInstanceId.',
+      );
+    }
+    if (!requiresResourcePrecondition) return;
+    final precondition = resourcePrecondition;
+    if (precondition == null) {
+      throw const AdminApiException(
+        428,
+        'PUT /api/config requires a resourcePrecondition.',
+      );
+    }
+    if (precondition.path != path ||
+        !_sameStringMap(precondition.queryParameters, queryParameters)) {
+      throw const AdminApiException(
+        400,
+        'The config resourcePrecondition must target the same path and query.',
+      );
+    }
+  }
+
+  static String? _parseRequestId(Object? value) {
+    final requestId = cleanString(value);
+    if (requestId == null) return null;
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$').hasMatch(requestId)) {
+      throw const AdminApiException(
+        400,
+        'Device admin requestId must be 8-128 safe ASCII characters.',
+      );
+    }
+    return requestId;
   }
 
   static String _normalizeDeviceAdminPath(Object? value) {
@@ -979,6 +1053,43 @@ class DeviceAdminProxyRequestDto {
   }
 }
 
+class DeviceAdminResourcePreconditionDto {
+  const DeviceAdminResourcePreconditionDto({
+    required this.path,
+    required this.queryParameters,
+    required this.bodySha256,
+  });
+
+  final String path;
+  final Map<String, String> queryParameters;
+  final String bodySha256;
+
+  factory DeviceAdminResourcePreconditionDto.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    final path = DeviceAdminProxyRequestDto._normalizeDeviceAdminPath(
+      json['path'],
+    );
+    final bodySha256 = cleanString(
+      json['bodySha256'] ?? json['body_sha256'],
+    );
+    if (bodySha256 == null ||
+        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(bodySha256)) {
+      throw const AdminApiException(
+        400,
+        'Device admin resource precondition requires a SHA-256 body hash.',
+      );
+    }
+    return DeviceAdminResourcePreconditionDto(
+      path: path,
+      queryParameters: DeviceAdminProxyRequestDto._parseStringQueryMap(
+        json['query'] ?? json['queryParameters'],
+      ),
+      bodySha256: bodySha256.toLowerCase(),
+    );
+  }
+}
+
 class DeviceAdminProxyResultDto {
   const DeviceAdminProxyResultDto({
     required this.hubId,
@@ -992,6 +1103,10 @@ class DeviceAdminProxyResultDto {
     required this.tokenAvailable,
     required this.hasEncryptedToken,
     required this.body,
+    this.requestId,
+    this.verifiedServerInstanceId,
+    this.bodySha256,
+    this.preconditionBodySha256,
   });
 
   final String hubId;
@@ -1005,6 +1120,10 @@ class DeviceAdminProxyResultDto {
   final bool tokenAvailable;
   final bool hasEncryptedToken;
   final Object? body;
+  final String? requestId;
+  final String? verifiedServerInstanceId;
+  final String? bodySha256;
+  final String? preconditionBodySha256;
 
   Map<String, dynamic> toJson() => {
         'hubId': hubId,
@@ -1017,8 +1136,22 @@ class DeviceAdminProxyResultDto {
         'completedAt': completedAt.toIso8601String(),
         'tokenAvailable': tokenAvailable,
         'hasEncryptedToken': hasEncryptedToken,
+        if (requestId != null) 'requestId': requestId,
+        if (verifiedServerInstanceId != null)
+          'verifiedServerInstanceId': verifiedServerInstanceId,
+        if (bodySha256 != null) 'bodySha256': bodySha256,
+        if (preconditionBodySha256 != null)
+          'preconditionBodySha256': preconditionBodySha256,
         'body': body,
       };
+}
+
+bool _sameStringMap(Map<String, String> left, Map<String, String> right) {
+  if (left.length != right.length) return false;
+  for (final entry in left.entries) {
+    if (right[entry.key] != entry.value) return false;
+  }
+  return true;
 }
 
 Map<String, dynamic>? asStringMap(Object? value) {
