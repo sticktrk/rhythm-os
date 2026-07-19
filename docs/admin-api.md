@@ -71,13 +71,15 @@ The API returns HTTP 428 for missing guards and HTTP 409 when identity or config
 freshness no longer matches. Successful mutation responses include the request
 ID, verified server identity, response hash, and precondition hash. The request
 ID is forwarded as `X-Request-Id` so the appliance support audit can be matched
-to the proposal/apply receipt.
+to the proposal/apply receipt. Updated appliances also receive and atomically
+enforce the expected identity and config hash at the write itself; deploy that
+appliance support before relying on the guarded tuning workflow.
 
 Use the `rhythm-customer-lighting-tuning` skill for remote curve work. It
 defaults to proposal-only, stores ignored before/candidate/after evidence and a
 human-readable handoff, and applies only after separate explicit authorization.
 
-Deploy the updated admin UI before the hardened admin API. The updated UI fails
-closed on config writes when an older API does not return the required body
-hash; older admin UIs receive explicit precondition errors from the hardened
-API rather than issuing an unguarded mutation.
+Deploy the updated appliance first, then the admin UI before the hardened admin
+API. The updated UI fails closed on config writes when an older API does not
+return the required body hash; older admin UIs receive explicit precondition
+errors from the hardened API rather than issuing an unguarded mutation.

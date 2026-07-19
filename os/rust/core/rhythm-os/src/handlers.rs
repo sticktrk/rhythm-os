@@ -952,6 +952,35 @@ pub fn handle_put_config_with_options(
     body: &Value,
     apply_outputs: bool,
 ) -> ApiResponse {
+    handle_put_config_with_options_and_precondition(
+        state,
+        profile_id,
+        body,
+        apply_outputs,
+        None,
+        None,
+    )
+}
+
+pub fn handle_put_config_with_options_and_precondition(
+    state: &SharedState,
+    profile_id: Option<&str>,
+    body: &Value,
+    apply_outputs: bool,
+    expected_server_instance_id: Option<&str>,
+    expected_resource_sha256: Option<&str>,
+) -> ApiResponse {
+    let precondition = match (expected_server_instance_id, expected_resource_sha256) {
+        (Some(server_instance_id), Some(resource_sha256)) => {
+            Some((server_instance_id, resource_sha256))
+        }
+        (None, None) => None,
+        _ => {
+            return ApiResponse::bad_request(
+                "Guarded config writes require both expected server identity and resource hash",
+            )
+        }
+    };
     let mut config: rhythm_core::LightProfileConfig = match serde_json::from_value(body.clone()) {
         Ok(c) => c,
         Err(e) => return ApiResponse::bad_request(&format!("Invalid config: {}", e)),
@@ -959,8 +988,16 @@ pub fn handle_put_config_with_options(
     if let Some(id) = profile_id {
         config.id = id.to_string();
     }
-    match commands::do_config_set_with_options(state, config, apply_outputs) {
+    match commands::do_config_set_with_options_if_matches(
+        state,
+        config,
+        apply_outputs,
+        precondition,
+    ) {
         Ok(()) => ApiResponse::no_content(),
+        Err(e) if e.to_string().starts_with("config precondition failed:") => {
+            ApiResponse::conflict(&e.to_string())
+        }
         Err(e) => ApiResponse::server_error(e),
     }
 }

@@ -406,6 +406,12 @@ class DeviceProbeService {
       if (result.message != null) {
         failures.add('${candidate.route} $baseUrl: ${result.message}');
       }
+      if (request.isMutation && result.mutationDispatched) {
+        // Once a mutation has reached an endpoint, a transport or response
+        // failure is ambiguous: the device may already have applied it. Do
+        // not replay the same mutation through another route.
+        break;
+      }
     }
 
     if (sawAuthRequired) {
@@ -508,6 +514,7 @@ class DeviceProbeService {
     required String? authToken,
   }) async {
     final baseUrl = candidate.endpoint.baseUrl;
+    var mutationDispatched = false;
     try {
       String? verifiedServerInstanceId;
       String? preconditionBodySha256;
@@ -568,21 +575,33 @@ class DeviceProbeService {
           'Accept': 'application/json',
           if (authToken != null) 'Authorization': 'Bearer $authToken',
           if (request.requestId != null) 'X-Request-Id': request.requestId!,
+          if (verifiedServerInstanceId != null)
+            'X-Expected-Server-Instance-Id': verifiedServerInstanceId,
+          if (preconditionBodySha256 != null)
+            'X-Expected-Resource-Sha256': preconditionBodySha256,
         });
       if (request.method != 'GET' && request.body != null) {
         outbound.headers['Content-Type'] = 'application/json';
         outbound.body = jsonEncode(request.body);
       }
 
+      mutationDispatched = request.isMutation;
       final streamed = await _http.send(outbound).timeout(request.timeout);
       final response = await http.Response.fromStream(streamed);
       if (response.statusCode == 401 || response.statusCode == 403) {
         return const _ProxyJsonEndpointResult.authRequired();
       }
+      if (request.resourcePrecondition != null && response.statusCode == 409) {
+        return _ProxyJsonEndpointResult.preconditionFailed(
+          '${request.method} /${request.path} was rejected by the device because its live preconditions changed.',
+          mutationDispatched: true,
+        );
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return _ProxyJsonEndpointResult.error(
           '${request.method} /${request.path} returned HTTP ${response.statusCode}'
           '${_responseErrorSuffix(response)}.',
+          mutationDispatched: mutationDispatched,
         );
       }
 
@@ -594,6 +613,7 @@ class DeviceProbeService {
         } catch (_) {
           return _ProxyJsonEndpointResult.error(
             '${request.method} /${request.path} returned invalid JSON.',
+            mutationDispatched: mutationDispatched,
           );
         }
       }
@@ -621,10 +641,12 @@ class DeviceProbeService {
     } on TimeoutException {
       return _ProxyJsonEndpointResult.error(
         '${request.method} /${request.path} request timed out.',
+        mutationDispatched: mutationDispatched,
       );
     } catch (error) {
       return _ProxyJsonEndpointResult.error(
         '${request.method} /${request.path} request failed: $error',
+        mutationDispatched: mutationDispatched,
       );
     }
   }
@@ -1255,24 +1277,37 @@ class _ProxyJsonEndpointResult {
     this.message,
     this.authRequired = false,
     this.preconditionFailed = false,
+    this.mutationDispatched = false,
   });
 
   const _ProxyJsonEndpointResult.success(DeviceAdminProxyResultDto success)
       : this._(success: success);
 
-  const _ProxyJsonEndpointResult.error(String message)
-      : this._(message: message);
+  const _ProxyJsonEndpointResult.error(
+    String message, {
+    bool mutationDispatched = false,
+  }) : this._(
+          message: message,
+          mutationDispatched: mutationDispatched,
+        );
 
   const _ProxyJsonEndpointResult.authRequired()
       : this._(authRequired: true, message: 'authentication required');
 
-  const _ProxyJsonEndpointResult.preconditionFailed(String message)
-      : this._(preconditionFailed: true, message: message);
+  const _ProxyJsonEndpointResult.preconditionFailed(
+    String message, {
+    bool mutationDispatched = false,
+  }) : this._(
+          preconditionFailed: true,
+          message: message,
+          mutationDispatched: mutationDispatched,
+        );
 
   final DeviceAdminProxyResultDto? success;
   final String? message;
   final bool authRequired;
   final bool preconditionFailed;
+  final bool mutationDispatched;
 }
 
 Future<String> _canonicalJsonSha256(Object? value) async {

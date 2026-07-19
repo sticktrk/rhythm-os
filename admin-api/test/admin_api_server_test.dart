@@ -831,6 +831,7 @@ void main() {
     const currentConfig = {'id': 'rhythm', 'max_brightness': 71};
     const candidateConfig = {'id': 'rhythm', 'max_brightness': 60};
     var mutationRequested = false;
+    String? expectedBeforeHash;
     final client = _HandlerClient((request) async {
       if (request.url.host != 'device.test' &&
           request.url.host != 'local.test') {
@@ -852,6 +853,9 @@ void main() {
       if (request.url.path == '/api/config' && request.method == 'PUT') {
         mutationRequested = true;
         expect(request.headers['x-request-id'], 'customer-tuning:hash-receipt');
+        expect(request.headers['x-expected-server-instance-id'], 'srv-test');
+        expect(
+            request.headers['x-expected-resource-sha256'], expectedBeforeHash);
         expect(jsonDecode((request as http.Request).body), candidateConfig);
         return _jsonResponse(candidateConfig);
       }
@@ -877,6 +881,11 @@ void main() {
     expect(readResponse.statusCode, 200);
     final beforeHash =
         (jsonDecode(await readResponse.readAsString()) as Map)['bodySha256'];
+    expect(
+      beforeHash,
+      '73abd682803fa0866b8220029db8ad171e68d7df8f76477eb0b237e41bc9a3a6',
+    );
+    expectedBeforeHash = beforeHash as String;
     expect(beforeHash, hasLength(64));
 
     final applyResponse = await server.handler(
@@ -911,6 +920,142 @@ void main() {
     expect(receipt['preconditionBodySha256'], beforeHash);
     expect(receipt['bodySha256'], hasLength(64));
     expect(receipt['bodySha256'], isNot(beforeHash));
+  });
+
+  test('device mutation is not replayed after an ambiguous remote failure',
+      () async {
+    var remoteMutations = 0;
+    var localRequests = 0;
+    final client = _HandlerClient((request) async {
+      if (request.url.host != 'device.test' &&
+          request.url.host != 'local.test') {
+        return _supabaseResponse(request);
+      }
+      if (request.url.host == 'local.test') {
+        localRequests++;
+        return http.Response('unexpected local fallback', 500);
+      }
+      if (request.url.path == '/api/state') {
+        return _jsonResponse({
+          'version': '0.6.522-beta',
+          'server_instance_id': 'srv-test',
+          'platform': 'appliance',
+          'context': 'rpiz',
+          'nodes': const [],
+          'hubs': const [],
+        });
+      }
+      if (request.url.path == '/api/settings' && request.method == 'PUT') {
+        remoteMutations++;
+        throw TimeoutException('response lost after apply');
+      }
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+
+    final response = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/settings',
+          'requestId': 'customer-tuning:ambiguous-response',
+          'expectedServerInstanceId': 'srv-test',
+          'body': {'auto_update': false},
+        }),
+      ),
+    );
+
+    expect(response.statusCode, 502);
+    expect(remoteMutations, 1);
+    expect(localRequests, 0);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      contains('request timed out'),
+    );
+  });
+
+  test('device-side config precondition rejection is returned without replay',
+      () async {
+    var localRequests = 0;
+    final client = _HandlerClient((request) async {
+      if (request.url.host != 'device.test' &&
+          request.url.host != 'local.test') {
+        return _supabaseResponse(request);
+      }
+      if (request.url.host == 'local.test') {
+        localRequests++;
+        return http.Response('unexpected local fallback', 500);
+      }
+      if (request.url.path == '/api/state') {
+        return _jsonResponse({
+          'server_instance_id': 'srv-test',
+          'nodes': const [],
+          'hubs': const [],
+        });
+      }
+      if (request.url.path == '/api/config' && request.method == 'GET') {
+        return _jsonResponse({'id': 'rhythm', 'max_brightness': 71});
+      }
+      if (request.url.path == '/api/config' && request.method == 'PUT') {
+        return http.Response('config precondition failed', 409);
+      }
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+    final readResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'GET',
+          'path': 'api/config',
+          'query': {'id': 'rhythm'},
+        }),
+      ),
+    );
+    final beforeHash =
+        (jsonDecode(await readResponse.readAsString()) as Map)['bodySha256'];
+
+    final response = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/config',
+          'query': {'id': 'rhythm'},
+          'requestId': 'customer-tuning:atomic-stale',
+          'expectedServerInstanceId': 'srv-test',
+          'resourcePrecondition': {
+            'path': 'api/config',
+            'query': {'id': 'rhythm'},
+            'bodySha256': beforeHash,
+          },
+          'body': {'id': 'rhythm', 'max_brightness': 60},
+        }),
+      ),
+    );
+
+    expect(response.statusCode, 409);
+    expect(localRequests, 0);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      contains('rejected by the device'),
+    );
   });
 
   test('admin deletes exactly one server hub and preserves its home', () async {
