@@ -22327,6 +22327,39 @@ mod tests {
     }
 
     #[test]
+    fn empty_topology_rooms_exclude_bootstrap_and_routable_rooms() {
+        let (state, _) = setup_state(Vec::new());
+        add_topology_room(&state, "empty-custom-room", &[]);
+        add_topology_room(&state, "empty-bootstrap-room", &[]);
+        add_topology_room(&state, "bound-custom-room", &["hue"]);
+        add_topology_room(&state, "device-custom-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.topology
+                .get_mut("empty-custom-room")
+                .unwrap()
+                .user_customized = true;
+            s.topology
+                .get_mut("bound-custom-room")
+                .unwrap()
+                .user_customized = true;
+            let device_room = s.topology.get_mut("device-custom-room").unwrap();
+            device_room.user_customized = true;
+            device_room.devices.push(crate::topology::RoomDevice {
+                device_id: "light-1".into(),
+                placement: crate::topology::DevicePlacement::UserOverride,
+            });
+        }
+
+        let empty_rooms = EmptyTopologyRooms::from_state(&state);
+
+        assert!(empty_rooms.contains("empty-custom-room"));
+        assert!(!empty_rooms.contains("empty-bootstrap-room"));
+        assert!(!empty_rooms.contains("bound-custom-room"));
+        assert!(!empty_rooms.contains("device-custom-room"));
+    }
+
+    #[test]
     fn mode_transition_reapply_clears_motion_timer_for_standby_room() {
         let (state, runtime) = setup_state(vec![make_snapshot("r1", false, true)]);
         {
