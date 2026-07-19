@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../backend/backend.dart';
 import 'account_data_encryption_service.dart';
 import 'auth_service.dart';
+import 'server_identity.dart';
 
 /// A Home plus the Rhythm Server hubs saved for that Home in the account.
 class AccountHomeServerHubs {
@@ -825,7 +826,10 @@ Hub _mergeAccountServerHubRows(Hub base, Hub incoming) {
     updatedAt: _latestDate(base.updatedAt, incoming.updatedAt),
     enabled: base.enabled || incoming.enabled,
     remoteEndpoint: winner.remoteEndpoint ?? fallback.remoteEndpoint,
-    serverInstanceId: winner.serverInstanceId ?? fallback.serverInstanceId,
+    serverInstanceId: preferredServerIdentity(
+      existing: fallback.serverInstanceId,
+      candidate: winner.serverInstanceId,
+    ),
   );
 }
 
@@ -846,21 +850,18 @@ bool _sameNonEmptyToken(String? left, String? right) {
 }
 
 bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
-  final leftId = _cleanServerInstanceId(left.serverInstanceId);
-  final rightId = _cleanServerInstanceId(right.serverInstanceId);
-  return leftId != null && rightId != null && leftId == rightId;
+  return serverIdentitiesMatch(left.serverInstanceId, right.serverInstanceId);
 }
 
 bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
-  final leftId = _cleanServerInstanceId(left.serverInstanceId);
-  final rightId = _cleanServerInstanceId(right.serverInstanceId);
-  return leftId != null && rightId != null && leftId != rightId;
+  return serverIdentitiesConflict(
+    left.serverInstanceId,
+    right.serverInstanceId,
+  );
 }
 
 String? _cleanServerInstanceId(String? value) {
-  final clean = value?.trim().toLowerCase();
-  if (clean == null || clean.isEmpty) return null;
-  return clean;
+  return normalizeServerIdentity(value);
 }
 
 DateTime _latestDate(DateTime left, DateTime right) {

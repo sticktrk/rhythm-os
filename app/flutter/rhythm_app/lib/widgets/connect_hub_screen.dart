@@ -42,6 +42,7 @@ import '../services/ble_provisioning_service.dart';
 import '../services/cloud_home_join_service.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/recent_servers_service.dart';
+import '../services/server_identity.dart';
 
 /// Which empty-state variant to show.
 enum ConnectHubMode { rhythmServer, hue }
@@ -294,28 +295,18 @@ bool _sameNonEmptyToken(String? left, String? right) {
 }
 
 bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
-  final leftId = left.serverInstanceId?.trim();
-  final rightId = right.serverInstanceId?.trim();
-  return leftId != null &&
-      leftId.isNotEmpty &&
-      rightId != null &&
-      rightId.isNotEmpty &&
-      leftId == rightId;
+  return serverIdentitiesMatch(left.serverInstanceId, right.serverInstanceId);
 }
 
 bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
-  final leftId = left.serverInstanceId?.trim();
-  final rightId = right.serverInstanceId?.trim();
-  return leftId != null &&
-      leftId.isNotEmpty &&
-      rightId != null &&
-      rightId.isNotEmpty &&
-      leftId != rightId;
+  return serverIdentitiesConflict(
+    left.serverInstanceId,
+    right.serverInstanceId,
+  );
 }
 
 String? _cleanServerInstanceId(String? value) {
-  final clean = value?.trim();
-  return clean != null && clean.isNotEmpty ? clean : null;
+  return normalizeServerIdentity(value);
 }
 
 Set<String> _homeIdsRepresentedBy({
@@ -342,7 +333,12 @@ bool _recentServerIsRepresentedByHome(
       final hubServerInstanceId = _cleanServerInstanceId(hub.serverInstanceId);
       if (serverInstanceId != null && hubServerInstanceId != null) {
         if (serverInstanceId == hubServerInstanceId) return true;
-        continue;
+        if (serverIdentitiesConflict(
+          serverInstanceId,
+          hubServerInstanceId,
+        )) {
+          continue;
+        }
       }
       if (hub.endpoint.host == server.host &&
           hub.endpoint.port == server.port) {
@@ -416,7 +412,13 @@ bool _serverHubMatchesDiscoveredServer(
   final cleanServerInstanceId = _cleanServerInstanceId(serverInstanceId);
   final hubServerInstanceId = _cleanServerInstanceId(hub.serverInstanceId);
   if (cleanServerInstanceId != null && hubServerInstanceId != null) {
-    return cleanServerInstanceId == hubServerInstanceId;
+    if (cleanServerInstanceId == hubServerInstanceId) return true;
+    if (serverIdentitiesConflict(
+      cleanServerInstanceId,
+      hubServerInstanceId,
+    )) {
+      return false;
+    }
   }
 
   final cleanAuthToken = authToken?.trim();
@@ -455,7 +457,10 @@ Hub _serverHubForDiscoveredServer({
       useSsl: false,
     ),
     token: token != null && token.isNotEmpty ? token : hub.token,
-    serverInstanceId: serverInstanceId,
+    serverInstanceId: preferredServerIdentity(
+      existing: hub.serverInstanceId,
+      candidate: serverInstanceId,
+    ),
     updatedAt: DateTime.now(),
     pendingSync: true,
   );
@@ -1554,6 +1559,15 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           serverInstanceId: serverInstanceId,
           joinProof: joinProof,
         );
+      } on CloudHomeJoinBlockedException catch (error) {
+        if (!mounted) return;
+        setState(() {
+          _isConnecting = false;
+          _connectingEndpoint = null;
+          _connectError = endpointKey;
+          _connectErrorMessage = error.userMessage;
+        });
+        return;
       } on _HomeNameCancelledException {
         if (!mounted) return;
         setState(() {
@@ -1722,7 +1736,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     }
 
     final name = _displayNameForDiscoveredServer(discovered);
-    final cloudHome =
+    final cloudJoin =
         await CloudHomeJoinService.instance.joinByLocalDeviceProof(
       serverInstanceId: serverInstanceId,
       joinProof: joinProof,
@@ -1731,8 +1745,11 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       ownerToken: authToken,
       hubName: name,
     );
-    if (cloudHome != null) {
-      return homeProvider.enterHome(cloudHome);
+    if (cloudJoin.home != null) {
+      return homeProvider.enterHome(cloudJoin.home!);
+    }
+    if (!cloudJoin.canCreateHome) {
+      throw CloudHomeJoinBlockedException(code: cloudJoin.code);
     }
 
     if (!mounted) throw const _HomeNameCancelledException();

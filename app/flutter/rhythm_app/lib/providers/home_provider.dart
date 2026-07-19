@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../data/local_data_source.dart';
 import '../repositories/home_repository.dart';
 import '../services/account_cloud_sync_service.dart';
+import '../services/server_identity.dart';
 import '../services/auth_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/settings_service.dart';
@@ -204,7 +205,13 @@ bool _serverHubMatchesPairing(
   final cleanServerInstanceId = _cleanOptionalString(serverInstanceId);
   final hubServerInstanceId = _cleanOptionalString(hub.serverInstanceId);
   if (cleanServerInstanceId != null && hubServerInstanceId != null) {
-    return cleanServerInstanceId == hubServerInstanceId;
+    if (cleanServerInstanceId == hubServerInstanceId) return true;
+    if (serverIdentitiesConflict(
+      cleanServerInstanceId,
+      hubServerInstanceId,
+    )) {
+      return false;
+    }
   }
 
   final cleanToken = _cleanOptionalString(token);
@@ -237,7 +244,10 @@ Hub _serverHubForPairing({
     name: hub.name.trim().isNotEmpty ? hub.name : cleanHubName,
     endpoint: HubEndpoint(host: host, port: port),
     token: cleanToken,
-    serverInstanceId: cleanServerInstanceId,
+    serverInstanceId: preferredServerIdentity(
+      existing: hub.serverInstanceId,
+      candidate: cleanServerInstanceId,
+    ),
     updatedAt: now,
     pendingSync: true,
   );
@@ -1381,28 +1391,22 @@ Hub mergeCloudServerHubForLocalStorageForTesting({
     remoteEndpoint:
         cloudRemote ?? (keepExistingRemote ? existing.remoteEndpoint : null),
     clearRemoteEndpoint: cloudRemote == null && !keepExistingRemote,
-    serverInstanceId: cloudHub.serverInstanceId ?? existing.serverInstanceId,
+    serverInstanceId: preferredServerIdentity(
+      existing: existing.serverInstanceId,
+      candidate: cloudHub.serverInstanceId,
+    ),
   );
 }
 
 bool _sameNonEmptyServerInstanceId(Hub left, Hub right) {
-  final leftId = left.serverInstanceId?.trim();
-  final rightId = right.serverInstanceId?.trim();
-  return leftId != null &&
-      leftId.isNotEmpty &&
-      rightId != null &&
-      rightId.isNotEmpty &&
-      leftId == rightId;
+  return serverIdentitiesMatch(left.serverInstanceId, right.serverInstanceId);
 }
 
 bool _differentNonEmptyServerInstanceIds(Hub left, Hub right) {
-  final leftId = left.serverInstanceId?.trim();
-  final rightId = right.serverInstanceId?.trim();
-  return leftId != null &&
-      leftId.isNotEmpty &&
-      rightId != null &&
-      rightId.isNotEmpty &&
-      leftId != rightId;
+  return serverIdentitiesConflict(
+    left.serverInstanceId,
+    right.serverInstanceId,
+  );
 }
 
 String? _cleanOptionalString(String? value) {
