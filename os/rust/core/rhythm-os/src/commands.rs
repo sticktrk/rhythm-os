@@ -3508,7 +3508,23 @@ pub fn build_config(state: &SharedState, profile_id: Option<&str>) -> Result<Str
         .light_profile_config(&id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", id))?;
-    serde_json::to_string(&config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
+    serialize_light_profile_config_resource(&config)
+}
+
+/// Serialize a config exactly as it is exposed by `GET /api/config`.
+fn serialize_light_profile_config_resource(config: &LightProfileConfig) -> Result<String> {
+    serde_json::to_string(config).map_err(|e| anyhow::anyhow!("serialize config: {}", e))
+}
+
+/// Hash the same numeric JSON representation clients review through
+/// `GET /api/config`. Serializing an `f32` directly produces its shortest
+/// round-trippable decimal; converting it straight to a generic JSON `Value`
+/// first widens it to `f64` and can expose irrelevant binary float digits.
+fn light_profile_config_resource_sha256(config: &LightProfileConfig) -> Result<String> {
+    let serialized = serialize_light_profile_config_resource(config)?;
+    let resource: Value = serde_json::from_str(&serialized)
+        .map_err(|e| anyhow::anyhow!("parse serialized config resource: {}", e))?;
+    Ok(canonical_json_sha256(&resource))
 }
 
 // ============================================================================
@@ -6075,6 +6091,7 @@ where
         profile.id = profile_id.clone();
         profile.name = node_mood_profile_name(snapshot);
         update(&mut profile);
+        profile.normalize_float_precision();
         s.set_light_profile_config(profile.clone());
         if persist {
             persist_light_profiles_locked(&s);
@@ -9649,6 +9666,7 @@ pub fn do_config_set_with_options_if_matches(
     precondition: Option<(&str, &str)>,
 ) -> Result<()> {
     rhythm_core::normalize_builtin_state_profile_config(&mut config);
+    config.normalize_float_precision();
 
     let curve_desc = match &config.curve {
         rhythm_core::LightCurveShape::SuperGaussian { direct_color, .. } => {
@@ -9697,9 +9715,7 @@ pub fn do_config_set_with_options_if_matches(
             let current = s
                 .light_profile_config(&config.id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown light profile: {}", config.id))?;
-            let current_json = serde_json::to_value(current)
-                .map_err(|error| anyhow::anyhow!("serialize config precondition: {}", error))?;
-            if canonical_json_sha256(&current_json) != expected_resource_sha256 {
+            if light_profile_config_resource_sha256(current)? != expected_resource_sha256 {
                 return Err(anyhow::anyhow!(
                     "config precondition failed: live config hash changed"
                 ));
@@ -9845,9 +9861,10 @@ pub fn do_absorb_time_offset(
     };
 
     // Adjust config widths if offset is meaningful
-    if let Some(new_config) =
+    if let Some(mut new_config) =
         absorb_light_profile_time_offset(&config, current_hour, offset_minutes, sunrise, sunset)
     {
+        new_config.normalize_float_precision();
         info!(target: "cmd", "absorb_time_offset: adjusted widths — bri L={:.3} R={:.3}, cct L={:.3} R={:.3}",
         match &new_config.curve {
             rhythm_core::LightCurveShape::SuperGaussian { width_left_bri, .. } => *width_left_bri,
@@ -13144,19 +13161,31 @@ mod tests {
         LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
         RuntimeResult, RuntimeSnapshot,
     };
-    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn canonical_config_hash_matches_cross_language_contract() {
-        assert_eq!(
-            canonical_json_sha256(&json!({
-                "id": "rhythm",
-                "max_brightness": 71,
-            })),
-            "73abd682803fa0866b8220029db8ad171e68d7df8f76477eb0b237e41bc9a3a6"
-        );
+    fn config_resource_hash_matches_cross_language_numeric_contract() {
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../../../testdata/light-profile-config-hash-cases.json"
+        ))
+        .unwrap();
+        for case in fixtures["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let config: LightProfileConfig =
+                serde_json::from_value(case["config"].clone()).unwrap();
+            let serialized = serialize_light_profile_config_resource(&config).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&serialized).unwrap(),
+                case["config"],
+                "GET representation changed for {name}"
+            );
+            assert_eq!(
+                light_profile_config_resource_sha256(&config).unwrap(),
+                case["sha256"].as_str().unwrap(),
+                "resource hash changed for {name}"
+            );
+        }
     }
 
     fn wait_for_sync_count(sync_count: &AtomicUsize, expected: usize) {

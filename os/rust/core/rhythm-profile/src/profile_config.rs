@@ -20,6 +20,19 @@ use crate::curve_shape::LightCurveShape;
 /// Default fade duration in milliseconds.
 pub const DEFAULT_FADE_MS: u16 = 500;
 
+/// Maximum decimal precision stored for customer-editable floating config.
+pub const CONFIG_FLOAT_DECIMAL_PLACES: u32 = 3;
+
+fn normalize_config_float(value: f32) -> f32 {
+    let scale = 10_u32.pow(CONFIG_FLOAT_DECIMAL_PLACES) as f64;
+    let rounded = (((value as f64) * scale).round() / scale) as f32;
+    if rounded == 0.0 {
+        0.0
+    } else {
+        rounded
+    }
+}
+
 // ── TimerSetting ────────────────────────────────────────────────────
 
 /// A single hour-based breakpoint for scheduled timer settings.
@@ -91,6 +104,14 @@ impl TimerSetting {
     pub fn is_auto(&self) -> bool {
         matches!(self, Self::Auto)
     }
+
+    fn normalize_float_precision(&mut self) {
+        if let Self::Scheduled { breakpoints } = self {
+            for breakpoint in breakpoints {
+                breakpoint.hour = normalize_config_float(breakpoint.hour);
+            }
+        }
+    }
 }
 
 /// Complete light profile configuration — the full JSON-serializable config.
@@ -151,6 +172,57 @@ fn default_auto() -> TimerSetting {
 }
 
 impl LightProfileConfig {
+    /// Round every customer-editable floating value to the supported config
+    /// precision. Integer ranges and timer values are already exact.
+    pub fn normalize_float_precision(&mut self) {
+        match &mut self.curve {
+            LightCurveShape::SuperGaussian {
+                width_left_bri,
+                width_right_bri,
+                width_left_cct,
+                width_right_cct,
+                shape_p,
+                direct_color,
+            } => {
+                for value in [
+                    width_left_bri,
+                    width_right_bri,
+                    width_left_cct,
+                    width_right_cct,
+                    shape_p,
+                ] {
+                    *value = normalize_config_float(*value);
+                }
+                if let Some(color) = direct_color {
+                    color.xy.x = normalize_config_float(color.xy.x);
+                    color.xy.y = normalize_config_float(color.xy.y);
+                }
+            }
+            LightCurveShape::Palette { keyframes } => {
+                for keyframe in keyframes {
+                    keyframe.hour = normalize_config_float(keyframe.hour);
+                }
+            }
+            LightCurveShape::InheritActive => {}
+            LightCurveShape::Constant {
+                brightness,
+                color_temp,
+                direct_color,
+            } => {
+                *brightness = normalize_config_float(*brightness);
+                *color_temp = normalize_config_float(*color_temp);
+                if let Some(color) = direct_color {
+                    color.xy.x = normalize_config_float(color.xy.x);
+                    color.xy.y = normalize_config_float(color.xy.y);
+                }
+            }
+        }
+
+        self.fade_ms.normalize_float_precision();
+        self.motion_timeout_secs.normalize_float_precision();
+        self.rhythm_interval_secs.normalize_float_precision();
+    }
+
     /// Calculate the brightness step size based on max_dim_steps.
     pub fn brightness_step_size(&self) -> f32 {
         // saturating_sub: profiles are imported from user-editable bundles
@@ -206,7 +278,8 @@ fn default_max_dim_steps() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curve_shape::LightCurveShape;
+    use crate::color::{Rgb, XyColor};
+    use crate::curve_shape::{LightCurveShape, LightDirectColor, LightPaletteKeyframe};
 
     fn test_config() -> LightProfileConfig {
         LightProfileConfig {
@@ -231,6 +304,97 @@ mod tests {
         config.max_brightness = 100;
         config.max_dim_steps = 10;
         assert!((config.brightness_step_size() - 9.9).abs() < 0.1);
+    }
+
+    #[test]
+    fn normalize_float_precision_covers_super_gaussian_color_and_timers() {
+        let mut config = test_config();
+        config.curve = LightCurveShape::SuperGaussian {
+            width_left_bri: 0.94999,
+            width_right_bri: 0.71197575,
+            width_left_cct: 1.23449,
+            width_right_cct: 1.2345,
+            shape_p: 6.66666,
+            direct_color: Some(LightDirectColor {
+                xy: XyColor::new(0.31271, 0.32904),
+                rgb: Rgb::new(214, 185, 156),
+            }),
+        };
+        config.fade_ms = TimerSetting::Scheduled {
+            breakpoints: vec![HourBreakpoint {
+                hour: 5.3333335,
+                value: 275,
+            }],
+        };
+
+        config.normalize_float_precision();
+
+        let LightCurveShape::SuperGaussian {
+            width_left_bri,
+            width_right_bri,
+            width_left_cct,
+            width_right_cct,
+            shape_p,
+            direct_color,
+        } = config.curve
+        else {
+            panic!("expected super-gaussian curve");
+        };
+        assert_eq!(width_left_bri, 0.95);
+        assert_eq!(width_right_bri, 0.712);
+        assert_eq!(width_left_cct, 1.234);
+        assert_eq!(width_right_cct, 1.235);
+        assert_eq!(shape_p, 6.667);
+        assert_eq!(direct_color.unwrap().xy, XyColor::new(0.313, 0.329));
+        assert_eq!(
+            config.fade_ms,
+            TimerSetting::Scheduled {
+                breakpoints: vec![HourBreakpoint {
+                    hour: 5.333,
+                    value: 275,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_float_precision_covers_palette_and_constant_curves() {
+        let mut palette = test_config();
+        palette.curve = LightCurveShape::Palette {
+            keyframes: vec![LightPaletteKeyframe {
+                hour: 12.1239,
+                r: 232,
+                g: 241,
+                b: 255,
+            }],
+        };
+        palette.normalize_float_precision();
+        let LightCurveShape::Palette { keyframes } = palette.curve else {
+            panic!("expected palette curve");
+        };
+        assert_eq!(keyframes[0].hour, 12.124);
+
+        let mut constant = test_config();
+        constant.curve = LightCurveShape::Constant {
+            brightness: 0.37549,
+            color_temp: 0.61251,
+            direct_color: Some(LightDirectColor {
+                xy: XyColor::new(0.41049, -0.0001),
+                rgb: Rgb::new(190, 156, 121),
+            }),
+        };
+        constant.normalize_float_precision();
+        let LightCurveShape::Constant {
+            brightness,
+            color_temp,
+            direct_color,
+        } = constant.curve
+        else {
+            panic!("expected constant curve");
+        };
+        assert_eq!(brightness, 0.375);
+        assert_eq!(color_temp, 0.613);
+        assert_eq!(direct_color.unwrap().xy, XyColor::new(0.41, 0.0));
     }
 
     // ── TimerSetting resolve tests ──────────────────────────────

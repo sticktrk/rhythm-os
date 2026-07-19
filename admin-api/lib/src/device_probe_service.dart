@@ -593,7 +593,8 @@ class DeviceProbeService {
       }
       if (request.resourcePrecondition != null && response.statusCode == 409) {
         return _ProxyJsonEndpointResult.preconditionFailed(
-          '${request.method} /${request.path} was rejected by the device because its live preconditions changed.',
+          '${request.method} /${request.path} was rejected by the device because its live preconditions changed'
+          '${_responseErrorSuffix(response)}.',
           mutationDispatched: true,
         );
       }

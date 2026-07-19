@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:rhythm_admin_api/src/config.dart';
@@ -716,6 +717,54 @@ void main() {
     expect(deviceRequested, isFalse);
   });
 
+  test('device config hashes match the shared numeric contract', () async {
+    final fixtures = jsonDecode(
+      File('../testdata/light-profile-config-hash-cases.json')
+          .readAsStringSync(),
+    ) as Map<String, dynamic>;
+
+    for (final rawCase in fixtures['cases'] as List) {
+      final hashCase = rawCase as Map<String, dynamic>;
+      final config = hashCase['config'] as Map<String, dynamic>;
+      final client = _HandlerClient((request) async {
+        if (request.url.host != 'device.test' &&
+            request.url.host != 'local.test') {
+          return _supabaseResponse(request);
+        }
+        if (request.url.path == '/api/config' && request.method == 'GET') {
+          return _jsonResponse(config);
+        }
+        return http.Response('not found', 404);
+      });
+      final server = _testServer(client: client);
+
+      final response = await server.handler(
+        Request(
+          'POST',
+          Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+          headers: {
+            'authorization': 'Bearer staff-session',
+            'content-type': 'application/json',
+          },
+          body: jsonEncode({
+            'method': 'GET',
+            'path': 'api/config',
+            'query': {'id': 'rhythm'},
+          }),
+        ),
+      );
+
+      expect(response.statusCode, 200, reason: hashCase['name'] as String);
+      final result =
+          jsonDecode(await response.readAsString()) as Map<String, dynamic>;
+      expect(
+        result['bodySha256'],
+        hashCase['sha256'],
+        reason: hashCase['name'] as String,
+      );
+    }
+  });
+
   test('device admin mutation stops when live server identity changes',
       () async {
     var mutationRequested = false;
@@ -1003,7 +1052,10 @@ void main() {
         return _jsonResponse({'id': 'rhythm', 'max_brightness': 71});
       }
       if (request.url.path == '/api/config' && request.method == 'PUT') {
-        return http.Response('config precondition failed', 409);
+        return http.Response(
+          'config precondition failed: live config hash changed',
+          409,
+        );
       }
       return http.Response('not found', 404);
     });
@@ -1052,10 +1104,10 @@ void main() {
 
     expect(response.statusCode, 409);
     expect(localRequests, 0);
-    expect(
-      (jsonDecode(await response.readAsString()) as Map)['error'],
-      contains('rejected by the device'),
-    );
+    final error =
+        (jsonDecode(await response.readAsString()) as Map)['error'] as String;
+    expect(error, contains('rejected by the device'));
+    expect(error, contains('live config hash changed'));
   });
 
   test('admin deletes exactly one server hub and preserves its home', () async {

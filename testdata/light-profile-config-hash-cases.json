@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "super-gaussian curve parameters and direct color",
+      "config": {
+        "id": "rhythm",
+        "name": "Super Gaussian Hash Contract",
+        "curve": {
+          "type": "super-gaussian",
+          "width_left_bri": 0.95,
+          "width_right_bri": 0.85,
+          "width_left_cct": 0.712,
+          "width_right_cct": 1.15,
+          "shape_p": 6.25,
+          "direct_color": {
+            "xy": {"x": 0.313, "y": 0.329},
+            "rgb": {"r": 214, "g": 185, "b": 156}
+          }
+        },
+        "min_brightness": 7,
+        "max_brightness": 83,
+        "min_color_temp": 1800,
+        "max_color_temp": 6100,
+        "max_dim_steps": 13,
+        "fade_ms": {
+          "mode": "scheduled",
+          "breakpoints": [
+            {"hour": 6.25, "value": 350},
+            {"hour": 19.75, "value": 800}
+          ]
+        },
+        "motion_timeout_secs": {"mode": "fixed", "value": 900},
+        "rhythm_interval_secs": {"mode": "auto"}
+      },
+      "sha256": "ccc0bbc1f69d4e75d44cf69732e1ceba53c0c4b96543d87f0400338624a85fde"
+    },
+    {
+      "name": "palette keyframe hours and scheduled timer",
+      "config": {
+        "id": "rhythm",
+        "name": "Palette Hash Contract",
+        "curve": {
+          "type": "palette",
+          "keyframes": [
+            {"hour": 5.75, "r": 255, "g": 112, "b": 48},
+            {"hour": 12.125, "r": 232, "g": 241, "b": 255},
+            {"hour": 18.5, "r": 255, "g": 91, "b": 33}
+          ]
+        },
+        "min_brightness": 4,
+        "max_brightness": 76,
+        "min_color_temp": 1700,
+        "max_color_temp": 5900,
+        "max_dim_steps": 9,
+        "fade_ms": {"mode": "auto"},
+        "motion_timeout_secs": {
+          "mode": "scheduled",
+          "breakpoints": [
+            {"hour": 7.1, "value": 600},
+            {"hour": 22.9, "value": 120}
+          ]
+        },
+        "rhythm_interval_secs": {"mode": "fixed", "value": 45}
+      },
+      "sha256": "656d20c0b249f5e2fc9bc7bcdfcdf00509d8995242dff755349874664eecf7f0"
+    },
+    {
+      "name": "constant curve parameters and direct color",
+      "config": {
+        "id": "rhythm",
+        "name": "Constant Hash Contract",
+        "curve": {
+          "type": "constant",
+          "brightness": 0.375,
+          "color_temp": 0.613,
+          "direct_color": {
+            "xy": {"x": 0.41, "y": 0.37},
+            "rgb": {"r": 190, "g": 156, "b": 121}
+          }
+        },
+        "min_brightness": 12,
+        "max_brightness": 64,
+        "min_color_temp": 2200,
+        "max_color_temp": 4800,
+        "max_dim_steps": 11,
+        "fade_ms": {"mode": "fixed", "value": 425},
+        "motion_timeout_secs": {"mode": "auto"},
+        "rhythm_interval_secs": {
+          "mode": "scheduled",
+          "breakpoints": [
+            {"hour": 6.6, "value": 90},
+            {"hour": 17.4, "value": 30}
+          ]
+        }
+      },
+      "sha256": "b872d8c5722de216c2f96ddb9675d067bcd8e4dc12e8b06b0e321af04ccde8f0"
+    },
+    {
+      "name": "inherit-active with decimal timer breakpoints",
+      "config": {
+        "id": "rhythm",
+        "name": "Inherit Active Hash Contract",
+        "curve": {"type": "inherit-active"},
+        "min_brightness": 1,
+        "max_brightness": 28,
+        "min_color_temp": 1900,
+        "max_color_temp": 4300,
+        "max_dim_steps": 6,
+        "fade_ms": {
+          "mode": "scheduled",
+          "breakpoints": [
+            {"hour": 5.333, "value": 275},
+            {"hour": 20.667, "value": 950}
+          ]
+        },
+        "motion_timeout_secs": {"mode": "fixed", "value": 300},
+        "rhythm_interval_secs": {"mode": "auto"}
+      },
+      "sha256": "3a6cd21c8d146fbdef304cf47dc53e262df26e162a27a16135396dab318302cc"
+    }
+  ]
+}

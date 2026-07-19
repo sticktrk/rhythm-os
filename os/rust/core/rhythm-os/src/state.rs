@@ -1038,6 +1038,7 @@ impl AppState {
     pub fn set_light_profile_config(&mut self, config: LightProfileConfig) {
         let mut config = config;
         rhythm_core::normalize_builtin_state_profile_config(&mut config);
+        config.normalize_float_precision();
         let is_active = config.id == self.active_mode_profile_id();
         self.light_profile_configs.insert(config.id.clone(), config);
         if is_active {
@@ -1716,6 +1717,46 @@ mod tests {
                 .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
                 .cloned(),
             factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+        );
+    }
+
+    #[test]
+    fn setting_a_profile_self_heals_float_precision() {
+        let mut state = AppState::default();
+        let mut rhythm = state
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        let rhythm_core::LightCurveShape::SuperGaussian { width_left_cct, .. } = &mut rhythm.curve
+        else {
+            panic!("default rhythm profile should be super-gaussian");
+        };
+        *width_left_cct = 0.71197575;
+        rhythm.fade_ms = rhythm_core::TimerSetting::Scheduled {
+            breakpoints: vec![rhythm_core::HourBreakpoint {
+                hour: 5.3333335,
+                value: 275,
+            }],
+        };
+
+        state.set_light_profile_config(rhythm);
+
+        let stored = state
+            .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap();
+        let rhythm_core::LightCurveShape::SuperGaussian { width_left_cct, .. } = &stored.curve
+        else {
+            panic!("stored rhythm profile should be super-gaussian");
+        };
+        assert_eq!(*width_left_cct, 0.712);
+        assert_eq!(
+            stored.fade_ms,
+            rhythm_core::TimerSetting::Scheduled {
+                breakpoints: vec![rhythm_core::HourBreakpoint {
+                    hour: 5.333,
+                    value: 275,
+                }],
+            }
         );
     }
 }
