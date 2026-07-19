@@ -1,0 +1,25 @@
+#!/bin/sh
+
+# rcS completes before BusyBox init starts any respawn entries. Capture and
+# archive prior-boot evidence here so it deterministically precedes opening
+# /dev/watchdog, independent of respawn scheduling.
+
+RECORDER_BIN="${RHYTHM_HOST_RECORDER_BIN:-/usr/bin/rhythm-host-recorder}"
+DATA_DIR="${RHYTHM_DATA_DIR:-/data}"
+CONSOLE="${RHYTHM_CONSOLE:-/dev/console}"
+
+case "${1:-start}" in
+    start)
+        if [ ! -x "$RECORDER_BIN" ]; then
+            printf 'rhythm-host-recorder: missing executable %s\n' "$RECORDER_BIN" >"$CONSOLE" 2>/dev/null || true
+            exit 0
+        fi
+        if ! "$RECORDER_BIN" boot-capture --data-dir "$DATA_DIR"; then
+            # A failed one-shot must not block boot. The independently
+            # supervised daemon repeats the capture as a marked late fallback.
+            printf 'rhythm-host-recorder: early boot capture failed\n' >"$CONSOLE" 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

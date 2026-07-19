@@ -1886,6 +1886,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-host-recorder"
+version = "0.6.524-beta"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rhythm-hue"
 version = "0.6.525-beta"
 dependencies = [
@@ -2021,6 +2031,7 @@ dependencies = [
  "mdns-sd",
  "reqwest",
  "rhythm-ha",
+ "rhythm-host-recorder",
  "rhythm-hue",
  "rhythm-matter",
  "rhythm-os",

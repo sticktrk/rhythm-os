@@ -68,6 +68,11 @@ const BOOT_DIAGNOSTIC_FILES: &[&str] = &[
     crate::boot_diagnostics::KERNEL_PREVIOUS_FILE,
     crate::boot_diagnostics::HARDWARE_RESET_FILE,
 ];
+const HOST_RECORDER_METADATA_BYTES_LIMIT: u64 = 64 * 1024;
+const HOST_RECORDER_SEGMENT_BYTES_LIMIT: u64 = 256 * 1024;
+const HOST_RECORDER_PSTORE_BYTES_LIMIT: u64 = 256 * 1024;
+const HOST_RECORDER_SEGMENT_FILE_LIMIT: usize = 8;
+const HOST_RECORDER_PSTORE_FILE_LIMIT: usize = 8;
 const PERSISTED_HUB_REGISTRY_GLOB: &str = "hub_registry_*.json";
 #[cfg(target_os = "linux")]
 const THREAD_SNAPSHOT_ENTRY_LIMIT: usize = 64;
@@ -131,6 +136,7 @@ struct StateDebugSnapshot {
 struct FileArtifact {
     source_path: PathBuf,
     archive_path: String,
+    bytes_limit: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -769,13 +775,33 @@ pub fn build_debug_bundle_with_app_log(
     let matter_controller_json =
         build_matter_controller_debug_json(&runtime, created_at, &mut diagnostics)
             .context("building Matter controller debug snapshot")?;
+    let host_flight_recorder_summary_json = if runtime.platform_context == "rpiz" {
+        Some(
+            rhythm_host_recorder::build_synthesis(Path::new(&runtime.data_dir)).unwrap_or_else(
+                |error| {
+                    diagnostics.add_warning(format!(
+                        "Failed to synthesize host flight recorder evidence: {error}"
+                    ));
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "status": "unavailable",
+                        "detail": error.to_string(),
+                    })
+                    .to_string()
+                },
+            ),
+        )
+    } else {
+        None
+    };
 
     let log_artifacts = discover_log_artifacts(&searched_log_dirs, &mut diagnostics);
     let captured_log_artifacts = log_artifacts_for_bundle_capture(&log_artifacts);
     let log_summary_json =
         build_log_summary_json(&captured_log_artifacts, created_at, &mut diagnostics)
             .context("building log summary snapshot")?;
-    let persisted_artifacts = discover_persisted_artifacts(&runtime, &mut diagnostics);
+    let mut persisted_artifacts = discover_persisted_artifacts(&runtime, &mut diagnostics);
+    persisted_artifacts.extend(discover_host_recorder_artifacts(&runtime, &mut diagnostics));
 
     let encoder = flate2::write::GzEncoder::new(Vec::<u8>::new(), flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
@@ -835,6 +861,14 @@ pub fn build_debug_bundle_with_app_log(
         "matter_controller.json",
         matter_controller_json.as_bytes(),
     )?;
+    if let Some(summary) = &host_flight_recorder_summary_json {
+        append_generated_file(
+            &mut builder,
+            &mut generated_files,
+            "host_flight_recorder_summary.json",
+            summary.as_bytes(),
+        )?;
+    }
 
     let mut captured_logs = Vec::<CapturedFileEntry>::new();
     for artifact in &captured_log_artifacts {
@@ -1277,6 +1311,7 @@ fn discover_log_artifacts(
                 FileArtifact {
                     source_path: path,
                     archive_path,
+                    bytes_limit: None,
                 },
                 modified,
             ));
@@ -1321,6 +1356,7 @@ fn discover_persisted_artifacts(
             discovered.push(FileArtifact {
                 source_path,
                 archive_path: format!("persisted/{file_name}"),
+                bytes_limit: None,
             });
         } else {
             diagnostics
@@ -1338,6 +1374,7 @@ fn discover_persisted_artifacts(
             discovered.push(FileArtifact {
                 source_path,
                 archive_path: format!("persisted/{file_name}"),
+                bytes_limit: None,
             });
         }
     }
@@ -1348,6 +1385,7 @@ fn discover_persisted_artifacts(
             discovered.push(FileArtifact {
                 source_path,
                 archive_path: format!("persisted/{file_name}"),
+                bytes_limit: None,
             });
         }
     }
@@ -1358,6 +1396,7 @@ fn discover_persisted_artifacts(
             discovered.push(FileArtifact {
                 source_path,
                 archive_path: format!("persisted/{file_name}"),
+                bytes_limit: None,
             });
         }
     }
@@ -1383,6 +1422,7 @@ fn discover_persisted_artifacts(
                     crate::boot_diagnostics::PSTORE_DIR,
                     file_name
                 ),
+                bytes_limit: None,
             });
         }
     }
@@ -1443,6 +1483,7 @@ fn discover_persisted_artifacts(
         discovered.push(FileArtifact {
             source_path: path,
             archive_path: format!("persisted/{file_name}"),
+            bytes_limit: None,
         });
     }
 
@@ -1454,6 +1495,130 @@ fn discover_persisted_artifacts(
 
     discovered.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
     discovered
+}
+
+fn discover_host_recorder_artifacts(
+    runtime: &RuntimeSnapshot,
+    diagnostics: &mut BundleDiagnostics,
+) -> Vec<FileArtifact> {
+    if runtime.platform_context != "rpiz" || runtime.data_dir.is_empty() {
+        return Vec::new();
+    }
+    let root = PathBuf::from(&runtime.data_dir).join(rhythm_host_recorder::ROOT_RELATIVE_PATH);
+    let mut discovered = Vec::new();
+
+    for file_name in [
+        rhythm_host_recorder::ring::EARLY_BOOT_FILE,
+        rhythm_host_recorder::ring::PREVIOUS_EARLY_BOOT_FILE,
+    ] {
+        push_host_recorder_artifact(
+            &root,
+            Path::new(file_name),
+            HOST_RECORDER_METADATA_BYTES_LIMIT,
+            diagnostics,
+            &mut discovered,
+        );
+    }
+
+    for boot_dir in [
+        rhythm_host_recorder::ring::CURRENT_DIR,
+        rhythm_host_recorder::ring::PREVIOUS_DIR,
+    ] {
+        push_host_recorder_artifact(
+            &root,
+            &Path::new(boot_dir).join("manifest.json"),
+            HOST_RECORDER_METADATA_BYTES_LIMIT,
+            diagnostics,
+            &mut discovered,
+        );
+        let dir = root.join(boot_dir);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut names = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_string();
+                (name.starts_with("segment-") && name.ends_with(".ndjson")).then_some(name)
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        for name in names.into_iter().take(HOST_RECORDER_SEGMENT_FILE_LIMIT) {
+            push_host_recorder_artifact(
+                &root,
+                &Path::new(boot_dir).join(name),
+                HOST_RECORDER_SEGMENT_BYTES_LIMIT,
+                diagnostics,
+                &mut discovered,
+            );
+        }
+    }
+
+    for pstore_dir in [
+        rhythm_host_recorder::ring::PSTORE_CURRENT_DIR,
+        rhythm_host_recorder::ring::PSTORE_PREVIOUS_DIR,
+    ] {
+        let dir = root.join(pstore_dir);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut names = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        names.sort();
+        for name in names.into_iter().take(HOST_RECORDER_PSTORE_FILE_LIMIT) {
+            push_host_recorder_artifact(
+                &root,
+                &Path::new(pstore_dir).join(name),
+                HOST_RECORDER_PSTORE_BYTES_LIMIT,
+                diagnostics,
+                &mut discovered,
+            );
+        }
+    }
+
+    discovered.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
+    discovered
+}
+
+fn push_host_recorder_artifact(
+    root: &Path,
+    relative: &Path,
+    bytes_limit: u64,
+    diagnostics: &mut BundleDiagnostics,
+    discovered: &mut Vec<FileArtifact>,
+) {
+    let source_path = root.join(relative);
+    let metadata = match fs::symlink_metadata(&source_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            diagnostics.record_file_error(
+                "host_recorder_metadata",
+                source_path.display().to_string(),
+                error,
+            );
+            return;
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        diagnostics.add_warning(format!(
+            "Skipped non-regular host recorder artifact {}.",
+            source_path.display()
+        ));
+        return;
+    }
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    discovered.push(FileArtifact {
+        source_path,
+        archive_path: format!(
+            "persisted/{}/{}",
+            rhythm_host_recorder::ROOT_RELATIVE_PATH,
+            relative
+        ),
+        bytes_limit: Some(bytes_limit),
+    });
 }
 
 fn build_matter_controller_debug_json(
@@ -1795,14 +1960,41 @@ fn capture_artifact(
     artifact: &FileArtifact,
     diagnostics: &mut BundleDiagnostics,
 ) -> Option<(CapturedFileEntry, Vec<u8>)> {
-    let bytes = match fs::read(&artifact.source_path) {
-        Ok(bytes) => bytes,
+    let file = match fs::File::open(&artifact.source_path) {
+        Ok(file) => file,
         Err(err) => {
-            diagnostics.record_file_error("read", artifact.source_path.display().to_string(), &err);
-            diagnostics.add_warning(format!("Failed to read {}", artifact.source_path.display()));
+            diagnostics.record_file_error("open", artifact.source_path.display().to_string(), &err);
+            diagnostics.add_warning(format!("Failed to open {}", artifact.source_path.display()));
             return None;
         }
     };
+    let source_bytes = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(err) => {
+            diagnostics.record_file_error(
+                "metadata",
+                artifact.source_path.display().to_string(),
+                &err,
+            );
+            return None;
+        }
+    };
+    let limit = artifact.bytes_limit.unwrap_or(source_bytes);
+    let mut bytes = Vec::with_capacity(limit.min(source_bytes).min(1024 * 1024) as usize);
+    if let Err(err) = file.take(limit.saturating_add(1)).read_to_end(&mut bytes) {
+        diagnostics.record_file_error("read", artifact.source_path.display().to_string(), &err);
+        diagnostics.add_warning(format!("Failed to read {}", artifact.source_path.display()));
+        return None;
+    }
+    let truncated = bytes.len() as u64 > limit;
+    if truncated {
+        bytes.truncate(limit as usize);
+        diagnostics.add_warning(format!(
+            "Truncated {} to its {} byte bundle limit.",
+            artifact.source_path.display(),
+            limit
+        ));
+    }
 
     let modified_at = path_modified_rfc3339(&artifact.source_path, diagnostics);
     Some((
@@ -1810,8 +2002,8 @@ fn capture_artifact(
             archive_path: artifact.archive_path.clone(),
             source_path: artifact.source_path.display().to_string(),
             bytes: bytes.len(),
-            source_bytes: None,
-            truncated: None,
+            source_bytes: truncated.then_some(source_bytes),
+            truncated: truncated.then_some(true),
             modified_at,
         },
         bytes,
@@ -3432,6 +3624,7 @@ mod tests {
         let artifact = FileArtifact {
             source_path: file.clone(),
             archive_path: "persisted/file.json".to_string(),
+            bytes_limit: None,
         };
         let (captured, bytes) = capture_artifact(&artifact, &mut diagnostics).unwrap();
         assert_eq!(captured.archive_path, "persisted/file.json");
@@ -3441,12 +3634,13 @@ mod tests {
         let missing_artifact = FileArtifact {
             source_path: root.join("gone.json"),
             archive_path: "persisted/gone.json".to_string(),
+            bytes_limit: None,
         };
         assert!(capture_artifact(&missing_artifact, &mut diagnostics).is_none());
         assert!(diagnostics
             .warnings
             .iter()
-            .any(|warning| warning.contains("Failed to read")));
+            .any(|warning| warning.contains("Failed to open")));
 
         let process_json =
             build_process_resources_json(generated_at, "bad\0path", &mut diagnostics).unwrap();
@@ -3457,6 +3651,52 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("interior NUL byte")));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_recorder_bundle_discovery_is_allowlisted_and_byte_bounded() {
+        let root = unique_test_dir("host-recorder-artifacts");
+        let recorder = root
+            .join(rhythm_host_recorder::ROOT_RELATIVE_PATH)
+            .join(rhythm_host_recorder::CURRENT_DIR);
+        fs::create_dir_all(&recorder).unwrap();
+        fs::write(recorder.join("manifest.json"), b"{}").unwrap();
+        fs::write(
+            recorder.join("segment-000.ndjson"),
+            vec![b'x'; HOST_RECORDER_SEGMENT_BYTES_LIMIT as usize + 1024],
+        )
+        .unwrap();
+        fs::write(
+            root.join(rhythm_host_recorder::ROOT_RELATIVE_PATH)
+                .join("credentials.txt"),
+            b"secret",
+        )
+        .unwrap();
+        let runtime = RuntimeSnapshot {
+            firmware_version: "test".to_string(),
+            platform_type: "appliance".to_string(),
+            platform_context: "rpiz".to_string(),
+            data_dir: root.display().to_string(),
+        };
+        let mut diagnostics =
+            BundleDiagnostics::new(Utc::now(), root.display().to_string(), Vec::new());
+        let artifacts = discover_host_recorder_artifacts(&runtime, &mut diagnostics);
+        assert_eq!(artifacts.len(), 2);
+        assert!(!artifacts
+            .iter()
+            .any(|artifact| artifact.archive_path.contains("credentials")));
+        let segment = artifacts
+            .iter()
+            .find(|artifact| artifact.archive_path.ends_with("segment-000.ndjson"))
+            .unwrap();
+        let (captured, bytes) = capture_artifact(segment, &mut diagnostics).unwrap();
+        assert_eq!(bytes.len(), HOST_RECORDER_SEGMENT_BYTES_LIMIT as usize);
+        assert_eq!(captured.truncated, Some(true));
+        assert!(diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("byte bundle limit")));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3577,6 +3817,7 @@ mod tests {
             &[FileArtifact {
                 source_path: log,
                 archive_path: "logs/rhythm-server.log".to_string(),
+                bytes_limit: None,
             }],
             generated_at,
             &mut diagnostics,
@@ -3630,6 +3871,7 @@ mod tests {
             &[FileArtifact {
                 source_path: log,
                 archive_path: "logs/rhythm-server.log".to_string(),
+                bytes_limit: None,
             }],
             generated_at,
             &mut diagnostics,
@@ -3738,6 +3980,26 @@ mod tests {
             b"prior-kernel-panic",
         )
         .unwrap();
+        let mut host_recorder = rhythm_host_recorder::RingWriter::open(
+            &data_dir,
+            "test-boot-id",
+            rhythm_host_recorder::RingConfig::default(),
+        )
+        .unwrap();
+        host_recorder
+            .append(
+                "test-boot-id",
+                12_000,
+                "summary",
+                &serde_json::json!({"watchdog":{"status":"ok","value":{"state":"active"}}}),
+                true,
+            )
+            .unwrap();
+        fs::write(
+            rhythm_host_recorder::recorder_root(&data_dir).join("secret.env"),
+            b"TOKEN=must-not-ship",
+        )
+        .unwrap();
 
         let state: SharedState =
             std::sync::Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
@@ -3842,6 +4104,12 @@ mod tests {
                 .map(Vec::as_slice),
             Some(b"prior-kernel-panic".as_slice())
         );
+        assert!(files
+            .contains_key("persisted/boot-diagnostics/host-flight-recorder/current/manifest.json"));
+        assert!(files.contains_key(
+            "persisted/boot-diagnostics/host-flight-recorder/current/segment-000.ndjson"
+        ));
+        assert!(!files.contains_key("persisted/boot-diagnostics/host-flight-recorder/secret.env"));
         assert!(!files.contains_key("persisted/cloudflared/connector_token"));
         assert!(files.contains_key("state.json"));
         assert!(files.contains_key("profile_bundle.json"));
@@ -3852,6 +4120,7 @@ mod tests {
         assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("matter_controller.json"));
+        assert!(files.contains_key("host_flight_recorder_summary.json"));
         assert!(files.contains_key("bundle_diagnostics.json"));
         assert!(files.contains_key("manifest.json"));
 
@@ -3864,7 +4133,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            10
+            12
         );
         assert!(!manifest["missing_persisted_files"]
             .as_array()
@@ -3886,6 +4155,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value["archive_path"] == "matter_controller.json"));
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["archive_path"] == "host_flight_recorder_summary.json"));
         assert!(manifest["generated_files"]
             .as_array()
             .unwrap()

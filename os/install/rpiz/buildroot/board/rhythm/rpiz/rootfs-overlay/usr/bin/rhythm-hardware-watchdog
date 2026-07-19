@@ -7,6 +7,18 @@
 WATCHDOG_DEVICE="${RHYTHM_HARDWARE_WATCHDOG_DEVICE:-/dev/watchdog}"
 HEARTBEAT_SECS="${RHYTHM_HARDWARE_WATCHDOG_INTERVAL_SECS:-5}"
 ALLOW_REGULAR="${RHYTHM_HARDWARE_WATCHDOG_ALLOW_REGULAR:-0}"
+HEARTBEAT_FILE="${RHYTHM_HARDWARE_WATCHDOG_HEARTBEAT:-/run/rhythm-hardware-watchdog-heartbeat.json}"
+
+write_heartbeat() {
+    boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    monotonic_ms="$(awk '{printf "%.0f", $1 * 1000}' /proc/uptime 2>/dev/null || true)"
+    wall_time="$(date -Iseconds 2>/dev/null || date)"
+    heartbeat_tmp="${HEARTBEAT_FILE}.tmp.$$"
+    if printf '{"schema_version":1,"kind":"hardware_watchdog_feed","pid":%s,"boot_id":"%s","monotonic_ms":%s,"wall_time":"%s"}\n' \
+        "$$" "$boot_id" "${monotonic_ms:-0}" "$wall_time" >"$heartbeat_tmp" 2>/dev/null; then
+        mv -f "$heartbeat_tmp" "$HEARTBEAT_FILE" 2>/dev/null || rm -f "$heartbeat_tmp"
+    fi
+}
 
 watchdog_available() {
     [ -c "$WATCHDOG_DEVICE" ] || {
@@ -36,6 +48,7 @@ trap disarm_watchdog HUP INT TERM
 while :; do
     # Any write is a keepalive under the Linux watchdog userspace contract.
     printf '\0' >&3 || exit 1
+    write_heartbeat
     sleep "$HEARTBEAT_SECS" &
     wait "$!"
 done

@@ -255,10 +255,15 @@ for target in $TARGETS; do
     server_bin="$target_dir/rhythm-server"
     cli_bin="$target_dir/rhythm-cli"
     chipd_bin="$target_dir/rhythm-chipd"
+    host_recorder_bin="$target_dir/rhythm-host-recorder"
 
     if [ ! -f "$server_bin" ]; then
         echo "Skipping $target: missing $server_bin"
         continue
+    fi
+    if [ "$target" = "rpiz" ] && [ ! -f "$host_recorder_bin" ]; then
+        echo "Error: missing required rpiz host recorder: $host_recorder_bin" >&2
+        exit 1
     fi
 
     ota_name="rhythm-server-$target"
@@ -288,6 +293,7 @@ for target in $TARGETS; do
         archive_members=("rhythm-server")
         [ -f "$cli_bin" ] && archive_members+=("rhythm-cli")
         [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
+        [ -f "$host_recorder_bin" ] && archive_members+=("rhythm-host-recorder")
         echo "  ${archive_members[*]} -> $archive_path"
         if [ "${#image_candidates[@]}" -gt 0 ]; then
             for image_name in "${image_candidates[@]}"; do
@@ -303,6 +309,7 @@ for target in $TARGETS; do
     archive_members=("rhythm-server")
     [ -f "$cli_bin" ] && archive_members+=("rhythm-cli")
     [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
+    [ -f "$host_recorder_bin" ] && archive_members+=("rhythm-host-recorder")
     tar -czf "$archive_path" -C "$target_dir" "${archive_members[@]}"
 
     archive_sha="$(sha256_file "$archive_path")"
@@ -311,6 +318,7 @@ for target in $TARGETS; do
     install_entries=()
     install_entries+=('{"archive_path":"rhythm-server","slot":"self","required":true}')
     [ -f "$chipd_bin" ] && install_entries+=('{"archive_path":"rhythm-chipd","slot":"sibling","path":"rhythm-chipd","required":true}')
+    [ -f "$host_recorder_bin" ] && install_entries+=('{"archive_path":"rhythm-host-recorder","slot":"sibling","path":"rhythm-host-recorder","required":true}')
     [ -f "$cli_bin" ] && install_entries+=('{"archive_path":"rhythm-cli","slot":"sibling","path":"rhythm-cli","required":false}')
     install_json=""
     if [ "${#install_entries[@]}" -gt 0 ]; then

@@ -8,6 +8,7 @@ WATCHDOG="$PROJECT_ROOT/os/install/rpiz/buildroot/board/rhythm/rpiz/rootfs-overl
 INITTAB="$PROJECT_ROOT/os/install/rpiz/buildroot/board/rhythm/rpiz/rootfs-overlay/etc/inittab"
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rhythm-watchdog-test.XXXXXX")
 SINK="$TMP_DIR/watchdog"
+HEARTBEAT="$TMP_DIR/watchdog-heartbeat.json"
 PID=""
 
 cleanup() {
@@ -27,17 +28,23 @@ grep -Fq '::respawn:/usr/bin/rhythm-hardware-watchdog' "$INITTAB"
 RHYTHM_HARDWARE_WATCHDOG_DEVICE="$SINK" \
 RHYTHM_HARDWARE_WATCHDOG_INTERVAL_SECS=0.05 \
 RHYTHM_HARDWARE_WATCHDOG_ALLOW_REGULAR=1 \
+RHYTHM_HARDWARE_WATCHDOG_HEARTBEAT="$HEARTBEAT" \
     "$WATCHDOG" &
 PID=$!
 
 attempt=0
-while [ ! -s "$SINK" ] && [ "$attempt" -lt 100 ]; do
+while { [ ! -s "$SINK" ] || [ ! -s "$HEARTBEAT" ]; } && [ "$attempt" -lt 100 ]; do
     sleep 0.01
     attempt=$((attempt + 1))
 done
 
 if [ ! -s "$SINK" ]; then
     echo "watchdog did not emit a keepalive" >&2
+    exit 1
+fi
+
+if [ ! -s "$HEARTBEAT" ] || ! grep -Fq '"kind":"hardware_watchdog_feed"' "$HEARTBEAT"; then
+    echo "watchdog did not publish an independent heartbeat" >&2
     exit 1
 fi
 

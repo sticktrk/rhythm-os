@@ -17,6 +17,7 @@ path = "src/cli.rs"
 rhythm-ha = { path = "../../integrations/rhythm-ha" }
 rhythm-hue = { path = "../../integrations/rhythm-hue" }
 rhythm-matter = { path = "../../integrations/rhythm-matter" }
+rhythm-host-recorder = { path = "../rhythm-host-recorder" }
 rhythm-os = { path = "../../core/rhythm-os" }
 rhythm-os-runtime-modules = { path = "../../../../runtime/rust/rhythm-os-runtime-modules" }
 
