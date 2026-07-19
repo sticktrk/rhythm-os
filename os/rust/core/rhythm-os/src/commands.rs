@@ -5559,9 +5559,41 @@ fn send_work_item_with_pending(
     }
 }
 
+/// Persisted user-managed rooms that definitively have no physical target.
+///
+/// Missing routes alone are not enough to skip work: an integration/controller
+/// failure must remain visible, and empty bootstrap rooms may still be backed by
+/// a legacy runtime route. A user-customized room with neither device membership
+/// nor a source-room binding is a semantic settings container with nothing to
+/// dispatch.
+#[derive(Default)]
+struct EmptyTopologyRooms {
+    room_ids: HashSet<String>,
+}
+
+impl EmptyTopologyRooms {
+    fn from_state(state: &SharedState) -> Self {
+        let Ok(s) = state.lock() else {
+            return Self::default();
+        };
+        let room_ids = s
+            .topology
+            .rooms()
+            .filter(|room| room.user_customized && !room.has_devices() && !room.has_bindings())
+            .map(|room| room.id.clone())
+            .collect();
+        Self { room_ids }
+    }
+
+    fn contains(&self, node_id: &str) -> bool {
+        self.room_ids.contains(node_id)
+    }
+}
+
 fn apply_room_mode_defaults(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
+    empty_topology_rooms: &EmptyTopologyRooms,
     ctx: ModeDefaultApplyContext<'_>,
     snapshots: &[rhythm_core::RoomSnapshot],
 ) -> bool {
@@ -5586,6 +5618,7 @@ fn apply_room_mode_defaults(
     let mut changed_room_ids = Vec::new();
     let mut non_hard_off_changed_room_ids = Vec::new();
     let mut hard_off_rooms = Vec::new();
+    let mut empty_hard_off_room_ids = Vec::new();
     let mut lights_on_updates = Vec::new();
     let mut missing_rooms = 0usize;
 
@@ -5690,7 +5723,11 @@ fn apply_room_mode_defaults(
                         )
                     })
                     .filter(|ms| *ms > 0);
-                hard_off_rooms.push((snap.id.clone(), transition_ms));
+                if empty_topology_rooms.contains(&snap.id) {
+                    empty_hard_off_room_ids.push(snap.id.clone());
+                } else {
+                    hard_off_rooms.push((snap.id.clone(), transition_ms));
+                }
             }
             RoomModeState::Wake | RoomModeState::Warning => {}
         }
@@ -5718,6 +5755,18 @@ fn apply_room_mode_defaults(
     // until that worker finally fires.
     for room_id in &non_hard_off_changed_room_ids {
         emit_node_state_event_after_apply(state, runtime, room_id);
+    }
+
+    for room_id in &empty_hard_off_room_ids {
+        queue_motion_timer_clear(state, room_id);
+        emit_node_state_event_after_apply(state, runtime, room_id);
+    }
+    if !empty_hard_off_room_ids.is_empty() {
+        debug!(
+            target: "cmd",
+            "active_mode_apply: skipped physical hard-off for {} empty topology rooms",
+            empty_hard_off_room_ids.len()
+        );
     }
 
     if !hard_off_rooms.is_empty() {
@@ -6868,6 +6917,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     };
 
     let transition_started_at = current_local_datetime(utc_offset);
+    let empty_topology_rooms = EmptyTopologyRooms::from_state(state);
     let lighting = RoomLightingContext {
         light_profile_configs: &light_profile_configs,
         mode_configs: &mode_configs,
@@ -6882,6 +6932,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     let room_defaults_changed = apply_room_mode_defaults(
         state,
         &runtime,
+        &empty_topology_rooms,
         ModeDefaultApplyContext {
             lighting,
             transition: transition.as_ref(),
@@ -22232,6 +22283,47 @@ mod tests {
             state.lock().unwrap().pending_motion_clear,
             vec!["r1".to_string()]
         );
+    }
+
+    #[test]
+    fn mode_change_skips_physical_hard_off_for_empty_topology_room() {
+        let (state, runtime) = setup_state(vec![make_snapshot("empty-room", false, false)]);
+        add_topology_room(&state, "empty-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.get_mut("empty-room").unwrap().user_customized = true;
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "empty-room", true);
+            s.motion_snapshots.insert(
+                "empty-room".into(),
+                MotionSnapshot {
+                    motion_active: false,
+                    motion_owned: true,
+                    remaining_secs: Some(180),
+                    timeout_secs: 300,
+                    warning_active: false,
+                },
+            );
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "empty-room".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        assert!(runtime.lights_off_calls().is_empty());
+        assert!(runtime.engine_room_snapshot("empty-room").unwrap().hard_off);
+        let s = state.lock().unwrap();
+        assert_eq!(observed_lights_on(&s, "empty-room"), Some(false));
+        assert_eq!(s.pending_motion_clear, vec!["empty-room".to_string()]);
     }
 
     #[test]
