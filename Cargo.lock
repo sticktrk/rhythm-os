@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-host-recorder"
-version = "0.6.524-beta"
+version = "0.6.525-beta"
 dependencies = [
  "chrono",
  "libc",
