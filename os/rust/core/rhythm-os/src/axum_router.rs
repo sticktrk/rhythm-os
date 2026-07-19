@@ -1394,6 +1394,13 @@ mod tests {
         app.oneshot(req).await.unwrap().status()
     }
 
+    fn light_profile_config_hash_cases() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../../../testdata/light-profile-config-hash-cases.json"
+        ))
+        .expect("light profile config hash fixtures should be valid JSON")
+    }
+
     fn room_state_json<'a>(body: &'a serde_json::Value, room_id: &str) -> &'a serde_json::Value {
         body["nodes"]
             .as_array()
@@ -1587,6 +1594,87 @@ mod tests {
                 .max_brightness,
             original_max_brightness
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_put_config_accepts_hashes_from_get_for_every_numeric_shape() {
+        for case in light_profile_config_hash_cases()["cases"]
+            .as_array()
+            .expect("fixture cases should be an array")
+        {
+            let case_name = case["name"].as_str().expect("case should have a name");
+            let config: LightProfileConfig = serde_json::from_value(case["config"].clone())
+                .unwrap_or_else(|error| panic!("invalid config fixture {case_name}: {error}"));
+            let expected_hash = case["sha256"]
+                .as_str()
+                .expect("case should have an expected hash");
+            let state = test_state_with_runtime(
+                Arc::new(ThreadRecordingRuntime {
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                    snapshots: vec![],
+                    current_hour: 12.0,
+                }),
+                &[],
+            );
+            state
+                .lock()
+                .unwrap()
+                .set_light_profile_config(config.clone());
+            let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+            let app = api_routes().with_state(state.clone());
+
+            let get_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(HttpMethod::GET)
+                        .uri("/api/config?id=rhythm")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(get_response.status(), StatusCode::OK, "{case_name}");
+            let get_body: serde_json::Value = serde_json::from_slice(
+                &to_bytes(get_response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(get_body, case["config"], "{case_name}");
+
+            let mut candidate = config;
+            candidate.max_brightness = candidate.max_brightness.saturating_sub(1);
+            let put_response = app
+                .oneshot(
+                    Request::builder()
+                        .method(HttpMethod::PUT)
+                        .uri("/api/config?id=rhythm")
+                        .header("content-type", "application/json")
+                        .header("x-expected-server-instance-id", server_instance_id)
+                        .header("x-expected-resource-sha256", expected_hash)
+                        .body(Body::from(serde_json::to_vec(&candidate).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                put_response.status(),
+                StatusCode::NO_CONTENT,
+                "guarded write rejected GET hash for {case_name}"
+            );
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .light_profile_config(rhythm_core::RHYTHM_PROFILE_ID)
+                    .unwrap()
+                    .max_brightness,
+                candidate.max_brightness,
+                "{case_name}"
+            );
+        }
     }
 
     #[tokio::test]

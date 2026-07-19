@@ -274,6 +274,7 @@ impl StoredLightProfiles {
             let mut normalized = profile.clone();
             normalize_legacy_persisted_builtin_state_profile(&mut normalized);
             rhythm_core::normalize_builtin_state_profile_config(&mut normalized);
+            normalized.normalize_float_precision();
             profiles.insert(normalized.id.clone(), normalized);
         }
         runtime_config.solar_noon_hour = self.solar_noon_hour;
