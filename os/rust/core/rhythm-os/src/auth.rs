@@ -592,7 +592,15 @@ pub async fn require_api_auth_middleware(
         auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
         req.extensions_mut().insert(auth_info);
         if verified_token.role == ApiTokenRole::Support {
-            write_support_audit_line(&state, &verified_token.id, req.method(), req.uri().path());
+            write_support_audit_line(
+                &state,
+                &verified_token.id,
+                req.method(),
+                req.uri().path(),
+                req.headers()
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok()),
+            );
             if let Some(reason) = support_token_forbidden_reason(req.method(), req.uri()) {
                 return forbidden(reason);
             }
@@ -795,7 +803,13 @@ fn query_flag_truthy(query: Option<&str>, key: &str) -> bool {
     })
 }
 
-fn write_support_audit_line(state: &SharedState, token_id: &str, method: &Method, path: &str) {
+fn write_support_audit_line(
+    state: &SharedState,
+    token_id: &str,
+    method: &Method,
+    path: &str,
+    request_id: Option<&str>,
+) {
     let data_dir = state
         .lock()
         .ok()
@@ -815,12 +829,28 @@ fn write_support_audit_line(state: &SharedState, token_id: &str, method: &Method
     };
     let _ = writeln!(
         file,
-        "{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}",
         current_epoch_ms(),
         token_id,
         method,
-        path
+        path,
+        sanitized_support_request_id(request_id),
     );
+}
+
+fn sanitized_support_request_id(request_id: Option<&str>) -> &str {
+    let Some(request_id) = request_id.map(str::trim) else {
+        return "-";
+    };
+    if (8..=128).contains(&request_id.len())
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+    {
+        request_id
+    } else {
+        "-"
+    }
 }
 
 fn generate_raw_token(prefix: &str) -> String {
@@ -1438,6 +1468,8 @@ mod tests {
                     AUTHORIZATION,
                     format!("Bearer {}", issued.token).parse().unwrap(),
                 );
+                req.headers_mut()
+                    .insert("x-request-id", "customer-tuning:test-1234".parse().unwrap());
                 req
             })
             .await
@@ -1447,7 +1479,19 @@ mod tests {
         let audit = fs::read_to_string(data_dir.join(SUPPORT_AUDIT_FILE)).unwrap();
         assert!(audit.contains(&issued.id));
         assert!(audit.contains("\tGET\t/api/state"));
+        assert!(audit.contains("\tcustomer-tuning:test-1234"));
         let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn support_audit_request_ids_fail_closed_to_a_placeholder() {
+        assert_eq!(sanitized_support_request_id(None), "-");
+        assert_eq!(sanitized_support_request_id(Some("short")), "-");
+        assert_eq!(sanitized_support_request_id(Some("unsafe request id")), "-");
+        assert_eq!(
+            sanitized_support_request_id(Some("customer-tuning:abc_123")),
+            "customer-tuning:abc_123"
+        );
     }
 
     #[tokio::test]

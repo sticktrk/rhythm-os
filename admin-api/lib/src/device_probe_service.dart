@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmDeviceType, RhythmDiagnosticsApi, RhythmHello;
@@ -371,6 +372,7 @@ class DeviceProbeService {
 
     final failures = <String>[];
     var sawAuthRequired = false;
+    var sawPreconditionFailure = false;
     for (final candidate in candidates) {
       final baseUrl = candidate.endpoint.baseUrl;
       final token = await _authTokenForEndpoint(session, hub, baseUrl);
@@ -400,6 +402,7 @@ class DeviceProbeService {
       }
       if (result.success != null) return result.success!;
       if (result.authRequired) sawAuthRequired = true;
+      if (result.preconditionFailed) sawPreconditionFailure = true;
       if (result.message != null) {
         failures.add('${candidate.route} $baseUrl: ${result.message}');
       }
@@ -409,6 +412,16 @@ class DeviceProbeService {
       throw AdminApiException(
         403,
         _operationAuthRequiredMessage(hub, request.path),
+      );
+    }
+
+    if (sawPreconditionFailure) {
+      throw AdminApiException(
+        409,
+        failures.isEmpty
+            ? 'Device mutation preconditions no longer match.'
+            : 'Device mutation preconditions no longer match. '
+                '${failures.join(' ')}',
       );
     }
 
@@ -496,6 +509,54 @@ class DeviceProbeService {
   }) async {
     final baseUrl = candidate.endpoint.baseUrl;
     try {
+      String? verifiedServerInstanceId;
+      String? preconditionBodySha256;
+      if (request.isMutation) {
+        final state = await _fetchState(baseUrl, authToken);
+        if (state.authRequired) {
+          return const _ProxyJsonEndpointResult.authRequired();
+        }
+        if (state.error != null) {
+          return _ProxyJsonEndpointResult.error(
+            'mutation identity preflight failed: ${state.error}',
+          );
+        }
+        verifiedServerInstanceId = cleanString(state.hello?.serverInstanceId);
+        if (verifiedServerInstanceId == null ||
+            verifiedServerInstanceId != request.expectedServerInstanceId) {
+          return _ProxyJsonEndpointResult.preconditionFailed(
+            'live server identity did not match expectedServerInstanceId.',
+          );
+        }
+
+        final resource = request.resourcePrecondition;
+        if (resource != null) {
+          final current = await _fetchJsonFromEndpoint(
+            hub: hub,
+            candidate: candidate,
+            path: resource.path,
+            authToken: authToken,
+            operation: 'mutation resource preflight',
+            queryParameters: resource.queryParameters,
+          );
+          if (current.authRequired) {
+            return const _ProxyJsonEndpointResult.authRequired();
+          }
+          if (current.success == null) {
+            return _ProxyJsonEndpointResult.error(
+              current.message ?? 'mutation resource preflight failed.',
+            );
+          }
+          preconditionBodySha256 =
+              await _canonicalJsonSha256(current.success!.body);
+          if (preconditionBodySha256 != resource.bodySha256) {
+            return _ProxyJsonEndpointResult.preconditionFailed(
+              'live resource hash did not match the reviewed proposal.',
+            );
+          }
+        }
+      }
+
       final uri = _uriWithAppendedPath(
         baseUrl,
         request.path,
@@ -506,6 +567,7 @@ class DeviceProbeService {
         ..headers.addAll({
           'Accept': 'application/json',
           if (authToken != null) 'Authorization': 'Bearer $authToken',
+          if (request.requestId != null) 'X-Request-Id': request.requestId!,
         });
       if (request.method != 'GET' && request.body != null) {
         outbound.headers['Content-Type'] = 'application/json';
@@ -549,6 +611,11 @@ class DeviceProbeService {
           tokenAvailable: authToken != null,
           hasEncryptedToken: hub.hasEncryptedToken,
           body: decoded,
+          requestId: request.requestId,
+          verifiedServerInstanceId: verifiedServerInstanceId,
+          bodySha256:
+              decoded == null ? null : await _canonicalJsonSha256(decoded),
+          preconditionBodySha256: preconditionBodySha256,
         ),
       );
     } on TimeoutException {
@@ -1187,6 +1254,7 @@ class _ProxyJsonEndpointResult {
     this.success,
     this.message,
     this.authRequired = false,
+    this.preconditionFailed = false,
   });
 
   const _ProxyJsonEndpointResult.success(DeviceAdminProxyResultDto success)
@@ -1198,9 +1266,34 @@ class _ProxyJsonEndpointResult {
   const _ProxyJsonEndpointResult.authRequired()
       : this._(authRequired: true, message: 'authentication required');
 
+  const _ProxyJsonEndpointResult.preconditionFailed(String message)
+      : this._(preconditionFailed: true, message: message);
+
   final DeviceAdminProxyResultDto? success;
   final String? message;
   final bool authRequired;
+  final bool preconditionFailed;
+}
+
+Future<String> _canonicalJsonSha256(Object? value) async {
+  final canonical = _canonicalJsonValue(value);
+  final digest = await Sha256().hash(utf8.encode(jsonEncode(canonical)));
+  return digest.bytes
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+}
+
+Object? _canonicalJsonValue(Object? value) {
+  if (value is Map) {
+    final keys = value.keys.map((key) => key.toString()).toList()..sort();
+    return <String, Object?>{
+      for (final key in keys) key: _canonicalJsonValue(value[key]),
+    };
+  }
+  if (value is List) {
+    return value.map(_canonicalJsonValue).toList(growable: false);
+  }
+  return value;
 }
 
 class _JsonEndpointSuccess {

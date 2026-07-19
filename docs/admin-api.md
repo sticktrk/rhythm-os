@@ -53,3 +53,31 @@ and requires `SUPABASE_SERVICE_ROLE_KEY`. It removes only the matching Rhythm
 `server` hub plus its hub-scoped cascade records. It does not delete the Home or
 send a reset command to the physical Light Box. A customer app that still has
 the hub locally may recreate the cloud record during a later sync.
+
+## Guarded device mutations
+
+`POST /api/hubs/:hubId/device-admin/proxy` keeps `GET` and device-sampled
+`POST /api/curve` requests read-only. Every other proxied method is a live
+customer-device mutation and therefore requires:
+
+- an enabled staff account with the `admin` role;
+- a safe 8-128 character `requestId`;
+- `expectedServerInstanceId`, verified from `/api/state` on the same endpoint
+  immediately before dispatch; and
+- for `PUT /api/config`, a `resourcePrecondition` with the same path/query and
+  canonical SHA-256 body hash from a prior proxy GET.
+
+The API returns HTTP 428 for missing guards and HTTP 409 when identity or config
+freshness no longer matches. Successful mutation responses include the request
+ID, verified server identity, response hash, and precondition hash. The request
+ID is forwarded as `X-Request-Id` so the appliance support audit can be matched
+to the proposal/apply receipt.
+
+Use the `rhythm-customer-lighting-tuning` skill for remote curve work. It
+defaults to proposal-only, stores ignored before/candidate/after evidence and a
+human-readable handoff, and applies only after separate explicit authorization.
+
+Deploy the updated admin UI before the hardened admin API. The updated UI fails
+closed on config writes when an older API does not return the required body
+hash; older admin UIs receive explicit precondition errors from the hardened
+API rather than issuing an unguarded mutation.

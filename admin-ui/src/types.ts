@@ -210,6 +210,13 @@ export type DeviceAdminProxyRequest = {
   query?: Record<string, string>;
   body?: unknown;
   timeoutSeconds?: number;
+  requestId?: string;
+  expectedServerInstanceId?: string;
+  resourcePrecondition?: {
+    path: string;
+    query?: Record<string, string>;
+    bodySha256: string;
+  };
 };
 
 export type DeviceAdminProxyResponse = {
@@ -223,6 +230,10 @@ export type DeviceAdminProxyResponse = {
   completedAt: string;
   tokenAvailable: boolean;
   hasEncryptedToken: boolean;
+  requestId?: string;
+  verifiedServerInstanceId?: string;
+  bodySha256?: string;
+  preconditionBodySha256?: string;
   body: unknown;
 };
 

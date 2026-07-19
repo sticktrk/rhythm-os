@@ -218,6 +218,13 @@ class AdminApiServer {
     final session = await _requireStaff(request);
     final body = await _readJsonObject(request, 'Device admin request');
     final proxyRequest = DeviceAdminProxyRequestDto.fromJson(body);
+    if (proxyRequest.isMutation && !session.staff.isAdmin) {
+      throw const AdminApiException(
+        403,
+        'An enabled Rhythm admin account is required for device mutations.',
+      );
+    }
+    proxyRequest.validateMutationGuards();
     final result = await _probes.proxyJson(
       session: session,
       hubId: hubId,

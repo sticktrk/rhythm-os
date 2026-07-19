@@ -285,6 +285,7 @@ void main() {
         expect(request.method, 'PUT');
         expect(request.url.queryParameters['source'], 'admin');
         expect(request.headers['Authorization'], 'Bearer legacy-token');
+        expect(request.headers['x-request-id'], 'customer-tuning:settings');
         expect(request.headers['content-type'], contains('application/json'));
         expect(
           jsonDecode((request as http.Request).body),
@@ -301,6 +302,7 @@ void main() {
         deviceRequests.add(request);
         expect(request.method, 'PATCH');
         expect(request.headers['Authorization'], 'Bearer legacy-token');
+        expect(request.headers['x-request-id'], 'customer-tuning:future');
         expect(
           jsonDecode((request as http.Request).body),
           {
@@ -318,6 +320,7 @@ void main() {
         deviceRequests.add(request);
         expect(request.method, 'DELETE');
         expect(request.headers['Authorization'], 'Bearer legacy-token');
+        expect(request.headers['x-request-id'], 'customer-tuning:delete');
         return http.Response('', 204);
       }
 
@@ -549,6 +552,8 @@ void main() {
           'path': '/api/settings',
           'query': {'source': 'admin'},
           'body': {'auto_update': false},
+          'requestId': 'customer-tuning:settings',
+          'expectedServerInstanceId': 'srv-test',
         }),
       ),
     );
@@ -561,6 +566,8 @@ void main() {
     expect(adminProxy['path'], 'api/settings');
     expect(adminProxy['statusCode'], 200);
     expect(adminProxy['tokenAvailable'], isTrue);
+    expect(adminProxy['requestId'], 'customer-tuning:settings');
+    expect(adminProxy['verifiedServerInstanceId'], 'srv-test');
     expect(adminProxy['body'], {
       'auto_update': false,
       'power_save': false,
@@ -578,6 +585,8 @@ void main() {
         body: jsonEncode({
           'method': 'PATCH',
           'path': 'api/future-settings',
+          'requestId': 'customer-tuning:future',
+          'expectedServerInstanceId': 'srv-test',
           'body': {
             'zones': ['kitchen', 'den'],
           },
@@ -606,6 +615,8 @@ void main() {
         body: jsonEncode({
           'method': 'DELETE',
           'path': 'api/future-settings/kitchen',
+          'requestId': 'customer-tuning:delete',
+          'expectedServerInstanceId': 'srv-test',
         }),
       ),
     );
@@ -647,7 +658,259 @@ void main() {
     final ready = jsonDecode(await readyResponse.readAsString()) as Map;
     expect(ready['remoteDebugReady'], isTrue);
     expect(ready['missing'], isEmpty);
-    expect(deviceRequests, hasLength(14));
+    expect(deviceRequests, hasLength(17));
+  });
+
+  test('device admin mutations require admin role and mutation guards',
+      () async {
+    var deviceRequested = false;
+    final supportClient = _HandlerClient((request) async {
+      final authResponse = _staffAuthResponse(request, role: 'support');
+      if (authResponse != null) return authResponse;
+      if (request.url.host == 'device.test') deviceRequested = true;
+      return _supabaseResponse(request);
+    });
+    final supportServer = _testServer(client: supportClient);
+
+    final roleResponse = await supportServer.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/settings',
+          'requestId': 'customer-tuning:blocked-role',
+          'expectedServerInstanceId': 'srv-test',
+          'body': {'auto_update': false},
+        }),
+      ),
+    );
+    expect(roleResponse.statusCode, 403);
+    expect(deviceRequested, isFalse);
+
+    final adminClient = _HandlerClient((request) async {
+      if (request.url.host == 'device.test') deviceRequested = true;
+      return _supabaseResponse(request);
+    });
+    final adminServer = _testServer(client: adminClient);
+    final guardResponse = await adminServer.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/settings',
+          'body': {'auto_update': false},
+        }),
+      ),
+    );
+    expect(guardResponse.statusCode, 428);
+    expect(deviceRequested, isFalse);
+  });
+
+  test('device admin mutation stops when live server identity changes',
+      () async {
+    var mutationRequested = false;
+    final client = _HandlerClient((request) async {
+      if (request.url.host != 'device.test' &&
+          request.url.host != 'local.test') {
+        return _supabaseResponse(request);
+      }
+      if (request.url.path == '/api/state') {
+        return _jsonResponse({
+          'version': '0.6.522-beta',
+          'server_instance_id': 'srv-different',
+          'platform': 'appliance',
+          'context': 'rpiz',
+          'nodes': const [],
+          'hubs': const [],
+        });
+      }
+      if (request.method == 'PUT') mutationRequested = true;
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+
+    final response = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/settings',
+          'requestId': 'customer-tuning:identity-check',
+          'expectedServerInstanceId': 'srv-test',
+          'body': {'auto_update': false},
+        }),
+      ),
+    );
+
+    expect(response.statusCode, 409);
+    expect(mutationRequested, isFalse);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      contains('identity'),
+    );
+  });
+
+  test('device config mutation stops when the reviewed config is stale',
+      () async {
+    var mutationRequested = false;
+    final client = _HandlerClient((request) async {
+      if (request.url.host != 'device.test' &&
+          request.url.host != 'local.test') {
+        return _supabaseResponse(request);
+      }
+      if (request.url.path == '/api/state') {
+        return _jsonResponse({
+          'version': '0.6.522-beta',
+          'server_instance_id': 'srv-test',
+          'platform': 'appliance',
+          'context': 'rpiz',
+          'nodes': const [],
+          'hubs': const [],
+        });
+      }
+      if (request.url.path == '/api/config' && request.method == 'GET') {
+        return _jsonResponse({'id': 'rhythm', 'max_brightness': 71});
+      }
+      if (request.url.path == '/api/config' && request.method == 'PUT') {
+        mutationRequested = true;
+      }
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+
+    final response = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/config',
+          'query': {'id': 'rhythm'},
+          'requestId': 'customer-tuning:stale-config',
+          'expectedServerInstanceId': 'srv-test',
+          'resourcePrecondition': {
+            'path': 'api/config',
+            'query': {'id': 'rhythm'},
+            'bodySha256':
+                '0000000000000000000000000000000000000000000000000000000000000000',
+          },
+          'body': {'id': 'rhythm', 'max_brightness': 60},
+        }),
+      ),
+    );
+
+    expect(response.statusCode, 409);
+    expect(mutationRequested, isFalse);
+    expect(
+      (jsonDecode(await response.readAsString()) as Map)['error'],
+      contains('resource hash'),
+    );
+  });
+
+  test('device config mutation returns correlated before and after hashes',
+      () async {
+    const currentConfig = {'id': 'rhythm', 'max_brightness': 71};
+    const candidateConfig = {'id': 'rhythm', 'max_brightness': 60};
+    var mutationRequested = false;
+    final client = _HandlerClient((request) async {
+      if (request.url.host != 'device.test' &&
+          request.url.host != 'local.test') {
+        return _supabaseResponse(request);
+      }
+      if (request.url.path == '/api/state') {
+        return _jsonResponse({
+          'version': '0.6.522-beta',
+          'server_instance_id': 'srv-test',
+          'platform': 'appliance',
+          'context': 'rpiz',
+          'nodes': const [],
+          'hubs': const [],
+        });
+      }
+      if (request.url.path == '/api/config' && request.method == 'GET') {
+        return _jsonResponse(currentConfig);
+      }
+      if (request.url.path == '/api/config' && request.method == 'PUT') {
+        mutationRequested = true;
+        expect(request.headers['x-request-id'], 'customer-tuning:hash-receipt');
+        expect(jsonDecode((request as http.Request).body), candidateConfig);
+        return _jsonResponse(candidateConfig);
+      }
+      return http.Response('not found', 404);
+    });
+    final server = _testServer(client: client);
+
+    final readResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'GET',
+          'path': 'api/config',
+          'query': {'id': 'rhythm'},
+        }),
+      ),
+    );
+    expect(readResponse.statusCode, 200);
+    final beforeHash =
+        (jsonDecode(await readResponse.readAsString()) as Map)['bodySha256'];
+    expect(beforeHash, hasLength(64));
+
+    final applyResponse = await server.handler(
+      Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/device-admin/proxy'),
+        headers: {
+          'authorization': 'Bearer staff-session',
+          'content-type': 'application/json',
+        },
+        body: jsonEncode({
+          'method': 'PUT',
+          'path': 'api/config',
+          'query': {'id': 'rhythm'},
+          'requestId': 'customer-tuning:hash-receipt',
+          'expectedServerInstanceId': 'srv-test',
+          'resourcePrecondition': {
+            'path': 'api/config',
+            'query': {'id': 'rhythm'},
+            'bodySha256': beforeHash,
+          },
+          'body': candidateConfig,
+        }),
+      ),
+    );
+
+    expect(applyResponse.statusCode, 200);
+    expect(mutationRequested, isTrue);
+    final receipt = jsonDecode(await applyResponse.readAsString()) as Map;
+    expect(receipt['requestId'], 'customer-tuning:hash-receipt');
+    expect(receipt['verifiedServerInstanceId'], 'srv-test');
+    expect(receipt['preconditionBodySha256'], beforeHash);
+    expect(receipt['bodySha256'], hasLength(64));
+    expect(receipt['bodySha256'], isNot(beforeHash));
   });
 
   test('admin deletes exactly one server hub and preserves its home', () async {

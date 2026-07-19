@@ -444,6 +444,7 @@ pub struct StoredMotionTimerEntry {
 /// then rename). Used by rhythm-addon and rhythm-server.
 pub struct FileStorage {
     dir: std::path::PathBuf,
+    write_lock: std::sync::Mutex<()>,
 }
 
 const INTEGRATION_SUBDIRS: &[&str] = &["matter"];
@@ -456,7 +457,10 @@ impl FileStorage {
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create data dir: {}", dir.display()))?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            write_lock: std::sync::Mutex::new(()),
+        })
     }
 
     fn file_path(&self, name: &str) -> std::path::PathBuf {
@@ -482,6 +486,14 @@ impl FileStorage {
         unix_mode: Option<u32>,
     ) -> Result<()> {
         use std::io::Write;
+
+        // All atomic writes on a FileStorage instance share predictable `.tmp`
+        // names. Serialize them so concurrent activity updates cannot remove or
+        // rename another writer's temporary file.
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("File storage write lock is poisoned"))?;
 
         let path = self.file_path(name);
         let tmp = self.file_path(&format!("{}.tmp", name));
@@ -2467,6 +2479,7 @@ mod tests {
     mod file_storage_tests {
         use super::*;
         use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Barrier};
 
         static NEXT_TEMP_STORAGE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -2509,6 +2522,34 @@ mod tests {
             assert_eq!(loaded.profiles.len(), 1);
             assert_eq!(loaded.profiles[0].id, rhythm_core::RHYTHM_PROFILE_ID);
             assert!((loaded.solar_noon_hour - 13.25).abs() < 0.01);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn concurrent_activity_history_writes_are_serialized() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            let writers = 24;
+            let barrier = Arc::new(Barrier::new(writers));
+            let mut handles = Vec::with_capacity(writers);
+
+            for _ in 0..writers {
+                let storage = Arc::clone(&storage);
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    storage.save_light_activity_history(
+                        &crate::activity::LightActivityHistory::default(),
+                    )
+                }));
+            }
+
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+
+            assert!(storage.load_light_activity_history().unwrap().is_some());
+            assert!(!path.join("activity_history.json.tmp").exists());
             cleanup(&path);
         }
 
