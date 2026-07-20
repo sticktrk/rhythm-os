@@ -122,6 +122,25 @@ bool rhythmExistingHomeNeedsCloudIdentityPromotionForTesting({
     );
 
 @visibleForTesting
+Future<Hub?> rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting({
+  required AccountHomeServerHubs existingHome,
+  required bool shouldPromote,
+  required Future<CloudHomeJoinResult> Function() promote,
+  required Future<Hub?> Function(AccountHomeServerHubs home) enterHome,
+}) async {
+  if (shouldPromote) {
+    final cloudPromotion = await promote();
+    if (cloudPromotion.home != null) {
+      return enterHome(cloudPromotion.home!);
+    }
+    if (!cloudPromotion.canCreateHome) {
+      throw CloudHomeJoinBlockedException(code: cloudPromotion.code);
+    }
+  }
+  return enterHome(existingHome);
+}
+
+@visibleForTesting
 Set<String> rhythmHomeIdsRepresentedByForTesting({
   required AccountHomeServerHubs snapshot,
   required Iterable<AccountHomeServerHubs> localHomes,
@@ -1779,30 +1798,25 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     );
     final name = _displayNameForDiscoveredServer(discovered);
     if (existingHome != null) {
-      if (_existingHomeNeedsCloudIdentityPromotion(
-        server: discovered,
-        homes: visibleHomes,
-        authToken: authToken,
-        serverInstanceId: serverInstanceId,
-        hasJoinProof: joinProof != null,
-      )) {
-        final cloudPromotion =
-            await CloudHomeJoinService.instance.joinByLocalDeviceProof(
+      return rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+        existingHome: existingHome,
+        shouldPromote: _existingHomeNeedsCloudIdentityPromotion(
+          server: discovered,
+          homes: visibleHomes,
+          authToken: authToken,
+          serverInstanceId: serverInstanceId,
+          hasJoinProof: joinProof != null,
+        ),
+        promote: () => CloudHomeJoinService.instance.joinByLocalDeviceProof(
           serverInstanceId: serverInstanceId,
           joinProof: joinProof,
           host: discovered.address,
           port: discovered.port,
           ownerToken: authToken,
           hubName: name,
-        );
-        if (cloudPromotion.home != null) {
-          return homeProvider.enterHome(cloudPromotion.home!);
-        }
-        if (!cloudPromotion.canCreateHome) {
-          throw CloudHomeJoinBlockedException(code: cloudPromotion.code);
-        }
-      }
-      return homeProvider.enterHome(existingHome);
+        ),
+        enterHome: homeProvider.enterHome,
+      );
     }
 
     final cloudJoin =

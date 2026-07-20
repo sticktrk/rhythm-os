@@ -1,6 +1,7 @@
 import 'package:bonsoir/bonsoir.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
+import 'package:rhythm_app/services/cloud_home_join_service.dart';
 import 'package:rhythm_app/services/recent_servers_service.dart';
 import 'package:rhythm_app/widgets/connect_hub_screen.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -684,6 +685,130 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('enters the cloud Home returned by identity promotion', () async {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final cloudHome = Home.create(
+        id: 'cloud-home',
+        name: 'Kitchen',
+        ownerId: 'cloud-user',
+      );
+      final localSnapshot = AccountHomeServerHubs(
+        home: localHome,
+        serverHubs: const [],
+      );
+      final cloudSnapshot = AccountHomeServerHubs(
+        home: cloudHome,
+        serverHubs: const [],
+      );
+      final enteredHomes = <String>[];
+
+      await rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+        existingHome: localSnapshot,
+        shouldPromote: true,
+        promote: () async => CloudHomeJoinResult.joined(cloudSnapshot),
+        enterHome: (snapshot) async {
+          enteredHomes.add(snapshot.home.id);
+          return null;
+        },
+      );
+
+      expect(enteredHomes, ['cloud-home']);
+    });
+
+    test('rejected identity promotion does not enter the local Home', () async {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final localSnapshot = AccountHomeServerHubs(
+        home: localHome,
+        serverHubs: const [],
+      );
+      var enterCalls = 0;
+
+      await expectLater(
+        rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+          existingHome: localSnapshot,
+          shouldPromote: true,
+          promote: () async =>
+              const CloudHomeJoinResult.blocked(code: 'identity_conflict'),
+          enterHome: (_) async {
+            enterCalls += 1;
+            return null;
+          },
+        ),
+        throwsA(
+          isA<CloudHomeJoinBlockedException>().having(
+            (error) => error.code,
+            'code',
+            'identity_conflict',
+          ),
+        ),
+      );
+      expect(enterCalls, 0);
+    });
+
+    test('unavailable cloud promotion still enters the existing Home',
+        () async {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final localSnapshot = AccountHomeServerHubs(
+        home: localHome,
+        serverHubs: const [],
+      );
+      final enteredHomes = <String>[];
+
+      await rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+        existingHome: localSnapshot,
+        shouldPromote: true,
+        promote: () async => const CloudHomeJoinResult.notAttempted(),
+        enterHome: (snapshot) async {
+          enteredHomes.add(snapshot.home.id);
+          return null;
+        },
+      );
+
+      expect(enteredHomes, ['local-home']);
+    });
+
+    test('skips promotion when the existing Home does not need it', () async {
+      final localHome = Home.create(
+        id: 'local-home',
+        name: 'Kitchen',
+        ownerId: 'local-user',
+      );
+      final localSnapshot = AccountHomeServerHubs(
+        home: localHome,
+        serverHubs: const [],
+      );
+      var promotionCalls = 0;
+      final enteredHomes = <String>[];
+
+      await rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+        existingHome: localSnapshot,
+        shouldPromote: false,
+        promote: () async {
+          promotionCalls += 1;
+          return const CloudHomeJoinResult.notAttempted();
+        },
+        enterHome: (snapshot) async {
+          enteredHomes.add(snapshot.home.id);
+          return null;
+        },
+      );
+
+      expect(promotionCalls, 0);
+      expect(enteredHomes, ['local-home']);
     });
 
     test('keeps known-different server identity separate at the same endpoint',
