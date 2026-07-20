@@ -13,7 +13,7 @@ use crate::ring::{
     read_json, read_ring, recorder_root, CURRENT_DIR, EARLY_BOOT_FILE, PREVIOUS_DIR,
 };
 
-const EXPECTED_SUMMARY_INTERVAL_MS: u64 = 10_000;
+const LEGACY_SUMMARY_INTERVAL_MS: u64 = 10_000;
 const CADENCE_GAP_TOLERANCE_MS: u64 = 2_000;
 
 pub fn build_synthesis(data_dir: &Path) -> io::Result<String> {
@@ -73,10 +73,13 @@ fn summarize_boot(
     summary_times.sort_unstable();
     let mut cadence_gap_count = 0_u64;
     let mut max_cadence_gap_ms = 0_u64;
+    let expected_summary_interval_ms = manifest
+        .map(|manifest| manifest.summary_interval_secs.saturating_mul(1000))
+        .unwrap_or(LEGACY_SUMMARY_INTERVAL_MS);
     for pair in summary_times.windows(2) {
         let gap = pair[1].saturating_sub(pair[0]);
         max_cadence_gap_ms = max_cadence_gap_ms.max(gap);
-        if gap > EXPECTED_SUMMARY_INTERVAL_MS.saturating_add(CADENCE_GAP_TOLERANCE_MS) {
+        if gap > expected_summary_interval_ms.saturating_add(CADENCE_GAP_TOLERANCE_MS) {
             cadence_gap_count = cadence_gap_count.saturating_add(1);
         }
     }
@@ -336,6 +339,23 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("cannot prove"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn synthesis_uses_the_manifest_summary_interval_for_gap_detection() {
+        let dir = temp_dir("configured-cadence");
+        let mut writer = RingWriter::open(&dir, "boot-a", RingConfig::default()).unwrap();
+        writer
+            .append("boot-a", 0, "summary", &serde_json::json!({}), false)
+            .unwrap();
+        writer
+            .append("boot-a", 30_000, "summary", &serde_json::json!({}), true)
+            .unwrap();
+
+        let synthesis: Value = serde_json::from_str(&build_synthesis(&dir).unwrap()).unwrap();
+        assert_eq!(synthesis["current"]["cadence_gap_count"], 0);
+        assert_eq!(synthesis["current"]["max_cadence_gap_ms"], 30_000);
         fs::remove_dir_all(dir).unwrap();
     }
 

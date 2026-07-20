@@ -40,8 +40,8 @@ impl Default for RingConfig {
         Self {
             segment_count: DEFAULT_SEGMENT_COUNT,
             segment_bytes_limit: DEFAULT_SEGMENT_BYTES_LIMIT,
-            summary_interval_secs: 10,
-            detail_interval_secs: 60,
+            summary_interval_secs: 30,
+            detail_interval_secs: 300,
             sync_interval_secs: 60,
         }
     }
@@ -603,29 +603,44 @@ mod tests {
     }
 
     #[test]
-    fn default_ring_retains_thirty_minutes_at_schema_size_envelopes() {
+    fn default_ring_retains_ninety_minutes_at_schema_size_envelopes() {
         let dir = temp_dir("retention");
         let mut writer = RingWriter::open(&dir, "boot-a", RingConfig::default()).unwrap();
         let summary = json!({"sample": "s".repeat(7 * 1024)});
         let detail = json!({"processes": "d".repeat(14 * 1024)});
         let mut monotonic_ms = 0_u64;
-        for minute in 0..30 {
-            for _ in 0..6 {
+        for minute in 0_u64..90 {
+            for _ in 0..2 {
                 writer
                     .append("boot-a", monotonic_ms, "summary", &summary, false)
                     .unwrap();
-                monotonic_ms = monotonic_ms.saturating_add(10_000);
+                monotonic_ms = monotonic_ms.saturating_add(30_000);
             }
-            writer
-                .append("boot-a", minute * 60_000, "detail", &detail, false)
-                .unwrap();
+            if minute.is_multiple_of(5) {
+                writer
+                    .append("boot-a", minute * 60_000, "detail", &detail, false)
+                    .unwrap();
+            }
         }
         writer.sync().unwrap();
 
         let report = read_ring(&recorder_root(&dir).join(CURRENT_DIR)).unwrap();
-        assert_eq!(report.valid_records, 210);
+        assert_eq!(report.valid_records, 198);
         assert_eq!(report.records.first().unwrap().sequence, 0);
         assert!(ring_data_bytes(&dir).unwrap() <= DEFAULT_TOTAL_RING_BYTES_LIMIT);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn default_cadence_caps_baseline_payload_below_thirty_mib_per_day() {
+        let config = RingConfig::default();
+        let summaries_per_day = 86_400 / config.summary_interval_secs;
+        let details_per_day = 86_400 / config.detail_interval_secs;
+        let payload_limit = summaries_per_day * SUMMARY_RECORD_BYTES_LIMIT as u64
+            + details_per_day * DETAIL_RECORD_BYTES_LIMIT as u64;
+
+        assert_eq!(config.summary_interval_secs, 30);
+        assert_eq!(config.detail_interval_secs, 300);
+        assert!(payload_limit <= 30 * 1024 * 1024);
     }
 }

@@ -141,6 +141,13 @@ pub struct TargetProcessSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BlockedTaskSummary {
+    pub pid: u32,
+    pub comm: String,
+    pub wait_channel: Observation<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ThermalSnapshot {
     pub zone: String,
     pub millidegrees_c: i64,
@@ -182,6 +189,8 @@ pub struct SummarySample {
     pub disks: Observation<Vec<DiskSnapshot>>,
     pub filesystem: Observation<FilesystemSnapshot>,
     pub tasks: Observation<TaskCounts>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_tasks: Vec<BlockedTaskSummary>,
     pub target_processes: Observation<Vec<TargetProcessSummary>>,
     pub thermal: Observation<Vec<ThermalSnapshot>>,
     pub cpu_frequency_khz: Observation<u64>,
@@ -222,6 +231,8 @@ pub struct DetailSample {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EscalationSample {
     pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_tasks: Vec<BlockedTaskSummary>,
     pub processes: Vec<ProcessDetail>,
     pub dmesg_tail: Observation<String>,
 }

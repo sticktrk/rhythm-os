@@ -116,7 +116,7 @@ fn run_daemon(options: Options) -> Result<(), String> {
             options.config.summary_interval_secs.saturating_mul(1000),
         );
         if !reasons.is_empty() {
-            let escalation = collect_escalation(&options.paths, reasons);
+            let escalation = collect_escalation(&options.paths, reasons, &sample.blocked_tasks);
             if let Err(error) =
                 writer.append(&boot_id, monotonic_ms, "escalation", &escalation, true)
             {
