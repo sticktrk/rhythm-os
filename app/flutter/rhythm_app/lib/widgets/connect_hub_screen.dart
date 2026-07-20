@@ -106,6 +106,41 @@ AccountHomeServerHubs? rhythmHomeEntryForDiscoveredServerForTesting({
     );
 
 @visibleForTesting
+bool rhythmExistingHomeNeedsCloudIdentityPromotionForTesting({
+  required DiscoveredHub server,
+  required Iterable<AccountHomeServerHubs> homes,
+  required String? authToken,
+  required String? serverInstanceId,
+  required bool hasJoinProof,
+}) =>
+    _existingHomeNeedsCloudIdentityPromotion(
+      server: server,
+      homes: homes,
+      authToken: authToken,
+      serverInstanceId: serverInstanceId,
+      hasJoinProof: hasJoinProof,
+    );
+
+@visibleForTesting
+Future<Hub?> rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting({
+  required AccountHomeServerHubs existingHome,
+  required bool shouldPromote,
+  required Future<CloudHomeJoinResult> Function() promote,
+  required Future<Hub?> Function(AccountHomeServerHubs home) enterHome,
+}) async {
+  if (shouldPromote) {
+    final cloudPromotion = await promote();
+    if (cloudPromotion.home != null) {
+      return enterHome(cloudPromotion.home!);
+    }
+    if (!cloudPromotion.canCreateHome) {
+      throw CloudHomeJoinBlockedException(code: cloudPromotion.code);
+    }
+  }
+  return enterHome(existingHome);
+}
+
+@visibleForTesting
 Set<String> rhythmHomeIdsRepresentedByForTesting({
   required AccountHomeServerHubs snapshot,
   required Iterable<AccountHomeServerHubs> localHomes,
@@ -362,6 +397,35 @@ bool _discoveredServerIsRepresentedByHome(
         serverInstanceId: serverInstanceId,
       ) !=
       null;
+}
+
+bool _existingHomeNeedsCloudIdentityPromotion({
+  required DiscoveredHub server,
+  required Iterable<AccountHomeServerHubs> homes,
+  required String? authToken,
+  required String? serverInstanceId,
+  required bool hasJoinProof,
+}) {
+  if (!hasJoinProof ||
+      serverIdentityKind(serverInstanceId) != ServerIdentityKind.durable) {
+    return false;
+  }
+
+  for (final home in homes) {
+    for (final hub in home.serverHubs) {
+      if (_serverHubMatchesDiscoveredServer(
+            hub,
+            server,
+            authToken: authToken,
+            serverInstanceId: serverInstanceId,
+          ) &&
+          serverIdentityKind(hub.serverInstanceId) ==
+              ServerIdentityKind.provisional) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 AccountHomeServerHubs? _homeEntryForDiscoveredServer({
@@ -1725,17 +1789,36 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     RhythmCloudJoinProof? joinProof,
   }) async {
     final homeProvider = context.read<HomeProvider>();
+    final visibleHomes = _visibleHomeEntries(homeProvider);
     final existingHome = _homeEntryForDiscoveredServer(
       server: discovered,
-      homes: _visibleHomeEntries(homeProvider),
+      homes: visibleHomes,
       authToken: authToken,
       serverInstanceId: serverInstanceId,
     );
+    final name = _displayNameForDiscoveredServer(discovered);
     if (existingHome != null) {
-      return homeProvider.enterHome(existingHome);
+      return rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+        existingHome: existingHome,
+        shouldPromote: _existingHomeNeedsCloudIdentityPromotion(
+          server: discovered,
+          homes: visibleHomes,
+          authToken: authToken,
+          serverInstanceId: serverInstanceId,
+          hasJoinProof: joinProof != null,
+        ),
+        promote: () => CloudHomeJoinService.instance.joinByLocalDeviceProof(
+          serverInstanceId: serverInstanceId,
+          joinProof: joinProof,
+          host: discovered.address,
+          port: discovered.port,
+          ownerToken: authToken,
+          hubName: name,
+        ),
+        enterHome: homeProvider.enterHome,
+      );
     }
 
-    final name = _displayNameForDiscoveredServer(discovered);
     final cloudJoin =
         await CloudHomeJoinService.instance.joinByLocalDeviceProof(
       serverInstanceId: serverInstanceId,
