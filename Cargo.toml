@@ -10,6 +10,7 @@ members = [
     "os/rust/integrations/rhythm-ha",
     "os/rust/integrations/rhythm-matter",
     "os/rust/bins/rhythm-server",
+    "os/rust/bins/rhythm-host-recorder",
     "os/rust/bins/rhythm-chipd",
     "os/rust/bins/rhythm-linux-appliance",
     "os/rust/bins/rhythm-addon",

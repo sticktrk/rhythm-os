@@ -364,6 +364,12 @@ if [ ! -x "$SERVER_BINARY" ]; then
     echo "Build it first with: ./tools/os/scripts/build-server.sh --release --target rpiz"
     exit 1
 fi
+HOST_RECORDER_BINARY="$PROJECT_ROOT/dist/bin/rpiz/rhythm-host-recorder"
+if [ ! -x "$HOST_RECORDER_BINARY" ]; then
+    echo "Error: Missing $HOST_RECORDER_BINARY"
+    echo "Build it first with: ./tools/os/scripts/build-server.sh --release --target rpiz"
+    exit 1
+fi
 RHYTHM_IMAGE_VERSION="${RHYTHM_IMAGE_VERSION:-$("$SCRIPT_DIR/resolve-version.sh" server)}"
 export RHYTHM_IMAGE_VERSION
 

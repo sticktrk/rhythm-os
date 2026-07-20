@@ -325,6 +325,11 @@ build_for_target() {
     RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
         "$builder" build $CARGO_FLAGS -p "$package" --target "$rust_target" "${cargo_bin_flags[@]}"
 
+    if [ "$target" = "rpiz" ]; then
+        RHYTHM_BUILD_VERSION="$BUILD_VERSION" \
+            "$builder" build $CARGO_FLAGS -p rhythm-host-recorder --target "$rust_target" --bin rhythm-host-recorder
+    fi
+
     # chip-ffi links to glib/dbus/avahi, which Buildroot only provides as shared libs
     # (avahi explicitly can't be built static). Drop +crt-static for rhythm-chipd on
     # musl targets so the linker can pick up the .so files; the Buildroot rootfs
@@ -365,7 +370,8 @@ build_for_target() {
     if [ "$target" = "rpiz" ]; then
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-linux-appliance" "$output_dir/rhythm-server"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-chipd" "$output_dir/"
-        echo "Output: dist/bin/$target/{rhythm-server,rhythm-chipd}"
+        cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-host-recorder" "$output_dir/"
+        echo "Output: dist/bin/$target/{rhythm-server,rhythm-chipd,rhythm-host-recorder}"
     else
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-server" "$output_dir/"
         cp "$PROJECT_ROOT/target/$rust_target/$PROFILE/rhythm-cli" "$output_dir/"
@@ -417,6 +423,7 @@ if [ "$CLEAN" = true ]; then
     echo "Cleaning target artifacts..."
     cargo clean -p rhythm-server
     cargo clean -p rhythm-chipd
+    cargo clean -p rhythm-host-recorder
     cargo clean -p rhythm-linux-appliance
 fi
 

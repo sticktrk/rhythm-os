@@ -1,0 +1,17 @@
+[package]
+name = "rhythm-host-recorder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Independent bounded host flight recorder for Rhythm rpiz appliances"
+default-run = "rhythm-host-recorder"
+
+[[bin]]
+name = "rhythm-host-recorder"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { workspace = true }
+libc = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }

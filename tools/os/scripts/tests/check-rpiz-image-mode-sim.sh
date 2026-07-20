@@ -24,8 +24,17 @@ make_base_output() {
 BR2_PACKAGE_RHYTHM_CLOUDFLARED=y
 EOF
     printf '#!/bin/sh\n' > "$out/target/usr/bin/cloudflared"
+    printf '#!/bin/sh\n' > "$out/target/usr/bin/rhythm-host-recorder"
     printf '#!/bin/sh\n' > "$out/target/etc/init.d/rhythm-cloudflared"
-    chmod +x "$out/target/usr/bin/cloudflared" "$out/target/etc/init.d/rhythm-cloudflared"
+    printf '#!/bin/sh\n' > "$out/target/etc/init.d/S42hostrecorder"
+    chmod +x "$out/target/usr/bin/cloudflared" "$out/target/usr/bin/rhythm-host-recorder" \
+        "$out/target/etc/init.d/rhythm-cloudflared" "$out/target/etc/init.d/S42hostrecorder"
+    cat > "$out/target/etc/inittab" <<'EOF'
+::sysinit:/etc/init.d/rcS
+::respawn:/usr/bin/rhythm-host-recorder run --data-dir /data
+::respawn:/usr/bin/rhythm-hardware-watchdog
+::respawn:/usr/bin/rhythm-launch
+EOF
     printf 'test-image\n' > "$out/target/etc/rhythm-image-version"
     printf 'v1-prod-test\n' > "$out/target/etc/rhythm-image-fingerprint"
 }

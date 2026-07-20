@@ -20,6 +20,7 @@ pub fn spawn_periodic_watchdog(state: SharedState) {
         .spawn(move || {
             let mut consecutive_lock_failures: u64 = 0;
             loop {
+                write_host_recorder_heartbeat();
                 std::thread::sleep(PERIODIC_WATCHDOG_CHECK_INTERVAL);
                 crate::boot_diagnostics::watchdog_heartbeat();
 
@@ -51,6 +52,18 @@ pub fn spawn_periodic_watchdog(state: SharedState) {
             }
         })
         .expect("Failed to spawn liveness watchdog thread");
+}
+
+fn write_host_recorder_heartbeat() {
+    let Some(path) = std::env::var_os("RHYTHM_SERVER_HEARTBEAT_FILE") else {
+        return;
+    };
+    if let Err(error) = rhythm_host_recorder::write_heartbeat(
+        std::path::Path::new(&path),
+        "server_liveness_watchdog",
+    ) {
+        log::debug!(target: "sys", "Unable to write host-recorder heartbeat: {}", error);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

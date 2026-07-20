@@ -37,6 +37,7 @@ ARTIFACT_ROOT="$WORK_DIR/dist/bin"
 mkdir -p "$ARTIFACT_ROOT/rpiz"
 printf 'stub rhythm-server' > "$ARTIFACT_ROOT/rpiz/rhythm-server"
 printf 'stub rhythm-chipd' > "$ARTIFACT_ROOT/rpiz/rhythm-chipd"
+printf 'stub rhythm-host-recorder' > "$ARTIFACT_ROOT/rpiz/rhythm-host-recorder"
 
 # Fake image root.
 IMAGE_ROOT="$WORK_DIR/images"
@@ -89,6 +90,8 @@ for channel in beta stable; do
     assert_eq "$channel carried rootfs url" "v$image_version/rootfs.ext2.gz" \
         "$(jq -r '.images[] | select(.kind == "rootfs_image") | .url' "$manifest2")"
     assert_eq "$channel package version" "$binary_version" "$(jq -r '.package.version' "$manifest2")"
+    assert_eq "$channel host recorder is required sibling" "true" \
+        "$(jq -r '.package.install[] | select(.archive_path == "rhythm-host-recorder") | (.required == true and .slot == "sibling")' "$manifest2")"
 
     # --- 3. [no-image] release: no image flags at all -> images: [] ----------
     # (This is what CI runs for a tag carrying the [no-image] marker: the

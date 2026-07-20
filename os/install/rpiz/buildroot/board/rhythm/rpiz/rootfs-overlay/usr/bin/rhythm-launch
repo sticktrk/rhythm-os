@@ -35,6 +35,7 @@ resolve_log_dir() {
 export RHYTHM_PLATFORM_TYPE=appliance
 export RHYTHM_PLATFORM_CONTEXT=rpiz
 export RHYTHM_MATTER_CHIPD="${RHYTHM_MATTER_CHIPD:-/usr/bin/rhythm-chipd}"
+export RHYTHM_SERVER_HEARTBEAT_FILE="${RHYTHM_SERVER_HEARTBEAT_FILE:-/run/rhythm-server-heartbeat.json}"
 
 if [ -r "$DEFAULTS" ]; then
     # shellcheck disable=SC1090
