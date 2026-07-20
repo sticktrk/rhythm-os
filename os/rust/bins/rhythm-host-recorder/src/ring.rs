@@ -51,6 +51,19 @@ pub fn recorder_root(data_dir: &Path) -> PathBuf {
     data_dir.join(ROOT_RELATIVE_PATH)
 }
 
+pub fn current_ring_boot_id(data_dir: &Path) -> Option<String> {
+    let current = recorder_root(data_dir).join(CURRENT_DIR);
+    read_ring(&current)
+        .ok()?
+        .records
+        .first()
+        .map(|record| record.boot_id.clone())
+        .or_else(|| {
+            read_json::<RecorderManifest>(&current.join("manifest.json"))
+                .map(|manifest| manifest.boot_id)
+        })
+}
+
 pub struct RingWriter {
     dir: PathBuf,
     manifest: RecorderManifest,
@@ -266,6 +279,20 @@ pub fn segment_name(index: usize) -> String {
 }
 
 pub fn archive_current_boot(data_dir: &Path) -> io::Result<ArchiveResult> {
+    archive_current_boot_for_new_boot(data_dir, None)
+}
+
+pub fn archive_current_boot_for_boot(
+    data_dir: &Path,
+    current_boot_id: &str,
+) -> io::Result<ArchiveResult> {
+    archive_current_boot_for_new_boot(data_dir, Some(current_boot_id))
+}
+
+fn archive_current_boot_for_new_boot(
+    data_dir: &Path,
+    current_boot_id: Option<&str>,
+) -> io::Result<ArchiveResult> {
     let root = recorder_root(data_dir);
     fs::create_dir_all(&root)?;
     let current = root.join(CURRENT_DIR);
@@ -292,8 +319,36 @@ pub fn archive_current_boot(data_dir: &Path) -> io::Result<ArchiveResult> {
     }
 
     let report = read_ring(&current)?;
-    let archived_boot_id = read_json::<RecorderManifest>(&current.join("manifest.json"))
-        .map(|manifest| manifest.boot_id);
+    let archived_boot_id = report
+        .records
+        .first()
+        .map(|record| record.boot_id.clone())
+        .or_else(|| {
+            read_json::<RecorderManifest>(&current.join("manifest.json"))
+                .map(|manifest| manifest.boot_id)
+        });
+    if current_boot_id.is_some_and(|boot_id| archived_boot_id.as_deref() == Some(boot_id)) {
+        let previous_report = read_ring(&previous)?;
+        let previous_boot_id = previous_report
+            .records
+            .first()
+            .map(|record| record.boot_id.clone())
+            .or_else(|| {
+                read_json::<RecorderManifest>(&previous.join("manifest.json"))
+                    .map(|manifest| manifest.boot_id)
+            });
+        return Ok(ArchiveResult {
+            status: SourceStatus::Ok,
+            archived_boot_id: previous_boot_id,
+            valid_records: previous_report.valid_records,
+            torn_records: previous_report.torn_records,
+            corrupt_records: previous_report.corrupt_records,
+            detail: Some(
+                "current ring already belongs to this boot; preserved previous-boot evidence"
+                    .to_string(),
+            ),
+        });
+    }
     fs::rename(&current, &pending)?;
     sync_directory(&root)?;
     if previous.is_dir() {
@@ -517,6 +572,33 @@ mod tests {
         assert_eq!(archived.archived_boot_id.as_deref(), Some("boot-a"));
         assert!(recorder_root(&dir).join(PREVIOUS_DIR).is_dir());
         assert!(!recorder_root(&dir).join(CURRENT_DIR).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_capture_for_same_boot_preserves_previous_boot_ring() {
+        let dir = temp_dir("same-boot-capture");
+        let mut previous = RingWriter::open(&dir, "boot-a", RingConfig::default()).unwrap();
+        previous
+            .append("boot-a", 1, "summary", &json!({"boot": "a"}), true)
+            .unwrap();
+        archive_current_boot_for_boot(&dir, "boot-b").unwrap();
+
+        let mut current = RingWriter::open(&dir, "boot-b", RingConfig::default()).unwrap();
+        current
+            .append("boot-b", 2, "summary", &json!({"boot": "b"}), true)
+            .unwrap();
+
+        let repeated = archive_current_boot_for_boot(&dir, "boot-b").unwrap();
+        assert_eq!(repeated.archived_boot_id.as_deref(), Some("boot-a"));
+        assert!(repeated
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("preserved previous-boot")));
+        let previous_report = read_ring(&recorder_root(&dir).join(PREVIOUS_DIR)).unwrap();
+        let current_report = read_ring(&recorder_root(&dir).join(CURRENT_DIR)).unwrap();
+        assert_eq!(previous_report.records[0].boot_id, "boot-a");
+        assert_eq!(current_report.records[0].boot_id, "boot-b");
         fs::remove_dir_all(dir).unwrap();
     }
 

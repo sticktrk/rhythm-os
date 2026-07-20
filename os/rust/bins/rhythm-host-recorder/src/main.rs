@@ -9,6 +9,10 @@ use rhythm_host_recorder::{
 };
 
 static STOP: AtomicBool = AtomicBool::new(false);
+const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Debug)]
 struct Options {
@@ -26,7 +30,12 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let options = parse_args(std::env::args().skip(1))?;
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if requests_version(&arguments) {
+        println!("rhythm-host-recorder {VERSION}");
+        return Ok(());
+    }
+    let options = parse_args(arguments.into_iter())?;
     match options.command.as_str() {
         "boot-capture" => {
             boot_capture(&options.paths, false).map_err(|error| error.to_string())?;
@@ -40,6 +49,10 @@ fn run() -> Result<(), String> {
         command => return Err(format!("unknown command: {command}")),
     }
     Ok(())
+}
+
+fn requests_version(arguments: &[String]) -> bool {
+    matches!(arguments, [argument] if argument == "--version" || argument == "-V")
 }
 
 fn run_daemon(options: Options) -> Result<(), String> {
@@ -168,7 +181,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--once" => once = true,
             "-h" | "--help" => {
                 println!(
-                    "Usage: rhythm-host-recorder [run|boot-capture|synthesize] [--data-dir PATH] [--once]"
+                    "Usage: rhythm-host-recorder [run|boot-capture|synthesize] [--data-dir PATH] [--once]\n       rhythm-host-recorder --version"
                 );
                 std::process::exit(0);
             }
@@ -211,3 +224,16 @@ fn install_signal_handlers() {
 
 #[cfg(not(unix))]
 fn install_signal_handlers() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_flag_matches_ota_component_probe_contract() {
+        assert!(requests_version(&["--version".to_string()]));
+        assert!(requests_version(&["-V".to_string()]));
+        assert!(!requests_version(&["run".to_string()]));
+        assert!(VERSION.split('.').count() >= 3);
+    }
+}

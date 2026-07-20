@@ -17,8 +17,9 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::ring::{
-    archive_current_boot, atomic_write, atomic_write_json, recorder_root, RingConfig, RingWriter,
-    EARLY_BOOT_FILE, PREVIOUS_EARLY_BOOT_FILE, PSTORE_CURRENT_DIR, PSTORE_PREVIOUS_DIR,
+    archive_current_boot_for_boot, atomic_write, atomic_write_json, current_ring_boot_id,
+    read_json, recorder_root, RingConfig, RingWriter, EARLY_BOOT_FILE, PREVIOUS_EARLY_BOOT_FILE,
+    PSTORE_CURRENT_DIR, PSTORE_PREVIOUS_DIR,
 };
 
 const TEXT_BYTES_LIMIT: usize = 16 * 1024;
@@ -709,6 +710,13 @@ pub fn boot_capture(
 ) -> io::Result<EarlyBootSnapshot> {
     let now = Utc::now();
     let boot_id = collect_boot_id(paths);
+    let current_boot_id = boot_id
+        .value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    let repeated_same_boot_capture =
+        current_ring_boot_id(&paths.data_dir).as_deref() == Some(current_boot_id);
     let uptime = collect_uptime(paths);
     let inferred_boot_at = match uptime.value {
         Some(seconds) => chrono::Duration::from_std(Duration::from_secs_f64(seconds.max(0.0)))
@@ -730,24 +738,29 @@ pub fn boot_capture(
         OPTIONAL_SOURCE_TIMEOUT,
         true,
     ));
-    let pstore = rotate_and_capture_pstore(paths)?;
+    let pstore = rotate_and_capture_pstore(paths, !repeated_same_boot_capture)?;
     let watchdog = collect_watchdog(paths);
     let firmware_reset_power = collect_power(paths);
-    let archive = archive_current_boot(&paths.data_dir).unwrap_or_else(|error| ArchiveResult {
-        status: SourceStatus::Unavailable,
-        archived_boot_id: None,
-        valid_records: 0,
-        torn_records: 0,
-        corrupt_records: 0,
-        detail: Some(error.to_string()),
-    });
+    let archive =
+        archive_current_boot_for_boot(&paths.data_dir, current_boot_id).unwrap_or_else(|error| {
+            ArchiveResult {
+                status: SourceStatus::Unavailable,
+                archived_boot_id: None,
+                valid_records: 0,
+                torn_records: 0,
+                corrupt_records: 0,
+                detail: Some(error.to_string()),
+            }
+        });
 
     let root = recorder_root(&paths.data_dir);
     fs::create_dir_all(&root)?;
     let early_boot = root.join(EARLY_BOOT_FILE);
     let previous_early_boot = root.join(PREVIOUS_EARLY_BOOT_FILE);
-    if early_boot.is_file() {
-        let _ = fs::copy(&early_boot, previous_early_boot);
+    if !repeated_same_boot_capture {
+        if let Some(previous_snapshot) = read_json::<EarlyBootSnapshot>(&early_boot) {
+            let _ = atomic_write_json(&previous_early_boot, &previous_snapshot);
+        }
     }
 
     let snapshot = EarlyBootSnapshot {
@@ -772,26 +785,26 @@ pub fn boot_capture(
         late_fallback_capture,
     };
     atomic_write_json(&early_boot, &snapshot)?;
-    let current_boot_id = boot_id
-        .value
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
     let mut writer = RingWriter::open(&paths.data_dir, current_boot_id, RingConfig::default())?;
     writer.sync()?;
     Ok(snapshot)
 }
 
-fn rotate_and_capture_pstore(paths: &CollectorPaths) -> io::Result<Observation<Vec<PstoreEntry>>> {
+fn rotate_and_capture_pstore(
+    paths: &CollectorPaths,
+    rotate_previous: bool,
+) -> io::Result<Observation<Vec<PstoreEntry>>> {
     let root = recorder_root(&paths.data_dir);
     fs::create_dir_all(&root)?;
     let current = root.join(PSTORE_CURRENT_DIR);
     let previous = root.join(PSTORE_PREVIOUS_DIR);
-    if previous.is_dir() {
-        fs::remove_dir_all(&previous)?;
-    }
-    if current.is_dir() {
-        fs::rename(&current, &previous)?;
+    if rotate_previous {
+        if previous.is_dir() {
+            fs::remove_dir_all(&previous)?;
+        }
+        if current.is_dir() {
+            fs::rename(&current, &previous)?;
+        }
     }
 
     let source = paths.sys_root.join("fs/pstore");
@@ -943,7 +956,8 @@ fn read_bounded_bytes(
         Ok(file) => file,
         Err(error) => return bytes_from_io_error(error, optional),
     };
-    let mut bytes = Vec::with_capacity(limit.min(4096));
+    let read_limit = limit.saturating_add(1);
+    let mut bytes = Vec::with_capacity(read_limit.min(4096));
     let mut chunk = [0_u8; 4096];
     loop {
         if started.elapsed() >= timeout {
@@ -962,10 +976,11 @@ fn read_bounded_bytes(
                 }
             }
             Ok(count) => {
-                let remaining = limit.saturating_sub(bytes.len());
+                let remaining = read_limit.saturating_sub(bytes.len());
                 let take = count.min(remaining);
                 bytes.extend_from_slice(&chunk[..take]);
-                if take < count || bytes.len() >= limit {
+                if take < count || bytes.len() > limit {
+                    bytes.truncate(limit);
                     return BytesObservation {
                         status: SourceStatus::Truncated,
                         bytes: Some(bytes),
@@ -1272,6 +1287,12 @@ mod tests {
             read_bounded_text(&large, 8, Duration::from_millis(20), false).status,
             SourceStatus::Truncated
         );
+        let exact = paths.data_dir.join("exact");
+        fs::write(&exact, b"01234567").unwrap();
+        assert_eq!(
+            read_bounded_text(&exact, 8, Duration::from_millis(20), false).status,
+            SourceStatus::Ok
+        );
         assert_eq!(
             read_bounded_text(
                 &paths.data_dir.join("missing"),
@@ -1363,6 +1384,34 @@ mod tests {
         assert!(recorder_root(&paths.data_dir)
             .join(crate::ring::PREVIOUS_DIR)
             .is_dir());
+
+        let root = recorder_root(&paths.data_dir);
+        fs::write(
+            root.join(PREVIOUS_EARLY_BOOT_FILE),
+            b"previous-early-sentinel",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join(PSTORE_PREVIOUS_DIR)).unwrap();
+        fs::write(
+            root.join(PSTORE_PREVIOUS_DIR)
+                .join("previous-pstore-sentinel"),
+            b"previous-pstore",
+        )
+        .unwrap();
+        let repeated = boot_capture(&paths, true).unwrap();
+        assert_eq!(repeated.archive.archived_boot_id.as_deref(), Some("boot-a"));
+        assert_eq!(
+            fs::read(root.join(PREVIOUS_EARLY_BOOT_FILE)).unwrap(),
+            b"previous-early-sentinel"
+        );
+        assert_eq!(
+            fs::read(
+                root.join(PSTORE_PREVIOUS_DIR)
+                    .join("previous-pstore-sentinel")
+            )
+            .unwrap(),
+            b"previous-pstore"
+        );
         fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
     }
 
