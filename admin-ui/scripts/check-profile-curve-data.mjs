@@ -14,7 +14,27 @@ const compiled = ts.transpileModule(source, {
   fileName: pathToFileURL(sourceUrl.pathname).href
 }).outputText;
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`;
-const { parseCurveSamples } = await import(moduleUrl);
+const { groupProfileTabs, parseCurveSamples } = await import(moduleUrl);
+
+assert.deepEqual(
+  groupProfileTabs([
+    { id: 'day_idle', name: 'Day Idle' },
+    { id: 'rhythm', name: 'Day' },
+    { id: 'sleep', name: 'Sleep' },
+    { id: 'sleep_idle', name: 'Sleep Idle' }
+  ]),
+  {
+    primary: [
+      { id: 'rhythm', name: 'Day' },
+      { id: 'sleep', name: 'Sleep' }
+    ],
+    secondary: [
+      { id: 'day_idle', name: 'Day Idle' },
+      { id: 'sleep_idle', name: 'Sleep Idle' }
+    ]
+  },
+  'keeps Day and Sleep ahead of the secondary idle profiles'
+);
 
 assert.deepEqual(
   parseCurveSamples({

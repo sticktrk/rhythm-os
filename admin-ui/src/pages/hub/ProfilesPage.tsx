@@ -34,7 +34,11 @@ import { useDeviceCall } from '../../hooks/useDeviceCall';
 import { useDeviceClient } from '../../hooks/useDeviceClient';
 import { usePolling } from '../../hooks/usePolling';
 import { errorMessage } from '../../lib/format';
-import { parseCurveSamples, type CurvePoints } from './profileCurveData';
+import {
+  groupProfileTabs,
+  parseCurveSamples,
+  type CurvePoints
+} from './profileCurveData';
 import '../../styles/pages-phase4.css';
 
 const CURVE_TYPES = [
@@ -85,8 +89,13 @@ export default function ProfilesPage() {
     () => parseProfiles(profilesQuery.data),
     [profilesQuery.data]
   );
+  const profileTabs = useMemo(() => groupProfileTabs(profiles), [profiles]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const profileId = selectedId ?? profiles[0]?.id ?? null;
+  const profileId =
+    profiles.find((profile) => profile.id === selectedId)?.id ??
+    profileTabs.primary[0]?.id ??
+    profileTabs.secondary[0]?.id ??
+    null;
 
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [savedConfig, setSavedConfig] = useState<string | null>(null);
@@ -264,16 +273,32 @@ export default function ProfilesPage() {
       {configError ? <ErrorNotice message={configError} /> : null}
 
       <div className="profileTabs">
-        {profiles.map((profile) => (
-          <button
-            key={profile.id}
-            type="button"
-            className={`profileTab${profile.id === profileId ? ' active' : ''}`}
-            onClick={() => setSelectedId(profile.id)}
-          >
-            {profile.name}
-          </button>
-        ))}
+        <div className="profileTabGroup primary">
+          {profileTabs.primary.map((profile) => (
+            <button
+              key={profile.id}
+              type="button"
+              className={`profileTab${profile.id === profileId ? ' active' : ''}`}
+              onClick={() => setSelectedId(profile.id)}
+            >
+              {profile.name}
+            </button>
+          ))}
+        </div>
+        {profileTabs.secondary.length > 0 ? (
+          <div className="profileTabGroup secondary" aria-label="Idle profiles">
+            {profileTabs.secondary.map((profile) => (
+              <button
+                key={profile.id}
+                type="button"
+                className={`profileTab${profile.id === profileId ? ' active' : ''}`}
+                onClick={() => setSelectedId(profile.id)}
+              >
+                {profile.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
         {profiles.length === 0 && !profilesQuery.loading ? (
           <span className="cardNote">No profiles reported by the device.</span>
         ) : null}

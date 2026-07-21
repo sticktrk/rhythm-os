@@ -3,6 +3,32 @@ export type CurvePoints = {
   kelvin: Array<{ hour: number; value: number }>;
 };
 
+export type ProfileTabGroups<T> = {
+  primary: T[];
+  secondary: T[];
+};
+
+function profilePriority(id: string): number {
+  const normalized = id.toLowerCase();
+  if (normalized === 'rhythm' || normalized === 'day') return 0;
+  if (normalized === 'sleep') return 1;
+  return 2;
+}
+
+/** Keep the everyday Day/Sleep profiles prominent while moving idle-state
+    implementation profiles into a quieter secondary group. */
+export function groupProfileTabs<T extends { id: string }>(
+  profiles: T[]
+): ProfileTabGroups<T> {
+  const primary = profiles
+    .filter((profile) => !/(?:^|[_-])idle$/i.test(profile.id))
+    .sort((a, b) => profilePriority(a.id) - profilePriority(b.id));
+  const secondary = profiles.filter((profile) =>
+    /(?:^|[_-])idle$/i.test(profile.id)
+  );
+  return { primary, secondary };
+}
+
 function recordOf(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)

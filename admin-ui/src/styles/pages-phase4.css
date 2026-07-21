@@ -164,7 +164,27 @@
 .profileTabs {
   display: flex;
   gap: 6px;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
+}
+
+.profileTabGroup {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.profileTabGroup.secondary {
+  margin-left: auto;
+  padding-left: 24px;
+}
+
+.profileTabGroup.secondary .profileTab:not(.active) {
+  background: var(--surface-muted);
+  opacity: 0.68;
+  font-weight: 650;
 }
 
 .profileTab {
