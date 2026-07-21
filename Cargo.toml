@@ -69,6 +69,7 @@ anyhow = "1.0"
 
 # Logging
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # mDNS
 mdns-sd = "0.11"

@@ -13,7 +13,10 @@ use serde_json::Value;
 
 static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(1);
 static LOG_CLOCK: OnceLock<RwLock<Option<LogClock>>> = OnceLock::new();
+static NATIVE_LOG_ERROR_COUNTERS: OnceLock<Vec<tracing_appender::non_blocking::ErrorCounter>> =
+    OnceLock::new();
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.6f%:z";
+const NATIVE_LOG_BUFFERED_LINES: usize = 1024;
 
 #[derive(Clone)]
 enum LogClock {
@@ -180,12 +183,17 @@ pub fn init_native_logging(default_level: &str) -> anyhow::Result<()> {
         .unwrap_or_else(|_| "full".to_string())
         .to_ascii_lowercase();
 
-    match format.as_str() {
+    let (stdout, stdout_guard, stdout_errors) = non_blocking_log_writer(std::io::stdout());
+    let mut guards = vec![stdout_guard];
+    let mut error_counters = vec![stdout_errors];
+
+    let result = match format.as_str() {
         "json" => tracing_subscriber::fmt()
             .with_timer(LocalTimer)
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
             .with_target(true)
             .with_thread_names(true)
+            .with_writer(stdout)
             .json()
             .flatten_event(true)
             .with_current_span(true)
@@ -196,11 +204,53 @@ pub fn init_native_logging(default_level: &str) -> anyhow::Result<()> {
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
             .with_target(true)
             .with_thread_names(true)
+            .with_writer(stdout)
             .compact()
             .try_init()
             .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e)),
-        _ => init_full_format(filter),
+        _ => init_full_format(filter, stdout, &mut guards, &mut error_counters),
+    };
+
+    if result.is_ok() {
+        let _ = NATIVE_LOG_ERROR_COUNTERS.set(error_counters);
+        // A WorkerGuard flushes and joins its writer thread when dropped. Native
+        // logging lives for the process lifetime, so intentionally retain the
+        // guards instead of blocking initialization while the sinks are active.
+        for guard in guards {
+            Box::leak(Box::new(guard));
+        }
     }
+
+    result
+}
+
+fn non_blocking_log_writer<W>(
+    writer: W,
+) -> (
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+    tracing_appender::non_blocking::ErrorCounter,
+)
+where
+    W: std::io::Write + Send + 'static,
+{
+    let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(NATIVE_LOG_BUFFERED_LINES)
+        .lossy(true)
+        .finish(writer);
+    let errors = writer.error_counter();
+    (writer, guard, errors)
+}
+
+/// Lines discarded because a native log sink could not keep up.
+///
+/// Native logging is deliberately lossy under backpressure so storage I/O can
+/// never stop periodic scheduling, integration work, or the liveness watchdog.
+pub fn native_log_dropped_lines() -> usize {
+    NATIVE_LOG_ERROR_COUNTERS
+        .get()
+        .map(|counters| counters.iter().map(|counter| counter.dropped_lines()).sum())
+        .unwrap_or(0)
 }
 
 /// Chatty targets that get their own log files when splitting is active.
@@ -236,7 +286,12 @@ fn split_log_dir() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(dir))
 }
 
-fn init_full_format(filter: String) -> anyhow::Result<()> {
+fn init_full_format(
+    filter: String,
+    stdout: tracing_appender::non_blocking::NonBlocking,
+    guards: &mut Vec<tracing_appender::non_blocking::WorkerGuard>,
+    error_counters: &mut Vec<tracing_appender::non_blocking::ErrorCounter>,
+) -> anyhow::Result<()> {
     use std::io::IsTerminal;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -253,7 +308,7 @@ fn init_full_format(filter: String) -> anyhow::Result<()> {
                 .append(true)
                 .open(dir.join(name))
             {
-                Ok(file) => files.push((*target, std::sync::Arc::new(file))),
+                Ok(file) => files.push((*target, file)),
                 Err(error) => {
                     eprintln!(
                         "rhythm: chatter log {name} unavailable ({error}); using single-stream logging"
@@ -274,25 +329,29 @@ fn init_full_format(filter: String) -> anyhow::Result<()> {
             .with_target(true)
             .with_thread_names(true)
             .with_ansi(ansi)
+            .with_writer(stdout)
             .try_init()
             .map_err(|e| anyhow::anyhow!("failed to initialize logging: {}", e));
     };
 
-    let mut layers: Vec<
-        Box<dyn Layer<tracing_subscriber::registry::Registry> + Send + Sync>,
-    > = Vec::new();
+    let mut layers: Vec<Box<dyn Layer<tracing_subscriber::registry::Registry> + Send + Sync>> =
+        Vec::new();
     layers.push(
         tracing_subscriber::fmt::layer()
             .with_timer(LocalTimer)
             .with_target(true)
             .with_thread_names(true)
             .with_ansi(ansi)
+            .with_writer(stdout)
             .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
                 !is_split_log_target(metadata.target())
             }))
             .boxed(),
     );
     for (target, file) in split_files {
+        let (file, guard, errors) = non_blocking_log_writer(file);
+        guards.push(guard);
+        error_counters.push(errors);
         layers.push(
             tracing_subscriber::fmt::layer()
                 .with_timer(LocalTimer)
@@ -398,6 +457,62 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockingLogSink {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        blocked_once: bool,
+    }
+
+    impl std::io::Write for BlockingLogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.blocked_once {
+                self.blocked_once = true;
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn native_log_writer_never_blocks_runtime_threads_on_a_stalled_sink() {
+        use std::io::Write as _;
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (mut writer, guard, errors) = non_blocking_log_writer(BlockingLogSink {
+            entered: entered_tx,
+            release: release_rx,
+            blocked_once: false,
+        });
+
+        writer.write_all(b"first line\n").unwrap();
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("background writer should reach the blocked sink");
+
+        let started = std::time::Instant::now();
+        for _ in 0..(NATIVE_LOG_BUFFERED_LINES + 32) {
+            writer.write_all(b"queued line\n").unwrap();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "runtime writes must remain bounded while the sink is stalled"
+        );
+        assert!(
+            errors.dropped_lines() > 0,
+            "a full bounded queue should expose dropped-line evidence"
+        );
+
+        release_tx.send(()).unwrap();
+        drop(writer);
+        drop(guard);
+    }
 
     #[test]
     fn split_targets_cover_the_chatter_families() {
