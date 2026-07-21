@@ -34,19 +34,23 @@ wall time, monotonic time, kind, and payload. Each observation carries one of:
 - `truncated` (with the bounded partial value when available).
 
 Files are opened nonblocking and read under byte and elapsed-time limits. The
-10-second summary contains CPU/load, selected memory/vmstat, PSI, diskstats,
+30-second summary contains CPU/load, selected memory/vmstat, PSI, diskstats,
 `/data` capacity, R/D task counts, target process/thread counts, thermal and CPU
 frequency readings, firmware power/throttle sources, watchdog state/time-left,
-server/watchdog heartbeat ages, and recorder health. The 60-second detail adds
+server/watchdog heartbeat ages, and recorder health. When a process leader is
+in uninterruptible sleep, its bounded PID, name, and wait channel are retained
+in the same summary that observed it. The 5-minute detail adds
 bounded status and thread name/state/wchan for the server, CHIP daemon,
 watchdog, and recorder.
 
-Escalation occurs for a recorder cadence slip over 2 seconds, a rising D-state
-count, memory or I/O `full avg10 >= 1.0`, a missing server after the 60-second
-startup grace, or a server heartbeat at least 90 seconds old. Escalation is
-limited to once per 60 seconds. It adds bounded process I/O/status, at most four
-thread stack/scheduler captures, and a 16 KiB tail from at most 256 KiB of
-`dmesg` output collected by a child killed after 500 ms.
+Escalation occurs for a recorder cadence slip over 2 seconds, a D-state count
+that persists for two samples, memory or I/O `full avg10 >= 1.0`, a
+missing server after the 60-second startup grace, or a server heartbeat at
+least 90 seconds old. A new signal escalates immediately, while the same signal
+can repeat at most once per 15 minutes. It includes the blocked-task identity
+from the triggering summary, bounded process I/O/status, at most four thread
+stack/scheduler captures, and a 16 KiB tail from at most 256 KiB of `dmesg`
+output collected by a child killed after 500 ms.
 
 The collector never records environment variables, process argv/command lines,
 credentials, network payloads, or user content.
@@ -61,25 +65,26 @@ uses a separate 256 KiB-per-boot bound.
 
 Summary records have an 8 KiB total envelope cap, detail records 16 KiB, and
 escalation records 64 KiB. The automated retention fixture writes 180 near-cap
-summary records and 30 near-cap detail records and verifies the complete 30
+summary records and 18 near-cap detail records and verifies the complete 90
 minutes remains readable. A torn final line is ignored while every earlier
 sequence-valid line remains usable.
 
 Samples append into the kernel page cache. `fdatasync` occurs every 60 seconds,
 on rotation/shutdown, and immediately after an anomaly; it does not run every
-10 seconds. The default hard write envelope per day is:
+30 seconds. The default hard write envelope per day is:
 
-- summary: `8 KiB * 8,640 = 67.5 MiB`;
-- detail: `16 KiB * 1,440 = 22.5 MiB`;
-- continuously rate-limited escalation: `64 KiB * 1,440 = 90 MiB`;
+- summary: `8 KiB * 2,880 = 22.5 MiB`;
+- detail: `16 KiB * 288 = 4.5 MiB`;
+- one continuously active escalation signal: `64 KiB * 96 = 6 MiB`;
+- all six signal classes continuously active and staggered: at most `36 MiB`;
 - manifest/sync updates: under about `3 MiB`, excluding filesystem metadata.
 
-Thus the deliberately pessimistic all-sources-at-cap, anomaly-every-minute
-ceiling is about 183 MiB/day plus filesystem metadata. Normal operation is far
-below that ceiling because compact summary/detail records do not fill their
-caps and escalation is absent. Recorder health reports dropped records, late
-cycles, write/sync failures, rotations, recovery, torn/corrupt records, source
-timeouts, and truncation.
+Thus the baseline schema-cap envelope is 27 MiB/day, and the deliberately
+pessimistic all-sources-at-cap, all-signal ceiling is about 66 MiB/day plus
+filesystem metadata. Normal operation is lower because compact summary/detail
+records do not fill their caps and escalation is absent. Recorder health
+reports dropped records, late cycles, write/sync failures, rotations, recovery,
+torn/corrupt records, source timeouts, and truncation.
 
 ## Debug bundles and classification
 

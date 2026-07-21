@@ -10,11 +10,11 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::model::{
-    ArchiveResult, CpuSnapshot, DetailSample, DiskSnapshot, EarlyBootSnapshot, EscalationSample,
-    FilesystemSnapshot, HeartbeatSnapshot, LoadSnapshot, Observation, PowerSnapshot, ProcessDetail,
-    PsiLine, PsiSnapshot, PstoreEntry, RecorderHealth, SourceStatus, SummarySample,
-    TargetProcessSummary, TaskCounts, ThermalSnapshot, ThreadDetail, WatchdogSnapshot,
-    SCHEMA_VERSION,
+    ArchiveResult, BlockedTaskSummary, CpuSnapshot, DetailSample, DiskSnapshot, EarlyBootSnapshot,
+    EscalationSample, FilesystemSnapshot, HeartbeatSnapshot, LoadSnapshot, Observation,
+    PowerSnapshot, ProcessDetail, PsiLine, PsiSnapshot, PstoreEntry, RecorderHealth, SourceStatus,
+    SummarySample, TargetProcessSummary, TaskCounts, ThermalSnapshot, ThreadDetail,
+    WatchdogSnapshot, SCHEMA_VERSION,
 };
 use crate::ring::{
     archive_current_boot_for_boot, atomic_write, atomic_write_json, current_ring_boot_id,
@@ -31,6 +31,7 @@ const DMESG_SCAN_BYTES_LIMIT: usize = 256 * 1024;
 const PSTORE_TOTAL_BYTES_LIMIT: usize = 256 * 1024;
 const PSTORE_FILE_LIMIT: usize = 8;
 const PROCESS_SCAN_LIMIT: usize = 4096;
+const BLOCKED_TASK_LIMIT: usize = 8;
 const THREAD_SCAN_LIMIT: usize = 64;
 const ESCALATION_STACK_CAPTURE_LIMIT: usize = 4;
 const OPTIONAL_SOURCE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -40,7 +41,8 @@ const DMESG_TIMEOUT: Duration = Duration::from_millis(500);
 pub const SERVER_HEARTBEAT_FILE: &str = "rhythm-server-heartbeat.json";
 pub const HARDWARE_WATCHDOG_HEARTBEAT_FILE: &str = "rhythm-hardware-watchdog-heartbeat.json";
 pub const SERVER_HEARTBEAT_STALE_MS: u64 = 90_000;
-pub const ESCALATION_RATE_LIMIT_MS: u64 = 60_000;
+pub const ESCALATION_REPEAT_INTERVAL_MS: u64 = 15 * 60_000;
+pub const D_STATE_MIN_CONSECUTIVE_SAMPLES: u64 = 2;
 pub const STARTUP_GRACE_MS: u64 = 60_000;
 pub const CADENCE_SLIP_TOLERANCE_MS: u64 = 2_000;
 pub const PSI_FULL_AVG10_THRESHOLD: f64 = 1.0;
@@ -70,8 +72,8 @@ impl CollectorPaths {
 pub struct TriggerState {
     started_monotonic_ms: Option<u64>,
     last_sample_monotonic_ms: Option<u64>,
-    last_d_state_count: u64,
-    last_escalation_monotonic_ms: Option<u64>,
+    d_state_streak: u64,
+    last_escalation_by_key: BTreeMap<&'static str, u64>,
 }
 
 impl TriggerState {
@@ -82,24 +84,36 @@ impl TriggerState {
         expected_interval_ms: u64,
     ) -> Vec<String> {
         let started = *self.started_monotonic_ms.get_or_insert(monotonic_ms);
-        let mut reasons = Vec::new();
+        let mut candidates = Vec::<(&'static str, String)>::new();
 
         if let Some(previous) = self.last_sample_monotonic_ms {
             let actual = monotonic_ms.saturating_sub(previous);
             if actual > expected_interval_ms.saturating_add(CADENCE_SLIP_TOLERANCE_MS) {
-                reasons.push(format!("recorder_cadence_slip_ms:{actual}"));
+                candidates.push((
+                    "recorder_cadence_slip",
+                    format!("recorder_cadence_slip_ms:{actual}"),
+                ));
             }
         }
         self.last_sample_monotonic_ms = Some(monotonic_ms);
 
         if let Some(tasks) = sample.tasks.value.as_ref() {
-            if tasks.uninterruptible > self.last_d_state_count && tasks.uninterruptible > 0 {
-                reasons.push(format!(
-                    "d_state_count_rise:{}->{}",
-                    self.last_d_state_count, tasks.uninterruptible
+            if tasks.uninterruptible > 0 {
+                self.d_state_streak = self.d_state_streak.saturating_add(1);
+            } else {
+                self.d_state_streak = 0;
+            }
+            if self.d_state_streak >= D_STATE_MIN_CONSECUTIVE_SAMPLES {
+                candidates.push((
+                    "persistent_d_state",
+                    format!(
+                        "persistent_d_state_count:{}_samples:{}",
+                        tasks.uninterruptible, self.d_state_streak
+                    ),
                 ));
             }
-            self.last_d_state_count = tasks.uninterruptible;
+        } else {
+            self.d_state_streak = 0;
         }
 
         for (name, psi) in [("memory", &sample.psi_memory), ("io", &sample.psi_io)] {
@@ -109,7 +123,11 @@ impl TriggerState {
                 .and_then(|value| value.full.as_ref())
                 .is_some_and(|full| full.avg10 >= PSI_FULL_AVG10_THRESHOLD)
             {
-                reasons.push(format!("{name}_psi_full_avg10"));
+                let key = match name {
+                    "memory" => "memory_psi_full",
+                    _ => "io_psi_full",
+                };
+                candidates.push((key, format!("{name}_psi_full_avg10")));
             }
         }
 
@@ -125,7 +143,10 @@ impl TriggerState {
                         .any(|process| process.target == "rhythm-server")
                 })
             {
-                reasons.push("rhythm_server_process_missing".to_string());
+                candidates.push((
+                    "rhythm_server_process_missing",
+                    "rhythm_server_process_missing".to_string(),
+                ));
             }
             if sample
                 .server_heartbeat
@@ -134,20 +155,23 @@ impl TriggerState {
                 .and_then(|heartbeat| heartbeat.age_ms)
                 .is_some_and(|age| age >= SERVER_HEARTBEAT_STALE_MS)
             {
-                reasons.push("rhythm_server_heartbeat_stale".to_string());
+                candidates.push((
+                    "rhythm_server_heartbeat_stale",
+                    "rhythm_server_heartbeat_stale".to_string(),
+                ));
             }
         }
 
-        if reasons.is_empty() {
-            return reasons;
+        let mut reasons = Vec::new();
+        for (key, reason) in candidates {
+            let due = self.last_escalation_by_key.get(key).is_none_or(|last| {
+                monotonic_ms.saturating_sub(*last) >= ESCALATION_REPEAT_INTERVAL_MS
+            });
+            if due {
+                self.last_escalation_by_key.insert(key, monotonic_ms);
+                reasons.push(reason);
+            }
         }
-        if self
-            .last_escalation_monotonic_ms
-            .is_some_and(|last| monotonic_ms.saturating_sub(last) < ESCALATION_RATE_LIMIT_MS)
-        {
-            return Vec::new();
-        }
-        self.last_escalation_monotonic_ms = Some(monotonic_ms);
         reasons
     }
 }
@@ -159,7 +183,7 @@ pub fn collect_summary(paths: &CollectorPaths, health: &RecorderHealth) -> (u64,
         .as_ref()
         .map(|value| (*value * 1000.0).max(0.0) as u64)
         .unwrap_or(0);
-    let (tasks, targets) = collect_tasks_and_targets(paths);
+    let (tasks, targets, blocked_tasks) = collect_tasks_and_targets(paths);
     let mut sample = SummarySample {
         load: collect_load(paths),
         cpu: collect_cpu(paths),
@@ -197,6 +221,7 @@ pub fn collect_summary(paths: &CollectorPaths, health: &RecorderHealth) -> (u64,
         disks: collect_disks(paths),
         filesystem: collect_filesystem(&paths.data_dir),
         tasks,
+        blocked_tasks,
         target_processes: targets,
         thermal: collect_thermal(paths),
         cpu_frequency_khz: collect_u64_file(
@@ -245,9 +270,14 @@ pub fn collect_detail(paths: &CollectorPaths, with_stacks: bool) -> DetailSample
     }
 }
 
-pub fn collect_escalation(paths: &CollectorPaths, reasons: Vec<String>) -> EscalationSample {
+pub fn collect_escalation(
+    paths: &CollectorPaths,
+    reasons: Vec<String>,
+    blocked_tasks: &[BlockedTaskSummary],
+) -> EscalationSample {
     EscalationSample {
         reasons,
+        blocked_tasks: blocked_tasks.to_vec(),
         processes: collect_process_details(paths, true),
         dmesg_tail: run_bounded_command(
             &paths.dmesg_command,
@@ -450,6 +480,7 @@ fn collect_tasks_and_targets(
 ) -> (
     Observation<TaskCounts>,
     Observation<Vec<TargetProcessSummary>>,
+    Vec<BlockedTaskSummary>,
 ) {
     let entries = match fs::read_dir(&paths.proc_root) {
         Ok(entries) => entries,
@@ -458,12 +489,14 @@ fn collect_tasks_and_targets(
             return (
                 Observation::error(status, error.to_string()),
                 Observation::error(status, error.to_string()),
+                Vec::new(),
             );
         }
     };
     let started = Instant::now();
     let mut counts = TaskCounts::default();
     let mut targets = Vec::new();
+    let mut blocked_tasks = Vec::new();
     for entry in entries.flatten().take(PROCESS_SCAN_LIMIT) {
         if started.elapsed() >= DETAIL_SOURCE_TIMEOUT {
             counts.truncated = true;
@@ -502,6 +535,19 @@ fn collect_tasks_and_targets(
         .unwrap_or_default()
         .trim()
         .to_string();
+        if state == "D" && blocked_tasks.len() < BLOCKED_TASK_LIMIT {
+            blocked_tasks.push(BlockedTaskSummary {
+                pid,
+                comm: comm.clone(),
+                wait_channel: read_bounded_text(
+                    &entry.path().join("wchan"),
+                    256,
+                    OPTIONAL_SOURCE_TIMEOUT,
+                    false,
+                )
+                .map_value(|value| value.trim().to_string()),
+            });
+        }
         let Some(target) = target_name(&comm) else {
             continue;
         };
@@ -521,7 +567,7 @@ fn collect_tasks_and_targets(
     } else {
         Observation::ok(counts)
     };
-    (task_observation, Observation::ok(targets))
+    (task_observation, Observation::ok(targets), blocked_tasks)
 }
 
 fn collect_thermal(paths: &CollectorPaths) -> Observation<Vec<ThermalSnapshot>> {
@@ -607,7 +653,7 @@ fn collect_watchdog(paths: &CollectorPaths) -> Observation<WatchdogSnapshot> {
 }
 
 fn collect_process_details(paths: &CollectorPaths, with_stacks: bool) -> Vec<ProcessDetail> {
-    let (_, targets) = collect_tasks_and_targets(paths);
+    let (_, targets, _) = collect_tasks_and_targets(paths);
     let mut details = Vec::new();
     let mut expensive_capture_budget = ESCALATION_STACK_CAPTURE_LIMIT;
     for target in targets.value.unwrap_or_default() {
@@ -1324,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_is_rate_limited_and_detects_stale_heartbeat() {
+    fn trigger_cools_down_each_signal_without_hiding_a_new_signal() {
         let paths = fixture("trigger");
         fs::write(paths.proc_root.join("uptime"), "100 0\n").unwrap();
         let mut sample = minimal_sample();
@@ -1352,6 +1398,87 @@ mod tests {
         assert!(state
             .evaluate(&sample, STARTUP_GRACE_MS + 10_000, 10_000)
             .is_empty());
+
+        sample.server_heartbeat = Observation::unsupported("healthy for test");
+        sample.psi_memory = Observation::ok(PsiSnapshot {
+            some: None,
+            full: Some(PsiLine {
+                avg10: PSI_FULL_AVG10_THRESHOLD,
+                avg60: 0.0,
+                avg300: 0.0,
+                total_usec: 1,
+            }),
+        });
+        let distinct = state.evaluate(&sample, STARTUP_GRACE_MS + 20_000, 10_000);
+        assert_eq!(distinct, vec!["memory_psi_full_avg10"]);
+        fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn transient_d_state_is_ignored_and_persistent_d_state_is_cooled_down() {
+        let mut sample = minimal_sample();
+        sample.target_processes = Observation::ok(vec![TargetProcessSummary {
+            target: "rhythm-server".to_string(),
+            pid: 42,
+            comm: "rhythm-server".to_string(),
+            state: "S".to_string(),
+            thread_count: 1,
+        }]);
+        sample.server_heartbeat = Observation::ok(HeartbeatSnapshot {
+            kind: "server".to_string(),
+            pid: 42,
+            boot_id: Some("boot".to_string()),
+            monotonic_ms: Some(0),
+            wall_time: None,
+            age_ms: Some(0),
+        });
+        sample.tasks = Observation::ok(TaskCounts {
+            uninterruptible: 1,
+            ..TaskCounts::default()
+        });
+        let mut state = TriggerState::default();
+
+        assert!(state.evaluate(&sample, 0, 30_000).is_empty());
+        assert_eq!(
+            state.evaluate(&sample, 30_000, 30_000),
+            vec!["persistent_d_state_count:1_samples:2"]
+        );
+        assert!(state.evaluate(&sample, 60_000, 30_000).is_empty());
+
+        sample.tasks = Observation::ok(TaskCounts::default());
+        assert!(state.evaluate(&sample, 90_000, 30_000).is_empty());
+        sample.tasks = Observation::ok(TaskCounts {
+            uninterruptible: 1,
+            ..TaskCounts::default()
+        });
+        assert!(state.evaluate(&sample, 120_000, 30_000).is_empty());
+        assert!(state.evaluate(&sample, 150_000, 30_000).is_empty());
+        state.last_sample_monotonic_ms = Some(ESCALATION_REPEAT_INTERVAL_MS);
+        assert_eq!(
+            state.evaluate(&sample, 30_000 + ESCALATION_REPEAT_INTERVAL_MS, 30_000,),
+            vec!["persistent_d_state_count:1_samples:3"]
+        );
+    }
+
+    #[test]
+    fn process_scan_retains_blocked_task_identity() {
+        let paths = fixture("blocked-task");
+        let process = paths.proc_root.join("123");
+        fs::create_dir_all(&process).unwrap();
+        fs::write(process.join("stat"), "123 (mmcqd/0) D 1 2 3\n").unwrap();
+        fs::write(process.join("comm"), "mmcqd/0\n").unwrap();
+        fs::write(process.join("wchan"), "io_schedule\n").unwrap();
+
+        let (tasks, _, blocked) = collect_tasks_and_targets(&paths);
+
+        assert_eq!(tasks.value.unwrap().uninterruptible, 1);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].pid, 123);
+        assert_eq!(blocked[0].comm, "mmcqd/0");
+        assert_eq!(
+            blocked[0].wait_channel.value.as_deref(),
+            Some("io_schedule")
+        );
         fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
     }
 
@@ -1447,6 +1574,7 @@ mod tests {
             disks: Observation::unsupported("test"),
             filesystem: Observation::unsupported("test"),
             tasks: Observation::ok(TaskCounts::default()),
+            blocked_tasks: Vec::new(),
             target_processes: Observation::ok(Vec::new()),
             thermal: Observation::unsupported("test"),
             cpu_frequency_khz: Observation::unsupported("test"),
