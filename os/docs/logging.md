@@ -67,3 +67,7 @@ Periodic room-level tick logs should stay below `info`; operators should see one
 - `RHYTHM_LOG_FORMAT` supports `full`, `compact`, or `json`.
 - `RHYTHM_MATTER_LOGFILE` redirects raw `rhythm-chipd` stdout/stderr to a separate append-only file. Set it to an empty string to keep chipd output on the main process sink.
 - Native HTTP responses emit request-completion logs with `request_id`, `status`, and `latency_ms`.
+- Native stdout and split-file sinks use bounded, lossy background writers. If
+  storage is slow, runtime threads continue and excess lines are dropped instead
+  of blocking lighting work. `runtime_health.json` reports the cumulative
+  `logging.dropped_lines` count for the current process.

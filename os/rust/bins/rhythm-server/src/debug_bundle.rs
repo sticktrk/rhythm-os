@@ -261,11 +261,17 @@ struct RuntimeHealthSnapshot {
     platform: RuntimePlatformHealth,
     mode: RuntimeModeHealth,
     timing: RuntimeTimingHealth,
+    logging: RuntimeLoggingHealth,
     queues: RuntimeQueueHealth,
     hubs: Vec<RuntimeHubHealth>,
     topology: RuntimeTopologyHealth,
     motion: RuntimeMotionHealth,
     observed_power: RuntimeObservedPowerHealth,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeLoggingHealth {
+    dropped_lines: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -2331,6 +2337,9 @@ pub(crate) fn build_runtime_health_json(
             latitude: s.latitude,
             longitude: s.longitude,
         },
+        logging: RuntimeLoggingHealth {
+            dropped_lines: rhythm_os::logging::native_log_dropped_lines(),
+        },
         queues: RuntimeQueueHealth {
             work_queue_configured: s.work_tx.is_some(),
             periodic_work_queue_configured: s.periodic_work_tx.is_some(),
@@ -4272,6 +4281,7 @@ mod tests {
             DEBUG_BUNDLE_SCHEMA_VERSION
         );
         assert_eq!(runtime_health["platform"]["platform_context"], "rpiz");
+        assert_eq!(runtime_health["logging"]["dropped_lines"], 0);
         assert_eq!(
             runtime_health["queues"]["pending_periodic_ticks"],
             Value::from(1_u64)
