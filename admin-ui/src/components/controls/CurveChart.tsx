@@ -17,6 +17,9 @@ export type CurveChartProps = {
   solar?: { sunriseHour?: number; sunsetHour?: number };
   yLeft?: { min: number; max: number };
   yRight?: { min: number; max: number };
+  xAxisLabel?: string;
+  yLeftAxisLabel?: string;
+  yRightAxisLabel?: string;
   /** Extra SVG rendered in plot coordinates (used by CurveEditor handles). */
   overlay?: ReactNode;
   onPlotGeometry?: (geometry: PlotGeometry) => void;
@@ -95,6 +98,9 @@ export function CurveChart({
   solar,
   yLeft = { min: 0, max: 100 },
   yRight = { min: 500, max: 6500 },
+  xAxisLabel,
+  yLeftAxisLabel,
+  yRightAxisLabel,
   overlay
 }: CurveChartProps) {
   const geometry = plotGeometry(height, yLeft, yRight);
@@ -124,7 +130,12 @@ export function CurveChart({
               x2={x}
               y2={plotBottom}
             />
-            <text className="curveTick" x={x} y={height - 8} textAnchor="middle">
+            <text
+              className="curveTick"
+              x={x}
+              y={xAxisLabel ? height - 17 : height - 8}
+              textAnchor="middle"
+            >
               {formatHour(hour)}
             </text>
           </g>
@@ -168,6 +179,35 @@ export function CurveChart({
           </text>
         );
       })}
+
+      {xAxisLabel ? (
+        <text
+          className="curveAxisLabel"
+          x={(padding.left + CURVE_CHART_WIDTH - padding.right) / 2}
+          y={height - 2}
+          textAnchor="middle"
+        >
+          {xAxisLabel}
+        </text>
+      ) : null}
+      {yLeftAxisLabel ? (
+        <text
+          className="curveAxisLabel"
+          textAnchor="middle"
+          transform={`translate(10 ${(padding.top + plotBottom) / 2}) rotate(-90)`}
+        >
+          {yLeftAxisLabel}
+        </text>
+      ) : null}
+      {yRightAxisLabel ? (
+        <text
+          className="curveAxisLabel"
+          textAnchor="middle"
+          transform={`translate(${CURVE_CHART_WIDTH - 8} ${(padding.top + plotBottom) / 2}) rotate(90)`}
+        >
+          {yRightAxisLabel}
+        </text>
+      ) : null}
 
       {/* solar markers */}
       {solar?.sunriseHour !== undefined ? (

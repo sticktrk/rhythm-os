@@ -597,6 +597,7 @@
 
 .curveTick,
 .curveLegend,
+.curveAxisLabel,
 .curveSolarLabel,
 .curveHandleLabel,
 .clockTickLabel,
@@ -604,6 +605,12 @@
   fill: var(--muted);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+}
+
+.curveAxisLabel {
+  fill: var(--text);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .curveHandleLabel,
