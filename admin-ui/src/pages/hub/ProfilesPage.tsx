@@ -25,7 +25,6 @@ import {
 } from '../../device/curves';
 import { setNodesOffset } from '../../device/nodes';
 import {
-  asArray,
   asNumber,
   asRecord,
   asRecordArray,
@@ -35,6 +34,11 @@ import { useDeviceCall } from '../../hooks/useDeviceCall';
 import { useDeviceClient } from '../../hooks/useDeviceClient';
 import { usePolling } from '../../hooks/usePolling';
 import { errorMessage } from '../../lib/format';
+import {
+  groupProfileTabs,
+  parseCurveSamples,
+  type CurvePoints
+} from './profileCurveData';
 import '../../styles/pages-phase4.css';
 
 const CURVE_TYPES = [
@@ -61,49 +65,6 @@ function parseProfiles(payload: unknown): ProfileRef[] {
     .filter((entry): entry is ProfileRef => entry !== null);
 }
 
-type CurvePoints = {
-  brightness: Array<{ hour: number; value: number }>;
-  kelvin: Array<{ hour: number; value: number }>;
-};
-
-function parseCurveSamples(payload: unknown): CurvePoints {
-  const record = asRecord(payload);
-  const hours = asArray(record.hours).map(asNumber);
-  const brightnessArr = asArray(record.brightness).map(asNumber);
-  const kelvinArr = asArray(record.kelvin ?? record.color_temp).map(asNumber);
-
-  if (hours.length > 0) {
-    const brightness: CurvePoints['brightness'] = [];
-    const kelvin: CurvePoints['kelvin'] = [];
-    hours.forEach((hour, index) => {
-      if (hour === undefined) return;
-      const b = brightnessArr[index];
-      const k = kelvinArr[index];
-      if (b !== undefined) brightness.push({ hour, value: b });
-      if (k !== undefined) kelvin.push({ hour, value: k });
-    });
-    return { brightness, kelvin };
-  }
-
-  const points = asRecordArray(
-    record.points ?? record.samples ?? record.data ?? payload
-  );
-  const brightness: CurvePoints['brightness'] = [];
-  const kelvin: CurvePoints['kelvin'] = [];
-  for (const point of points) {
-    const hour = asNumber(point.hour) ?? asNumber(point.h);
-    if (hour === undefined) continue;
-    const b = asNumber(point.brightness) ?? asNumber(point.bri);
-    const k =
-      asNumber(point.kelvin) ??
-      asNumber(point.color_temp) ??
-      asNumber(point.cct);
-    if (b !== undefined) brightness.push({ hour, value: b });
-    if (k !== undefined) kelvin.push({ hour, value: k });
-  }
-  return { brightness, kelvin };
-}
-
 /** Locate the tagged curve-shape record within a config, tolerating both
     nested (`config.curve = {type,...}`) and flat (`config.type = ...`) forms. */
 function curveShapeOf(config: Record<string, unknown>): {
@@ -128,35 +89,50 @@ export default function ProfilesPage() {
     () => parseProfiles(profilesQuery.data),
     [profilesQuery.data]
   );
+  const profileTabs = useMemo(() => groupProfileTabs(profiles), [profiles]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const profileId = selectedId ?? profiles[0]?.id ?? null;
+  const profileId =
+    profiles.find((profile) => profile.id === selectedId)?.id ??
+    profileTabs.primary[0]?.id ??
+    profileTabs.secondary[0]?.id ??
+    null;
 
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [savedConfig, setSavedConfig] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(false);
+  const configLoadSeq = useRef(0);
 
   const [samples, setSamples] = useState<CurvePoints | null>(null);
   const [sampling, setSampling] = useState(false);
   const sampleSeq = useRef(0);
+  const lastSampleStartedAt = useRef(0);
 
   const [offsetHours, setOffsetHours] = useState(0);
 
   const loadConfig = useCallback(
     async (id: string) => {
+      const seq = (configLoadSeq.current += 1);
       setLoadingConfig(true);
       setConfigError(null);
+      setConfig(null);
+      setSavedConfig(null);
+      setSamples(null);
+      sampleSeq.current += 1;
+      setSampling(false);
       try {
         const result = await getConfig(client, id);
+        if (configLoadSeq.current !== seq) return;
         const record = asRecord(result);
         setConfig(record);
         setSavedConfig(JSON.stringify(record));
       } catch (error) {
+        if (configLoadSeq.current !== seq) return;
         setConfig(null);
         setSavedConfig(null);
         setConfigError(errorMessage(error));
       } finally {
-        setLoadingConfig(false);
+        if (configLoadSeq.current === seq) setLoadingConfig(false);
       }
     },
     [client]
@@ -166,13 +142,16 @@ export default function ProfilesPage() {
     if (profileId) void loadConfig(profileId);
   }, [profileId, loadConfig]);
 
-  // Debounced device-side re-sampling: curve math lives in Rust on the
-  // device, so the chart always renders what the device would actually do.
+  // Device-side re-sampling: curve math lives in Rust, so the chart renders
+  // the appliance's exact output. Cap live drag previews at 10 requests/sec.
   useEffect(() => {
     if (!config || !profileId) return;
     const seq = (sampleSeq.current += 1);
     setSampling(true);
+    const elapsed = window.performance.now() - lastSampleStartedAt.current;
+    const delay = Math.max(0, 100 - elapsed);
     const timer = window.setTimeout(() => {
+      lastSampleStartedAt.current = window.performance.now();
       sampleCurve(client, config, { id: profileId, samplesPerHour: 6 })
         .then((result) => {
           if (sampleSeq.current !== seq) return;
@@ -184,7 +163,7 @@ export default function ProfilesPage() {
         .finally(() => {
           if (sampleSeq.current === seq) setSampling(false);
         });
-    }, 300);
+    }, delay);
     return () => window.clearTimeout(timer);
   }, [client, config, profileId]);
 
@@ -227,9 +206,13 @@ export default function ProfilesPage() {
 
   const solar = asRecord(solarQuery.data);
   const sunriseHour =
-    asNumber(solar.sunrise_hour) ?? asNumber(asRecord(solar.sunrise).hour);
+    asNumber(solar.sunrise_hour) ??
+    asNumber(solar.sunrise) ??
+    asNumber(asRecord(solar.sunrise).hour);
   const sunsetHour =
-    asNumber(solar.sunset_hour) ?? asNumber(asRecord(solar.sunset).hour);
+    asNumber(solar.sunset_hour) ??
+    asNumber(solar.sunset) ??
+    asNumber(asRecord(solar.sunset).hour);
 
   const shapeInfo = config ? curveShapeOf(config) : null;
   const shapeType = shapeInfo ? asString(shapeInfo.shape.type) ?? 'super-gaussian' : null;
@@ -290,16 +273,32 @@ export default function ProfilesPage() {
       {configError ? <ErrorNotice message={configError} /> : null}
 
       <div className="profileTabs">
-        {profiles.map((profile) => (
-          <button
-            key={profile.id}
-            type="button"
-            className={`profileTab${profile.id === profileId ? ' active' : ''}`}
-            onClick={() => setSelectedId(profile.id)}
-          >
-            {profile.name}
-          </button>
-        ))}
+        <div className="profileTabGroup primary">
+          {profileTabs.primary.map((profile) => (
+            <button
+              key={profile.id}
+              type="button"
+              className={`profileTab${profile.id === profileId ? ' active' : ''}`}
+              onClick={() => setSelectedId(profile.id)}
+            >
+              {profile.name}
+            </button>
+          ))}
+        </div>
+        {profileTabs.secondary.length > 0 ? (
+          <div className="profileTabGroup secondary" aria-label="Idle profiles">
+            {profileTabs.secondary.map((profile) => (
+              <button
+                key={profile.id}
+                type="button"
+                className={`profileTab${profile.id === profileId ? ' active' : ''}`}
+                onClick={() => setSelectedId(profile.id)}
+              >
+                {profile.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
         {profiles.length === 0 && !profilesQuery.loading ? (
           <span className="cardNote">No profiles reported by the device.</span>
         ) : null}
@@ -324,6 +323,9 @@ export default function ProfilesPage() {
               solar={{ sunriseHour, sunsetHour }}
               yLeft={{ min: 0, max: 100 }}
               yRight={{ min: Math.min(minCct, 500), max: Math.max(maxCct, 6500) }}
+              xAxisLabel="Time (24-hour)"
+              yLeftAxisLabel="Brightness (%)"
+              yRightAxisLabel="Color temperature (K)"
             />
           </div>
         ) : loadingConfig || sampling ? (
@@ -347,6 +349,9 @@ export default function ProfilesPage() {
                 max={100}
                 minGap={1}
                 format={(value) => `${Math.round(value)}%`}
+                onChange={(low, high) =>
+                  patchConfig({ min_brightness: low, max_brightness: high })
+                }
                 onCommit={(low, high) =>
                   patchConfig({ min_brightness: low, max_brightness: high })
                 }
@@ -567,6 +572,7 @@ function ShapeParams({
         max={2}
         step={0.05}
         format={(value) => value.toFixed(2)}
+        onChange={(value) => onPatch({ [key]: value })}
         onCommit={(value) => onPatch({ [key]: value })}
       />
     );
@@ -583,6 +589,7 @@ function ShapeParams({
           max={10}
           step={0.1}
           format={(value) => value.toFixed(1)}
+          onChange={(value) => onPatch({ shape_p: value })}
           onCommit={(value) => onPatch({ shape_p: value })}
         />
       </div>

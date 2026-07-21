@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 
 import { formatHour } from '../../lib/format';
 
@@ -17,6 +17,9 @@ export type CurveChartProps = {
   solar?: { sunriseHour?: number; sunsetHour?: number };
   yLeft?: { min: number; max: number };
   yRight?: { min: number; max: number };
+  xAxisLabel?: string;
+  yLeftAxisLabel?: string;
+  yRightAxisLabel?: string;
   /** Extra SVG rendered in plot coordinates (used by CurveEditor handles). */
   overlay?: ReactNode;
   onPlotGeometry?: (geometry: PlotGeometry) => void;
@@ -86,6 +89,28 @@ function seriesPath(
     .join(' ');
 }
 
+function valueAtHour(
+  points: Array<{ hour: number; value: number }>,
+  hour: number
+): number | undefined {
+  const sorted = [...points].sort((a, b) => a.hour - b.hour);
+  if (sorted.length === 0) return undefined;
+  if (hour <= sorted[0].hour) return sorted[0].value;
+  if (hour >= sorted[sorted.length - 1].hour) {
+    return sorted[sorted.length - 1].value;
+  }
+  for (let index = 1; index < sorted.length; index += 1) {
+    const right = sorted[index];
+    if (right.hour < hour) continue;
+    const left = sorted[index - 1];
+    const span = right.hour - left.hour;
+    if (span <= 0) return right.value;
+    const progress = (hour - left.hour) / span;
+    return left.value + (right.value - left.value) * progress;
+  }
+  return undefined;
+}
+
 /** Dual-axis 24h curve chart (SVG). Brightness on the left axis,
     kelvin on the right. Values must come from the device's curve sampler. */
 export function CurveChart({
@@ -95,8 +120,12 @@ export function CurveChart({
   solar,
   yLeft = { min: 0, max: 100 },
   yRight = { min: 500, max: 6500 },
+  xAxisLabel,
+  yLeftAxisLabel,
+  yRightAxisLabel,
   overlay
 }: CurveChartProps) {
+  const [hoverHour, setHoverHour] = useState<number | null>(null);
   const geometry = plotGeometry(height, yLeft, yRight);
   const { padding } = geometry;
   const plotBottom = height - padding.bottom;
@@ -104,6 +133,37 @@ export function CurveChart({
   const hourTicks = [0, 3, 6, 9, 12, 15, 18, 21, 24];
   const leftTicks = 4;
   const rightTicks = 4;
+  const hoverValues = hoverHour === null
+    ? []
+    : series.flatMap((entry) => {
+        const value = valueAtHour(entry.points, hoverHour);
+        return value === undefined ? [] : [{ entry, value }];
+      });
+  const hoverX = hoverHour === null ? null : geometry.xForHour(hoverHour);
+  const tooltipWidth = 154;
+  const tooltipHeight = 28 + hoverValues.length * 18;
+  const tooltipX = hoverX === null
+    ? 0
+    : hoverX + tooltipWidth + 18 < CURVE_CHART_WIDTH - padding.right
+      ? hoverX + 10
+      : hoverX - tooltipWidth - 10;
+
+  function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = ((event.clientX - rect.left) / rect.width) * CURVE_CHART_WIDTH;
+    const y = ((event.clientY - rect.top) / rect.height) * height;
+    if (
+      x < padding.left ||
+      x > CURVE_CHART_WIDTH - padding.right ||
+      y < padding.top ||
+      y > plotBottom
+    ) {
+      setHoverHour(null);
+      return;
+    }
+    setHoverHour(geometry.hourForX(x));
+  }
 
   return (
     <svg
@@ -111,6 +171,8 @@ export function CurveChart({
       viewBox={`0 0 ${CURVE_CHART_WIDTH} ${height}`}
       role="img"
       aria-label="24 hour lighting curve"
+      onPointerMove={handlePointerMove}
+      onPointerLeave={() => setHoverHour(null)}
     >
       {/* grid */}
       {hourTicks.map((hour) => {
@@ -124,7 +186,12 @@ export function CurveChart({
               x2={x}
               y2={plotBottom}
             />
-            <text className="curveTick" x={x} y={height - 8} textAnchor="middle">
+            <text
+              className="curveTick"
+              x={x}
+              y={xAxisLabel ? height - 17 : height - 8}
+              textAnchor="middle"
+            >
               {formatHour(hour)}
             </text>
           </g>
@@ -169,6 +236,35 @@ export function CurveChart({
         );
       })}
 
+      {xAxisLabel ? (
+        <text
+          className="curveAxisLabel"
+          x={(padding.left + CURVE_CHART_WIDTH - padding.right) / 2}
+          y={height - 2}
+          textAnchor="middle"
+        >
+          {xAxisLabel}
+        </text>
+      ) : null}
+      {yLeftAxisLabel ? (
+        <text
+          className="curveAxisLabel"
+          textAnchor="middle"
+          transform={`translate(10 ${(padding.top + plotBottom) / 2}) rotate(-90)`}
+        >
+          {yLeftAxisLabel}
+        </text>
+      ) : null}
+      {yRightAxisLabel ? (
+        <text
+          className="curveAxisLabel"
+          textAnchor="middle"
+          transform={`translate(${CURVE_CHART_WIDTH - 8} ${(padding.top + plotBottom) / 2}) rotate(90)`}
+        >
+          {yRightAxisLabel}
+        </text>
+      ) : null}
+
       {/* solar markers */}
       {solar?.sunriseHour !== undefined ? (
         <SolarMarker
@@ -209,6 +305,52 @@ export function CurveChart({
           />
         ) : null
       )}
+
+      {hoverHour !== null && hoverX !== null && hoverValues.length > 0 ? (
+        <g className="curveHover" aria-hidden="true">
+          <line
+            className="curveHoverLine"
+            x1={hoverX}
+            y1={padding.top}
+            x2={hoverX}
+            y2={plotBottom}
+          />
+          {hoverValues.map(({ entry, value }) => (
+            <circle
+              key={`hover-${entry.id}`}
+              className="curveHoverMarker"
+              cx={hoverX}
+              cy={geometry.yForValue(value, entry.axis)}
+              r={4}
+              fill={entry.color}
+            />
+          ))}
+          <g transform={`translate(${tooltipX} ${padding.top + 8})`}>
+            <rect
+              className="curveHoverCard"
+              width={tooltipWidth}
+              height={tooltipHeight}
+              rx={6}
+            />
+            <text className="curveHoverTime" x={9} y={17}>
+              {formatHour(hoverHour)}
+            </text>
+            {hoverValues.map(({ entry, value }, index) => (
+              <text
+                key={`hover-label-${entry.id}`}
+                className="curveHoverValue"
+                x={9}
+                y={37 + index * 18}
+              >
+                {entry.axis === 'brightness' ? 'Brightness' : 'Color temp'}:{' '}
+                {entry.axis === 'brightness'
+                  ? `${Math.round(value)}%`
+                  : `${Math.round(value)}K`}
+              </text>
+            ))}
+          </g>
+        </g>
+      ) : null}
 
       {/* legend */}
       {series.map((entry, index) => (

@@ -184,6 +184,7 @@ export function RangeSlider({
   format,
   disabled,
   trackStyle = 'plain',
+  onChange,
   onCommit
 }: {
   low: number;
@@ -196,6 +197,7 @@ export function RangeSlider({
   format?: (value: number) => string;
   disabled?: boolean;
   trackStyle?: TrackStyle;
+  onChange?: (low: number, high: number) => void;
   onCommit: (low: number, high: number) => void;
 }) {
   const trackRef = useRef<HTMLDivElement | null>(null);
@@ -251,6 +253,7 @@ export function RangeSlider({
       high: shownHigh
     });
     setDrag({ thumb, ...next });
+    onChange?.(next.low, next.high);
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
@@ -259,6 +262,7 @@ export function RangeSlider({
     const pointerValue = valueFromPointer(event.clientX);
     const next = applyDrag(drag.thumb, pointerValue, drag);
     setDrag({ thumb: drag.thumb, ...next });
+    onChange?.(next.low, next.high);
   }
 
   function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
