@@ -1465,31 +1465,34 @@ pub(crate) fn update_lights_on_cache_for_native_light_report(
     );
 
     if let Some(parent_id) = parent_id.filter(|parent_id| parent_id != &node_id) {
-        let parent_lights_on = if lights_on {
-            true
+        if lights_on {
+            update_lights_on_cache_for_node_with_source(
+                state,
+                &parent_id,
+                LightNodeKind::Room,
+                None,
+                true,
+                source,
+            );
         } else {
             match runtime.any_lights_on(&parent_id) {
-                Ok(parent_lights_on) => parent_lights_on,
-                Err(e) => {
-                    warn!(
-                        target: "cmd",
-                        "Failed to refresh parent lights_on for '{}' after live report from '{}': {}",
-                        parent_id,
-                        node_id,
-                        e
-                    );
-                    false
-                }
+                Ok(parent_lights_on) => update_lights_on_cache_for_node_with_source(
+                    state,
+                    &parent_id,
+                    LightNodeKind::Room,
+                    None,
+                    parent_lights_on,
+                    source,
+                ),
+                Err(e) => warn!(
+                    target: "cmd",
+                    "Failed to refresh parent lights_on for '{}' after live report from '{}'; preserving prior observation: {}",
+                    parent_id,
+                    node_id,
+                    e
+                ),
             }
-        };
-        update_lights_on_cache_for_node_with_source(
-            state,
-            &parent_id,
-            LightNodeKind::Room,
-            None,
-            parent_lights_on,
-            source,
-        );
+        }
     }
 
     Some(node_id)
@@ -13161,7 +13164,7 @@ mod tests {
         LightRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeManifest, RuntimePlan,
         RuntimeResult, RuntimeSnapshot,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -13238,6 +13241,7 @@ mod tests {
         sun_times_updates: Mutex<Vec<Option<rhythm_core::SunTimes>>>,
         light_states: Mutex<HashMap<String, bool>>,
         light_state_queries: AtomicUsize,
+        fail_light_state_queries: AtomicBool,
         current_hour: f32,
     }
 
@@ -13255,8 +13259,13 @@ mod tests {
                 sun_times_updates: Mutex::new(Vec::new()),
                 light_states: Mutex::new(HashMap::new()),
                 light_state_queries: AtomicUsize::new(0),
+                fail_light_state_queries: AtomicBool::new(false),
                 current_hour,
             }
+        }
+
+        fn fail_light_state_queries(&self) {
+            self.fail_light_state_queries.store(true, Ordering::SeqCst);
         }
 
         fn set_light_on(&self, node_id: &str, on: bool) {
@@ -13553,6 +13562,9 @@ mod tests {
         }
         fn any_lights_on(&self, room_id: &str) -> anyhow::Result<bool> {
             self.light_state_queries.fetch_add(1, Ordering::SeqCst);
+            if self.fail_light_state_queries.load(Ordering::SeqCst) {
+                anyhow::bail!("observed power is indeterminate");
+            }
             Ok(self.any_target_lights_on(room_id))
         }
         fn current_hour(&self) -> f32 {
@@ -17319,6 +17331,31 @@ mod tests {
         let observed = app.room_observed_power.get("room1").unwrap();
         assert!(!observed.lights_on);
         assert_eq!(observed.source, ObservedPowerSource::Command);
+    }
+
+    #[test]
+    fn live_off_report_preserves_parent_when_aggregate_query_is_indeterminate() {
+        let (state, runtime, device_one_id, _device_two_id) = setup_matter_room_with_two_lights();
+        set_observed_lights_on(&state, "room1", true);
+        runtime.fail_light_state_queries();
+
+        let resolved = update_lights_on_cache_for_native_light_report(
+            &state,
+            &(runtime as Arc<dyn RuntimeHandle>),
+            &HubKey::new(HubType::new(HubType::MATTER), "local"),
+            "matter-light-1",
+            false,
+            ObservedPowerSource::LiveSubscription,
+        );
+
+        assert_eq!(resolved.as_deref(), Some(device_one_id.as_str()));
+        let app = state.lock().unwrap();
+        assert_eq!(observed_lights_on(&app, &device_one_id), Some(false));
+        assert_eq!(
+            observed_lights_on(&app, "room1"),
+            Some(true),
+            "an indeterminate sibling scan must preserve the known parent observation"
+        );
     }
 
     // ========================================================================
