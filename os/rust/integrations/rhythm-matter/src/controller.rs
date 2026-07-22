@@ -891,14 +891,19 @@ impl HubLightController for MatterLightController {
             return Ok(false);
         }
 
+        let mut indeterminate_count = 0usize;
         for device_id in &device_ids {
             let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
                 continue;
             };
             match self.read_on_off_with_backoff(node_id, endpoint) {
                 Ok(MatterOnOffRead::On) => return Ok(true),
-                Ok(MatterOnOffRead::Off) | Ok(MatterOnOffRead::Suppressed) => {}
+                Ok(MatterOnOffRead::Off) => {}
+                Ok(MatterOnOffRead::Suppressed) => {
+                    indeterminate_count += 1;
+                }
                 Err(e) => {
+                    indeterminate_count += 1;
                     let connectivity_timeout = Self::looks_like_connectivity_timeout(&e);
                     warn!(
                         target: "cmd",
@@ -919,6 +924,12 @@ impl HubLightController for MatterLightController {
                     }
                 }
             }
+        }
+
+        if indeterminate_count > 0 {
+            return Err(LightControlError::ConnectionError(format!(
+                "Matter on/off state is indeterminate because {indeterminate_count} endpoint(s) are unavailable"
+            )));
         }
 
         Ok(false)
@@ -1148,7 +1159,10 @@ mod tests {
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
 
-        assert!(!block_on(controller.any_lights_on("r1")).unwrap());
+        assert!(matches!(
+            block_on(controller.any_lights_on("r1")),
+            Err(LightControlError::ConnectionError(_))
+        ));
         assert!(
             spy.operations().is_empty(),
             "boot-unreachable node should suppress on/off reads while in read backoff"
@@ -1855,8 +1869,8 @@ mod tests {
             native_ids: vec!["matter-42".to_string()],
         };
 
-        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
-        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+        assert!(block_on(controller.any_lights_on_target(&target)).is_err());
+        assert!(block_on(controller.any_lights_on_target(&target)).is_err());
 
         let read_count = spy
             .operations()
@@ -1878,6 +1892,40 @@ mod tests {
     }
 
     #[test]
+    fn any_lights_on_keeps_suppressed_reads_indeterminate() {
+        let (controller, spy, _) = make_controller();
+        spy.fail_read_node(42);
+
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
+
+        let read_count = spy
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::ReadOnOff {
+                        node_id: 42,
+                        endpoint: 1
+                    }
+                )
+            })
+            .count();
+        assert_eq!(read_count, 1, "suppression must avoid a second live read");
+    }
+
+    #[test]
     fn proof_of_life_clears_read_backoff_before_next_read() {
         let (controller, spy, _) = make_controller();
         let target = HubDispatchTarget::Devices {
@@ -1885,7 +1933,10 @@ mod tests {
         };
         spy.fail_read_node(42);
 
-        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
 
         spy.allow_read_node(42);
         spy.set_on_off_state(42, true);
@@ -1975,7 +2026,10 @@ mod tests {
         };
         spy.fail_read_node(42);
 
-        assert!(!block_on(controller.any_lights_on_target(&direct_target)).unwrap());
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&direct_target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
         block_on(controller.flash_target(&direct_target)).unwrap();
         block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
 
@@ -2007,7 +2061,10 @@ mod tests {
         let (controller, spy, _) = make_controller();
         spy.fail_read_node(42);
 
-        assert!(!block_on(controller.any_lights_on("kitchen")).unwrap());
+        assert!(matches!(
+            block_on(controller.any_lights_on("kitchen")),
+            Err(LightControlError::ConnectionError(_))
+        ));
 
         assert_eq!(
             spy.operations(),
@@ -2744,8 +2801,11 @@ mod tests {
             writes
         );
         assert!(
-            !block_on(controller.any_lights_on("r1")).unwrap(),
-            "backed-off endpoint should report no observed power"
+            matches!(
+                block_on(controller.any_lights_on("r1")),
+                Err(LightControlError::ConnectionError(_))
+            ),
+            "backed-off endpoint should report indeterminate observed power"
         );
         let operations_after_read = transport.operations.lock().unwrap().clone();
         assert_eq!(
