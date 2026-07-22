@@ -1884,7 +1884,10 @@ mod tests {
         };
         spy.fail_read_node(42);
 
-        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
 
         {
             let mut backoff = controller.on_off_read_backoff.lock().unwrap();
@@ -1895,7 +1898,10 @@ mod tests {
         spy.set_on_off_state(42, true);
 
         assert!(
-            !block_on(controller.any_lights_on_target(&target)).unwrap(),
+            matches!(
+                block_on(controller.any_lights_on_target(&target)),
+                Err(LightControlError::ConnectionError(_))
+            ),
             "elapsed time alone must not re-probe an endpoint without recovery evidence"
         );
         assert_eq!(
