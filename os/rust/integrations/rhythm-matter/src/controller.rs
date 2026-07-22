@@ -1869,8 +1869,14 @@ mod tests {
             native_ids: vec!["matter-42".to_string()],
         };
 
-        assert!(block_on(controller.any_lights_on_target(&target)).is_err());
-        assert!(block_on(controller.any_lights_on_target(&target)).is_err());
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
+        assert!(matches!(
+            block_on(controller.any_lights_on_target(&target)),
+            Err(LightControlError::ConnectionError(_))
+        ));
 
         let read_count = spy
             .operations()
@@ -1889,40 +1895,6 @@ mod tests {
             read_count, 1,
             "second read should be suppressed while the failed endpoint is in backoff"
         );
-    }
-
-    #[test]
-    fn any_lights_on_keeps_suppressed_reads_indeterminate() {
-        let (controller, spy, _) = make_controller();
-        spy.fail_read_node(42);
-
-        let target = HubDispatchTarget::Devices {
-            native_ids: vec!["matter-42".to_string()],
-        };
-
-        assert!(matches!(
-            block_on(controller.any_lights_on_target(&target)),
-            Err(LightControlError::ConnectionError(_))
-        ));
-        assert!(matches!(
-            block_on(controller.any_lights_on_target(&target)),
-            Err(LightControlError::ConnectionError(_))
-        ));
-
-        let read_count = spy
-            .operations()
-            .iter()
-            .filter(|operation| {
-                matches!(
-                    operation,
-                    RecordedOperation::ReadOnOff {
-                        node_id: 42,
-                        endpoint: 1
-                    }
-                )
-            })
-            .count();
-        assert_eq!(read_count, 1, "suppression must avoid a second live read");
     }
 
     #[test]
