@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+#[cfg(test)]
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -31,7 +34,6 @@ const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
 const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
-const MATTER_ON_OFF_READ_BACKOFF: Duration = Duration::from_secs(120);
 
 fn env_flag_enabled(name: &str, default: bool) -> bool {
     std::env::var(name)
@@ -49,7 +51,6 @@ pub(crate) fn matter_group_fanout_only_enabled() -> bool {
 #[derive(Clone, Copy, Debug)]
 struct MatterOnOffReadBackoff {
     marked_at: Instant,
-    suppress_until: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,7 +64,6 @@ fn initial_connectivity_backoff(
     hub_data: &MatterHubData,
 ) -> HashMap<(u64, u16), MatterOnOffReadBackoff> {
     let marked_at = Instant::now();
-    let suppress_until = marked_at + MATTER_ON_OFF_READ_BACKOFF;
     hub_data
         .commissioned
         .lock()
@@ -71,15 +71,7 @@ fn initial_connectivity_backoff(
             commissioned
                 .iter()
                 .filter(|device| !device.reachable)
-                .map(|device| {
-                    (
-                        (device.node_id, 1),
-                        MatterOnOffReadBackoff {
-                            marked_at,
-                            suppress_until,
-                        },
-                    )
-                })
+                .map(|device| ((device.node_id, 1), MatterOnOffReadBackoff { marked_at }))
                 .collect()
         })
         .unwrap_or_default()
@@ -545,35 +537,22 @@ impl MatterLightController {
     fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16) {
         let marked_at = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
-            backoff.insert(
-                (node_id, endpoint),
-                MatterOnOffReadBackoff {
-                    marked_at,
-                    suppress_until: marked_at + MATTER_ON_OFF_READ_BACKOFF,
-                },
-            );
+            backoff.insert((node_id, endpoint), MatterOnOffReadBackoff { marked_at });
         }
         self.hub_data.mark_node_reachable(node_id, false);
     }
 
     fn read_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
-        let now = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
-            match backoff.get(&(node_id, endpoint)).copied() {
-                Some(entry) if entry.suppress_until > now => {
-                    if self
-                        .hub_data
-                        .has_node_proof_of_life_after(node_id, entry.marked_at)
-                    {
-                        backoff.remove(&(node_id, endpoint));
-                        return false;
-                    }
-                    return true;
-                }
-                Some(_) => {
+            if let Some(entry) = backoff.get(&(node_id, endpoint)).copied() {
+                if self
+                    .hub_data
+                    .has_node_proof_of_life_after(node_id, entry.marked_at)
+                {
                     backoff.remove(&(node_id, endpoint));
+                    return false;
                 }
-                None => {}
+                return true;
             }
         }
         false
@@ -912,8 +891,8 @@ impl HubLightController for MatterLightController {
                             event = "matter_on_off_read_backoff",
                             node_id,
                             endpoint,
-                            backoff_secs = MATTER_ON_OFF_READ_BACKOFF.as_secs(),
-                            "Matter on/off read failed with connectivity error; suppressing remaining reads for this target"
+                            recovery = "proof_of_life",
+                            "Matter on/off read failed with connectivity error; suppressing reads until the endpoint proves life"
                         );
                         break;
                     }
@@ -1874,6 +1853,50 @@ mod tests {
         assert_eq!(
             read_count, 1,
             "second read should be suppressed while the failed endpoint is in backoff"
+        );
+    }
+
+    #[test]
+    fn any_lights_on_waits_for_proof_of_life_after_backoff_window() {
+        let (controller, spy, _) = make_controller();
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["matter-42".to_string()],
+        };
+        spy.fail_read_node(42);
+
+        assert!(!block_on(controller.any_lights_on_target(&target)).unwrap());
+
+        {
+            let mut backoff = controller.on_off_read_backoff.lock().unwrap();
+            backoff.get_mut(&(42, 1)).unwrap().marked_at =
+                Instant::now() - Duration::from_secs(121);
+        }
+        spy.allow_read_node(42);
+        spy.set_on_off_state(42, true);
+
+        assert!(
+            !block_on(controller.any_lights_on_target(&target)).unwrap(),
+            "elapsed time alone must not re-probe an endpoint without recovery evidence"
+        );
+        assert_eq!(
+            spy.operations()
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::ReadOnOff { .. }))
+                .count(),
+            1,
+            "the failed endpoint should stay suppressed until it proves life"
+        );
+
+        controller.hub_data.record_node_proof_of_life(42);
+
+        assert!(block_on(controller.any_lights_on_target(&target)).unwrap());
+        assert_eq!(
+            spy.operations()
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::ReadOnOff { .. }))
+                .count(),
+            2,
+            "subscription or command proof should restore live reads"
         );
     }
 
