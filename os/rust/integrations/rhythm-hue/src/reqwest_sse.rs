@@ -443,6 +443,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_stream_waits_for_activity_before_rearming_timeout() {
+        let sse_liveness = HueSseLiveness::default();
+        sse_liveness.begin_expected_activity();
+        sse_liveness.note_reconnect("expected_activity_timeout");
+        sse_liveness.reset_for_connected_stream();
+        assert!(sse_liveness.begin_expected_activity().is_none());
+
+        let mut quiet_replacement =
+            futures::stream::pending::<Result<&'static [u8], &'static str>>();
+        let (tx, _rx) = sync_channel::<HueSseEvent>(4);
+        let shutdown = AtomicBool::new(false);
+        let mut parse_state = SseParseState::new();
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(40),
+            consume_sse_stream(
+                &mut quiet_replacement,
+                &tx,
+                &shutdown,
+                &mut parse_state,
+                &sse_liveness,
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            ),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "a quiet replacement stream must not enter a reconnect loop"
+        );
+
+        sse_liveness.observe_sse_activity();
+        assert!(sse_liveness.begin_expected_activity().is_some());
+        let outcome = consume_sse_stream(
+            &mut quiet_replacement,
+            &tx,
+            &shutdown,
+            &mut parse_state,
+            &sse_liveness,
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(outcome, StreamEnd::Reconnect("expected_activity_timeout"));
+    }
+
+    #[tokio::test]
     async fn filtered_light_bytes_satisfy_expected_activity() {
         use futures::StreamExt as _;
 
