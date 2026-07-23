@@ -17,6 +17,7 @@ pub(crate) struct ExpectedActivityFailure {
 struct LivenessState {
     next_token: u64,
     pending: BTreeMap<ExpectedActivityToken, Instant>,
+    write_expectations_suppressed_until_activity: bool,
     last_connected_epoch_ms: Option<i64>,
     last_sse_activity_epoch_ms: Option<i64>,
     connection_count: u64,
@@ -28,6 +29,7 @@ struct LivenessState {
 pub struct HueSseLivenessSnapshot {
     pub pending_write_count: usize,
     pub oldest_pending_write_age_secs: Option<f64>,
+    pub write_expectations_suppressed_until_activity: bool,
     pub last_connected_epoch_ms: Option<i64>,
     pub last_sse_activity_epoch_ms: Option<i64>,
     pub connection_count: u64,
@@ -46,6 +48,9 @@ pub struct HueSseLiveness {
 impl HueSseLiveness {
     pub(crate) fn begin_expected_activity(&self) -> Option<ExpectedActivityToken> {
         let mut state = self.state.lock().ok()?;
+        if state.write_expectations_suppressed_until_activity {
+            return None;
+        }
         state.next_token = state.next_token.wrapping_add(1).max(1);
         let token = ExpectedActivityToken(state.next_token);
         state.pending.insert(token, Instant::now());
@@ -64,6 +69,7 @@ impl HueSseLiveness {
     pub(crate) fn observe_sse_activity(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.pending.clear();
+            state.write_expectations_suppressed_until_activity = false;
             state.last_sse_activity_epoch_ms = epoch_ms_now();
         }
     }
@@ -81,8 +87,13 @@ impl HueSseLiveness {
 
     pub(crate) fn note_reconnect(&self, reason: impl Into<String>) {
         if let Ok(mut state) = self.state.lock() {
+            let reason = reason.into();
+            if reason == "expected_activity_timeout" {
+                state.pending.clear();
+                state.write_expectations_suppressed_until_activity = true;
+            }
             state.reconnect_count = state.reconnect_count.saturating_add(1);
-            state.last_reconnect_reason = Some(reason.into());
+            state.last_reconnect_reason = Some(reason);
         }
     }
 
@@ -91,6 +102,7 @@ impl HueSseLiveness {
             return HueSseLivenessSnapshot {
                 pending_write_count: 0,
                 oldest_pending_write_age_secs: None,
+                write_expectations_suppressed_until_activity: true,
                 last_connected_epoch_ms: None,
                 last_sse_activity_epoch_ms: None,
                 connection_count: 0,
@@ -105,6 +117,8 @@ impl HueSseLiveness {
                 .values()
                 .min()
                 .map(|oldest| oldest.elapsed().as_secs_f64()),
+            write_expectations_suppressed_until_activity: state
+                .write_expectations_suppressed_until_activity,
             last_connected_epoch_ms: state.last_connected_epoch_ms,
             last_sse_activity_epoch_ms: state.last_sse_activity_epoch_ms,
             connection_count: state.connection_count,
@@ -181,6 +195,7 @@ mod tests {
 
         let snapshot = liveness.snapshot();
         assert_eq!(snapshot.pending_write_count, 0);
+        assert!(snapshot.write_expectations_suppressed_until_activity);
         assert!(snapshot.last_connected_epoch_ms.is_some());
         assert!(snapshot.last_sse_activity_epoch_ms.is_some());
         assert_eq!(snapshot.connection_count, 1);
@@ -188,6 +203,35 @@ mod tests {
         assert_eq!(
             snapshot.last_reconnect_reason.as_deref(),
             Some("expected_activity_timeout")
+        );
+    }
+
+    #[test]
+    fn timeout_suppresses_repeat_expectations_until_stream_activity() {
+        let liveness = HueSseLiveness::default();
+        assert!(liveness.begin_expected_activity().is_some());
+
+        liveness.note_reconnect("expected_activity_timeout");
+        liveness.reset_for_connected_stream();
+
+        assert!(
+            liveness.begin_expected_activity().is_none(),
+            "a replacement stream without proof-of-life must not trigger another timeout loop"
+        );
+        let snapshot = liveness.snapshot();
+        assert_eq!(snapshot.pending_write_count, 0);
+        assert!(snapshot.write_expectations_suppressed_until_activity);
+
+        liveness.observe_sse_activity();
+
+        assert!(
+            liveness.begin_expected_activity().is_some(),
+            "real stream activity must re-arm write-based liveness detection"
+        );
+        assert!(
+            !liveness
+                .snapshot()
+                .write_expectations_suppressed_until_activity
         );
     }
 }

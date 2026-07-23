@@ -366,6 +366,7 @@ struct RuntimeHueSseHealth {
     pending_write_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     oldest_pending_write_age_secs: Option<f64>,
+    write_expectations_suppressed_until_activity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_connected_epoch_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -384,6 +385,8 @@ fn runtime_hue_sse_health(hub: &rhythm_os::hub::ActiveHub) -> Option<RuntimeHueS
     Some(RuntimeHueSseHealth {
         pending_write_count: snapshot.pending_write_count,
         oldest_pending_write_age_secs: snapshot.oldest_pending_write_age_secs,
+        write_expectations_suppressed_until_activity: snapshot
+            .write_expectations_suppressed_until_activity,
         last_connected_epoch_ms: snapshot.last_connected_epoch_ms,
         last_sse_activity_epoch_ms: snapshot.last_sse_activity_epoch_ms,
         connection_count: snapshot.connection_count,
