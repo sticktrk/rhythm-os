@@ -1,0 +1,22 @@
+{
+  "version": "4.0.303",
+  "source_commit": "53033dd7b3e41d6b693a68bf39e77e02bbc44dec",
+  "release_notes": {
+    "en-US": "A redesigned lighting control experience keeps brightness and standby controls within reach. A new universal pairing scanner makes supported devices easier to add. Home reconnection is also more reliable."
+  },
+  "apple": {
+    "build_number": "3",
+    "automatic_release": false,
+    "phased_release": true,
+    "review_notes": "This release adds the universal pairing scanner and refreshed room-lighting controls. The virtual experience exercises both without physical hardware."
+  },
+  "google_play": {
+    "version_code": "33",
+    "source_track": "internal",
+    "rollout": 0.1
+  },
+  "approval": {
+    "candidate_verified": false,
+    "release_notes_reviewed": false
+  }
+}

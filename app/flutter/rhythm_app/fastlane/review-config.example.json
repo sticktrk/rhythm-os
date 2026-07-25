@@ -1,0 +1,8 @@
+{
+  "first_name": "App Review contact first name",
+  "last_name": "App Review contact last name",
+  "phone_number": "+1 555 555 5555",
+  "email_address": "app-review@example.com",
+  "demo_user": "reviewer@example.com",
+  "demo_password": "store-outside-the-repository"
+}
