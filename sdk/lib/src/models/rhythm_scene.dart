@@ -563,6 +563,33 @@ class RhythmSceneDefinition {
       };
 }
 
+class RhythmSceneCatalogResult {
+  final List<RhythmSceneDefinition> scenes;
+  final bool nativeDiscoveryFailed;
+  final Map<String, dynamic> raw;
+
+  const RhythmSceneCatalogResult({
+    this.scenes = const [],
+    this.nativeDiscoveryFailed = false,
+    this.raw = const <String, dynamic>{},
+  });
+
+  factory RhythmSceneCatalogResult.fromJson(Map<String, dynamic> json) {
+    final raw = Map<String, dynamic>.from(json)
+      ..remove('scenes')
+      ..remove('native_discovery_failed');
+    return RhythmSceneCatalogResult(
+      scenes: ((json['scenes'] as List<dynamic>?) ?? const <dynamic>[])
+          .map(jsonMap)
+          .nonNulls
+          .map(RhythmSceneDefinition.fromJson)
+          .toList(),
+      nativeDiscoveryFailed: jsonBool(json['native_discovery_failed']),
+      raw: raw,
+    );
+  }
+}
+
 class RhythmSceneActionResult {
   final String sceneId;
   final String targetId;

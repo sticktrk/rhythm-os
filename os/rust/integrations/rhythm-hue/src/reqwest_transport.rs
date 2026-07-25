@@ -20,6 +20,30 @@ fn identify_light_body() -> serde_json::Value {
     })
 }
 
+fn scene_recall_body(transition_ms: Option<u32>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "recall": { "action": "active" }
+    });
+    if let Some(duration) = transition_ms {
+        body["recall"]["duration"] = serde_json::json!(duration);
+    }
+    body
+}
+
+fn validate_hue_v2_write_response(operation: &str, body: &str) -> Result<()> {
+    let envelope: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| anyhow::anyhow!("{operation} returned invalid JSON: {error}"))?;
+    if let Some(errors) = envelope.get("errors").and_then(|value| value.as_array()) {
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "{operation} returned Hue errors: {}",
+                serde_json::Value::Array(errors.clone())
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn light_control_body(
     on: bool,
     brightness: Option<u8>,
@@ -295,6 +319,36 @@ impl HueTransport for ReqwestHueTransport {
         Ok(resp.json()?)
     }
 
+    fn recall_scene(
+        &self,
+        username: &str,
+        scene_id: &str,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let url = format!("{}/clip/v2/resource/scene/{}", self.base_url(), scene_id);
+        let body = scene_recall_body(transition_ms);
+
+        let resp = self
+            .client
+            .put(&url)
+            .header("hue-application-key", username)
+            .json(&body)
+            .send()?;
+
+        let status = resp.status();
+        let response_body = resp.text().unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "PUT scene/{} recall failed with status {}: {}",
+                scene_id,
+                status,
+                response_body
+            ));
+        }
+
+        validate_hue_v2_write_response(&format!("PUT scene/{scene_id} recall"), &response_body)
+    }
+
     fn update_room_children(
         &self,
         username: &str,
@@ -323,19 +377,7 @@ impl HueTransport for ReqwestHueTransport {
             ));
         }
 
-        let envelope: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-            anyhow::anyhow!("PUT room/{} returned invalid JSON: {}", room_id, error)
-        })?;
-        if let Some(errors) = envelope.get("errors").and_then(|value| value.as_array()) {
-            if !errors.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "PUT room/{} returned Hue errors: {}",
-                    room_id,
-                    serde_json::Value::Array(errors.clone())
-                ));
-            }
-        }
-        Ok(())
+        validate_hue_v2_write_response(&format!("PUT room/{room_id}"), &body)
     }
 }
 
@@ -351,6 +393,43 @@ mod tests {
                 "identify": { "action": "identify" }
             })
         );
+    }
+
+    #[test]
+    fn scene_recall_body_uses_active_action_and_optional_duration() {
+        assert_eq!(
+            scene_recall_body(None),
+            serde_json::json!({"recall": {"action": "active"}})
+        );
+        assert_eq!(
+            scene_recall_body(Some(750)),
+            serde_json::json!({
+                "recall": {"action": "active", "duration": 750}
+            })
+        );
+    }
+
+    #[test]
+    fn hue_write_response_rejects_application_errors_on_success_status() {
+        validate_hue_v2_write_response(
+            "PUT scene/native-1 recall",
+            r#"{"data":[{"rid":"native-1","rtype":"scene"}],"errors":[]}"#,
+        )
+        .unwrap();
+
+        let error = validate_hue_v2_write_response(
+            "PUT scene/native-1 recall",
+            r#"{"data":[],"errors":[{"description":"scene unavailable"}]}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("scene unavailable"));
+    }
+
+    #[test]
+    fn hue_write_response_rejects_invalid_json() {
+        let error =
+            validate_hue_v2_write_response("PUT scene/native-1 recall", "not-json").unwrap_err();
+        assert!(error.to_string().contains("invalid JSON"));
     }
 
     #[test]

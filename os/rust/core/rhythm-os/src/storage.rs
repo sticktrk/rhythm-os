@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 
 use crate::canonical::identity::HubKey;
 use crate::hub::HubCredentials;
-use crate::scenes::StoredScenes;
+use crate::scenes::{is_native_scene_id, StoredScenes};
 
 /// Namespaced durable state for plan-based light runtimes.
 ///
@@ -1472,9 +1472,28 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         match storage.load_scenes() {
             Ok(Some(stored)) => {
                 s.scenes.clear();
+                let mut removed_native_definitions = 0usize;
                 for mut scene in stored.scenes {
                     scene.normalize();
+                    if is_native_scene_id(&scene.id) {
+                        removed_native_definitions += 1;
+                        warn!(
+                            target: "sys",
+                            "Discarding persisted scene '{}' from the reserved native namespace",
+                            scene.id
+                        );
+                        continue;
+                    }
                     s.scenes.insert(scene.id.clone(), scene);
+                }
+                if removed_native_definitions > 0 {
+                    if let Err(error) = storage.save_scenes(&s.stored_scenes()) {
+                        warn!(
+                            target: "sys",
+                            "Failed to repair persisted native scene definitions: {}",
+                            error
+                        );
+                    }
                 }
                 info!(target: "sys", "Loaded scenes: {}", s.scenes.len());
             }
@@ -2612,6 +2631,49 @@ mod tests {
 
             assert!(state.scenes.contains_key("icy-glow"));
             assert_eq!(state.scenes["icy-glow"].name, "Icy Glow");
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_repairs_reserved_native_scene_definitions() {
+            let (storage, path) = temp_storage();
+            let native_id = crate::scenes::native_scene_id("hue", "native-1");
+            storage
+                .save_scenes(&crate::scenes::StoredScenes {
+                    schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                    scenes: vec![
+                        crate::scenes::SceneDefinition {
+                            id: "icy-glow".into(),
+                            name: "Icy Glow".into(),
+                            description: None,
+                            source: crate::scenes::SceneSource::User,
+                            light: None,
+                            extensions: std::collections::BTreeMap::new(),
+                        },
+                        crate::scenes::SceneDefinition {
+                            id: native_id.clone(),
+                            name: "Persisted Hue shadow".into(),
+                            description: None,
+                            source: crate::scenes::SceneSource::User,
+                            light: None,
+                            extensions: std::collections::BTreeMap::new(),
+                        },
+                    ],
+                })
+                .unwrap();
+
+            let storage = std::sync::Arc::new(storage);
+            let mut state = crate::state::AppState {
+                storage: Some(storage.clone()),
+                ..Default::default()
+            };
+            load_persisted_state(&mut state);
+
+            assert!(state.scenes.contains_key("icy-glow"));
+            assert!(!state.scenes.contains_key(&native_id));
+            let repaired = storage.load_scenes().unwrap().unwrap();
+            assert_eq!(repaired.scenes.len(), 1);
+            assert_eq!(repaired.scenes[0].id, "icy-glow");
             cleanup(&path);
         }
 

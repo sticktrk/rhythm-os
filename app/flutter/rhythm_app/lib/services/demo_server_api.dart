@@ -274,7 +274,8 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<List<RhythmSceneDefinition>> getScenes() async => _demoScenes;
+  Future<List<RhythmSceneDefinition>> getScenes({String? targetId}) async =>
+      _demoScenes;
 
   static RhythmLightSceneEntry _rgbEntry(
     String nodeId,

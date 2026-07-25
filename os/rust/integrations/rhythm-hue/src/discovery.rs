@@ -14,6 +14,10 @@ use rhythm_core::DeviceRegistry;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
 use rhythm_os::discovery::{DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery};
 use rhythm_os::registry::HubDeviceRegistry;
+use rhythm_os::scenes::{
+    native_scene_id, LightSceneColor, LightSceneLayer, LightSceneOutput, LightScenePower,
+    SceneDefinition, SceneSource,
+};
 
 use crate::transport::HueTransport;
 
@@ -300,6 +304,118 @@ impl<H: HueTransport> HueDiscovery<H> {
         }
         map
     }
+
+    fn scene_output(action: &serde_json::Value) -> Option<LightSceneOutput> {
+        let power = match action.pointer("/on/on").and_then(|value| value.as_bool()) {
+            Some(false) => LightScenePower::Off,
+            _ => LightScenePower::On,
+        };
+        let brightness = action
+            .pointer("/dimming/brightness")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(100.0)
+            .round()
+            .clamp(1.0, 100.0) as u8;
+        let color = action
+            .pointer("/color/xy")
+            .and_then(|xy| Some((xy.get("x")?.as_f64()? as f32, xy.get("y")?.as_f64()? as f32)))
+            .map(|(x, y)| LightSceneColor::Xy {
+                xy: rhythm_core::XyColor::new(x, y),
+            })
+            .or_else(|| {
+                action
+                    .pointer("/color_temperature/mirek")
+                    .and_then(|value| value.as_u64())
+                    .filter(|mirek| *mirek > 0)
+                    .map(|mirek| LightSceneColor::Kelvin {
+                        kelvin: ((1_000_000.0 / mirek as f64).round() as u16).clamp(500, 25_000),
+                    })
+            });
+
+        if power == LightScenePower::On && color.is_none() {
+            return None;
+        }
+
+        Some(LightSceneOutput {
+            power,
+            brightness,
+            color,
+            transition_ms: None,
+        })
+    }
+
+    fn scenes_for_room(response: &serde_json::Value, room_id: &str) -> Vec<SceneDefinition> {
+        let mut scenes: Vec<_> = response
+            .get("data")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|scene| {
+                scene
+                    .pointer("/group/rtype")
+                    .and_then(|value| value.as_str())
+                    == Some("room")
+                    && scene.pointer("/group/rid").and_then(|value| value.as_str()) == Some(room_id)
+            })
+            .filter_map(|scene| {
+                let external_id = scene.get("id").and_then(|value| value.as_str())?;
+                let name = scene
+                    .pointer("/metadata/name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Hue scene")
+                    .trim();
+                let palette: Vec<_> = scene
+                    .get("actions")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.get("action").and_then(Self::scene_output))
+                    .collect();
+                if palette
+                    .iter()
+                    .all(|output| output.power == LightScenePower::Off)
+                {
+                    return None;
+                }
+
+                Some(SceneDefinition {
+                    id: native_scene_id("hue", external_id),
+                    name: if name.is_empty() {
+                        "Hue scene".to_string()
+                    } else {
+                        name.to_string()
+                    },
+                    description: Some("From Philips Hue".to_string()),
+                    source: SceneSource::Imported {
+                        provider: "hue".to_string(),
+                        external_id: Some(external_id.to_string()),
+                    },
+                    light: Some(LightSceneLayer {
+                        default_transition_ms: None,
+                        default_output: palette
+                            .iter()
+                            .find(|output| output.power == LightScenePower::On)
+                            .cloned(),
+                        palette,
+                        entries: Vec::new(),
+                    }),
+                    extensions: [(
+                        "hue_room_id".to_string(),
+                        serde_json::Value::String(room_id.to_string()),
+                    )]
+                    .into_iter()
+                    .collect(),
+                })
+            })
+            .collect();
+        scenes.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        scenes
+    }
 }
 
 impl<H: HueTransport> HueDiscovery<H> {
@@ -498,6 +614,23 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
         info!(target: "hue_discovery", "Discovered {} button devices and {} motion sensors from Hue bridge",
             button_count, motion_count);
         Ok(devices)
+    }
+
+    fn discover_scenes(&self, room_id: &str) -> Result<Vec<SceneDefinition>> {
+        let response = self.transport.get_resources(&self.username, "scene")?;
+        let scenes = Self::scenes_for_room(&response, room_id);
+        info!(
+            target: "hue_scenes",
+            "Discovered {} Hue scenes for room {}",
+            scenes.len(),
+            room_id
+        );
+        Ok(scenes)
+    }
+
+    fn recall_scene(&self, scene_id: &str, transition_ms: Option<u32>) -> Result<()> {
+        self.transport
+            .recall_scene(&self.username, scene_id, transition_ms)
     }
 
     /// Discover all devices with full hardware identity information.
@@ -996,6 +1129,84 @@ mod tests {
                 ("behavior-direct".to_string(), "dev-button".to_string()),
                 ("behavior-dependee".to_string(), "dev-motion".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn scene_discovery_filters_to_room_and_projects_hue_palette() {
+        let response = serde_json::json!({
+            "data": [
+                {
+                    "id": "scene-cool",
+                    "metadata": {"name": "Arctic aurora"},
+                    "group": {"rid": "room-1", "rtype": "room"},
+                    "actions": [
+                        {
+                            "target": {"rid": "light-1", "rtype": "light"},
+                            "action": {
+                                "on": {"on": true},
+                                "dimming": {"brightness": 63.4},
+                                "color": {"xy": {"x": 0.21, "y": 0.24}}
+                            }
+                        },
+                        {
+                            "target": {"rid": "light-2", "rtype": "light"},
+                            "action": {
+                                "on": {"on": true},
+                                "dimming": {"brightness": 40},
+                                "color_temperature": {"mirek": 250}
+                            }
+                        }
+                    ]
+                },
+                {
+                    "id": "scene-other-room",
+                    "metadata": {"name": "Other"},
+                    "group": {"rid": "room-2", "rtype": "room"},
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "color_temperature": {"mirek": 300}
+                        }
+                    }]
+                },
+                {
+                    "id": "scene-zone",
+                    "metadata": {"name": "Zone"},
+                    "group": {"rid": "room-1", "rtype": "zone"},
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "color_temperature": {"mirek": 300}
+                        }
+                    }]
+                }
+            ]
+        });
+
+        let scenes = HueDiscovery::<StaticHueTransport>::scenes_for_room(&response, "room-1");
+
+        assert_eq!(scenes.len(), 1);
+        let scene = &scenes[0];
+        assert_eq!(scene.id, "native-hue-scene-cool");
+        assert_eq!(scene.name, "Arctic aurora");
+        assert_eq!(
+            scene.source,
+            SceneSource::Imported {
+                provider: "hue".to_string(),
+                external_id: Some("scene-cool".to_string()),
+            }
+        );
+        let light = scene.light.as_ref().unwrap();
+        assert_eq!(light.palette.len(), 2);
+        assert_eq!(light.palette[0].brightness, 63);
+        assert!(matches!(
+            light.palette[0].color,
+            Some(LightSceneColor::Xy { .. })
+        ));
+        assert_eq!(
+            light.palette[1].color,
+            Some(LightSceneColor::Kelvin { kelvin: 4000 })
         );
     }
 

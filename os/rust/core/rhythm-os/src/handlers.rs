@@ -1608,8 +1608,8 @@ pub fn handle_get_profiles(state: &SharedState) -> ApiResponse {
     }
 }
 
-pub fn handle_get_scenes(state: &SharedState) -> ApiResponse {
-    match commands::build_scenes(state) {
+pub fn handle_get_scenes(state: &SharedState, target_id: Option<&str>) -> ApiResponse {
+    match commands::build_scenes_for_target(state, target_id) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }

@@ -270,8 +270,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved scenes (presets) from the server, used for scene-backed Mood.
   List<RhythmSceneDefinition> _scenes = const [];
 
+  /// Room-scoped scene catalogs, including integration-owned native scenes.
+  final Map<String, List<RhythmSceneDefinition>> _roomScenes = {};
+
   /// Local scene selection while the server catches up to Mood edits.
   final Map<String, String?> _optimisticMoodSceneIds = {};
+
+  /// Rejects stale scene outcomes after a newer selection for the same room.
+  final Map<String, int> _moodSceneApplyGenerations = {};
 
   /// Mode configs from the server (profile routing per mode).
   List<RhythmModeConfig> _modeConfigs = const [];
@@ -392,6 +398,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved scenes (presets) available to use as moods.
   List<RhythmSceneDefinition> get scenes => _userVisibleScenes(_scenes);
 
+  /// Saved and native scenes applicable to [roomId].
+  List<RhythmSceneDefinition> scenesForRoom(String roomId) =>
+      _userVisibleScenes(_roomScenes[roomId] ?? _scenes);
+
   /// The scene id currently bound as the given room's mood, if any.
   String? moodSceneIdForRoom(String roomId) {
     if (_optimisticMoodSceneIds.containsKey(roomId)) {
@@ -412,36 +422,73 @@ class ServerSyncProvider extends ChangeNotifier {
     for (final scene in _scenes) {
       if (scene.id == id) return scene;
     }
+    for (final scenes in _roomScenes.values) {
+      for (final scene in scenes) {
+        if (scene.id == id) return scene;
+      }
+    }
     return null;
   }
 
-  /// Fetch the latest scenes from the server, caching the result. Returns the
-  /// cached list when offline or in demo mode.
-  Future<List<RhythmSceneDefinition>> fetchScenes() async {
+  /// Fetch the latest scenes from the server, optionally including native
+  /// integration scenes for [roomId]. Returns the matching cache when offline.
+  Future<List<RhythmSceneDefinition>> fetchScenes({String? roomId}) async {
     if (HueServiceLocator.isDemoMode) {
       _scenes = await DemoServerApi.instance.getScenes();
       notifyListeners();
-      return scenes;
+      return roomId == null ? scenes : scenesForRoom(roomId);
     }
-    if (!_connection.connected) return scenes;
-    final fetched = await _connection.api.getScenes();
-    if (fetched.isNotEmpty || _scenes.isEmpty) {
+    if (!_connection.connected) {
+      return roomId == null ? scenes : scenesForRoom(roomId);
+    }
+    final catalog = await _connection.api.getSceneCatalog(targetId: roomId);
+    if (catalog == null) {
+      return roomId == null ? scenes : scenesForRoom(roomId);
+    }
+    final fetched = catalog.scenes;
+    if (roomId == null) {
       _scenes = fetched;
       notifyListeners();
+      return scenes;
     }
-    return scenes;
+    final cached = _roomScenes[roomId];
+    if (catalog.nativeDiscoveryFailed && cached != null) {
+      final mergedById = <String, RhythmSceneDefinition>{
+        for (final scene in fetched) scene.id: scene,
+      };
+      for (final scene in cached) {
+        if (scene.id.startsWith('native-')) {
+          mergedById.putIfAbsent(scene.id, () => scene);
+        }
+      }
+      _roomScenes[roomId] = mergedById.values.toList();
+    } else {
+      _roomScenes[roomId] = fetched;
+    }
+    notifyListeners();
+    return scenesForRoom(roomId);
   }
 
   /// Apply [sceneId] to [roomId] and bind it as that room's Mood scene.
   ///
   /// [color] is the scene's representative RGB, used to optimistically tint the
-  /// room card while the server confirms. Returns false if not deliverable.
-  bool applyMoodScene(
+  /// room card while the server confirms. Returns whether the server accepted
+  /// and applied the scene.
+  Future<bool> applyMoodScene(
     String roomId,
     String sceneId, {
     (int, int, int)? color,
     int? transitionMs,
-  }) {
+  }) async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final generation = (_moodSceneApplyGenerations[roomId] ?? 0) + 1;
+    _moodSceneApplyGenerations[roomId] = generation;
+    final hadPreviousOverride = _optimisticMoodSceneIds.containsKey(roomId);
+    final previousOverride = _optimisticMoodSceneIds[roomId];
+    final previousRoomColor = _roomProvider.getRoomColor(roomId);
+    final previousMoodColor = _roomProvider.getMoodColor(roomId);
+    final previousMoodBrightness = _roomProvider.getMoodBrightness(roomId);
+    final previousMoodEnabled = _roomProvider.isMoodEnabled(roomId);
     if (color != null) {
       _roomProvider.setRoomColorLocal(
         roomId,
@@ -473,13 +520,34 @@ class ServerSyncProvider extends ChangeNotifier {
       );
       return true;
     }
-    if (!_connection.connected) return false;
-    _connection.api.applyScene(
-      sceneId: sceneId,
-      targetId: roomId,
-      transitionMs: transitionMs,
+    RhythmSceneActionResult? result;
+    try {
+      result = await _connection.api.applyScene(
+        sceneId: sceneId,
+        targetId: roomId,
+        transitionMs: transitionMs,
+      );
+    } catch (_) {
+      result = null;
+    }
+    if (result != null) return true;
+    if (_moodSceneApplyGenerations[roomId] != generation) {
+      return false;
+    }
+    if (hadPreviousOverride) {
+      _optimisticMoodSceneIds[roomId] = previousOverride;
+    } else {
+      _optimisticMoodSceneIds.remove(roomId);
+    }
+    _roomProvider.restoreMoodPresentationLocal(
+      roomId,
+      roomColor: previousRoomColor,
+      moodColor: previousMoodColor,
+      moodBrightness: previousMoodBrightness,
+      moodEnabled: previousMoodEnabled,
     );
-    return true;
+    notifyListeners();
+    return false;
   }
 
   /// Current day/sleep toggle binding, if configured.
@@ -2140,6 +2208,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _scenes = [...hello.scenes];
     }
     _optimisticMoodSceneIds.clear();
+    _moodSceneApplyGenerations.clear();
     _modeConfigs = [...?hello.mode?.configs];
     _profiles = [...hello.profiles];
     _activeProfileId = hello.activeProfile['id'] as String? ??
@@ -2427,6 +2496,8 @@ class ServerSyncProvider extends ChangeNotifier {
       if (state.profileSettings != null &&
           _optimisticMoodSceneIds.containsKey(state.nodeId)) {
         _optimisticMoodSceneIds.remove(state.nodeId);
+        _moodSceneApplyGenerations[state.nodeId] =
+            (_moodSceneApplyGenerations[state.nodeId] ?? 0) + 1;
         moodSceneOverrideCleared = true;
       }
     } finally {
@@ -2657,6 +2728,10 @@ class ServerSyncProvider extends ChangeNotifier {
     _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
     _activeMode = null;
     _activeProfileId = null;
+    _scenes = const [];
+    _roomScenes.clear();
+    _optimisticMoodSceneIds.clear();
+    _moodSceneApplyGenerations.clear();
     _helloNodes = [];
     _helloRooms = [];
     _clearStandbyEnabledOptimisticStates();
@@ -3012,6 +3087,8 @@ class ServerSyncProvider extends ChangeNotifier {
       rememberAsMood: persistAsMood,
     );
     if (persistAsMood) {
+      _moodSceneApplyGenerations[nodeId] =
+          (_moodSceneApplyGenerations[nodeId] ?? 0) + 1;
       final sceneOverrideChanged =
           !_optimisticMoodSceneIds.containsKey(nodeId) ||
               _optimisticMoodSceneIds[nodeId] != null;

@@ -152,6 +152,12 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         String? scope,
       })> nodeColorCalls = [];
   List<RhythmSceneDefinition> scenes = const [];
+  final Map<String, List<RhythmSceneDefinition>> roomScenes = {};
+  final List<String?> sceneTargetCalls = [];
+  final Set<String?> failedSceneCatalogTargets = {};
+  final Set<String> partialNativeDiscoveryFailureTargets = {};
+  bool applySceneSucceeds = true;
+  Completer<RhythmSceneActionResult?>? applySceneCompleter;
   final List<({String sceneId, String targetId, int? transitionMs})>
       applySceneCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
@@ -320,7 +326,21 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<List<RhythmSceneDefinition>> getScenes() async => scenes;
+  Future<List<RhythmSceneDefinition>> getScenes({String? targetId}) async {
+    final catalog = await getSceneCatalog(targetId: targetId);
+    return catalog?.scenes ?? const [];
+  }
+
+  @override
+  Future<RhythmSceneCatalogResult?> getSceneCatalog({String? targetId}) async {
+    sceneTargetCalls.add(targetId);
+    if (failedSceneCatalogTargets.contains(targetId)) return null;
+    return RhythmSceneCatalogResult(
+      scenes: targetId == null ? scenes : roomScenes[targetId] ?? scenes,
+      nativeDiscoveryFailed: targetId != null &&
+          partialNativeDiscoveryFailureTargets.contains(targetId),
+    );
+  }
 
   @override
   Future<RhythmSceneActionResult?> applyScene({
@@ -333,6 +353,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       targetId: targetId,
       transitionMs: transitionMs,
     ));
+    final completer = applySceneCompleter;
+    if (completer != null) return completer.future;
+    if (!applySceneSucceeds) return null;
     return RhythmSceneActionResult(
       sceneId: sceneId,
       targetId: targetId,
@@ -2517,12 +2540,80 @@ void main() {
       expect(provider.scenes.map((scene) => scene.id), ['evening-glow']);
     });
 
+    test('keeps native scene catalogs isolated by room', () async {
+      api.scenes = [_testScene('rhythm-scene')];
+      api.roomScenes['room-1'] = [
+        _testScene('rhythm-scene'),
+        _testScene('native-hue-room-1'),
+      ];
+      api.roomScenes['room-2'] = [
+        _testScene('rhythm-scene'),
+        _testScene('native-hue-room-2'),
+      ];
+
+      await provider.fetchScenes(roomId: 'room-1');
+      await provider.fetchScenes(roomId: 'room-2');
+
+      expect(api.sceneTargetCalls, ['room-1', 'room-2']);
+      expect(
+        provider.scenesForRoom('room-1').map((scene) => scene.id),
+        ['rhythm-scene', 'native-hue-room-1'],
+      );
+      expect(
+        provider.scenesForRoom('room-2').map((scene) => scene.id),
+        ['rhythm-scene', 'native-hue-room-2'],
+      );
+      expect(
+        provider.scenesForRoom('room-1').map((scene) => scene.id),
+        isNot(contains('native-hue-room-2')),
+      );
+    });
+
+    test('retains cached native scenes across a partial discovery failure',
+        () async {
+      api.roomScenes['room-1'] = [
+        _testScene('stored-old'),
+        _testScene('native-hue-aurora'),
+      ];
+      await provider.fetchScenes(roomId: 'room-1');
+
+      api.roomScenes['room-1'] = [_testScene('stored-current')];
+      api.partialNativeDiscoveryFailureTargets.add('room-1');
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(
+        fetched.map((scene) => scene.id),
+        ['stored-current', 'native-hue-aurora'],
+      );
+    });
+
+    test('clears a room cache after a successful empty refresh', () async {
+      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      await provider.fetchScenes(roomId: 'room-1');
+
+      api.roomScenes['room-1'] = const [];
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(fetched, isEmpty);
+      expect(provider.scenesForRoom('room-1'), isEmpty);
+    });
+
+    test('retains a room cache when the catalog request fails', () async {
+      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      await provider.fetchScenes(roomId: 'room-1');
+
+      api.failedSceneCatalogTargets.add('room-1');
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(fetched.map((scene) => scene.id), ['native-hue-aurora']);
+    });
+
     test('applies a mood scene without issuing a duplicate preferences write',
         () async {
       api.scenes = [_testScene('evening-glow')];
       await provider.fetchScenes();
 
-      final dispatched = provider.applyMoodScene(
+      final dispatched = await provider.applyMoodScene(
         'room-1',
         'evening-glow',
         color: (240, 80, 24),
@@ -2544,7 +2635,7 @@ void main() {
       api.scenes = [_testPaletteScene('color-carnival')];
       await provider.fetchScenes();
 
-      final dispatched = provider.applyMoodScene(
+      final dispatched = await provider.applyMoodScene(
         'room-1',
         'color-carnival',
       );
@@ -2552,6 +2643,75 @@ void main() {
       expect(dispatched, isTrue);
       expect(provider.moodSceneIdForRoom('room-1'), 'color-carnival');
       expect(roomProvider.getMoodBrightness('room-1'), 42);
+    });
+
+    test('rolls back optimistic scene selection when apply fails', () async {
+      api.scenes = [_testScene('evening-glow')];
+      api.applySceneSucceeds = false;
+      await provider.fetchScenes();
+      roomProvider.setRoomColorLocal(
+        'room-1',
+        12,
+        34,
+        56,
+        rememberAsMood: true,
+      );
+      roomProvider.setMoodBrightnessLocal('room-1', 27);
+      roomProvider.setMoodEnabledLocal('room-1', false);
+
+      final applied = await provider.applyMoodScene(
+        'room-1',
+        'evening-glow',
+        color: (240, 80, 24),
+      );
+
+      expect(applied, isFalse);
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+      expect(roomProvider.getRoomColor('room-1'), (12, 34, 56));
+      expect(roomProvider.getMoodColor('room-1'), (12, 34, 56));
+      expect(roomProvider.getMoodBrightness('room-1'), 27);
+      expect(roomProvider.isMoodEnabled('room-1'), isFalse);
+    });
+
+    test('stale scene failure does not roll back a newer custom mood',
+        () async {
+      api.scenes = [_testScene('evening-glow')];
+      api.applySceneCompleter = Completer<RhythmSceneActionResult?>();
+      await provider.fetchScenes();
+
+      final pending = provider.applyMoodScene(
+        'room-1',
+        'evening-glow',
+        color: (240, 80, 24),
+      );
+      expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
+
+      provider.dispatchNodeColor(
+        'room-1',
+        10,
+        20,
+        30,
+        scope: 'mood',
+        brightness: 31,
+      );
+      api.applySceneCompleter!.complete(null);
+
+      expect(await pending, isFalse);
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+      expect(roomProvider.getMoodColor('room-1'), (10, 20, 30));
+      expect(roomProvider.getMoodBrightness('room-1'), 31);
+    });
+
+    test('does not change optimistic scene state while disconnected', () async {
+      api.scenes = [_testScene('evening-glow')];
+      connection.isConnected = false;
+
+      expect(
+        await provider.applyMoodScene('room-1', 'evening-glow'),
+        isFalse,
+      );
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+      expect(api.applySceneCalls, isEmpty);
     });
   });
 
@@ -2668,7 +2828,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(provider.moodSceneIdForRoom('room-1'), isNull);
 
-      final dispatched = provider.applyMoodScene(
+      final dispatched = await provider.applyMoodScene(
         'room-1',
         'evening-glow',
         color: (240, 80, 24),

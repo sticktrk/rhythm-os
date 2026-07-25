@@ -72,6 +72,16 @@ pub trait HueTransport: Send + Sync {
         resource_type: &str,
     ) -> anyhow::Result<serde_json::Value>;
 
+    /// Recall a Hue V2 scene.
+    fn recall_scene(
+        &self,
+        _username: &str,
+        _scene_id: &str,
+        _transition_ms: Option<u32>,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Hue scene recall is not supported by this transport")
+    }
+
     /// Replace the device children of a Hue V2 room.
     ///
     /// Hue room membership is authoritative for grouped-light dispatch, so

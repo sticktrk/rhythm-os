@@ -1383,6 +1383,83 @@ void main() {
       verify(() => dio.get('api/scenes')).called(1);
     });
 
+    test('getScenes sends room target for native scene discovery', () async {
+      when(() => dio.get(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes'),
+            statusCode: 200,
+            data: {
+              'scenes': [sceneJson(id: 'hue-arctic')],
+            },
+          ));
+
+      final scenes = await api.getScenes(targetId: 'room-1');
+
+      expect(scenes.single.id, 'hue-arctic');
+      verify(() => dio.get(
+            'api/scenes',
+            queryParameters: {'target_id': 'room-1'},
+          )).called(1);
+    });
+
+    test('getSceneCatalog exposes partial native discovery failure', () async {
+      when(() => dio.get(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes'),
+            statusCode: 200,
+            data: {
+              'scenes': [sceneJson(id: 'stored-scene')],
+              'native_discovery_failed': true,
+            },
+          ));
+
+      final catalog = await api.getSceneCatalog(targetId: 'room-1');
+
+      expect(catalog, isNotNull);
+      expect(catalog!.scenes.single.id, 'stored-scene');
+      expect(catalog.nativeDiscoveryFailed, isTrue);
+    });
+
+    test('getSceneCatalog defaults missing discovery metadata to complete',
+        () async {
+      when(() => dio.get(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes'),
+            statusCode: 200,
+            data: {
+              'scenes': [sceneJson(id: 'stored-scene')],
+            },
+          ));
+
+      final catalog = await api.getSceneCatalog(targetId: 'room-1');
+
+      expect(catalog, isNotNull);
+      expect(catalog!.nativeDiscoveryFailed, isFalse);
+    });
+
+    test('getSceneCatalog treats malformed or failed responses as failures',
+        () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes'),
+            statusCode: 200,
+            data: {'unexpected': true},
+          ));
+
+      expect(await api.getSceneCatalog(), isNull);
+
+      when(() => dio.get(any())).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/scenes'),
+      ));
+
+      expect(await api.getSceneCatalog(), isNull);
+    });
+
     test('upsertScene posts the scene definition', () async {
       when(() => dio.post(any(), data: any(named: 'data')))
           .thenAnswer((_) async => Response(
