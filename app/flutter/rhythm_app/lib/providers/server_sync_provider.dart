@@ -2786,19 +2786,62 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Dispatch multiple node actions in a single batch request.
   ///
-  /// Returns true if dispatched to server, false if not connected.
-  /// On success, applies each returned state for fast convergence.
-  Future<bool> dispatchBatchNodeActions(
+  /// Returns the server's dispatch metadata and states, or null when the
+  /// request cannot be sent. On success, applies each returned state for fast
+  /// convergence.
+  Future<RhythmDispatchResult?> dispatchBatchNodeActionsResult(
       List<({String nodeId, String action})> actions) async {
-    if (!_connection.connected || actions.isEmpty) return false;
+    if (actions.isEmpty) return null;
+    if (HueServiceLocator.isDemoMode) {
+      for (final item in actions) {
+        final currentBrightness =
+            _roomProvider.getBrightness(item.nodeId) ?? 50;
+        switch (item.action) {
+          case 'step_down':
+            dispatchNodeCurveBrightness(
+              item.nodeId,
+              (currentBrightness - 10).clamp(1, 100).toInt(),
+            );
+            break;
+          case 'step_up':
+            dispatchNodeCurveBrightness(
+              item.nodeId,
+              (currentBrightness + 10).clamp(1, 100).toInt(),
+            );
+            break;
+          case 'reset':
+            _roomProvider.setRoomStateLocal(
+              item.nodeId,
+              RoomModeState.active,
+            );
+            await _roomProvider.setRoomLightsOnLocal(item.nodeId, true);
+            break;
+        }
+      }
+      return RhythmDispatchResult(
+        metadata: RhythmDispatchMetadata(dispatchCount: actions.length),
+      );
+    }
+    if (!_connection.connected) return null;
     for (final action in actions) {
       _clearRecentDispatchFailure(action.nodeId);
     }
-    final states = await _connection.api.nodeActionBatch(actions);
-    for (final state in states) {
+    final result = await _connection.api.nodeActionBatchResult(actions);
+    if (result.states.isEmpty && !result.metadata.hasLoadingMetadata) {
+      return null;
+    }
+    for (final state in result.states) {
       _onRhythmState(state, fromActionResponse: true);
     }
-    return true;
+    return result;
+  }
+
+  /// Dispatch multiple node actions in a single batch request.
+  ///
+  /// Returns true if dispatched to server, false if not connected.
+  Future<bool> dispatchBatchNodeActions(
+      List<({String nodeId, String action})> actions) async {
+    return await dispatchBatchNodeActionsResult(actions) != null;
   }
 
   Future<bool> dispatchBatchActions(
@@ -2854,6 +2897,37 @@ class ServerSyncProvider extends ChangeNotifier {
 
   bool dispatchBrightness(String roomId, int brightness) =>
       dispatchNodeCurveBrightness(roomId, brightness);
+
+  /// Apply curve brightness modifiers to several nodes in one batch.
+  ///
+  /// Returns the server's dispatch metadata and states, or null when the
+  /// request cannot be sent. Demo mode preserves the single-node simulation
+  /// behavior while reporting every locally-applied item as dispatched.
+  Future<RhythmDispatchResult?> dispatchBatchNodeCurveBrightnessResult(
+    List<({String nodeId, int brightness})> items,
+  ) async {
+    if (items.isEmpty) return null;
+    if (HueServiceLocator.isDemoMode) {
+      for (final item in items) {
+        dispatchNodeCurveBrightness(item.nodeId, item.brightness);
+      }
+      return RhythmDispatchResult(
+        metadata: RhythmDispatchMetadata(dispatchCount: items.length),
+      );
+    }
+    if (!_connection.connected) return null;
+    for (final item in items) {
+      _clearRecentDispatchFailure(item.nodeId);
+    }
+    final result = await _connection.api.nodeCurveBrightnessBatchResult(items);
+    if (result.states.isEmpty && !result.metadata.hasLoadingMetadata) {
+      return null;
+    }
+    for (final state in result.states) {
+      _onRhythmState(state, fromActionResponse: true);
+    }
+    return result;
+  }
 
   bool? _expectedLightsOnForState(RoomModeState? state) {
     return switch (state) {
