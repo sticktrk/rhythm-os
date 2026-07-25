@@ -55,9 +55,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
     await binding.takeScreenshot('02_input_filled');
 
-    // 3. Pairing failure phase. "Add Device" appears as both the page header
-    // text and the submit button — `.last` targets the submit button.
-    await tester.tap(find.text('Add Device').last);
+    // 3. Pairing failure phase.
+    await tester.tap(find.text('Add Bulb'));
 
     final failureFinder = find.text('Pairing Failed');
     var sawFailure = false;

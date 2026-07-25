@@ -2748,6 +2748,7 @@ class RhythmServerHubManagementSection extends StatefulWidget {
     super.key,
     this.showConfigured = true,
     this.showAddOptions = true,
+    this.showMatterAddOption = true,
     this.onResynced,
   });
 
@@ -2758,6 +2759,10 @@ class RhythmServerHubManagementSection extends StatefulWidget {
   /// the same capability-aware section back both the Settings → Devices list
   /// (configured only) and the "+" Add Device flow (add options only).
   final bool showAddOptions;
+
+  /// Render the direct Matter pairing row. Add & Review owns its universal
+  /// Add Bulb row, while Devices settings keeps the existing direct option.
+  final bool showMatterAddOption;
 
   /// Called after a "Re-Sync" completes, so a host (e.g. the Add & Review
   /// screen) can reload anything derived from the fresh device data.
@@ -2930,7 +2935,9 @@ class _RhythmServerHubManagementSectionState
     ServerSyncProvider syncProvider,
     List<Map<String, dynamic>> configuredHubs,
   ) {
-    final matterOptions = _buildMatterAddOptionRows(syncProvider);
+    final matterOptions = widget.showMatterAddOption
+        ? _buildMatterAddOptionRows(syncProvider)
+        : const <Widget>[];
 
     Widget divider() => Divider(
           height: 1,
