@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-adaptive"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "rhythm-core",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-addon"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "axum",
@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-chipd"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "cc",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-core"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-devices"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-ha"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-host-recorder"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "chrono",
  "libc",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-hue"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-linux-appliance"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "axum",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-matter"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-os"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-os-runtime-modules"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "rhythm-adaptive",
@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-profile"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "libm",
  "serde",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-runtime-api"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "async-trait",
  "serde",
@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "rhythm-server"
-version = "0.6.531-beta"
+version = "0.6.532-beta"
 dependencies = [
  "anyhow",
  "axum",
