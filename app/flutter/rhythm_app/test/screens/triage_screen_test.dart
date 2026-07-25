@@ -6,6 +6,7 @@ import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/triage_screen.dart';
+import 'package:rhythm_app/widgets/settings_row.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -103,6 +104,20 @@ class _FakeRhythmConnection extends RhythmConnection {
   }
 }
 
+class _TestServerSyncProvider extends ServerSyncProvider {
+  _TestServerSyncProvider({
+    required super.connection,
+    required super.roomProvider,
+    required super.homeProvider,
+  });
+
+  bool matterPairingEnabled = false;
+
+  @override
+  bool get canAddMatterDevice =>
+      matterPairingEnabled || super.canAddMatterDevice;
+}
+
 Widget _buildTestApp({
   required RoomProvider roomProvider,
   required RhythmConnection connection,
@@ -167,7 +182,7 @@ void main() {
     late _TestHomeProvider homeProvider;
     late _FakeTriageServerApi api;
     late _FakeRhythmConnection connection;
-    late ServerSyncProvider serverSyncProvider;
+    late _TestServerSyncProvider serverSyncProvider;
 
     setUp(() async {
       roomProvider = RoomProvider();
@@ -185,7 +200,7 @@ void main() {
       homeProvider = _TestHomeProvider();
       api = _FakeTriageServerApi(triageEntries: [_roomBindingEntry()]);
       connection = _FakeRhythmConnection(api);
-      serverSyncProvider = ServerSyncProvider(
+      serverSyncProvider = _TestServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
         homeProvider: homeProvider,
@@ -219,6 +234,34 @@ void main() {
         find.text('No devices need your attention right now.'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('shows Add Bulb at the same row size as Add a Room',
+        (tester) async {
+      serverSyncProvider.matterPairingEnabled = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.text('Add Bulb'), findsOneWidget);
+      expect(find.text('Add Matter Device'), findsNothing);
+
+      final addBulbSize = tester.getSize(find.widgetWithText(
+        SettingsRow,
+        'Add Bulb',
+      ));
+      final addRoomSize = tester.getSize(find.widgetWithText(
+        SettingsRow,
+        'Add a Room',
+      ));
+      expect(addBulbSize.height, addRoomSize.height);
     });
 
     testWidgets('reconnects after keeping a room binding separate',

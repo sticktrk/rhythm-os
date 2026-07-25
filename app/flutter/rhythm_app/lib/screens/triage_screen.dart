@@ -7,6 +7,7 @@ import '../services/analytics_service.dart';
 import '../widgets/room_picker_sheet.dart';
 import '../widgets/settings_row.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
+import 'hubs/matter_pairing_flow.dart';
 import 'hubs/rhythmserver_settings_screen.dart';
 
 enum _TriageFilter { all, devices, rooms }
@@ -259,11 +260,19 @@ class _TriageScreenState extends State<TriageScreen> {
         // ── Add ─────────────────────────────────────────────────────────
         RhythmServerHubManagementSection(
           showConfigured: false,
+          showMatterAddOption: false,
           onResynced: () => _loadEntries(),
         ),
         const SizedBox(height: 12),
         SettingsGroup(
           children: [
+            if (serverSync.canAddMatterDevice)
+              SettingsRow(
+                icon: Icons.lightbulb_outline_rounded,
+                iconColor: const Color(0xFF26A69A),
+                label: 'Add Bulb',
+                onTap: () => _addBulb(),
+              ),
             SettingsRow(
               icon: Icons.meeting_room_outlined,
               iconColor: const Color(0xFF7C83FF),
@@ -307,6 +316,13 @@ class _TriageScreenState extends State<TriageScreen> {
           ),
         ),
       );
+
+  Future<void> _addBulb() async {
+    await startMatterPairingFlow(context);
+    if (mounted) {
+      await _loadEntries();
+    }
+  }
 
   Future<void> _addRoom() async {
     final room = await createTopologyRoomOptionFromPrompt(context);

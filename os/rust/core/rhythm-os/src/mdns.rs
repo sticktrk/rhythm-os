@@ -7,7 +7,9 @@ pub const MDNS_TXT_VERSION: &str = "version";
 pub const MDNS_TXT_TYPE: &str = "type";
 
 const MDNS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-const MDNS_ANNOUNCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+// mdns-sd's conflict probing can defer for one second before restarting its
+// 750ms probe sequence, so leave enough time for a conflict-resolved announce.
+const MDNS_ANNOUNCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LocalIpv4Interface {
@@ -353,23 +355,41 @@ fn wait_for_mdns_announcement(
     monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>,
     service_fullname: &str,
 ) -> Result<String, String> {
+    let mut expected_fullname = service_fullname.to_string();
     let deadline = std::time::Instant::now() + MDNS_ANNOUNCE_TIMEOUT;
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match monitor.recv_timeout(remaining) {
-            Ok(mdns_sd::DaemonEvent::Announce(fullname, addrs)) => {
-                if fullname == service_fullname {
-                    return Ok(addrs);
-                }
-            }
-            Ok(mdns_sd::DaemonEvent::Error(e)) => return Err(format!("{:?}", e)),
-            Ok(mdns_sd::DaemonEvent::IpAdd(_)) | Ok(mdns_sd::DaemonEvent::IpDel(_)) => {}
-            Ok(_) => {}
-            Err(e) => return Err(e.to_string()),
+        let event = monitor.recv_timeout(remaining).map_err(|e| e.to_string())?;
+        if let Some(result) =
+            mdns_announcement_result(event, service_fullname, &mut expected_fullname)
+        {
+            return result;
         }
     }
 
     Err("timed out waiting for mdns-sd announce event".to_string())
+}
+
+fn mdns_announcement_result(
+    event: mdns_sd::DaemonEvent,
+    original_fullname: &str,
+    expected_fullname: &mut String,
+) -> Option<Result<String, String>> {
+    match event {
+        mdns_sd::DaemonEvent::Announce(fullname, addrs)
+            if fullname.eq_ignore_ascii_case(expected_fullname) =>
+        {
+            Some(Ok(addrs))
+        }
+        mdns_sd::DaemonEvent::NameChange(change)
+            if change.original.eq_ignore_ascii_case(original_fullname) =>
+        {
+            *expected_fullname = change.new_name;
+            None
+        }
+        mdns_sd::DaemonEvent::Error(e) => Some(Err(format!("{e:?}"))),
+        _ => None,
+    }
 }
 
 /// Compose the mDNS hostname. When a stable `device_id` is provided
@@ -472,6 +492,43 @@ mod tests {
         assert_eq!(
             info.get_property_val_str(MDNS_TXT_TYPE),
             Some("rhythm-server")
+        );
+    }
+
+    #[test]
+    fn mdns_announcement_tracks_conflict_resolved_service_name() {
+        let original = "Rhythm OS (rhythm-server-31810e88)._http._tcp.local.";
+        let renamed = "Rhythm OS (rhythm-server-31810e88) (2)._http._tcp.local.";
+        let mut expected = original.to_string();
+
+        let rename = mdns_sd::DnsNameChange {
+            original: original.to_string(),
+            new_name: renamed.to_string(),
+            rr_type: mdns_sd::RRType::SRV,
+            intf_name: "eth0".to_string(),
+        };
+        assert_eq!(
+            mdns_announcement_result(
+                mdns_sd::DaemonEvent::NameChange(rename),
+                original,
+                &mut expected,
+            ),
+            None
+        );
+        assert_eq!(expected, renamed);
+
+        assert_eq!(
+            mdns_announcement_result(
+                mdns_sd::DaemonEvent::Announce(
+                    renamed.to_string(),
+                    "rhythm-server-31810e88-2.local.:192.168.0.13".to_string(),
+                ),
+                original,
+                &mut expected,
+            ),
+            Some(Ok(
+                "rhythm-server-31810e88-2.local.:192.168.0.13".to_string()
+            ))
         );
     }
 

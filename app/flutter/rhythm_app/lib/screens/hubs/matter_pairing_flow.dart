@@ -7,6 +7,7 @@ import '../../providers/server_sync_provider.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/device_detail_sheet.dart';
+import 'device_pairing_scanner_screen.dart';
 import 'matter_add_method.dart';
 import 'matter_device_add_screen.dart';
 
@@ -32,12 +33,32 @@ Future<void> startMatterPairingFlow(
   );
   if (!context.mounted) return;
 
-  final pairingResult = await MatterDeviceAddScreen.show(
-    context,
-    endpoint: serverEndpoint.endpoint,
-    authToken: serverEndpoint.hub.token,
-    addMethod: addMethod,
-  );
+  MatterDevicePairingResult? pairingResult;
+  if (!supportsDevicePairingCamera) {
+    pairingResult = await MatterDeviceAddScreen.show(
+      context,
+      endpoint: serverEndpoint.endpoint,
+      authToken: serverEndpoint.hub.token,
+      addMethod: addMethod,
+    );
+  } else {
+    while (pairingResult == null) {
+      if (!context.mounted) return;
+      final scanResult = await DevicePairingScannerScreen.show(context);
+      if (!context.mounted || scanResult == null) return;
+
+      pairingResult = await MatterDeviceAddScreen.show(
+        context,
+        endpoint: serverEndpoint.endpoint,
+        authToken: serverEndpoint.hub.token,
+        addMethod: addMethod,
+        initialSetupPayload:
+            scanResult.action == DevicePairingScannerAction.matter
+                ? scanResult.payload
+                : null,
+      );
+    }
+  }
   if (!context.mounted || pairingResult == null) return;
 
   if (HueServiceLocator.isDemoMode) {

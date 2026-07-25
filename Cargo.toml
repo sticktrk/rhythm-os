@@ -72,7 +72,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # mDNS
-mdns-sd = "0.11"
+# 0.13.2 adds the missing NSEC type-bitmap bounds check (upstream #291).
+mdns-sd = "0.13.2"
 
 [profile.release]
 strip = true
