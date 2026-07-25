@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub const LIGHT_SCENE_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_LIGHT_SCENE_PREVIEW_MS: u64 = 30_000;
+const NATIVE_SCENE_ID_PREFIX: &str = "native-";
 
 fn default_schema_version() -> u32 {
     LIGHT_SCENE_SCHEMA_VERSION
@@ -26,6 +27,27 @@ fn default_light_scene_power() -> LightScenePower {
 
 fn default_light_scene_brightness() -> u8 {
     100
+}
+
+/// Build the stable public ID for an integration-owned scene.
+///
+/// Native definitions remain ephemeral, but this reserved ID can be stored in
+/// room state and backups so the owning integration can resolve it again after
+/// reconnect or restore.
+pub fn native_scene_id(provider: &str, external_id: &str) -> String {
+    let provider = normalize_scene_id(provider, "integration");
+    let external_id = normalize_scene_id(external_id, "scene");
+    format!("{NATIVE_SCENE_ID_PREFIX}{provider}-{external_id}")
+}
+
+/// Whether an ID belongs to the reserved integration-owned scene namespace.
+pub fn is_native_scene_id(id: &str) -> bool {
+    let Some(reference) = id.strip_prefix(NATIVE_SCENE_ID_PREFIX) else {
+        return false;
+    };
+    reference
+        .split_once('-')
+        .is_some_and(|(provider, external_id)| !provider.is_empty() && !external_id.is_empty())
 }
 
 /// Where a scene originated.
@@ -291,6 +313,15 @@ mod tests {
     fn scene_id_normalizes_from_name() {
         assert_eq!(normalize_scene_id("", "Icy Glow"), "icy-glow");
         assert_eq!(normalize_scene_id("  My Scene!! ", ""), "my-scene");
+    }
+
+    #[test]
+    fn native_scene_ids_are_stable_and_reserved() {
+        let id = native_scene_id("Hue", "5AA2EAC8-118E-4C25");
+        assert_eq!(id, "native-hue-5aa2eac8-118e-4c25");
+        assert!(is_native_scene_id(&id));
+        assert!(!is_native_scene_id("hue-5aa2eac8-118e-4c25"));
+        assert!(!is_native_scene_id("native-hue"));
     }
 
     #[test]

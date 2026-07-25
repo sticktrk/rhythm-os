@@ -538,6 +538,34 @@ class RoomProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Restore the local room presentation after a rejected optimistic scene.
+  void restoreMoodPresentationLocal(
+    String roomId, {
+    required (int r, int g, int b)? roomColor,
+    required (int r, int g, int b)? moodColor,
+    required int? moodBrightness,
+    required bool moodEnabled,
+  }) {
+    if (roomColor == null) {
+      _roomColor.remove(roomId);
+    } else {
+      _roomColor[roomId] = roomColor;
+    }
+    if (moodColor == null) {
+      _roomMoodColor.remove(roomId);
+    } else {
+      _roomMoodColor[roomId] = moodColor;
+    }
+    if (moodBrightness == null) {
+      _roomMoodBrightness.remove(roomId);
+    } else {
+      _roomMoodBrightness[roomId] = moodBrightness;
+    }
+    _roomMoodEnabled[roomId] = moodEnabled;
+    _roomStateLockedUntil.remove(roomId);
+    notifyListeners();
+  }
+
   /// Get the timestamp of the last rhythm tick for a room.
   DateTime? getLastTickTime(String roomId) => _lastTickTime[roomId];
 

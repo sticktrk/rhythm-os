@@ -59,7 +59,7 @@ void main() {
             initialTab: MoodTab.color,
             scenesLoader: () async => const [],
             onColorChanged: (_) {},
-            onSceneSelected: (_) {},
+            onSceneSelected: (_) async => true,
           ),
         ),
       ),
@@ -88,7 +88,7 @@ void main() {
             initialScenes: [scene],
             scenesLoader: () async => [scene],
             onColorChanged: (_) => colorChangeCount += 1,
-            onSceneSelected: (_) {},
+            onSceneSelected: (_) async => true,
           ),
         ),
       ),
@@ -108,5 +108,74 @@ void main() {
     await tester.pump(const Duration(milliseconds: 320));
 
     expect(find.byIcon(Icons.check_rounded), findsNothing);
+  });
+
+  testWidgets('refreshes a non-empty cached scene catalog', (tester) async {
+    final cached = _scene('cached-scene');
+    final refreshed = _scene('refreshed-scene');
+    var loaderCalls = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialTab: MoodTab.scenes,
+            initialScenes: [cached],
+            scenesLoader: () async {
+              loaderCalls += 1;
+              return [refreshed];
+            },
+            onColorChanged: (_) {},
+            onSceneSelected: (_) async => true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(loaderCalls, 1);
+    expect(find.byKey(const Key('mood_scene_refreshed-scene')), findsOneWidget);
+    expect(find.byKey(const Key('mood_scene_cached-scene')), findsNothing);
+  });
+
+  testWidgets('restores the prior selection when scene apply fails',
+      (tester) async {
+    final previous = _scene('previous-scene');
+    final rejected = _scene('rejected-scene');
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialTab: MoodTab.scenes,
+            initialSceneId: previous.id,
+            initialScenes: [previous, rejected],
+            scenesLoader: () async => [previous, rejected],
+            onColorChanged: (_) {},
+            onSceneSelected: (_) async => false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+
+    await tester.tap(find.byKey(const Key('mood_scene_rejected-scene')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('mood_scene_previous-scene')),
+        matching: find.byIcon(Icons.check_rounded),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('mood_scene_rejected-scene')),
+        matching: find.byIcon(Icons.check_rounded),
+      ),
+      findsNothing,
+    );
   });
 }

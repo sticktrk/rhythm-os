@@ -15,8 +15,8 @@ use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
 use rhythm_os::discovery::{DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery};
 use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::scenes::{
-    LightSceneColor, LightSceneLayer, LightSceneOutput, LightScenePower, SceneDefinition,
-    SceneSource,
+    native_scene_id, LightSceneColor, LightSceneLayer, LightSceneOutput, LightScenePower,
+    SceneDefinition, SceneSource,
 };
 
 use crate::transport::HueTransport;
@@ -305,10 +305,6 @@ impl<H: HueTransport> HueDiscovery<H> {
         map
     }
 
-    fn scene_id(external_id: &str) -> String {
-        format!("hue-{external_id}")
-    }
-
     fn scene_output(action: &serde_json::Value) -> Option<LightSceneOutput> {
         let power = match action.pointer("/on/on").and_then(|value| value.as_bool()) {
             Some(false) => LightScenePower::Off,
@@ -383,7 +379,7 @@ impl<H: HueTransport> HueDiscovery<H> {
                 }
 
                 Some(SceneDefinition {
-                    id: Self::scene_id(external_id),
+                    id: native_scene_id("hue", external_id),
                     name: if name.is_empty() {
                         "Hue scene".to_string()
                     } else {
@@ -1192,7 +1188,7 @@ mod tests {
 
         assert_eq!(scenes.len(), 1);
         let scene = &scenes[0];
-        assert_eq!(scene.id, "hue-scene-cool");
+        assert_eq!(scene.id, "native-hue-scene-cool");
         assert_eq!(scene.name, "Arctic aurora");
         assert_eq!(
             scene.source,

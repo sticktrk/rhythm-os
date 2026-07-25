@@ -155,6 +155,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   final Map<String, List<RhythmSceneDefinition>> roomScenes = {};
   final List<String?> sceneTargetCalls = [];
   bool applySceneSucceeds = true;
+  Completer<RhythmSceneActionResult?>? applySceneCompleter;
   final List<({String sceneId, String targetId, int? transitionMs})>
       applySceneCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
@@ -339,6 +340,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       targetId: targetId,
       transitionMs: transitionMs,
     ));
+    final completer = applySceneCompleter;
+    if (completer != null) return completer.future;
     if (!applySceneSucceeds) return null;
     return RhythmSceneActionResult(
       sceneId: sceneId,
@@ -2558,7 +2561,7 @@ void main() {
       api.scenes = [_testScene('evening-glow')];
       await provider.fetchScenes();
 
-      final dispatched = provider.applyMoodScene(
+      final dispatched = await provider.applyMoodScene(
         'room-1',
         'evening-glow',
         color: (240, 80, 24),
@@ -2580,7 +2583,7 @@ void main() {
       api.scenes = [_testPaletteScene('color-carnival')];
       await provider.fetchScenes();
 
-      final dispatched = provider.applyMoodScene(
+      final dispatched = await provider.applyMoodScene(
         'room-1',
         'color-carnival',
       );
@@ -2594,24 +2597,65 @@ void main() {
       api.scenes = [_testScene('evening-glow')];
       api.applySceneSucceeds = false;
       await provider.fetchScenes();
+      roomProvider.setRoomColorLocal(
+        'room-1',
+        12,
+        34,
+        56,
+        rememberAsMood: true,
+      );
+      roomProvider.setMoodBrightnessLocal('room-1', 27);
+      roomProvider.setMoodEnabledLocal('room-1', false);
 
-      expect(
-        provider.applyMoodScene('room-1', 'evening-glow'),
-        isTrue,
+      final applied = await provider.applyMoodScene(
+        'room-1',
+        'evening-glow',
+        color: (240, 80, 24),
+      );
+
+      expect(applied, isFalse);
+      expect(provider.moodSceneIdForRoom('room-1'), isNull);
+      expect(roomProvider.getRoomColor('room-1'), (12, 34, 56));
+      expect(roomProvider.getMoodColor('room-1'), (12, 34, 56));
+      expect(roomProvider.getMoodBrightness('room-1'), 27);
+      expect(roomProvider.isMoodEnabled('room-1'), isFalse);
+    });
+
+    test('stale scene failure does not roll back a newer custom mood',
+        () async {
+      api.scenes = [_testScene('evening-glow')];
+      api.applySceneCompleter = Completer<RhythmSceneActionResult?>();
+      await provider.fetchScenes();
+
+      final pending = provider.applyMoodScene(
+        'room-1',
+        'evening-glow',
+        color: (240, 80, 24),
       );
       expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
 
-      await Future<void>.delayed(Duration.zero);
+      provider.dispatchNodeColor(
+        'room-1',
+        10,
+        20,
+        30,
+        scope: 'mood',
+        brightness: 31,
+      );
+      api.applySceneCompleter!.complete(null);
 
+      expect(await pending, isFalse);
       expect(provider.moodSceneIdForRoom('room-1'), isNull);
+      expect(roomProvider.getMoodColor('room-1'), (10, 20, 30));
+      expect(roomProvider.getMoodBrightness('room-1'), 31);
     });
 
-    test('does not change optimistic scene state while disconnected', () {
+    test('does not change optimistic scene state while disconnected', () async {
       api.scenes = [_testScene('evening-glow')];
       connection.isConnected = false;
 
       expect(
-        provider.applyMoodScene('room-1', 'evening-glow'),
+        await provider.applyMoodScene('room-1', 'evening-glow'),
         isFalse,
       );
       expect(provider.moodSceneIdForRoom('room-1'), isNull);
@@ -2732,7 +2776,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(provider.moodSceneIdForRoom('room-1'), isNull);
 
-      final dispatched = provider.applyMoodScene(
+      final dispatched = await provider.applyMoodScene(
         'room-1',
         'evening-glow',
         color: (240, 80, 24),

@@ -276,6 +276,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Local scene selection while the server catches up to Mood edits.
   final Map<String, String?> _optimisticMoodSceneIds = {};
 
+  /// Rejects stale scene outcomes after a newer selection for the same room.
+  final Map<String, int> _moodSceneApplyGenerations = {};
+
   /// Mode configs from the server (profile routing per mode).
   List<RhythmModeConfig> _modeConfigs = const [];
 
@@ -456,16 +459,23 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Apply [sceneId] to [roomId] and bind it as that room's Mood scene.
   ///
   /// [color] is the scene's representative RGB, used to optimistically tint the
-  /// room card while the server confirms. Returns false if not deliverable.
-  bool applyMoodScene(
+  /// room card while the server confirms. Returns whether the server accepted
+  /// and applied the scene.
+  Future<bool> applyMoodScene(
     String roomId,
     String sceneId, {
     (int, int, int)? color,
     int? transitionMs,
-  }) {
+  }) async {
     if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final generation = (_moodSceneApplyGenerations[roomId] ?? 0) + 1;
+    _moodSceneApplyGenerations[roomId] = generation;
     final hadPreviousOverride = _optimisticMoodSceneIds.containsKey(roomId);
     final previousOverride = _optimisticMoodSceneIds[roomId];
+    final previousRoomColor = _roomProvider.getRoomColor(roomId);
+    final previousMoodColor = _roomProvider.getMoodColor(roomId);
+    final previousMoodBrightness = _roomProvider.getMoodBrightness(roomId);
+    final previousMoodEnabled = _roomProvider.isMoodEnabled(roomId);
     if (color != null) {
       _roomProvider.setRoomColorLocal(
         roomId,
@@ -497,26 +507,34 @@ class ServerSyncProvider extends ChangeNotifier {
       );
       return true;
     }
-    unawaited(
-      _connection.api
-          .applyScene(
+    RhythmSceneActionResult? result;
+    try {
+      result = await _connection.api.applyScene(
         sceneId: sceneId,
         targetId: roomId,
         transitionMs: transitionMs,
-      )
-          .then((result) {
-        if (result != null || _optimisticMoodSceneIds[roomId] != sceneId) {
-          return;
-        }
-        if (hadPreviousOverride) {
-          _optimisticMoodSceneIds[roomId] = previousOverride;
-        } else {
-          _optimisticMoodSceneIds.remove(roomId);
-        }
-        notifyListeners();
-      }),
+      );
+    } catch (_) {
+      result = null;
+    }
+    if (result != null) return true;
+    if (_moodSceneApplyGenerations[roomId] != generation) {
+      return false;
+    }
+    if (hadPreviousOverride) {
+      _optimisticMoodSceneIds[roomId] = previousOverride;
+    } else {
+      _optimisticMoodSceneIds.remove(roomId);
+    }
+    _roomProvider.restoreMoodPresentationLocal(
+      roomId,
+      roomColor: previousRoomColor,
+      moodColor: previousMoodColor,
+      moodBrightness: previousMoodBrightness,
+      moodEnabled: previousMoodEnabled,
     );
-    return true;
+    notifyListeners();
+    return false;
   }
 
   /// Current day/sleep toggle binding, if configured.
@@ -2177,6 +2195,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _scenes = [...hello.scenes];
     }
     _optimisticMoodSceneIds.clear();
+    _moodSceneApplyGenerations.clear();
     _modeConfigs = [...?hello.mode?.configs];
     _profiles = [...hello.profiles];
     _activeProfileId = hello.activeProfile['id'] as String? ??
@@ -2464,6 +2483,8 @@ class ServerSyncProvider extends ChangeNotifier {
       if (state.profileSettings != null &&
           _optimisticMoodSceneIds.containsKey(state.nodeId)) {
         _optimisticMoodSceneIds.remove(state.nodeId);
+        _moodSceneApplyGenerations[state.nodeId] =
+            (_moodSceneApplyGenerations[state.nodeId] ?? 0) + 1;
         moodSceneOverrideCleared = true;
       }
     } finally {
@@ -2697,6 +2718,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _scenes = const [];
     _roomScenes.clear();
     _optimisticMoodSceneIds.clear();
+    _moodSceneApplyGenerations.clear();
     _helloNodes = [];
     _helloRooms = [];
     _clearStandbyEnabledOptimisticStates();
@@ -3052,6 +3074,8 @@ class ServerSyncProvider extends ChangeNotifier {
       rememberAsMood: persistAsMood,
     );
     if (persistAsMood) {
+      _moodSceneApplyGenerations[nodeId] =
+          (_moodSceneApplyGenerations[nodeId] ?? 0) + 1;
       final sceneOverrideChanged =
           !_optimisticMoodSceneIds.containsKey(nodeId) ||
               _optimisticMoodSceneIds[nodeId] != null;

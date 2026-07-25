@@ -48,10 +48,10 @@ use crate::factory_default_config::{
 };
 use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::{
-    LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput, LightScenePower,
-    LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest, SceneApplyResponse,
-    SceneDefinition, SceneDraftPreviewRequest, ScenePreviewRequest, SceneSource,
-    DEFAULT_LIGHT_SCENE_PREVIEW_MS,
+    is_native_scene_id, LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput,
+    LightScenePower, LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest,
+    SceneApplyResponse, SceneDefinition, SceneDraftPreviewRequest, ScenePreviewRequest,
+    SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
@@ -4143,6 +4143,12 @@ pub fn build_scenes_for_target(state: &SharedState, target_id: Option<&str>) -> 
 
 pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Result<String> {
     scene.normalize();
+    if is_native_scene_id(&scene.id) {
+        return Err(anyhow::anyhow!(
+            "Scene id '{}' uses the reserved native scene namespace",
+            scene.id
+        ));
+    }
     let response_scene = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.insert(scene.id.clone(), scene.clone());
@@ -4202,22 +4208,34 @@ pub fn do_scene_apply(
     scene_id: &str,
     request: SceneApplyRequest,
 ) -> Result<String> {
+    let response = do_scene_apply_response(state, scene_id, request, true)?;
+    serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
+}
+
+fn do_scene_apply_response(
+    state: &SharedState,
+    scene_id: &str,
+    request: SceneApplyRequest,
+    persist_state: bool,
+) -> Result<SceneApplyResponse> {
     let is_stored = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.contains_key(scene_id)
     };
-    let response = if is_stored {
-        do_scene_apply_inner(state, scene_id, request, true, true, None)?
-    } else {
-        do_native_scene_apply(state, scene_id, request)?
-    };
-    serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
+    if is_stored {
+        return do_scene_apply_inner(state, scene_id, request, true, persist_state, None);
+    }
+    if is_native_scene_id(scene_id) {
+        return do_native_scene_apply(state, scene_id, request, persist_state);
+    }
+    Err(anyhow::anyhow!("Scene '{}' not found", scene_id))
 }
 
 fn do_native_scene_apply(
     state: &SharedState,
     scene_id: &str,
     request: SceneApplyRequest,
+    persist_state: bool,
 ) -> Result<SceneApplyResponse> {
     let target_id = resolve_node_id(state, &request.target_id);
     let sources = {
@@ -4278,7 +4296,9 @@ fn do_native_scene_apply(
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
         }
-        persist_rooms(state);
+        if persist_state {
+            persist_rooms(state);
+        }
         emit_node_state_event_after_apply(state, &runtime, &target_id);
         info!(
             target: "native_scenes",
@@ -4505,16 +4525,14 @@ fn apply_mood_scene_or_tick(
     persist_state: bool,
 ) -> Result<()> {
     if let Some(scene_id) = mood_scene_id {
-        do_scene_apply_inner(
+        do_scene_apply_response(
             state,
             scene_id,
             SceneApplyRequest {
                 target_id: node_id.to_string(),
                 transition_ms: None,
             },
-            true,
             persist_state,
-            None,
         )?;
         return Ok(());
     }
@@ -8096,7 +8114,7 @@ fn validate_room_profile_settings(
             ));
         }
         if let Some(valid_scene_ids) = valid_scene_ids {
-            if !valid_scene_ids.contains(scene_id) {
+            if !valid_scene_ids.contains(scene_id) && !is_native_scene_id(scene_id) {
                 return Err(anyhow::anyhow!(
                     "Room '{}' references unknown mood scene '{}'",
                     room_id,
@@ -10681,7 +10699,7 @@ pub fn do_node_preferences_set(
         }
     }
     if let Some(scene_id) = profile_settings.mood_scene_id.as_deref() {
-        if !valid_scene_ids.contains(scene_id) {
+        if !valid_scene_ids.contains(scene_id) && !is_native_scene_id(scene_id) {
             return Err(anyhow::anyhow!("Unknown light scene: {}", scene_id));
         }
     }
@@ -10922,7 +10940,7 @@ fn validate_room_profile_settings_patch(
         .and_then(|patch| patch.mood_scene_id.as_ref())
         .and_then(|scene_id| scene_id.as_deref())
     {
-        if !valid_scene_ids.contains(scene_id) {
+        if !valid_scene_ids.contains(scene_id) && !is_native_scene_id(scene_id) {
             return Err(anyhow::anyhow!("Unknown light scene: {}", scene_id));
         }
     }
@@ -16073,6 +16091,24 @@ mod tests {
     }
 
     #[test]
+    fn scene_upsert_rejects_reserved_native_reference_ids() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let scene = SceneDefinition {
+            id: crate::scenes::native_scene_id("hue", "native-1"),
+            name: "User shadow".to_string(),
+            description: None,
+            source: SceneSource::User,
+            light: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let error = do_scene_upsert(&state, scene).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("reserved native scene namespace"));
+    }
+
+    #[test]
     fn scene_apply_uses_public_node_for_standalone_light_without_composite() {
         let (state, runtime, device_id) = setup_standalone_matter_light();
         do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
@@ -17045,7 +17081,8 @@ mod tests {
     #[test]
     fn room_scoped_scene_list_merges_native_scenes_without_persisting_them() {
         let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let native = imported_hue_scene("hue-native-1", "native-1");
+        let scene_id = crate::scenes::native_scene_id("hue", "native-1");
+        let native = imported_hue_scene(&scene_id, "native-1");
         install_native_scene_source(&state, native);
 
         let scoped: serde_json::Value =
@@ -17057,25 +17094,26 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|scene| scene["id"] == "hue-native-1"));
+            .any(|scene| scene["id"] == scene_id));
         assert!(!unscoped["scenes"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|scene| scene["id"] == "hue-native-1"));
-        assert!(!state.lock().unwrap().scenes.contains_key("hue-native-1"));
+            .any(|scene| scene["id"] == scene_id));
+        assert!(!state.lock().unwrap().scenes.contains_key(&scene_id));
     }
 
     #[test]
     fn applying_native_scene_recalls_external_id_and_commits_room_mood() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
-        let native = imported_hue_scene("hue-native-1", "native-1");
+        let scene_id = crate::scenes::native_scene_id("hue", "native-1");
+        let native = imported_hue_scene(&scene_id, "native-1");
         let recalls = install_native_scene_source(&state, native);
 
         let response: SceneApplyResponse = serde_json::from_str(
             &do_scene_apply(
                 &state,
-                "hue-native-1",
+                &scene_id,
                 SceneApplyRequest {
                     target_id: "room1".to_string(),
                     transition_ms: Some(850),
@@ -17085,7 +17123,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(response.scene_id, "hue-native-1");
+        assert_eq!(response.scene_id, scene_id);
         assert_eq!(
             recalls.lock().unwrap().as_slice(),
             &[("native-1".to_string(), Some(850))]
@@ -17097,9 +17135,114 @@ mod tests {
                 .profile_settings
                 .mood_scene_id
                 .as_deref(),
-            Some("hue-native-1")
+            Some(scene_id.as_str())
         );
         assert!(runtime.applied_commands().is_empty());
+    }
+
+    #[test]
+    fn native_scene_reference_survives_room_state_changes_and_recall() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let scene_id = crate::scenes::native_scene_id("hue", "native-1");
+        let native = imported_hue_scene(&scene_id, "native-1");
+        let recalls = install_native_scene_source(&state, native);
+
+        do_scene_apply(
+            &state,
+            &scene_id,
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+        do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            Some(RoomModeState::HardOff),
+            None,
+            false,
+        )
+        .unwrap();
+        do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            Some(RoomModeState::Mood),
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            recalls.lock().unwrap().as_slice(),
+            &[
+                ("native-1".to_string(), None),
+                ("native-1".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some(scene_id.as_str())
+        );
+    }
+
+    #[test]
+    fn backup_round_trips_native_scene_reference_without_definition() {
+        let (source_state, _source_runtime) =
+            setup_state(vec![make_snapshot("room1", false, false)]);
+        let scene_id = crate::scenes::native_scene_id("hue", "native-1");
+        let native = imported_hue_scene(&scene_id, "native-1");
+        install_native_scene_source(&source_state, native);
+        do_scene_apply(
+            &source_state,
+            &scene_id,
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        assert!(!bundle
+            .configuration
+            .scenes
+            .iter()
+            .any(|scene| scene.id == scene_id));
+        assert_eq!(
+            bundle.configuration.rooms[0]
+                .room_profile
+                .mood_scene_id
+                .as_deref(),
+            Some(scene_id.as_str())
+        );
+
+        let (target_state, _target_runtime) =
+            setup_state(vec![make_snapshot("room1", false, false)]);
+        target_state.lock().unwrap().storage = Some(Arc::new(TestStorage::default()));
+        do_backup_restore(&target_state, bundle).unwrap();
+        let reexported = build_backup_bundle_dto(&target_state, false).unwrap();
+        assert!(reexported
+            .configuration
+            .scenes
+            .iter()
+            .all(|scene| { !crate::scenes::is_native_scene_id(&scene.id) }));
+        assert!(reexported.configuration.rooms.iter().any(|room| room
+            .room_profile
+            .mood_scene_id
+            .as_deref()
+            == Some(scene_id.as_str())));
     }
 
     #[test]

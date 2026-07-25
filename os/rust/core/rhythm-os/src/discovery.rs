@@ -94,8 +94,9 @@ pub trait HubDiscovery: Send + Sync {
     /// Discover native scenes assigned to one hub-native room.
     ///
     /// Returned definitions are ephemeral projections for user-facing scene
-    /// pickers. The native integration remains authoritative; callers must not
-    /// persist these definitions as Rhythm-owned scenes.
+    /// pickers and must use [`crate::scenes::native_scene_id`] for their stable
+    /// public IDs. The native integration remains authoritative; callers must
+    /// not persist these definitions as Rhythm-owned scenes.
     fn discover_scenes(&self, _room_id: &str) -> Result<Vec<SceneDefinition>> {
         Ok(vec![])
     }

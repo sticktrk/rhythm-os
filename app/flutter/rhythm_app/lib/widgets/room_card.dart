@@ -270,13 +270,11 @@ class _RoomCardState extends State<RoomCard> {
           brightness: moodBrightness,
         );
       },
-      onSceneSelected: (scene) {
-        sync.applyMoodScene(
-          widget.roomId,
-          scene.id,
-          color: rhythmSceneRgb(scene),
-        );
-      },
+      onSceneSelected: (scene) => sync.applyMoodScene(
+        widget.roomId,
+        scene.id,
+        color: rhythmSceneRgb(scene),
+      ),
     );
   }
 

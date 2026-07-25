@@ -7,6 +7,10 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 /// Which kind of mood the sheet is editing.
 enum MoodTab { color, scenes }
 
+typedef MoodSceneSelected = Future<bool> Function(
+  RhythmSceneDefinition scene,
+);
+
 /// Slide-up "mood" card. A mood can be **either** a custom color or one of the
 /// saved Rhythm scenes (presets). A segmented toggle switches between a color
 /// wheel and a gallery of luminous scene tiles; the card's ambient glow tracks
@@ -18,7 +22,7 @@ class MoodSheet extends StatefulWidget {
   final List<RhythmSceneDefinition> initialScenes;
   final Future<List<RhythmSceneDefinition>> Function() scenesLoader;
   final ValueChanged<Color> onColorChanged;
-  final ValueChanged<RhythmSceneDefinition> onSceneSelected;
+  final MoodSceneSelected onSceneSelected;
 
   const MoodSheet({
     super.key,
@@ -36,7 +40,7 @@ class MoodSheet extends StatefulWidget {
     BuildContext context, {
     required Future<List<RhythmSceneDefinition>> Function() scenesLoader,
     required ValueChanged<Color> onColorChanged,
-    required ValueChanged<RhythmSceneDefinition> onSceneSelected,
+    required MoodSceneSelected onSceneSelected,
     Color? initialColor,
     String? initialSceneId,
     MoodTab initialTab = MoodTab.color,
@@ -74,6 +78,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   late List<RhythmSceneDefinition> _scenes;
   late bool _loadingScenes;
   bool _scenesLoadStarted = false;
+  int _sceneSelectionGeneration = 0;
   String? _selectedSceneId;
 
   late final AnimationController _glowPulse;
@@ -109,9 +114,9 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   }
 
   Future<void> _ensureScenesLoaded() async {
-    if (_scenesLoadStarted || _scenes.isNotEmpty) return;
+    if (_scenesLoadStarted) return;
     _scenesLoadStarted = true;
-    if (!_loadingScenes) {
+    if (_scenes.isEmpty && !_loadingScenes) {
       setState(() => _loadingScenes = true);
     }
 
@@ -183,10 +188,24 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
     _setColor(hue, saturation, commit: commit);
   }
 
-  void _onSceneTap(RhythmSceneDefinition scene) {
+  Future<void> _onSceneTap(RhythmSceneDefinition scene) async {
     HapticFeedback.mediumImpact();
+    final previousSceneId = _selectedSceneId;
+    final generation = ++_sceneSelectionGeneration;
     setState(() => _selectedSceneId = scene.id);
-    widget.onSceneSelected(scene);
+    var applied = false;
+    try {
+      applied = await widget.onSceneSelected(scene);
+    } catch (_) {
+      applied = false;
+    }
+    if (!mounted ||
+        applied ||
+        generation != _sceneSelectionGeneration ||
+        _selectedSceneId != scene.id) {
+      return;
+    }
+    setState(() => _selectedSceneId = previousSceneId);
   }
 
   void _switchTab(MoodTab tab) {
