@@ -3,12 +3,30 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/matter_add_method.dart';
 import 'package:rhythm_app/screens/hubs/matter_device_add_screen.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import '../helpers/capturing_analytics_backend.dart';
+
 void main() {
+  late CapturingAnalyticsBackend analyticsBackend;
+
+  setUp(() async {
+    analyticsBackend = CapturingAnalyticsBackend();
+    await analyticsBackend.initialize();
+    BackendProvider.setInstanceForTesting(
+      auth: OfflineAuthBackend(),
+      analytics: analyticsBackend,
+    );
+    await AnalyticsService().initialize();
+  });
+
+  tearDown(BackendProvider.resetForTesting);
+
   testWidgets('shows QR scanner button on Android', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
 
@@ -102,6 +120,8 @@ void main() {
             endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
             addMethod: MatterAddMethod.automatic,
             initialSetupPayload: 'MT:Y.K908OC16750648G00',
+            analyticsSource: 'test_scanner',
+            journeyId: 'matter-pair-test',
             pairingApi: api,
           ),
         ),
@@ -111,6 +131,29 @@ void main() {
 
       expect(pairRequestCount, 1);
       expect(find.textContaining('Pairing failed.'), findsOneWidget);
+      expect(
+        analyticsBackend.events.map((event) => event.name),
+        containsAllInOrder([
+          'matter_pairing_attempted',
+          'matter_pairing_completed',
+        ]),
+      );
+      final completed = analyticsBackend.events.singleWhere(
+        (event) => event.name == 'matter_pairing_completed',
+      );
+      expect(completed.properties, {
+        'journey_id': 'matter-pair-test',
+        'source': 'test_scanner',
+        'input_method': 'camera',
+        'add_method': 'automatic',
+        'attempt_number': 1,
+        'outcome': 'failed',
+        'failure_stage': 'commissioning',
+      });
+      expect(
+        completed.properties.values,
+        isNot(contains('MT:Y.K908OC16750648G00')),
+      );
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

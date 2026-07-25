@@ -109,10 +109,9 @@ class _RoomCardState extends State<RoomCard> {
       return;
     }
 
-    final alreadyInMood = context
-            .read<RoomProvider>()
-            .getDisplayRoomState(widget.roomId) ==
-        RoomModeState.mood;
+    final alreadyInMood =
+        context.read<RoomProvider>().getDisplayRoomState(widget.roomId) ==
+            RoomModeState.mood;
     _applyModeChange(RoomMode.mood);
     if (!alreadyInMood && mounted) {
       _showMoodScenePicker();
@@ -1982,8 +1981,7 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
       Color(0xFF8E7CFF),
       Color(0xFF5EE7F7),
     ];
-    final palette =
-        widget.palette.isEmpty ? fallbackPalette : widget.palette;
+    final palette = widget.palette.isEmpty ? fallbackPalette : widget.palette;
     final primary = palette.first;
     final secondary = palette.length > 1 ? palette[1] : primary;
 
@@ -2002,15 +2000,12 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
           key: ValueKey('room-card-segment-${widget.roomId}-scenes'),
           behavior: HitTestBehavior.opaque,
           onTap: widget.enabled ? widget.onPressed : null,
-          onTapDown: widget.enabled
-              ? (_) => setState(() => _pressed = true)
-              : null,
-          onTapUp: widget.enabled
-              ? (_) => setState(() => _pressed = false)
-              : null,
-          onTapCancel: widget.enabled
-              ? () => setState(() => _pressed = false)
-              : null,
+          onTapDown:
+              widget.enabled ? (_) => setState(() => _pressed = true) : null,
+          onTapUp:
+              widget.enabled ? (_) => setState(() => _pressed = false) : null,
+          onTapCancel:
+              widget.enabled ? () => setState(() => _pressed = false) : null,
           child: AnimatedScale(
             scale: _pressed ? 0.90 : 1.0,
             duration: const Duration(milliseconds: 110),

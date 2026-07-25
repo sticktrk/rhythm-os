@@ -158,8 +158,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   final Set<String> partialNativeDiscoveryFailureTargets = {};
   bool applySceneSucceeds = true;
   Completer<RhythmSceneActionResult?>? applySceneCompleter;
-  final List<({String sceneId, String targetId, int? transitionMs})>
-      applySceneCalls = [];
+  final List<
+      ({
+        String sceneId,
+        String targetId,
+        int? transitionMs,
+        String? correlationId,
+      })> applySceneCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<({String nodeId, bool enabled, String requestId})>
       motionActivationCalls = [];
@@ -347,11 +352,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     required String sceneId,
     required String targetId,
     int? transitionMs,
+    String? correlationId,
   }) async {
     applySceneCalls.add((
       sceneId: sceneId,
       targetId: targetId,
       transitionMs: transitionMs,
+      correlationId: correlationId,
     ));
     final completer = applySceneCompleter;
     if (completer != null) return completer.future;
@@ -2688,6 +2695,10 @@ void main() {
       expect(api.applySceneCalls.single.sceneId, 'evening-glow');
       expect(api.applySceneCalls.single.targetId, 'room-1');
       expect(api.applySceneCalls.single.transitionMs, 450);
+      expect(
+        api.applySceneCalls.single.correlationId,
+        startsWith('mood-scene-'),
+      );
       expect(api.nodePreferenceCalls, isEmpty);
       expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
       expect(roomProvider.getMoodColor('room-1'), (240, 80, 24));

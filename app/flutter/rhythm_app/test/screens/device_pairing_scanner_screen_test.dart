@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
+
+import '../helpers/capturing_analytics_backend.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late ValueChanged<Iterable<String>> detect;
+  late CapturingAnalyticsBackend analyticsBackend;
 
   Widget buildScanner() {
     return MaterialApp(
@@ -18,9 +23,18 @@ void main() {
     );
   }
 
-  setUp(() {
+  setUp(() async {
     detect = (_) {};
+    analyticsBackend = CapturingAnalyticsBackend();
+    await analyticsBackend.initialize();
+    BackendProvider.setInstanceForTesting(
+      auth: OfflineAuthBackend(),
+      analytics: analyticsBackend,
+    );
+    await AnalyticsService().initialize();
   });
+
+  tearDown(BackendProvider.resetForTesting);
 
   testWidgets('offers back and manual-code actions from the camera', (
     tester,
@@ -114,5 +128,16 @@ void main() {
 
     expect(result?.action, DevicePairingScannerAction.matter);
     expect(result?.payload, 'MT:Y.K908OC16750648G00');
+    final event = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'device_pairing_code_detected',
+    );
+    expect(event.properties, {
+      'code_kind': 'matter',
+      'outcome': 'continued_to_pairing',
+    });
+    expect(
+      event.properties.values,
+      isNot(contains('MT:Y.K908OC16750648G00')),
+    );
   });
 }

@@ -1,53 +1,96 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rhythm_app/backend/analytics/analytics_backend.dart';
-import 'package:rhythm_app/backend/auth/offline_auth_backend.dart';
-import 'package:rhythm_app/backend/backend_provider.dart';
+import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
 
-class _RecordingAnalyticsBackend implements AnalyticsBackend {
-  bool _initialized = false;
-  final events = <({String name, Map<String, Object>? params})>[];
-
-  @override
-  bool get isInitialized => _initialized;
-
-  @override
-  Future<void> initialize() async => _initialized = true;
-
-  @override
-  Future<void> logEvent(String name, [Map<String, Object>? params]) async {
-    events.add((name: name, params: params));
-  }
-
-  @override
-  Future<void> logScreenView(String screenName) async {}
-
-  @override
-  Future<void> setUserId(String? userId) async {}
-
-  @override
-  Future<void> setUserProperty(String name, String? value) async {}
-
-  @override
-  void dispose() => _initialized = false;
-}
+import '../helpers/capturing_analytics_backend.dart';
 
 void main() {
-  test('Mood picker analytics use privacy-bounded categories', () async {
-    final backend = _RecordingAnalyticsBackend();
+  late CapturingAnalyticsBackend backend;
+  late AnalyticsService analytics;
+
+  setUp(() async {
+    backend = CapturingAnalyticsBackend();
     await backend.initialize();
     BackendProvider.setInstanceForTesting(
       auth: OfflineAuthBackend(),
       analytics: backend,
     );
-    final analytics = AnalyticsService();
+    analytics = AnalyticsService();
     analytics.resetForTesting();
     await analytics.initialize();
-    addTearDown(() {
-      analytics.resetForTesting();
-      BackendProvider.resetForTesting();
-    });
+  });
 
+  tearDown(() {
+    analytics.resetForTesting();
+    BackendProvider.resetForTesting();
+  });
+
+  test('recent feature events use stable privacy-safe properties', () async {
+    await analytics.logDevicePairingCodeDetected(
+      codeKind: 'homekit',
+      outcome: 'guidance_shown',
+    );
+    await analytics.logMatterPairingCompleted(
+      journeyId: 'matter-pair-123',
+      source: 'add_review',
+      inputMethod: 'camera',
+      addMethod: 'automatic',
+      attemptNumber: 1,
+      outcome: 'failed',
+      failureStage: 'wifi_preflight',
+    );
+    await analytics.logMoodSceneApplyCompleted(
+      journeyId: 'mood-scene-123',
+      sceneSource: 'native_hue',
+      outcome: 'succeeded',
+    );
+    await analytics.logGlobalRoomActionCompleted(
+      journeyId: 'global-room-123',
+      action: 'soften',
+      eligibleCount: 3,
+      attemptedCount: 2,
+      completedCount: 2,
+      outcome: 'partial',
+    );
+
+    expect(
+      backend.events.map((event) => event.name),
+      [
+        'device_pairing_code_detected',
+        'matter_pairing_completed',
+        'mood_scene_apply_completed',
+        'global_room_action_completed',
+      ],
+    );
+    expect(
+      backend.events[1].properties,
+      containsPair('failure_stage', 'wifi_preflight'),
+    );
+    expect(
+      backend.events[2].properties,
+      containsPair('scene_source', 'native_hue'),
+    );
+    expect(
+      backend.events[3].properties,
+      containsPair('completed_count', 2),
+    );
+
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'setup_payload',
+      'qr_payload',
+      'scene_id',
+      'room_id',
+      'device_id',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
+  test('Mood picker analytics use privacy-bounded categories', () async {
     await analytics.logMoodPickerOpened(
       roomSource: 'matter',
       hasHueTab: true,
@@ -71,24 +114,38 @@ void main() {
       ],
     );
     expect(
-      backend.events[0].params,
+      backend.events[0].properties,
       containsPair('has_hue_tab', 1),
     );
     expect(
-      backend.events[1].params,
+      backend.events[1].properties,
       containsPair('tab', 'hue'),
     );
     expect(
-      backend.events[2].params,
+      backend.events[2].properties,
       containsPair('scene_category', 'hue_palette'),
     );
     expect(
-      backend.events[2].params,
+      backend.events[2].properties,
       containsPair('success', 1),
     );
     expect(
-      backend.events.expand((event) => event.params?.keys ?? const []),
+      backend.events.expand((event) => event.properties.keys),
       isNot(contains(anyOf('room_id', 'scene_id', 'scene_name'))),
+    );
+  });
+
+  test('analytics remains a no-op when the backend is unavailable', () async {
+    BackendProvider.resetForTesting();
+
+    await expectLater(
+      analytics.logMoodSceneApplyCompleted(
+        journeyId: 'mood-scene-offline',
+        sceneSource: 'rhythm',
+        outcome: 'failed',
+        failureStage: 'offline',
+      ),
+      completes,
     );
   });
 }

@@ -27,37 +27,45 @@ class CloudBackedServerApi {
 
   Future<List<RhythmRoomState>> roomActionBatch(
       List<({String roomId, String action})> actions,
-      {int? dispatchSpacingMs}) {
+      {int? dispatchSpacingMs,
+      String? correlationId}) {
     return _delegate.roomActionBatch(
       actions,
       dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
     );
   }
 
   Future<List<RhythmRoomState>> nodeActionBatch(
       List<({String nodeId, String action})> actions,
-      {int? dispatchSpacingMs}) {
+      {int? dispatchSpacingMs,
+      String? correlationId}) {
     return _delegate.nodeActionBatch(
       actions,
       dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
     );
   }
 
   Future<RhythmDispatchResult> roomActionBatchResult(
       List<({String roomId, String action})> actions,
-      {int? dispatchSpacingMs}) {
+      {int? dispatchSpacingMs,
+      String? correlationId}) {
     return _delegate.roomActionBatchResult(
       actions,
       dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
     );
   }
 
   Future<RhythmDispatchResult> nodeActionBatchResult(
       List<({String nodeId, String action})> actions,
-      {int? dispatchSpacingMs}) {
+      {int? dispatchSpacingMs,
+      String? correlationId}) {
     return _delegate.nodeActionBatchResult(
       actions,
       dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
     );
   }
 

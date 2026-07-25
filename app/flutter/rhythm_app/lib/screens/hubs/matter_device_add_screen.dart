@@ -8,6 +8,7 @@ import 'package:rhythm_core/rhythm_core.dart' show HubEndpoint;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../services/analytics_service.dart';
 import '../../services/demo_server_api.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/matter_setup_payload.dart';
@@ -48,6 +49,8 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required this.addMethod,
     this.authToken,
     this.initialSetupPayload,
+    this.analyticsSource = 'unknown',
+    this.journeyId,
     @visibleForTesting this.pairingApi,
   });
 
@@ -55,6 +58,8 @@ class MatterDeviceAddScreen extends StatefulWidget {
   final MatterAddMethod addMethod;
   final String? authToken;
   final String? initialSetupPayload;
+  final String analyticsSource;
+  final String? journeyId;
   final RhythmMatterApi? pairingApi;
 
   static Future<MatterDevicePairingResult?> show(
@@ -63,6 +68,8 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required MatterAddMethod addMethod,
     String? authToken,
     String? initialSetupPayload,
+    String analyticsSource = 'unknown',
+    String? journeyId,
   }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
@@ -74,6 +81,8 @@ class MatterDeviceAddScreen extends StatefulWidget {
             addMethod: addMethod,
             authToken: authToken,
             initialSetupPayload: initialSetupPayload,
+            analyticsSource: analyticsSource,
+            journeyId: journeyId,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -118,6 +127,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   String? _errorText;
   bool _hasFailedOnce = false;
   bool _pairingRequestInFlight = false;
+  int _attemptNumber = 0;
+  String _inputMethod = 'manual_code';
   StreamSubscription<RhythmPairingProgress>? _progressSub;
   RhythmPairingProgress? _latestProgress;
 
@@ -129,7 +140,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           baseUrl: widget.endpoint.baseUrl,
           authToken: widget.authToken,
         );
-    _sessionId =
+    _sessionId = widget.journeyId ??
         'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
     _pulseController = AnimationController(
       vsync: this,
@@ -143,6 +154,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     final initialSetupPayload = widget.initialSetupPayload;
     if (initialSetupPayload != null &&
         isLikelyMatterSetupPayload(initialSetupPayload)) {
+      _inputMethod = 'camera';
       _phase = _PairingPhase.pairing;
       _setupPayloadController.text = initialSetupPayload;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -234,6 +246,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     }
 
     _setupPayloadController.text = payload;
+    _inputMethod = 'camera';
     _setupPayloadController.selection = TextSelection.collapsed(
       offset: payload.length,
     );
@@ -243,12 +256,19 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   Future<void> _startPairing() async {
     final setupPayload = _setupPayload;
-    if (!isLikelyMatterSetupPayload(setupPayload) ||
-        _pairingRequestInFlight) {
+    if (!isLikelyMatterSetupPayload(setupPayload) || _pairingRequestInFlight) {
       return;
     }
 
     _pairingRequestInFlight = true;
+    _attemptNumber += 1;
+    AnalyticsService().logMatterPairingAttempted(
+      journeyId: _sessionId,
+      source: widget.analyticsSource,
+      inputMethod: _inputMethod,
+      addMethod: _analyticsAddMethod,
+      attemptNumber: _attemptNumber,
+    );
     try {
       FocusScope.of(context).unfocus();
       HapticFeedback.mediumImpact();
@@ -280,6 +300,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           _showPairingError(
             'This Rhythm appliance is not ready to add a new device.',
             detail: details.join(' '),
+            failureStage: 'wifi_preflight',
           );
           return;
         }
@@ -299,12 +320,17 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         _showPairingError(
           'The server rejected the pairing request.',
           detail: result.error,
+          failureStage: 'server_rejected',
         );
         return;
       }
 
       if (result.status == 'failed') {
-        _showPairingError('Pairing failed.', detail: result.error);
+        _showPairingError(
+          'Pairing failed.',
+          detail: result.error,
+          failureStage: 'commissioning',
+        );
         return;
       }
 
@@ -314,10 +340,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         if (nativeDeviceId.isEmpty) {
           _showPairingError(
             'Pairing completed, but the server returned no device ID.',
+            failureStage: 'invalid_response',
           );
           return;
         }
 
+        _logPairingCompleted(outcome: 'succeeded');
         HapticFeedback.heavyImpact();
         Navigator.of(context).pop(
           MatterDevicePairingResult(
@@ -335,7 +363,14 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         'Pairing did not complete.',
         detail:
             result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
+        failureStage: 'unexpected_status',
       );
+    } catch (_) {
+      _logPairingCompleted(
+        outcome: 'failed',
+        failureStage: 'request_exception',
+      );
+      rethrow;
     } finally {
       _pairingRequestInFlight = false;
     }
@@ -352,6 +387,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       name: name,
     );
 
+    _logPairingCompleted(outcome: 'succeeded');
     HapticFeedback.heavyImpact();
     Navigator.of(context).pop(
       MatterDevicePairingResult(
@@ -364,9 +400,38 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  void _showPairingError(String message, {String? detail}) {
+  String get _analyticsAddMethod => switch (widget.addMethod) {
+        MatterAddMethod.automatic => 'automatic',
+        MatterAddMethod.onNetworkSetupCode => 'on_network_setup_code',
+        MatterAddMethod.bleWifiCommissioning => 'ble_wifi_commissioning',
+      };
+
+  void _logPairingCompleted({
+    required String outcome,
+    String? failureStage,
+  }) {
+    AnalyticsService().logMatterPairingCompleted(
+      journeyId: _sessionId,
+      source: widget.analyticsSource,
+      inputMethod: _inputMethod,
+      addMethod: _analyticsAddMethod,
+      attemptNumber: _attemptNumber,
+      outcome: outcome,
+      failureStage: failureStage,
+    );
+  }
+
+  void _showPairingError(
+    String message, {
+    String? detail,
+    required String failureStage,
+  }) {
     _progressSub?.cancel();
     _progressSub = null;
+    _logPairingCompleted(
+      outcome: 'failed',
+      failureStage: failureStage,
+    );
     setState(() {
       _phase = _PairingPhase.failed;
       _hasFailedOnce = true;

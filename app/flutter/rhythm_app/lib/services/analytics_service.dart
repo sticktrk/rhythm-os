@@ -241,6 +241,53 @@ class AnalyticsService {
     await logEvent('rooms_refreshed', {'source': source});
   }
 
+  /// Track the authoritative outcome of an All Rooms batch action.
+  Future<void> logGlobalRoomActionCompleted({
+    required String journeyId,
+    required String action,
+    required int eligibleCount,
+    required int attemptedCount,
+    required int completedCount,
+    required String outcome,
+  }) async {
+    await logEvent('global_room_action_completed', {
+      'journey_id': journeyId,
+      'action': action,
+      'eligible_count': eligibleCount,
+      'attempted_count': attemptedCount,
+      'completed_count': completedCount,
+      'outcome': outcome,
+    });
+  }
+
+  /// Track a room-scoped scene catalog result without scene identifiers.
+  Future<void> logMoodSceneCatalogLoaded({
+    required int sceneCount,
+    required int nativeSceneCount,
+    required String outcome,
+  }) async {
+    await logEvent('mood_scene_catalog_loaded', {
+      'scene_count': sceneCount,
+      'native_scene_count': nativeSceneCount,
+      'outcome': outcome,
+    });
+  }
+
+  /// Track a scene apply outcome and its matching server journey.
+  Future<void> logMoodSceneApplyCompleted({
+    required String journeyId,
+    required String sceneSource,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('mood_scene_apply_completed', {
+      'journey_id': journeyId,
+      'scene_source': sceneSource,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   /// Track opening the room Mood picker without exposing room or scene IDs.
   Future<void> logMoodPickerOpened({
     required String roomSource,
@@ -519,6 +566,59 @@ class AnalyticsService {
     await logEvent('hub_recovery_action', {
       'action': action,
       'disconnected_count': disconnectedCount,
+    });
+  }
+
+  // ===========================================================================
+  // Device Pairing Events
+  // ===========================================================================
+
+  /// Track a scanner classification without retaining its payload.
+  Future<void> logDevicePairingCodeDetected({
+    required String codeKind,
+    required String outcome,
+  }) async {
+    await logEvent('device_pairing_code_detected', {
+      'code_kind': codeKind,
+      'outcome': outcome,
+    });
+  }
+
+  /// Track a Matter pairing request at the app-to-server boundary.
+  Future<void> logMatterPairingAttempted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required String addMethod,
+    required int attemptNumber,
+  }) async {
+    await logEvent('matter_pairing_attempted', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'add_method': addMethod,
+      'attempt_number': attemptNumber,
+    });
+  }
+
+  /// Track a terminal Matter pairing outcome without raw errors or device data.
+  Future<void> logMatterPairingCompleted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required String addMethod,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('matter_pairing_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'add_method': addMethod,
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
     });
   }
 

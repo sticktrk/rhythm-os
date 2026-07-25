@@ -128,7 +128,7 @@ void main() {
           data: any(named: 'data'), options: any(named: 'options')));
     });
 
-    test('sends array body and parses rooms response', () async {
+    test('sends correlation wrapper and parses rooms response', () async {
       when(() => dio.put(any(),
               data: any(named: 'data'), options: any(named: 'options')))
           .thenAnswer((_) async => Response(
@@ -157,13 +157,24 @@ void main() {
       final result = await api.roomActionBatch([
         (roomId: 'r1', action: 'enable'),
         (roomId: 'r2', action: 'disable'),
-      ]);
+      ], correlationId: 'global-room-123');
 
       expect(result, hasLength(2));
       expect(result[0].roomId, 'r1');
       expect(result[1].roomId, 'r2');
       expect(cacheUpdates, hasLength(1));
       expect(cacheUpdates[0], hasLength(2));
+      verify(() => dio.put(
+            'api/nodes/action',
+            data: {
+              'nodes': [
+                {'node_id': 'r1', 'action': 'enable'},
+                {'node_id': 'r2', 'action': 'disable'},
+              ],
+              'correlation_id': 'global-room-123',
+            },
+            options: any(named: 'options'),
+          )).called(1);
     });
 
     test('returns empty list on DioException', () async {
@@ -1526,6 +1537,7 @@ void main() {
         sceneId: 'icy-glow',
         targetId: 'room1',
         transitionMs: 250,
+        correlationId: 'mood-scene-123',
       );
 
       expect(result?.sceneId, 'icy-glow');
@@ -1533,7 +1545,11 @@ void main() {
       expect(result?.affectedNodeIds, ['light-node-1']);
       verify(() => dio.post(
             'api/scenes/icy-glow/apply',
-            data: {'target_id': 'room1', 'transition_ms': 250},
+            data: {
+              'target_id': 'room1',
+              'transition_ms': 250,
+              'correlation_id': 'mood-scene-123',
+            },
           )).called(1);
     });
 
@@ -1840,7 +1856,7 @@ void main() {
       await api.nodeCurveBrightnessBatchResult([
         (nodeId: 'node-1', brightness: 42),
         (nodeId: 'node-2', brightness: 64),
-      ], dispatchSpacingMs: 20);
+      ], dispatchSpacingMs: 20, correlationId: 'global-room-brightness-123');
 
       verify(() => dio.put(
             'api/nodes/curve',
@@ -1850,6 +1866,7 @@ void main() {
                 {'node_id': 'node-2', 'brightness': 64},
               ],
               'dispatch_spacing_ms': 20,
+              'correlation_id': 'global-room-brightness-123',
             },
             options: any(named: 'options'),
           )).called(1);

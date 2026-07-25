@@ -318,7 +318,10 @@ class _TriageScreenState extends State<TriageScreen> {
       );
 
   Future<void> _addBulb() async {
-    await startMatterPairingFlow(context);
+    await startMatterPairingFlow(
+      context,
+      analyticsSource: 'add_review',
+    );
     if (mounted) {
       await _loadEntries();
     }

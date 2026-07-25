@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmDispatchResult, RhythmMode, RoomModeState;
+import 'package:uuid/uuid.dart';
 import '../providers/room_page_provider.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
@@ -80,6 +81,7 @@ class _DropTarget {
 }
 
 class _AllRoomsScreenState extends State<AllRoomsScreen> {
+  static const _uuid = Uuid();
   Timer? _edgeScrollTimer;
   static const _edgeScrollZone = 28.0;
   static const _edgeScrollIntentThreshold = 16.0;
@@ -1024,8 +1026,22 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Future<void> _runGlobalRoomAction(_GlobalRoomAction action) async {
     if (_globalActionPending) return;
+    final journeyId = 'global-room-${_uuid.v4()}';
+    final analyticsAction = switch (action) {
+      _GlobalRoomAction.soften => 'soften',
+      _GlobalRoomAction.boost => 'boost',
+      _GlobalRoomAction.reset => 'reset',
+    };
     final eligible = _eligibleGlobalRoomTargets();
     if (eligible.isEmpty) {
+      AnalyticsService().logGlobalRoomActionCompleted(
+        journeyId: journeyId,
+        action: analyticsAction,
+        eligibleCount: 0,
+        attemptedCount: 0,
+        completedCount: 0,
+        outcome: 'no_eligible_rooms',
+      );
       _showNoEligibleRooms();
       return;
     }
@@ -1055,7 +1071,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       result = await serverSync.dispatchBatchNodeActionsResult([
         for (final target in dispatchable)
           (nodeId: target.room.id, action: wireAction),
-      ]);
+      ], correlationId: journeyId);
     }
     if (!mounted) return;
 
@@ -1078,12 +1094,33 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       completed: completed,
       eligible: eligible.length,
     );
+    AnalyticsService().logGlobalRoomActionCompleted(
+      journeyId: journeyId,
+      action: analyticsAction,
+      eligibleCount: eligible.length,
+      attemptedCount: dispatchable.length,
+      completedCount: completed,
+      outcome: _globalRoomActionOutcome(
+        eligibleCount: eligible.length,
+        attemptedCount: dispatchable.length,
+        completedCount: completed,
+      ),
+    );
   }
 
   Future<void> _setGlobalBrightness(double value) async {
     if (_globalActionPending) return;
+    final journeyId = 'global-room-${_uuid.v4()}';
     final eligible = _eligibleGlobalRoomTargets();
     if (eligible.isEmpty) {
+      AnalyticsService().logGlobalRoomActionCompleted(
+        journeyId: journeyId,
+        action: 'set_brightness',
+        eligibleCount: 0,
+        attemptedCount: 0,
+        completedCount: 0,
+        outcome: 'no_eligible_rooms',
+      );
       _showNoEligibleRooms();
       return;
     }
@@ -1103,7 +1140,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       result = await serverSync.dispatchBatchNodeCurveBrightnessResult([
         for (final target in dispatchable)
           (nodeId: target.room.id, brightness: brightness),
-      ]);
+      ], correlationId: journeyId);
     }
     if (!mounted) return;
 
@@ -1126,10 +1163,23 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       completed: completed,
       eligible: eligible.length,
     );
+    AnalyticsService().logGlobalRoomActionCompleted(
+      journeyId: journeyId,
+      action: 'set_brightness',
+      eligibleCount: eligible.length,
+      attemptedCount: dispatchable.length,
+      completedCount: completed,
+      outcome: _globalRoomActionOutcome(
+        eligibleCount: eligible.length,
+        attemptedCount: dispatchable.length,
+        completedCount: completed,
+      ),
+    );
   }
 
   Future<void> _undoGlobalRoomAction() async {
     if (_globalActionPending || _globalUndoSnapshot == null) return;
+    final journeyId = 'global-room-${_uuid.v4()}';
     final snapshot = List<_GlobalRoomBrightness>.of(_globalUndoSnapshot!);
     final currentlyEligible = {
       for (final target in _eligibleGlobalRoomTargets()) target.room.id: target,
@@ -1147,6 +1197,14 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
     if (restorable.isEmpty) {
       _globalUndoSnapshot = null;
+      AnalyticsService().logGlobalRoomActionCompleted(
+        journeyId: journeyId,
+        action: 'undo',
+        eligibleCount: snapshot.length,
+        attemptedCount: 0,
+        completedCount: 0,
+        outcome: 'no_restorable_rooms',
+      );
       _showNoEligibleRooms();
       return;
     }
@@ -1159,7 +1217,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final result = await serverSync.dispatchBatchNodeCurveBrightnessResult([
       for (final saved in restorable)
         (nodeId: saved.nodeId, brightness: saved.brightness),
-    ]);
+    ], correlationId: journeyId);
     if (!mounted) return;
 
     final attemptedTargets = [
@@ -1175,6 +1233,18 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       completed: completed,
       eligible: snapshot.length,
       offerUndo: false,
+    );
+    AnalyticsService().logGlobalRoomActionCompleted(
+      journeyId: journeyId,
+      action: 'undo',
+      eligibleCount: snapshot.length,
+      attemptedCount: restorable.length,
+      completedCount: completed,
+      outcome: _globalRoomActionOutcome(
+        eligibleCount: snapshot.length,
+        attemptedCount: restorable.length,
+        completedCount: completed,
+      ),
     );
   }
 
@@ -1338,6 +1408,17 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       ),
     );
   }
+}
+
+String _globalRoomActionOutcome({
+  required int eligibleCount,
+  required int attemptedCount,
+  required int completedCount,
+}) {
+  if (attemptedCount == 0) return 'unavailable';
+  if (completedCount == 0) return 'failed';
+  if (completedCount < eligibleCount) return 'partial';
+  return 'succeeded';
 }
 
 enum _GlobalRoomAction { soften, boost, reset }

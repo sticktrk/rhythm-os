@@ -3067,7 +3067,10 @@ class _RhythmServerHubManagementSectionState
   }
 
   Future<void> _startMatterAddFlow() async {
-    await startMatterPairingFlow(context);
+    await startMatterPairingFlow(
+      context,
+      analyticsSource: 'device_settings',
+    );
     if (!mounted) return;
     await _fetchHubSummaries();
   }
@@ -4324,7 +4327,10 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                         label: matterActionLabel,
                         color: const Color(0xFF26A69A),
                         onTap: () async {
-                          await startMatterPairingFlow(context);
+                          await startMatterPairingFlow(
+                            context,
+                            analyticsSource: 'matter_hub_detail',
+                          );
                           if (!mounted) return;
                           await _fetchCanonicalDevices();
                         },

@@ -19,6 +19,7 @@ import 'package:uuid/uuid.dart';
 
 import '../backend/backend.dart' show AuthUser;
 import '../config/feature_flags.dart';
+import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
@@ -38,6 +39,25 @@ bool _isGeneratedMoodSceneId(String? sceneId) =>
     sceneId != null &&
     (sceneId.startsWith('node-mood-scene-') ||
         sceneId.startsWith('node_mood_scene_'));
+
+String _sceneAnalyticsSource(RhythmSceneDefinition? scene) {
+  if (scene == null || scene.source.kind == RhythmSceneSourceKind.user) {
+    return 'rhythm';
+  }
+  return scene.source.provider == 'hue' ? 'native_hue' : 'imported';
+}
+
+void _logRoomSceneCatalog(
+  List<RhythmSceneDefinition> scenes, {
+  required String outcome,
+}) {
+  AnalyticsService().logMoodSceneCatalogLoaded(
+    sceneCount: scenes.length,
+    nativeSceneCount:
+        scenes.where((scene) => scene.source.provider == 'hue').length,
+    outcome: outcome,
+  );
+}
 
 bool _sameEndpoint(HubEndpoint? left, HubEndpoint? right) {
   if (left == null || right == null) return left == right;
@@ -448,14 +468,26 @@ class ServerSyncProvider extends ChangeNotifier {
     if (HueServiceLocator.isDemoMode) {
       _scenes = await DemoServerApi.instance.getScenes();
       notifyListeners();
-      return roomId == null ? scenes : scenesForRoom(roomId);
+      final result = roomId == null ? scenes : scenesForRoom(roomId);
+      if (roomId != null) {
+        _logRoomSceneCatalog(result, outcome: 'demo');
+      }
+      return result;
     }
     if (!_connection.connected) {
-      return roomId == null ? scenes : scenesForRoom(roomId);
+      final result = roomId == null ? scenes : scenesForRoom(roomId);
+      if (roomId != null) {
+        _logRoomSceneCatalog(result, outcome: 'offline_cache');
+      }
+      return result;
     }
     final catalog = await _connection.api.getSceneCatalog(targetId: roomId);
     if (catalog == null) {
-      return roomId == null ? scenes : scenesForRoom(roomId);
+      final result = roomId == null ? scenes : scenesForRoom(roomId);
+      if (roomId != null) {
+        _logRoomSceneCatalog(result, outcome: 'request_failed');
+      }
+      return result;
     }
     final fetched = catalog.scenes;
     if (roomId == null) {
@@ -478,7 +510,12 @@ class ServerSyncProvider extends ChangeNotifier {
       _roomScenes[roomId] = fetched;
     }
     notifyListeners();
-    return scenesForRoom(roomId);
+    final result = scenesForRoom(roomId);
+    _logRoomSceneCatalog(
+      result,
+      outcome: catalog.nativeDiscoveryFailed ? 'partial' : 'succeeded',
+    );
+    return result;
   }
 
   /// Apply [sceneId] to [roomId] and bind it as that room's Mood scene.
@@ -492,7 +529,18 @@ class ServerSyncProvider extends ChangeNotifier {
     (int, int, int)? color,
     int? transitionMs,
   }) async {
-    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final scene = sceneById(sceneId);
+    final sceneSource = _sceneAnalyticsSource(scene);
+    final journeyId = 'mood-scene-${_uuid.v4()}';
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) {
+      AnalyticsService().logMoodSceneApplyCompleted(
+        journeyId: journeyId,
+        sceneSource: sceneSource,
+        outcome: 'failed',
+        failureStage: 'offline',
+      );
+      return false;
+    }
     final generation = (_moodSceneApplyGenerations[roomId] ?? 0) + 1;
     _moodSceneApplyGenerations[roomId] = generation;
     final hadPreviousOverride = _optimisticMoodSceneIds.containsKey(roomId);
@@ -510,7 +558,6 @@ class ServerSyncProvider extends ChangeNotifier {
         rememberAsMood: true,
       );
     }
-    final scene = sceneById(sceneId);
     if (scene != null) {
       final brightness = _sceneRepresentativeBrightness(scene);
       if (brightness != null) {
@@ -530,19 +577,40 @@ class ServerSyncProvider extends ChangeNotifier {
         color: color,
         state: RoomModeState.mood,
       );
+      AnalyticsService().logMoodSceneApplyCompleted(
+        journeyId: journeyId,
+        sceneSource: sceneSource,
+        outcome: 'succeeded',
+      );
       return true;
     }
     RhythmSceneActionResult? result;
+    var failureStage = 'server_rejected';
     try {
       result = await _connection.api.applyScene(
         sceneId: sceneId,
         targetId: roomId,
         transitionMs: transitionMs,
+        correlationId: journeyId,
       );
     } catch (_) {
       result = null;
+      failureStage = 'request_exception';
     }
-    if (result != null) return true;
+    if (result != null) {
+      AnalyticsService().logMoodSceneApplyCompleted(
+        journeyId: journeyId,
+        sceneSource: sceneSource,
+        outcome: 'succeeded',
+      );
+      return true;
+    }
+    AnalyticsService().logMoodSceneApplyCompleted(
+      journeyId: journeyId,
+      sceneSource: sceneSource,
+      outcome: 'failed',
+      failureStage: failureStage,
+    );
     if (_moodSceneApplyGenerations[roomId] != generation) {
       return false;
     }
@@ -2877,7 +2945,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// request cannot be sent. On success, applies each returned state for fast
   /// convergence.
   Future<RhythmDispatchResult?> dispatchBatchNodeActionsResult(
-      List<({String nodeId, String action})> actions) async {
+    List<({String nodeId, String action})> actions, {
+    String? correlationId,
+  }) async {
     if (actions.isEmpty) return null;
     if (HueServiceLocator.isDemoMode) {
       for (final item in actions) {
@@ -2913,7 +2983,10 @@ class ServerSyncProvider extends ChangeNotifier {
     for (final action in actions) {
       _clearRecentDispatchFailure(action.nodeId);
     }
-    final result = await _connection.api.nodeActionBatchResult(actions);
+    final result = await _connection.api.nodeActionBatchResult(
+      actions,
+      correlationId: correlationId,
+    );
     if (result.states.isEmpty && !result.metadata.hasLoadingMetadata) {
       return null;
     }
@@ -2991,8 +3064,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// request cannot be sent. Demo mode preserves the single-node simulation
   /// behavior while reporting every locally-applied item as dispatched.
   Future<RhythmDispatchResult?> dispatchBatchNodeCurveBrightnessResult(
-    List<({String nodeId, int brightness})> items,
-  ) async {
+    List<({String nodeId, int brightness})> items, {
+    String? correlationId,
+  }) async {
     if (items.isEmpty) return null;
     if (HueServiceLocator.isDemoMode) {
       for (final item in items) {
@@ -3006,7 +3080,10 @@ class ServerSyncProvider extends ChangeNotifier {
     for (final item in items) {
       _clearRecentDispatchFailure(item.nodeId);
     }
-    final result = await _connection.api.nodeCurveBrightnessBatchResult(items);
+    final result = await _connection.api.nodeCurveBrightnessBatchResult(
+      items,
+      correlationId: correlationId,
+    );
     if (result.states.isEmpty && !result.metadata.hasLoadingMetadata) {
       return null;
     }
