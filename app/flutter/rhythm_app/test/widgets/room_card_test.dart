@@ -1144,7 +1144,21 @@ void main() {
     expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
     expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
     expect(_hardOffAction(), findsOneWidget);
-    expect(find.text('Turn off completely'), findsOneWidget);
+    expect(find.text('Fully off'), findsOneWidget);
+    expect(
+      _roomCardSurfaceColor(tester, 'room-1'),
+      const Color(0xFF171A20),
+    );
+    expect(
+      find.byKey(const ValueKey('room-card-low-glow-halo-room-1')),
+      findsOneWidget,
+    );
+    final lowGlowCardRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-surface-room-1')),
+    );
+    final hardOffRect = tester.getRect(_hardOffAction());
+    expect(hardOffRect.left, closeTo(lowGlowCardRect.left + 12, 0.1));
+    expect(hardOffRect.width, lessThan(lowGlowCardRect.width / 2));
     final powerSemantics = tester.getSemantics(_powerToggle());
     expect(powerSemantics.label, 'Room power');
     expect(powerSemantics.value, 'Low glow');
@@ -1157,6 +1171,14 @@ void main() {
         tester.getSemantics(find.bySemanticsLabel('Turn room off completely'));
     expect(
       hardOffSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    final scenesSemantics = tester.getSemantics(_scenesControl());
+    expect(scenesSemantics.label, 'Scenes');
+    expect(scenesSemantics.value, 'Inactive');
+    expect(scenesSemantics.hint, 'Use a scene');
+    expect(
+      scenesSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
       isTrue,
     );
     expect(
@@ -1394,7 +1416,7 @@ void main() {
     expect(cctCall.preserveBrightness, isTrue);
   });
 
-  testWidgets('on room puts sliders beside power and Scenes on its own row',
+  testWidgets('on room mirrors Power and Scenes jewels around the sliders',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -1464,25 +1486,30 @@ void main() {
     );
     final powerRect = tester.getRect(_powerToggle());
     final scenesRect = tester.getRect(_scenesControl());
+    final scenesDecoration =
+        tester.widget<AnimatedContainer>(_scenesControl()).decoration
+            as BoxDecoration;
+    expect(scenesDecoration.shape, BoxShape.circle);
     final sliderStackRect = tester.getRect(
       find.byKey(const ValueKey('room-card-slider-stack-room-1')),
     );
     expect(sliderStackRect.left, closeTo(powerRect.right + 8, 0.1));
     expect(sliderStackRect.center.dy, closeTo(powerRect.center.dy, 0.1));
-    expect(scenesRect.top, closeTo(sliderStackRect.bottom + 8, 0.1));
+    expect(scenesRect.left, closeTo(sliderStackRect.right + 8, 0.1));
+    expect(scenesRect.center.dy, closeTo(powerRect.center.dy, 0.1));
+    expect(scenesRect.size, powerRect.size);
     final cardRect = tester.getRect(
       find.byKey(const ValueKey('room-card-surface-room-1')),
     );
     final cardWidth = cardRect.width;
-    expect(scenesRect.left, closeTo(cardRect.left + 12, 0.1));
-    expect(scenesRect.width, closeTo(cardWidth - 24, 0.1));
+    expect(scenesRect.right, closeTo(cardRect.right - 12, 0.1));
     expect(
       tester.getSize(_brightnessSlider()).width,
-      closeTo(cardWidth - 88, 0.1),
+      closeTo(cardWidth - 152, 0.1),
     );
     expect(
       tester.getSize(_cctSlider()).width,
-      closeTo(cardWidth - 88, 0.1),
+      closeTo(cardWidth - 152, 0.1),
     );
     expect(connection.api.nodePreferenceCalls, isEmpty);
     expect(connection.api.nodeCurveBrightnessCalls, isEmpty);
@@ -1774,6 +1801,7 @@ void main() {
 
   testWidgets('active Scenes shows palette picker and Mood brightness slider',
       (tester) async {
+    final semantics = tester.ensureSemantics();
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1832,6 +1860,10 @@ void main() {
     expect(_sceneBrightnessSlider(), findsOneWidget);
     expect(_scenePicker(), findsOneWidget);
     expect(_scenePalette(), findsOneWidget);
+    final scenesSemantics = tester.getSemantics(_scenesControl());
+    expect(scenesSemantics.label, 'Scenes');
+    expect(scenesSemantics.value, 'Active');
+    expect(scenesSemantics.hint, 'Choose a scene');
     final powerRect = tester.getRect(_powerToggle());
     final scenesRect = tester.getRect(_scenesControl());
     final sceneSliderRowRect = tester.getRect(
@@ -1839,12 +1871,13 @@ void main() {
     );
     expect(sceneSliderRowRect.left, closeTo(powerRect.right + 8, 0.1));
     expect(sceneSliderRowRect.top, closeTo(powerRect.top, 0.1));
-    expect(scenesRect.top, closeTo(sceneSliderRowRect.bottom + 8, 0.1));
+    expect(scenesRect.left, closeTo(sceneSliderRowRect.right + 8, 0.1));
+    expect(scenesRect.center.dy, closeTo(powerRect.center.dy, 0.1));
+    expect(scenesRect.size, powerRect.size);
     final cardRect = tester.getRect(
       find.byKey(const ValueKey('room-card-surface-room-1')),
     );
-    expect(scenesRect.left, closeTo(cardRect.left + 12, 0.1));
-    expect(scenesRect.width, closeTo(cardRect.width - 24, 0.1));
+    expect(scenesRect.right, closeTo(cardRect.right - 12, 0.1));
     expect(
       tester.widget<GestureDetector>(_scenePicker()).onTap,
       isNotNull,
@@ -1898,6 +1931,7 @@ void main() {
       connection.api.nodeActionCalls,
       [(nodeId: 'room-1', action: 'reset')],
     );
+    semantics.dispose();
   });
 
   testWidgets('room detail orb is a power control without countdown controls',
