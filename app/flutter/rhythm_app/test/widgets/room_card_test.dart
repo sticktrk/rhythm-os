@@ -263,6 +263,14 @@ Color _roomCardSurfaceColor(WidgetTester tester, String roomId) {
 Finder _roomSegment(String label, {String roomId = 'room-1'}) =>
     find.byKey(ValueKey('room-card-segment-$roomId-${label.toLowerCase()}'));
 
+Finder _brightnessSlider({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-brightness-slider-$roomId'),
+    );
+
+Finder _cctSlider({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-cct-slider-$roomId'),
+    );
+
 Future<void> _tapRoomSegment(
   WidgetTester tester,
   String label, {
@@ -587,7 +595,8 @@ void main() {
     );
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNotNull);
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -601,7 +610,8 @@ void main() {
     await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNull);
 
     await tester.tap(_roomSegment('Off'));
     await tester.pump();
@@ -669,7 +679,8 @@ void main() {
     );
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNotNull);
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -683,7 +694,8 @@ void main() {
     await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNotNull);
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -903,10 +915,15 @@ void main() {
       ),
     );
 
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
+
     await _tapRoomSegment(tester, 'On');
     await tester.pump();
 
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, isEmpty);
     expect(
       connection.api.nodeActionCalls,
@@ -1126,7 +1143,7 @@ void main() {
     expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
-  testWidgets('standby uses on segment and disabled brightness slider',
+  testWidgets('standby uses off segment and hides room sliders',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -1184,8 +1201,11 @@ void main() {
 
     expect(find.text('Off'), findsOneWidget);
     expect(find.text('On'), findsOneWidget);
-    expect(find.text('Dim'), findsOneWidget);
+    expect(find.text('Dim'), findsNothing);
+    expect(find.text('Bright'), findsNothing);
     expect(find.byType(Slider), findsNothing);
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
 
     await tester.tap(_roomSegment('Off'));
     await tester.pump();
@@ -1194,7 +1214,8 @@ void main() {
     expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
-  testWidgets('dim segment applies minimum manual brightness', (tester) async {
+  testWidgets('on room shows full-width brightness then CCT sliders',
+      (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1249,14 +1270,30 @@ void main() {
       ),
     );
 
-    await _tapRoomSegment(tester, 'Dim');
-
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(find.text('Dim'), findsNothing);
+    expect(find.text('Bright'), findsNothing);
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
+    expect(
+      tester.getCenter(_cctSlider()).dy,
+      greaterThan(tester.getCenter(_brightnessSlider()).dy),
+    );
+    final cardWidth = tester
+        .getSize(
+          find.byKey(const ValueKey('room-card-surface-room-1')),
+        )
+        .width;
+    expect(
+      tester.getSize(_brightnessSlider()).width,
+      closeTo(cardWidth - 16, 0.1),
+    );
+    expect(
+      tester.getSize(_cctSlider()).width,
+      closeTo(cardWidth - 16, 0.1),
+    );
     expect(connection.api.nodePreferenceCalls, isEmpty);
-    expect(connection.api.nodeCurveBrightnessCalls, hasLength(1));
-    final call = connection.api.nodeCurveBrightnessCalls.single;
-    expect(call.nodeId, 'room-1');
-    expect(call.brightness, 1);
+    expect(connection.api.nodeCurveBrightnessCalls, isEmpty);
+    expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
   });
 
   testWidgets('active brightness slider uses curve modifier endpoint',
@@ -1315,9 +1352,9 @@ void main() {
       ),
     );
 
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(67);
+    tester.widget<Slider>(_brightnessSlider()).onChanged!(67);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(67);
+    tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(67);
     await tester.pump();
 
     expect(connection.api.nodeBrightnessCalls, isEmpty);
@@ -1384,15 +1421,9 @@ void main() {
       ),
     );
 
-    tester
-        .widget<GestureDetector>(
-          find.byKey(const ValueKey('room-card-slider-mode-room-1')),
-        )
-        .onTap!();
+    tester.widget<Slider>(_cctSlider()).onChanged!(3200);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(3200);
-    await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3200);
+    tester.widget<Slider>(_cctSlider()).onChangeEnd!(3200);
     await tester.pump();
 
     expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
@@ -1460,19 +1491,12 @@ void main() {
       ),
     );
 
-    tester
-        .widget<GestureDetector>(
-          find.byKey(const ValueKey('room-card-slider-mode-room-1')),
-        )
-        .onTap!();
-    await tester.pump(const Duration(milliseconds: 350));
-
-    final cctSlider = tester.widget<Slider>(find.byType(Slider));
+    final cctSlider = tester.widget<Slider>(_cctSlider());
     expect(cctSlider.min, 3000);
     expect(cctSlider.max, 6500);
     cctSlider.onChanged!(3000);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3000);
+    tester.widget<Slider>(_cctSlider()).onChangeEnd!(3000);
     await tester.pump();
 
     expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
@@ -1555,8 +1579,7 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
   });
 
-  testWidgets('mood brightness slider uses mood-scoped color endpoint',
-      (tester) async {
+  testWidgets('mood hides brightness and CCT sliders', (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1609,104 +1632,13 @@ void main() {
       ),
     );
 
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(35);
-    await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(35);
-    await tester.pump();
-
+    expect(find.byType(Slider), findsNothing);
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
     expect(connection.api.nodeBrightnessCalls, isEmpty);
-    expect(connection.api.nodeColorCalls, hasLength(1));
-    final call = connection.api.nodeColorCalls.single;
-    expect(call.nodeId, 'room-1');
-    expect(call.brightness, 35);
-    expect(call.scope, 'mood');
-    expect(call.r, 20);
-    expect(call.g, 80);
-    expect(call.b, 240);
+    expect(connection.api.nodeCurveBrightnessCalls, isEmpty);
+    expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
+    expect(connection.api.nodeColorCalls, isEmpty);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
-  });
-
-  testWidgets('mood color picker uses slider brightness over active cache',
-      (tester) async {
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    await tester.binding.setSurfaceSize(const Size(390, 900));
-
-    final roomProvider = RoomProvider();
-    await roomProvider.addRoom(
-      const RoomDto(
-        id: 'room-1',
-        name: 'Kitchen',
-        source: RoomSourceDto.hue,
-        kind: RoomNodeKind.room,
-        deviceIds: ['light-1'],
-        rhythmEnabled: true,
-        disabled: false,
-        lightsOn: true,
-        timeOffsetMinutes: 0,
-        brightnessOffset: 0,
-      ),
-    );
-    await roomProvider.applyServerNodeState(
-      'room-1',
-      rhythmEnabled: true,
-      timeOffset: 0,
-      brightnessOffset: 0,
-      state: RoomModeState.active,
-      lightsOn: true,
-      brightness: 44,
-    );
-    roomProvider.setRoomStateLocal('room-1', RoomModeState.mood);
-    roomProvider.setRoomColorLocal(
-      'room-1',
-      20,
-      80,
-      240,
-      rememberAsMood: true,
-    );
-
-    final homeProvider = _FakeHomeProvider();
-    final connection = _TestRhythmConnection();
-    final serverSync = ServerSyncProvider(
-      connection: connection,
-      roomProvider: roomProvider,
-      homeProvider: homeProvider,
-    );
-    addTearDown(roomProvider.dispose);
-    addTearDown(serverSync.dispose);
-    addTearDown(connection.dispose);
-
-    await tester.pumpWidget(
-      MultiProvider(
-        providers: [
-          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
-          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
-        ],
-        child: MaterialApp(
-          home: Scaffold(
-            body: RoomCard(
-              roomId: 'room-1',
-              globalConfig: defaultCurveConfig,
-            ),
-          ),
-        ),
-      ),
-    );
-
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(13);
-    await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(13);
-    await tester.pump();
-
-    await _tapRoomSegment(tester, 'Scenes');
-    await tester.pump(const Duration(milliseconds: 300));
-    final amberWheelPoint =
-        tester.getCenter(find.byKey(const Key('mood_color_wheel'))) +
-            const Offset(40, 0);
-    await tester.tapAt(amberWheelPoint);
-    await tester.pump();
-
-    expect(connection.api.nodeColorCalls, hasLength(2));
-    expect(connection.api.nodeColorCalls.first.brightness, 13);
-    expect(connection.api.nodeColorCalls.last.brightness, 13);
   });
 }
