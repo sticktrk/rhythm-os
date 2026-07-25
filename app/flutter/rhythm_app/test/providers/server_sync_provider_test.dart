@@ -154,6 +154,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   List<RhythmSceneDefinition> scenes = const [];
   final Map<String, List<RhythmSceneDefinition>> roomScenes = {};
   final List<String?> sceneTargetCalls = [];
+  final Set<String?> failedSceneCatalogTargets = {};
+  final Set<String> partialNativeDiscoveryFailureTargets = {};
   bool applySceneSucceeds = true;
   Completer<RhythmSceneActionResult?>? applySceneCompleter;
   final List<({String sceneId, String targetId, int? transitionMs})>
@@ -325,8 +327,19 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<List<RhythmSceneDefinition>> getScenes({String? targetId}) async {
+    final catalog = await getSceneCatalog(targetId: targetId);
+    return catalog?.scenes ?? const [];
+  }
+
+  @override
+  Future<RhythmSceneCatalogResult?> getSceneCatalog({String? targetId}) async {
     sceneTargetCalls.add(targetId);
-    return targetId == null ? scenes : roomScenes[targetId] ?? scenes;
+    if (failedSceneCatalogTargets.contains(targetId)) return null;
+    return RhythmSceneCatalogResult(
+      scenes: targetId == null ? scenes : roomScenes[targetId] ?? scenes,
+      nativeDiscoveryFailed: targetId != null &&
+          partialNativeDiscoveryFailureTargets.contains(targetId),
+    );
   }
 
   @override
@@ -2531,11 +2544,11 @@ void main() {
       api.scenes = [_testScene('rhythm-scene')];
       api.roomScenes['room-1'] = [
         _testScene('rhythm-scene'),
-        _testScene('hue-room-1'),
+        _testScene('native-hue-room-1'),
       ];
       api.roomScenes['room-2'] = [
         _testScene('rhythm-scene'),
-        _testScene('hue-room-2'),
+        _testScene('native-hue-room-2'),
       ];
 
       await provider.fetchScenes(roomId: 'room-1');
@@ -2544,16 +2557,55 @@ void main() {
       expect(api.sceneTargetCalls, ['room-1', 'room-2']);
       expect(
         provider.scenesForRoom('room-1').map((scene) => scene.id),
-        ['rhythm-scene', 'hue-room-1'],
+        ['rhythm-scene', 'native-hue-room-1'],
       );
       expect(
         provider.scenesForRoom('room-2').map((scene) => scene.id),
-        ['rhythm-scene', 'hue-room-2'],
+        ['rhythm-scene', 'native-hue-room-2'],
       );
       expect(
         provider.scenesForRoom('room-1').map((scene) => scene.id),
-        isNot(contains('hue-room-2')),
+        isNot(contains('native-hue-room-2')),
       );
+    });
+
+    test('retains cached native scenes across a partial discovery failure',
+        () async {
+      api.roomScenes['room-1'] = [
+        _testScene('stored-old'),
+        _testScene('native-hue-aurora'),
+      ];
+      await provider.fetchScenes(roomId: 'room-1');
+
+      api.roomScenes['room-1'] = [_testScene('stored-current')];
+      api.partialNativeDiscoveryFailureTargets.add('room-1');
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(
+        fetched.map((scene) => scene.id),
+        ['stored-current', 'native-hue-aurora'],
+      );
+    });
+
+    test('clears a room cache after a successful empty refresh', () async {
+      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      await provider.fetchScenes(roomId: 'room-1');
+
+      api.roomScenes['room-1'] = const [];
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(fetched, isEmpty);
+      expect(provider.scenesForRoom('room-1'), isEmpty);
+    });
+
+    test('retains a room cache when the catalog request fails', () async {
+      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      await provider.fetchScenes(roomId: 'room-1');
+
+      api.failedSceneCatalogTargets.add('room-1');
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(fetched.map((scene) => scene.id), ['native-hue-aurora']);
     });
 
     test('applies a mood scene without issuing a duplicate preferences write',

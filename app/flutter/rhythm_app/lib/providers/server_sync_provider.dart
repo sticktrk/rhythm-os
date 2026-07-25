@@ -441,18 +441,31 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected) {
       return roomId == null ? scenes : scenesForRoom(roomId);
     }
-    final fetched = await _connection.api.getScenes(targetId: roomId);
+    final catalog = await _connection.api.getSceneCatalog(targetId: roomId);
+    if (catalog == null) {
+      return roomId == null ? scenes : scenesForRoom(roomId);
+    }
+    final fetched = catalog.scenes;
     if (roomId == null) {
-      if (fetched.isNotEmpty || _scenes.isEmpty) {
-        _scenes = fetched;
-        notifyListeners();
-      }
+      _scenes = fetched;
+      notifyListeners();
       return scenes;
     }
-    if (fetched.isNotEmpty || !_roomScenes.containsKey(roomId)) {
+    final cached = _roomScenes[roomId];
+    if (catalog.nativeDiscoveryFailed && cached != null) {
+      final mergedById = <String, RhythmSceneDefinition>{
+        for (final scene in fetched) scene.id: scene,
+      };
+      for (final scene in cached) {
+        if (scene.id.startsWith('native-')) {
+          mergedById.putIfAbsent(scene.id, () => scene);
+        }
+      }
+      _roomScenes[roomId] = mergedById.values.toList();
+    } else {
       _roomScenes[roomId] = fetched;
-      notifyListeners();
     }
+    notifyListeners();
     return scenesForRoom(roomId);
   }
 

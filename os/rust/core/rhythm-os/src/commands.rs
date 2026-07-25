@@ -4115,6 +4115,7 @@ pub fn build_scenes_for_target(state: &SharedState, target_id: Option<&str>) -> 
     };
 
     let mut known_ids: HashSet<String> = scenes.iter().map(|scene| scene.id.clone()).collect();
+    let mut native_discovery_failed = false;
     for (hub_key, hub_room_id, discovery) in sources {
         match discovery.discover_scenes(&hub_room_id) {
             Ok(discovered) => {
@@ -4124,31 +4125,40 @@ pub fn build_scenes_for_target(state: &SharedState, target_id: Option<&str>) -> 
                     }
                 }
             }
-            Err(error) => warn!(
-                target: "native_scenes",
-                "Failed to discover scenes for target={} hub={} room={}: {}",
-                target_id.unwrap_or_default(),
-                hub_key,
-                hub_room_id,
-                error
-            ),
+            Err(error) => {
+                native_discovery_failed = true;
+                warn!(
+                    target: "native_scenes",
+                    "Failed to discover scenes for target={} hub={} room={}: {}",
+                    target_id.unwrap_or_default(),
+                    hub_key,
+                    hub_room_id,
+                    error
+                );
+            }
         }
     }
 
     serde_json::to_string(&serde_json::json!({
-        "scenes": scenes
+        "scenes": scenes,
+        "native_discovery_failed": native_discovery_failed
     }))
     .map_err(|e| anyhow::anyhow!("serialize scenes: {}", e))
 }
 
-pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Result<String> {
-    scene.normalize();
-    if is_native_scene_id(&scene.id) {
+fn validate_persisted_scene_id(scene_id: &str) -> Result<()> {
+    if is_native_scene_id(scene_id) {
         return Err(anyhow::anyhow!(
             "Scene id '{}' uses the reserved native scene namespace",
-            scene.id
+            scene_id
         ));
     }
+    Ok(())
+}
+
+pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Result<String> {
+    scene.normalize();
+    validate_persisted_scene_id(&scene.id)?;
     let response_scene = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.insert(scene.id.clone(), scene.clone());
@@ -4437,6 +4447,7 @@ pub fn do_scene_preview_commit(state: &SharedState, preview_id: &str) -> Result<
     };
     if let Some(mut draft_scene) = preview.draft_scene.clone() {
         draft_scene.normalize();
+        validate_persisted_scene_id(&draft_scene.id)?;
         {
             let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             s.scenes.insert(draft_scene.id.clone(), draft_scene.clone());
@@ -8048,6 +8059,7 @@ fn normalized_scene_map(scenes: Vec<SceneDefinition>) -> Result<BTreeMap<String,
         if scene.id.trim().is_empty() {
             return Err(anyhow::anyhow!("Scene id cannot be empty"));
         }
+        validate_persisted_scene_id(&scene.id)?;
         if out.insert(scene.id.clone(), scene).is_some() {
             return Err(anyhow::anyhow!("Duplicate scene id"));
         }
@@ -14002,6 +14014,7 @@ mod tests {
     struct NativeSceneDiscovery {
         scenes: Vec<SceneDefinition>,
         recalls: Arc<Mutex<Vec<(String, Option<u32>)>>>,
+        discovery_error: Option<String>,
     }
 
     impl crate::discovery::HubDiscovery for NativeSceneDiscovery {
@@ -14014,6 +14027,9 @@ mod tests {
         }
 
         fn discover_scenes(&self, _room_id: &str) -> Result<Vec<SceneDefinition>> {
+            if let Some(error) = &self.discovery_error {
+                anyhow::bail!("{error}");
+            }
             Ok(self.scenes.clone())
         }
 
@@ -14054,12 +14070,21 @@ mod tests {
         state: &SharedState,
         scene: SceneDefinition,
     ) -> Arc<Mutex<Vec<(String, Option<u32>)>>> {
+        install_native_scene_source_with_error(state, scene, None)
+    }
+
+    fn install_native_scene_source_with_error(
+        state: &SharedState,
+        scene: SceneDefinition,
+        discovery_error: Option<&str>,
+    ) -> Arc<Mutex<Vec<(String, Option<u32>)>>> {
         let hub_type = HubType::new("hue");
         let hub_key = HubKey::new(hub_type.clone(), "hue-bridge");
         let recalls = Arc::new(Mutex::new(Vec::new()));
         let discovery = NativeSceneDiscovery {
             scenes: vec![scene],
             recalls: recalls.clone(),
+            discovery_error: discovery_error.map(str::to_string),
         };
         let mut room = crate::topology::TopologyRoom::new("room1", "Room 1");
         room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
@@ -16109,6 +16134,46 @@ mod tests {
     }
 
     #[test]
+    fn profile_and_backup_imports_reject_reserved_native_definition_ids() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let scene = SceneDefinition {
+            id: crate::scenes::native_scene_id("hue", "native-1"),
+            name: "Imported shadow".to_string(),
+            description: None,
+            source: SceneSource::User,
+            light: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let profile_error = do_profile_bundle_import(
+            &state,
+            ProfileBundleImportPayload::Profile(ProfileBundleData {
+                power_save: true,
+                profiles: Vec::new(),
+                scenes: vec![scene.clone()],
+                mode_transitions: Vec::new(),
+            }),
+        )
+        .unwrap_err();
+        assert!(profile_error
+            .to_string()
+            .contains("reserved native scene namespace"));
+
+        let mut backup = build_backup_bundle_dto(&state, false).unwrap();
+        backup.configuration.scenes = vec![scene];
+        let backup_error = do_backup_restore(&state, backup).unwrap_err();
+        assert!(backup_error
+            .to_string()
+            .contains("reserved native scene namespace"));
+        assert!(!state
+            .lock()
+            .unwrap()
+            .scenes
+            .keys()
+            .any(|id| is_native_scene_id(id)));
+    }
+
+    #[test]
     fn scene_apply_uses_public_node_for_standalone_light_without_composite() {
         let (state, runtime, device_id) = setup_standalone_matter_light();
         do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
@@ -16832,6 +16897,34 @@ mod tests {
     }
 
     #[test]
+    fn scene_draft_preview_commit_rejects_reserved_native_definition_ids() {
+        let (state, _runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let native_id = crate::scenes::native_scene_id("hue", "native-1");
+        let draft_scene = scene_for_light_with_output(&native_id, &device_id, 27, 3000);
+
+        let preview: SceneApplyResponse = serde_json::from_str(
+            &do_scene_draft_preview(
+                &state,
+                SceneDraftPreviewRequest {
+                    target_id: "room1".to_string(),
+                    scene: draft_scene,
+                    transition_ms: None,
+                    duration_ms: Some(30_000),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error =
+            do_scene_preview_commit(&state, preview.preview_id.as_deref().unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("reserved native scene namespace"));
+        assert!(!state.lock().unwrap().scenes.contains_key(&native_id));
+    }
+
+    #[test]
     fn scene_draft_preview_cancel_keeps_draft_ephemeral() {
         let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
         let draft_scene = scene_for_light_with_output("draft-glow", &device_id, 27, 3000);
@@ -17101,6 +17194,42 @@ mod tests {
             .iter()
             .any(|scene| scene["id"] == scene_id));
         assert!(!state.lock().unwrap().scenes.contains_key(&scene_id));
+        assert_eq!(scoped["native_discovery_failed"], false);
+    }
+
+    #[test]
+    fn room_scoped_scene_list_reports_partial_native_discovery_failure() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        do_scene_upsert(
+            &state,
+            SceneDefinition {
+                id: "stored-scene".to_string(),
+                name: "Stored scene".to_string(),
+                description: None,
+                source: SceneSource::User,
+                light: None,
+                extensions: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let scene_id = crate::scenes::native_scene_id("hue", "native-1");
+        let native = imported_hue_scene(&scene_id, "native-1");
+        install_native_scene_source_with_error(&state, native, Some("bridge unavailable"));
+
+        let scoped: serde_json::Value =
+            serde_json::from_str(&build_scenes_for_target(&state, Some("room1")).unwrap()).unwrap();
+
+        assert_eq!(scoped["native_discovery_failed"], true);
+        assert!(scoped["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scene| scene["id"] == "stored-scene"));
+        assert!(!scoped["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scene| scene["id"] == scene_id));
     }
 
     #[test]

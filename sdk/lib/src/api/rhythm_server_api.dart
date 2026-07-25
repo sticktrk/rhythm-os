@@ -772,6 +772,16 @@ class RhythmServerApi {
   /// When [targetId] is provided, capable appliances also include ephemeral
   /// native scenes that apply to that room.
   Future<List<RhythmSceneDefinition>> getScenes({String? targetId}) async {
+    final catalog = await getSceneCatalog(targetId: targetId);
+    return catalog?.scenes ?? const [];
+  }
+
+  /// Fetch scene definitions together with native-discovery outcome metadata.
+  ///
+  /// Returns `null` when the request or response fails, allowing callers to
+  /// preserve an existing cache. Previous appliances omit the additive
+  /// discovery field and therefore parse as a complete stored-scene catalog.
+  Future<RhythmSceneCatalogResult?> getSceneCatalog({String? targetId}) async {
     try {
       final response = targetId == null
           ? await _dio.get('api/scenes')
@@ -779,11 +789,11 @@ class RhythmServerApi {
               'api/scenes',
               queryParameters: {'target_id': targetId},
             );
-      return _parseScenesResponse(response.data);
+      return _parseSceneCatalogResponse(response.data);
     } catch (e) {
-      _log.warning('getScenes failed', e);
+      _log.warning('getSceneCatalog failed', e);
     }
-    return const [];
+    return null;
   }
 
   /// Upsert a scene with the scene ID from the request body.
@@ -2128,6 +2138,19 @@ class RhythmServerApi {
         .nonNulls
         .map(RhythmSceneDefinition.fromJson)
         .toList();
+  }
+
+  RhythmSceneCatalogResult? _parseSceneCatalogResponse(dynamic responseData) {
+    if (responseData is List<dynamic>) {
+      return RhythmSceneCatalogResult(
+        scenes: _parseScenesResponse(responseData),
+      );
+    }
+    final responseJson = jsonMap(responseData);
+    if (responseJson == null || responseJson['scenes'] is! List<dynamic>) {
+      return null;
+    }
+    return RhythmSceneCatalogResult.fromJson(responseJson);
   }
 
   RhythmRoomState? _parseAndCacheSingleState(dynamic responseData) {
