@@ -72,6 +72,7 @@ class _TestRhythmConnection extends RhythmConnection {
 
   final bool _connected;
   final _FakeRhythmServerApi _api;
+  VoidCallback? onReconnect;
 
   @override
   _FakeRhythmServerApi get api => _api;
@@ -114,7 +115,9 @@ class _TestRhythmConnection extends RhythmConnection {
   Future<void> pingOrReconnect() async {}
 
   @override
-  Future<void> reconnect({bool authoritative = false}) async {}
+  Future<void> reconnect({bool authoritative = false}) async {
+    onReconnect?.call();
+  }
 
   @override
   void disconnect() {}
@@ -236,11 +239,15 @@ class _AllRoomsHarness {
     required this.roomPageProvider,
     required this.roomProvider,
     required this.api,
+    required this.connection,
+    required this.pageController,
   });
 
   final RoomPageProvider roomPageProvider;
   final RoomProvider roomProvider;
   final _FakeRhythmServerApi api;
+  final _TestRhythmConnection connection;
+  final PageController pageController;
 }
 
 Future<_AllRoomsHarness> _pumpAllRooms(
@@ -303,6 +310,8 @@ Future<_AllRoomsHarness> _pumpAllRooms(
     roomPageProvider: roomPageProvider,
     roomProvider: roomProvider,
     api: connection.api,
+    connection: connection,
+    pageController: pageController,
   );
 }
 
@@ -362,6 +371,36 @@ void main() {
       find.byKey(const ValueKey('global-room-brightness-slider')),
       findsOneWidget,
     );
+  });
+
+  testWidgets('authoritative refresh preserves the visible room grouping',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+    harness.roomPageProvider.moveRoom(_bedroom.id, 1);
+    await tester.pump();
+    harness.pageController.jumpToPage(1);
+    await tester.pump();
+
+    expect(harness.pageController.page, 1);
+    expect(find.text('Bedroom').hitTestable(), findsOneWidget);
+
+    harness.connection.onReconnect = () {
+      // Simulate the PageView detaching during the authoritative reconnect
+      // and reattaching at its default first page.
+      harness.pageController.jumpToPage(0);
+    };
+    final refresh = tester.widget<RefreshIndicator>(
+      find.byType(RefreshIndicator).hitTestable(),
+    );
+    await refresh.onRefresh();
+    await tester.pump();
+    await tester.pump();
+
+    expect(harness.pageController.page, 1);
+    expect(find.text('Bedroom').hitTestable(), findsOneWidget);
   });
 
   testWidgets(

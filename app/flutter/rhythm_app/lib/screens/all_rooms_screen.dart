@@ -121,8 +121,41 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Future<void> _onRefresh() async {
     final serverSync = context.read<ServerSyncProvider>();
+    final pageController = widget.pageController;
+    final pageBeforeRefresh = pageController.hasClients
+        ? (pageController.page ?? _currentPage.toDouble()).round()
+        : _currentPage;
     await serverSync.fullRefresh();
+    _restorePageAfterRefresh(pageController, pageBeforeRefresh);
     AnalyticsService().logRoomsRefreshed(source: 'all_rooms_pull_to_refresh');
+  }
+
+  static void _restorePageAfterRefresh(
+    PageController controller,
+    int requestedPage, {
+    int remainingFrames = 2,
+  }) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!controller.hasClients || !controller.position.hasContentDimensions) {
+        if (remainingFrames > 0) {
+          _restorePageAfterRefresh(
+            controller,
+            requestedPage,
+            remainingFrames: remainingFrames - 1,
+          );
+        }
+        return;
+      }
+
+      final position = controller.position;
+      final viewport = position.viewportDimension;
+      final maxPage =
+          viewport <= 0 ? 0 : (position.maxScrollExtent / viewport).round();
+      final targetPage = requestedPage.clamp(0, maxPage);
+      if ((controller.page ?? 0).round() != targetPage) {
+        controller.jumpToPage(targetPage);
+      }
+    });
   }
 
   double _headerVerticalPadding(bool isLandscape) => isLandscape ? 4.0 : 10.0;

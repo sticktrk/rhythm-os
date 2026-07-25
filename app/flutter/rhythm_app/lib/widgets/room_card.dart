@@ -574,12 +574,12 @@ class _RoomCardState extends State<RoomCard> {
         // or stale RGB values during turn-on, and showing those as the card
         // background makes users think the light itself changed color.
         final dimT = displayBrightness / 100.0;
+        final lowGlowTint =
+            (0.20 + math.sqrt(dimT) * 0.30).clamp(0.20, 0.50).toDouble();
         const darkBase = Color(0xFF141210);
         final lightColorBg = switch (mode) {
           RoomMode.mood => Color.lerp(darkBase, cctColor, 0.22)!,
-          // Low glow is an ambient state, not a sampled paint color. Keep the
-          // card neutral and let the localized halo below carry the warmth.
-          RoomMode.standby => const Color(0xFF171A20),
+          RoomMode.standby => Color.lerp(darkBase, cctColor, lowGlowTint)!,
           RoomMode.on => Color.lerp(darkBase, cctColor, 0.10 + dimT * 0.50)!,
           RoomMode.off => CelestialColors.backgroundCard,
         };
@@ -591,7 +591,7 @@ class _RoomCardState extends State<RoomCard> {
         final onLight = mode == RoomMode.on && bgColor.computeLuminance() > 0.4;
         final titleColor = switch (mode) {
           RoomMode.mood => const Color(0xFFFFF3DF),
-          RoomMode.standby => const Color(0xFFFFF0D5),
+          RoomMode.standby => Color.lerp(cctColor, Colors.white, 0.78)!,
           RoomMode.on => onLight
               ? (kelvin < 4000
                   ? const Color(0xFF3A2A1A) // warm dark brown
@@ -601,7 +601,7 @@ class _RoomCardState extends State<RoomCard> {
         };
         final iconColor = switch (mode) {
           RoomMode.mood => const Color(0xFFD8C5A4),
-          RoomMode.standby => const Color(0xFFCDBE9D),
+          RoomMode.standby => Color.lerp(cctColor, Colors.white, 0.42)!,
           RoomMode.on => onLight
               ? (kelvin < 4000
                   ? const Color(0xFF4A3828) // warm brown
@@ -788,6 +788,15 @@ class _RoomCardState extends State<RoomCard> {
                                         ),
                                       ),
                                     ),
+                                    if (mode == RoomMode.standby) ...[
+                                      const SizedBox(width: 8),
+                                      _LowGlowHardOffAction(
+                                        roomId: widget.roomId,
+                                        enabled: !isTransitioning,
+                                        onPressed: () =>
+                                            _onModeChanged(RoomMode.off),
+                                      ),
+                                    ],
                                     const SizedBox(width: 8),
                                     SizedBox(
                                       key: ValueKey(
@@ -943,6 +952,7 @@ class _RoomCardState extends State<RoomCard> {
                                     onModeChanged: _onModeChanged,
                                     onReset: _resetToOn,
                                     cctColor: cctColor,
+                                    brightness: displayBrightness,
                                     enabled: !isTransitioning,
                                   ),
                                   if (adaptiveSlidersVisible) ...[
@@ -1255,14 +1265,6 @@ class _RoomCardState extends State<RoomCard> {
                                   ),
                                 ],
                               ),
-                              if (mode == RoomMode.standby) ...[
-                                const SizedBox(height: 6),
-                                _LowGlowHardOffAction(
-                                  roomId: widget.roomId,
-                                  enabled: !isTransitioning,
-                                  onPressed: () => _onModeChanged(RoomMode.off),
-                                ),
-                              ],
                             ],
                           ),
                         ),
@@ -1857,6 +1859,7 @@ class _RoomPowerControl extends StatelessWidget {
   /// curve (same as the "Reset to curve" action), rather than a plain On.
   final VoidCallback onReset;
   final Color cctColor;
+  final int brightness;
   final bool enabled;
 
   const _RoomPowerControl({
@@ -1866,6 +1869,7 @@ class _RoomPowerControl extends StatelessWidget {
     required this.onModeChanged,
     required this.onReset,
     required this.cctColor,
+    required this.brightness,
     this.enabled = true,
   });
 
@@ -1900,6 +1904,7 @@ class _RoomPowerControl extends StatelessWidget {
           },
           enabled: enabled,
           cctColor: cctColor,
+          brightness: brightness,
         ),
       ),
     );
@@ -2063,6 +2068,7 @@ class _RoomPowerTogglePill extends StatefulWidget {
   final ValueChanged<_PowerToggleState> onChanged;
   final bool enabled;
   final Color cctColor;
+  final int brightness;
 
   const _RoomPowerTogglePill({
     super.key,
@@ -2072,6 +2078,7 @@ class _RoomPowerTogglePill extends StatefulWidget {
     required this.onChanged,
     required this.enabled,
     required this.cctColor,
+    required this.brightness,
   });
 
   @override
@@ -2085,9 +2092,16 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
   Widget build(BuildContext context) {
     final activeColor = Color.lerp(widget.cctColor, Colors.white, 0.30)!;
     const inactiveColor = Color(0xFF727B87);
-    const standbyColor = Color(0xFFFFC857);
+    final standbyColor = Color.lerp(widget.cctColor, Colors.white, 0.18)!;
     final deepColor =
         Color.lerp(const Color(0xFF12161C), widget.cctColor, 0.22)!;
+    final brightnessT = widget.brightness.clamp(1, 100) / 100.0;
+    final lowGlowTint =
+        (0.20 + math.sqrt(brightnessT) * 0.30).clamp(0.20, 0.50).toDouble();
+    final standbyDeepColor =
+        Color.lerp(const Color(0xFF141210), widget.cctColor, lowGlowTint)!;
+    final standbyHighlightColor =
+        Color.lerp(standbyDeepColor, widget.cctColor, 0.22)!;
     final isOn = widget.state == _PowerToggleState.on;
     final isStandby = widget.state == _PowerToggleState.standby;
     final isOff = widget.state == _PowerToggleState.off;
@@ -2157,9 +2171,9 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
                           deepColor,
                         ]
                       : isStandby
-                          ? const <Color>[
-                              Color(0xFF322B18),
-                              Color(0xFF1C1B17),
+                          ? <Color>[
+                              standbyHighlightColor,
+                              standbyDeepColor,
                             ]
                           : const <Color>[
                               Color(0xFF222832),
@@ -2170,15 +2184,16 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
                   color: isOn
                       ? widget.cctColor.withValues(alpha: 0.58)
                       : isStandby
-                          ? standbyColor.withValues(alpha: 0.62)
+                          ? widget.cctColor.withValues(alpha: 0.54)
                           : const Color(0xFF353D48),
                   width: isOff ? 1 : 1.5,
                 ),
                 boxShadow: !isOff && widget.enabled
                     ? [
                         BoxShadow(
-                          color: (isStandby ? standbyColor : widget.cctColor)
-                              .withValues(alpha: isStandby ? 0.20 : 0.24),
+                          color: widget.cctColor.withValues(
+                            alpha: isStandby ? 0.20 : 0.24,
+                          ),
                           blurRadius: 16,
                           spreadRadius: 1,
                         ),
@@ -2206,13 +2221,13 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
                     color: isOn
                         ? widget.cctColor.withValues(alpha: 0.12)
                         : isStandby
-                            ? standbyColor.withValues(alpha: 0.10)
+                            ? widget.cctColor.withValues(alpha: 0.10)
                             : Colors.transparent,
                     border: Border.all(
                       color: isOn
                           ? widget.cctColor.withValues(alpha: 0.18)
                           : isStandby
-                              ? standbyColor.withValues(alpha: 0.20)
+                              ? widget.cctColor.withValues(alpha: 0.20)
                               : Colors.white.withValues(alpha: 0.04),
                     ),
                   ),
@@ -2283,7 +2298,7 @@ class _LowGlowHardOffAction extends StatelessWidget {
             key: ValueKey('room-card-hard-off-$roomId'),
             onPressed: enabled ? onPressed : null,
             icon: const Icon(Icons.power_settings_new_rounded, size: 13),
-            label: const Text('Fully off'),
+            label: const Text('Full off'),
             style: TextButton.styleFrom(
               foregroundColor:
                   CelestialColors.textSecondary.withValues(alpha: 0.82),
