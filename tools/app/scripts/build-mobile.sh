@@ -60,8 +60,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../app" && pwd)"
+REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
 RUST_FFI="$FLUTTER_APP/rust"
+BUILD_RECEIPT_WRITER="$SCRIPT_DIR/write-app-build-receipt.sh"
 
 # Find flutter command (same as build-wasm.sh)
 find_flutter() {
@@ -98,6 +100,28 @@ pubspec_build_number() {
     if [ "$version" != "${version##*+}" ]; then
         echo "${version##*+}"
     fi
+}
+
+write_store_build_receipt() {
+    local store="$1"
+    local channel="$2"
+    local artifact="$3"
+    local build_number="$4"
+    local version
+    local source_commit
+    local receipt_path
+
+    version="$(pubspec_build_name)"
+    source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+    receipt_path="${RHYTHM_APP_BUILD_RECEIPT_PATH:-$REPO_ROOT/.release-evidence/app-builds/$version-$channel-$build_number.json}"
+    "$BUILD_RECEIPT_WRITER" \
+        --store "$store" \
+        --channel "$channel" \
+        --version "$version" \
+        --build-number "$build_number" \
+        --commit "$source_commit" \
+        --artifact "$artifact" \
+        --output "$receipt_path"
 }
 
 resolve_testflight_build_number() {
@@ -871,6 +895,8 @@ else
                 --api_key_path "$ASC_API_KEY_PATH" \
                 --ipa "$IPA_FILE" \
                 --skip_waiting_for_build_processing
+            write_store_build_receipt \
+                app-store-connect testflight "$IPA_FILE" "$RESOLVED_BUILD_NUMBER"
 
             echo ""
             echo "Upload complete! Build will appear in TestFlight after processing."
@@ -1100,6 +1126,8 @@ else
                     echo "click Review release → Start rollout."
                 fi
                 rm -f /tmp/rhythm_supply_output.log
+                write_store_build_receipt \
+                    google-play "$GOOGLE_PLAY_TRACK" "$AAB_FILE" "$RESOLVED_BUILD_NUMBER"
 
                 echo ""
                 echo "Upload complete! Build will appear in Play Console after processing."
