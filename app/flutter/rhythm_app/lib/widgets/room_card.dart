@@ -273,11 +273,11 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
-  /// A Dim room remains directly adjustable. The first slider movement makes
-  /// that transition visible immediately; the normal curve-modifier request
-  /// sent on change-end clears the backend standby flag and becomes the
-  /// authoritative active state.
-  void _activateDimRoomForSlider() {
+  /// A Low glow room remains directly adjustable. The first slider movement
+  /// makes that transition visible immediately; the normal curve-modifier
+  /// request sent on change-end clears the backend Standby flag and becomes
+  /// the authoritative active state.
+  void _activateLowGlowRoomForSlider() {
     final roomProvider = context.read<RoomProvider>();
     final currentState = roomProvider.getDisplayRoomState(widget.roomId);
     if (currentState != RoomModeState.standby &&
@@ -972,7 +972,7 @@ class _RoomCardState extends State<RoomCard> {
                                                 onChanged:
                                                     brightnessSliderActive
                                                         ? (value) {
-                                                            _activateDimRoomForSlider();
+                                                            _activateLowGlowRoomForSlider();
                                                             setState(() {
                                                               _sliderBrightness =
                                                                   value.round();
@@ -1049,7 +1049,7 @@ class _RoomCardState extends State<RoomCard> {
                                                     .toDouble(),
                                                 onChanged: cctSliderActive
                                                     ? (value) {
-                                                        _activateDimRoomForSlider();
+                                                        _activateLowGlowRoomForSlider();
                                                         setState(() {
                                                           _sliderKelvin =
                                                               value.round();
@@ -1203,6 +1203,14 @@ class _RoomCardState extends State<RoomCard> {
                                   ],
                                 ],
                               ),
+                              if (mode == RoomMode.standby) ...[
+                                const SizedBox(height: 8),
+                                _LowGlowHardOffAction(
+                                  roomId: widget.roomId,
+                                  enabled: !isTransitioning,
+                                  onPressed: () => _onModeChanged(RoomMode.off),
+                                ),
+                              ],
                               const SizedBox(height: 8),
                               _RoomScenesControl(
                                 roomId: widget.roomId,
@@ -1795,7 +1803,7 @@ class _CCTGradientTrackShape extends SliderTrackShape
   }
 }
 
-/// Universal hard-power control used in the upper room-card control row.
+/// Primary room power control used in the upper room-card control row.
 enum _Seg { off, on, mood }
 
 class _RoomPowerControl extends StatelessWidget {
@@ -1901,8 +1909,9 @@ class _RoomScenesControl extends StatelessWidget {
 enum _PowerToggleState { on, standby, off }
 
 /// Power toggle used by every room card. Ordinary rooms alternate between On
-/// and hard Off; standby-enabled rooms present On → Dim → hard Off → On while
-/// retaining the existing standby backend state.
+/// and hard Off. Low-glow-enabled rooms alternate between On and the existing
+/// Standby state; full Off is a separate explicit action while Low glow is
+/// active.
 class _RoomPowerTogglePill extends StatefulWidget {
   final String roomId;
   final _PowerToggleState state;
@@ -1945,28 +1954,30 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
             : inactiveColor;
     final stateLabel = switch (widget.state) {
       _PowerToggleState.on => 'On',
-      _PowerToggleState.standby => 'Dim',
+      _PowerToggleState.standby => 'Low glow',
       _PowerToggleState.off => 'Off',
     };
     final nextState = switch (widget.state) {
       _PowerToggleState.on => widget.standbyAvailable
           ? _PowerToggleState.standby
           : _PowerToggleState.off,
-      _PowerToggleState.standby => _PowerToggleState.off,
+      _PowerToggleState.standby => _PowerToggleState.on,
       _PowerToggleState.off => _PowerToggleState.on,
     };
     final actionHint = switch (nextState) {
       _PowerToggleState.on => 'Turn on and reset to the curve',
-      _PowerToggleState.standby => 'Dim the room',
+      _PowerToggleState.standby => 'Use low glow',
       _PowerToggleState.off => 'Turn completely off',
     };
 
     return Semantics(
+      excludeSemantics: true,
       button: true,
       enabled: widget.enabled,
       label: 'Room power',
       value: stateLabel,
       hint: actionHint,
+      onTap: widget.enabled ? () => widget.onChanged(nextState) : null,
       child: Tooltip(
         message: '$stateLabel · $actionHint',
         child: GestureDetector(
@@ -2093,6 +2104,54 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
                   ),
                 ),
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LowGlowHardOffAction extends StatelessWidget {
+  final String roomId;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  const _LowGlowHardOffAction({
+    required this.roomId,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      excludeSemantics: true,
+      button: true,
+      enabled: enabled,
+      label: 'Turn room off completely',
+      onTap: enabled ? onPressed : null,
+      child: SizedBox(
+        width: double.infinity,
+        height: 36,
+        child: OutlinedButton.icon(
+          key: ValueKey('room-card-hard-off-$roomId'),
+          onPressed: enabled ? onPressed : null,
+          icon: const Icon(Icons.power_settings_new_rounded, size: 15),
+          label: const Text('Turn off completely'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor:
+                CelestialColors.textSecondary.withValues(alpha: 0.88),
+            side: BorderSide(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.42),
+            ),
+            textStyle: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.1,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
             ),
           ),
         ),

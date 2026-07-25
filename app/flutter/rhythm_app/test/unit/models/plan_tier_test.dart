@@ -49,8 +49,12 @@ void main() {
   });
 
   group('Entitlement display metadata', () {
-    test('describes standby gating', () {
-      expect(Entitlement.standby.displayName, 'Standby Lighting');
+    test('describes low-glow gating without changing the entitlement', () {
+      expect(Entitlement.standby.displayName, 'Low glow lighting');
+      expect(
+        Entitlement.standby.shortDescription,
+        'Keep inactive rooms softly lit',
+      );
       expect(Entitlement.standby.minimumTier, PlanTier.pro);
       expect(Entitlement.standby.isComingSoon, isFalse);
       expect(Entitlement.standby.labelFor(PlanTier.basic), 'Pro only');

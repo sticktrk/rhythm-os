@@ -3,10 +3,10 @@ import 'package:rhythm_app/widgets/mode_room_behavior_section.dart';
 
 void main() {
   group('profile room default state mapping', () {
-    test('keeps standby distinct from off', () {
-      expect(roomDefaultStateLabelForTesting('standby'), 'Dim');
-      expect(roomDefaultStateLabelForTesting('idle'), 'Dim');
-      expect(roomDefaultStateLabelForTesting('soft_off'), 'Dim');
+    test('presents standby compatibility states as Low glow', () {
+      expect(roomDefaultStateLabelForTesting('standby'), 'Low glow');
+      expect(roomDefaultStateLabelForTesting('idle'), 'Low glow');
+      expect(roomDefaultStateLabelForTesting('soft_off'), 'Low glow');
       expect(roomDefaultStateLabelForTesting('hard_off'), 'Off');
     });
 

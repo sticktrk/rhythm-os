@@ -175,7 +175,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Cached room summaries derived from hello/topology for room-centric UI.
   List<RhythmRoom> _helloRooms = [];
 
-  /// Per-node optimistic locks for the Off/Dim behavior preference.
+  /// Per-node optimistic locks for the Low glow (Standby) preference.
   ///
   /// The server can emit one stale hello immediately after the preference write,
   /// which otherwise makes the room detail switch jump back before the confirmed

@@ -2509,7 +2509,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
             stage: 'idle_mode',
           );
           _showSaveFeedback(
-            'Saved ${_profileTitle.toLowerCase()}, but failed to clear legacy standby settings.',
+            'Saved ${_profileTitle.toLowerCase()}, but failed to clear legacy low-glow settings.',
             error: true,
           );
           return;

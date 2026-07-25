@@ -864,7 +864,7 @@ class _StickyCta extends StatelessWidget {
           ),
         _UiTier.basic => _PrimaryButton(
             label: 'Subscribe to Pro',
-            sublabel: 'Standby, sleep & advanced controls',
+            sublabel: 'Low glow, sleep & advanced controls',
             gradient: const [_kProAmber, _kProAmberDeep],
             icon: Icons.auto_awesome_rounded,
             busy: busy,
@@ -1353,7 +1353,7 @@ List<_Feature> _featuresFor(_UiTier tier) {
     case _UiTier.pro:
       return [
         _Feature(
-          label: 'Standby & sleep idle scenes',
+          label: 'Low glow for inactive rooms',
           status: _FeatureStatus.included,
           entitlement: Entitlement.standby,
         ),

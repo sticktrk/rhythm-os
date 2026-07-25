@@ -4676,7 +4676,7 @@ void main() {
     );
 
     await _selectRoomSettingsTab(tester, 'Settings');
-    await tester.tap(find.text('Off Behavior'));
+    await tester.tap(find.text('Low glow'));
     await tester.pump();
 
     expect(api.nodePreferenceCalls, hasLength(1));
@@ -4798,7 +4798,7 @@ void main() {
 
     await _selectRoomSettingsTab(tester, 'Settings');
 
-    expect(find.text('Off Behavior'), findsOneWidget);
+    expect(find.text('Low glow'), findsOneWidget);
     expect(find.text('DAY PROFILE'), findsNothing);
     expect(find.text('SLEEP PROFILE'), findsNothing);
     expect(find.text('Motion Timeout'), findsNothing);

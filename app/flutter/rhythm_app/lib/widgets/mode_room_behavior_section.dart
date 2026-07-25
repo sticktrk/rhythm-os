@@ -12,12 +12,12 @@ import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
 import '../utils/room_visibility.dart';
 
-/// Per-room On / Standby / Off controls for a single [RhythmMode].
+/// Per-room On / Low glow / Off controls for a single [RhythmMode].
 ///
 /// This is the "what each room does when Day/Sleep engages" behavior — lifted
 /// out of the light-profile screen so the Automations tab can present it as its
 /// own automation (the light *look* lives on the Light tab; turning lights
-/// on/off/standby is an automation). Reads the room defaults from
+/// on/off/low-glow behavior is an automation). Reads the room defaults from
 /// [ServerSyncProvider.modeConfigs] and debounces writes back through
 /// `api.modeSet`, exactly as the profile screen used to.
 class ModeRoomBehaviorSection extends StatefulWidget {
@@ -179,7 +179,7 @@ _RoomDefaultMode _nextRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
 
 String _roomDefaultLabel(_RoomDefaultMode mode) => switch (mode) {
       _RoomDefaultMode.active => 'On',
-      _RoomDefaultMode.standby => 'Dim',
+      _RoomDefaultMode.standby => 'Low glow',
       _RoomDefaultMode.off => 'Off',
       _RoomDefaultMode.none => 'No override',
     };

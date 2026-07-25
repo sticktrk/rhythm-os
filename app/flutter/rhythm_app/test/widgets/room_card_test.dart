@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -275,6 +276,9 @@ Finder _powerToggleLabel({String roomId = 'room-1'}) =>
 
 Finder _scenesControl({String roomId = 'room-1'}) =>
     find.byKey(ValueKey('room-card-control-pill-$roomId-scenes'));
+
+Finder _hardOffAction({String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-hard-off-$roomId'));
 
 Finder _brightnessSlider({String roomId = 'room-1'}) => find.byKey(
       ValueKey('room-card-brightness-slider-$roomId'),
@@ -1041,8 +1045,9 @@ void main() {
     expect(call.profileSettings, {'mood_enabled': true});
   });
 
-  testWidgets('standby-enabled power presents Dim between On and hard Off',
+  testWidgets('low-glow power is reversible with a separate hard Off action',
       (tester) async {
+    final semantics = tester.ensureSemantics();
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1130,13 +1135,30 @@ void main() {
     expect(connection.api.nodePreferenceCalls, isEmpty);
     final onIconColor = tester.widget<Icon>(_powerToggleIcon()).color;
     expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(_hardOffAction(), findsNothing);
 
     tester.widget<GestureDetector>(_powerToggle()).onTap!();
     await tester.pump();
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
     expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
-    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Dim');
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
+    expect(_hardOffAction(), findsOneWidget);
+    expect(find.text('Turn off completely'), findsOneWidget);
+    final powerSemantics = tester.getSemantics(_powerToggle());
+    expect(powerSemantics.label, 'Room power');
+    expect(powerSemantics.value, 'Low glow');
+    expect(powerSemantics.hint, 'Turn on and reset to the curve');
+    expect(
+      powerSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    final hardOffSemantics =
+        tester.getSemantics(find.bySemanticsLabel('Turn room off completely'));
+    expect(
+      hardOffSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
     expect(
       tester.widget<Icon>(_powerToggleIcon()).icon,
       Icons.brightness_low_rounded,
@@ -1154,16 +1176,34 @@ void main() {
     tester.widget<GestureDetector>(_powerToggle()).onTap!();
     await tester.pump();
 
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(_hardOffAction(), findsNothing);
+    expect(
+      connection.api.nodeActionCalls,
+      [(nodeId: 'room-1', action: 'reset')],
+    );
+
+    tester.widget<GestureDetector>(_powerToggle()).onTap!();
+    await tester.pump();
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
+    expect(_hardOffAction(), findsOneWidget);
+
+    await tester.tap(_hardOffAction());
+    await tester.pump();
+
     expect(roomProvider.getRoom('room-1')?.lightsOn, isFalse);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
     expect(tester.widget<Text>(_powerToggleLabel()).data, 'Off');
     final offIconColor = tester.widget<Icon>(_powerToggleIcon()).color;
     expect(offIconColor, isNot(dimIconColor));
+    expect(_hardOffAction(), findsNothing);
     expect(_brightnessSlider(), findsNothing);
     expect(_cctSlider(), findsNothing);
-    expect(connection.api.nodePreferenceCalls, hasLength(2));
+    expect(connection.api.nodePreferenceCalls, hasLength(3));
     expect(
-      connection.api.nodePreferenceCalls[1].state,
+      connection.api.nodePreferenceCalls[2].state,
       RoomModeState.hardOff,
     );
 
@@ -1176,10 +1216,8 @@ void main() {
     expect(tester.widget<Icon>(_powerToggleIcon()).color, isNot(offIconColor));
     expect(_brightnessSlider(), findsOneWidget);
     expect(_cctSlider(), findsOneWidget);
-    expect(
-      connection.api.nodeActionCalls,
-      [(nodeId: 'room-1', action: 'reset')],
-    );
+    expect(connection.api.nodeActionCalls, hasLength(2));
+    semantics.dispose();
   });
 
   testWidgets('first Mood tap shows the explainer and defers the mode change',
@@ -1245,7 +1283,7 @@ void main() {
     expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
-  testWidgets('Dim shows sliders and either slider returns the room to On',
+  testWidgets('Low glow shows sliders and either slider returns the room to On',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -1305,12 +1343,13 @@ void main() {
     expect(find.text('Off'), findsNothing);
     expect(find.text('On'), findsNothing);
     expect(_roomSegment('Scenes'), findsOneWidget);
-    expect(_roomSegment('Dim'), findsNothing);
+    expect(_roomSegment('Low glow'), findsNothing);
     expect(_roomSegment('Bright'), findsNothing);
     expect(find.byType(Slider), findsNWidgets(2));
     expect(_brightnessSlider(), findsOneWidget);
     expect(_cctSlider(), findsOneWidget);
-    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Dim');
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
+    expect(_hardOffAction(), findsOneWidget);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
 
     tester.widget<Slider>(_brightnessSlider()).onChanged!(35);
@@ -1334,7 +1373,7 @@ void main() {
     roomProvider.setRoomStateLocal('room-1', RoomModeState.standby);
     await tester.pump();
 
-    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Dim');
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
     expect(_brightnessSlider(), findsOneWidget);
     expect(_cctSlider(), findsOneWidget);
 
@@ -1411,7 +1450,7 @@ void main() {
       ),
     );
 
-    expect(_roomSegment('Dim'), findsNothing);
+    expect(_roomSegment('Low glow'), findsNothing);
     expect(_roomSegment('Bright'), findsNothing);
     expect(_powerToggle(), findsOneWidget);
     expect(_roomSegment('Off'), findsNothing);

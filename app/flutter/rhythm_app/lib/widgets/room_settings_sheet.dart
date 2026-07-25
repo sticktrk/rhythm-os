@@ -16,7 +16,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmTimerSetting;
 import 'device_detail_sheet.dart';
 import 'info_tooltip.dart';
-import 'off_behavior_switch.dart';
+import 'low_glow_switch.dart';
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
@@ -282,22 +282,21 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       key: const ValueKey('rhythm'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
-        // Standby is its own room-level behavior, not a Day/Sleep override —
-        // so it sits above the per-mode profile groups as a standalone card.
+        // Low glow is the user-facing name for the room's existing Standby
+        // preference, independent of the Day/Sleep profile selection.
         _buildSettingsGroup('', [
           _SettingsRow(
             icon: Icons.bedtime_outlined,
-            label: 'Off Behavior',
+            label: 'Low glow',
             labelInfo: const InfoTooltip(
-              eyebrow: 'OFF BEHAVIOR',
+              eyebrow: 'LOW GLOW',
               accentColor: Color(0xFF7C83FF),
               iconSize: 15,
-              message: 'What this room does when it switches off. Off cuts the '
-                  'lights fully. Dim keeps them in a low, ready state '
-                  'instead of going dark.',
+              message: 'Keep this room softly lit when motion times out or '
+                  'you turn it off. Motion or On restores normal lighting.',
             ),
-            trailing: OffBehaviorSwitch(
-              standby: standbyEnabled,
+            trailing: LowGlowSwitch(
+              value: standbyEnabled,
               onChanged: (val) => _setStandbyEnabled(context, val),
             ),
             onTap: () => _setStandbyEnabled(context, !standbyEnabled),
