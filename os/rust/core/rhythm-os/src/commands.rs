@@ -4278,7 +4278,7 @@ fn do_native_scene_apply(
             }
         };
 
-        let (runtime, mut affected_node_ids) = {
+        let (runtime, mut affected_node_ids, companion_plan) = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             let runtime = s
                 .hub_runtime()
@@ -4286,7 +4286,14 @@ fn do_native_scene_apply(
             let affected: Vec<String> = light_scene_target_scope_node_ids(&s, &runtime, &target_id)
                 .into_iter()
                 .collect();
-            (runtime, affected)
+            let companion_plan = build_native_scene_companion_plan_locked(
+                &s,
+                &runtime,
+                &scene,
+                &target_id,
+                request.transition_ms,
+            )?;
+            (runtime, affected, companion_plan)
         };
         if affected_node_ids.is_empty() {
             affected_node_ids.push(target_id.clone());
@@ -4301,6 +4308,11 @@ fn do_native_scene_apply(
                     error
                 )
             })?;
+        let mut unresolved_node_ids = Vec::new();
+        if let Some(plan) = companion_plan {
+            dispatch_scene_plan(state, &runtime, &plan)?;
+            unresolved_node_ids = plan.unresolved_node_ids;
+        }
 
         set_scene_committed_state(state, &runtime, scene_id, &target_id, &affected_node_ids);
         if let Ok(mut s) = state.lock() {
@@ -4322,7 +4334,7 @@ fn do_native_scene_apply(
             scene_id: scene_id.to_string(),
             target_id,
             affected_node_ids,
-            unresolved_node_ids: Vec::new(),
+            unresolved_node_ids,
             preview_id: None,
         });
     }
@@ -4335,6 +4347,74 @@ fn do_native_scene_apply(
         ));
     }
     Err(anyhow::anyhow!("Scene '{}' not found", scene_id))
+}
+
+/// Build individual companion commands for bulbs whose topology explicitly
+/// supports device dispatch. Hue devices are intentionally excluded because
+/// their attached route collapses to the grouped room recall above.
+fn build_native_scene_companion_plan_locked(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    scene: &SceneDefinition,
+    target_id: &str,
+    transition_ms: Option<u32>,
+) -> Result<Option<SceneApplicationPlan>> {
+    if !matches!(
+        &scene.source,
+        SceneSource::Imported { provider, .. } if provider.eq_ignore_ascii_case("hue")
+    ) {
+        return Ok(None);
+    }
+    let Some(layer) = scene.light.as_ref() else {
+        return Ok(None);
+    };
+    let companion_node_ids: Vec<_> = light_scene_target_scope_node_ids(s, runtime, target_id)
+        .into_iter()
+        .filter(|node_id| {
+            s.topology
+                .light_node_uses_device_dispatch(node_id, &s.canonical_registry)
+        })
+        .collect();
+    if companion_node_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let mut commands = Vec::new();
+    let mut unresolved_node_ids = Vec::new();
+    for (index, node_id) in companion_node_ids.iter().enumerate() {
+        let output = if layer.palette.is_empty() {
+            layer.default_output.as_ref()
+        } else {
+            Some(&layer.palette[index % layer.palette.len()])
+        };
+        let Some(output) = output else {
+            continue;
+        };
+        push_scene_light_command(
+            s,
+            layer.default_transition_ms,
+            transition_ms,
+            node_id,
+            output,
+            &mut commands,
+            &mut unresolved_node_ids,
+        )?;
+    }
+    if commands.is_empty() {
+        return Ok(None);
+    }
+    commands.sort_by(|left, right| left.public_node_id.cmp(&right.public_node_id));
+    unresolved_node_ids.sort();
+    unresolved_node_ids.dedup();
+
+    Ok(Some(SceneApplicationPlan {
+        affected_node_ids: commands
+            .iter()
+            .map(|command| command.public_node_id.clone())
+            .collect(),
+        commands,
+        unresolved_node_ids,
+    }))
 }
 
 fn record_scene_preview_session(
@@ -14080,12 +14160,6 @@ mod tests {
     ) -> Arc<Mutex<Vec<(String, Option<u32>)>>> {
         let hub_type = HubType::new("hue");
         let hub_key = HubKey::new(hub_type.clone(), "hue-bridge");
-        let recalls = Arc::new(Mutex::new(Vec::new()));
-        let discovery = NativeSceneDiscovery {
-            scenes: vec![scene],
-            recalls: recalls.clone(),
-            discovery_error: discovery_error.map(str::to_string),
-        };
         let mut room = crate::topology::TopologyRoom::new("room1", "Room 1");
         room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
             hub_key: hub_key.clone(),
@@ -14093,9 +14167,25 @@ mod tests {
             control_id: "hue-group-1".to_string(),
             light_device_ids: vec!["hue-light-1".to_string()],
         });
+        state.lock().unwrap().topology.insert_room(room);
+        install_native_scene_source_for_hub(state, hub_key, scene, discovery_error)
+    }
+
+    fn install_native_scene_source_for_hub(
+        state: &SharedState,
+        hub_key: HubKey,
+        scene: SceneDefinition,
+        discovery_error: Option<&str>,
+    ) -> Arc<Mutex<Vec<(String, Option<u32>)>>> {
+        let hub_type = hub_key.hub_type.clone();
+        let recalls = Arc::new(Mutex::new(Vec::new()));
+        let discovery = NativeSceneDiscovery {
+            scenes: vec![scene],
+            recalls: recalls.clone(),
+            discovery_error: discovery_error.map(str::to_string),
+        };
 
         let mut app = state.lock().unwrap();
-        app.topology.insert_room(room);
         app.hubs.insert(
             hub_key.clone(),
             ActiveHub {
@@ -17267,6 +17357,76 @@ mod tests {
             Some(scene_id.as_str())
         );
         assert!(runtime.applied_commands().is_empty());
+    }
+
+    #[test]
+    fn applying_native_scene_recalls_hue_room_and_colors_device_dispatch_companions() {
+        let (state, runtime, matter_id, _ha_id, hue_one_id, hue_two_id) =
+            setup_mixed_room_with_hub_groups();
+        let scene_id = crate::scenes::native_scene_id("hue", "native-palette");
+        let mut native = imported_hue_scene(&scene_id, "native-palette");
+        native.light = Some(crate::scenes::LightSceneLayer {
+            default_transition_ms: Some(450),
+            default_output: None,
+            palette: vec![
+                crate::scenes::LightSceneOutput {
+                    power: LightScenePower::On,
+                    brightness: 66,
+                    color: Some(LightSceneColor::Rgb {
+                        rgb: Rgb::new(255, 48, 112),
+                    }),
+                    transition_ms: None,
+                },
+                crate::scenes::LightSceneOutput {
+                    power: LightScenePower::On,
+                    brightness: 52,
+                    color: Some(LightSceneColor::Rgb {
+                        rgb: Rgb::new(40, 188, 255),
+                    }),
+                    transition_ms: None,
+                },
+            ],
+            entries: Vec::new(),
+        });
+        native.extensions.insert(
+            "hue_palette_scene".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let recalls = install_native_scene_source_for_hub(
+            &state,
+            HubKey::new(HubType::new("hue"), "bridge"),
+            native,
+            None,
+        );
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &state,
+                &scene_id,
+                SceneApplyRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: Some(800),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            recalls.lock().unwrap().as_slice(),
+            &[("native-palette".to_string(), Some(800))]
+        );
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, matter_id);
+        assert_eq!(calls[0].1.brightness, 66);
+        assert_eq!(
+            (calls[0].1.rgb.r, calls[0].1.rgb.g, calls[0].1.rgb.b),
+            (255, 48, 112)
+        );
+        assert!(response.affected_node_ids.contains(&hue_one_id));
+        assert!(response.affected_node_ids.contains(&hue_two_id));
+        assert!(response.affected_node_ids.contains(&matter_id));
     }
 
     #[test]

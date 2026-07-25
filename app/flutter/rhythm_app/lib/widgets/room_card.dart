@@ -5,7 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDispatchFailure, RhythmSceneDefinition, RoomModeState;
+    show
+        RhythmDispatchFailure,
+        RhythmSceneDefinition,
+        RhythmSceneSourceKind,
+        RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
@@ -243,15 +247,37 @@ class _RoomCardState extends State<RoomCard> {
             255, existingColor.$1, existingColor.$2, existingColor.$3)
         : null;
     final activeSceneId = sync.moodSceneIdForRoom(widget.roomId);
+    final activeScene =
+        activeSceneId == null ? null : sync.sceneById(activeSceneId);
+    final roomSource =
+        roomProvider.getNode(widget.roomId)?.source ?? RoomSourceDto.unknown;
+    final showHueTab = sync.roomHasHueBinding(widget.roomId);
+    final initialTab = activeSceneId == null
+        ? MoodTab.color
+        : showHueTab && activeScene?.isImportedHueScene == true
+            ? MoodTab.hue
+            : MoodTab.scenes;
+
+    AnalyticsService().logMoodPickerOpened(
+      roomSource: roomSource.name,
+      hasHueTab: showHueTab,
+    );
 
     MoodSheet.show(
       context,
       // Open straight to whichever kind of mood the room is currently using.
-      initialTab: activeSceneId != null ? MoodTab.scenes : MoodTab.color,
+      initialTab: initialTab,
       initialColor: initialColor,
       initialSceneId: activeSceneId,
       initialScenes: sync.scenesForRoom(widget.roomId),
       scenesLoader: () => sync.fetchScenes(roomId: widget.roomId),
+      showHueTab: showHueTab,
+      onTabChanged: (tab) {
+        AnalyticsService().logMoodPickerTabChanged(
+          roomSource: roomSource.name,
+          tab: tab.name,
+        );
+      },
       onColorChanged: (color) {
         final r = (color.r * 255).round();
         final g = (color.g * 255).round();
@@ -270,11 +296,26 @@ class _RoomCardState extends State<RoomCard> {
           brightness: moodBrightness,
         );
       },
-      onSceneSelected: (scene) => sync.applyMoodScene(
-        widget.roomId,
-        scene.id,
-        color: rhythmSceneRgb(scene),
-      ),
+      onSceneSelected: (scene) async {
+        final applied = await sync.applyMoodScene(
+          widget.roomId,
+          scene.id,
+          color: rhythmSceneRgb(scene),
+        );
+        final sceneCategory = scene.isHuePaletteScene
+            ? 'hue_palette'
+            : scene.isImportedHueScene
+                ? 'hue_other'
+                : scene.source.kind == RhythmSceneSourceKind.imported
+                    ? 'other_imported'
+                    : 'rhythm';
+        AnalyticsService().logMoodSceneSelected(
+          roomSource: roomSource.name,
+          sceneCategory: sceneCategory,
+          success: applied,
+        );
+        return applied;
+      },
     );
   }
 

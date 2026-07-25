@@ -72,7 +72,6 @@ List<RhythmSceneDefinition> _userVisibleScenes(
     scenes
         .where((scene) =>
             !_isGeneratedMoodSceneId(scene.id) &&
-            (!scene.isImportedHueScene || scene.isHuePaletteScene) &&
             _firstLitSceneOutput(scene) != null)
         .toList();
 
@@ -402,6 +401,18 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved and native scenes applicable to [roomId].
   List<RhythmSceneDefinition> scenesForRoom(String roomId) =>
       _userVisibleScenes(_roomScenes[roomId] ?? _scenes);
+
+  /// Whether the authoritative room topology includes a Philips Hue binding.
+  bool roomHasHueBinding(String roomId) {
+    for (final node in _helloNodes) {
+      if (node.id == roomId) {
+        return node.hubTypes.any(
+          (hubType) => hubType.trim().toLowerCase() == 'hue',
+        );
+      }
+    }
+    return _roomProvider.getNode(roomId)?.source == RoomSourceDto.hue;
+  }
 
   /// The scene id currently bound as the given room's mood, if any.
   String? moodSceneIdForRoom(String roomId) {

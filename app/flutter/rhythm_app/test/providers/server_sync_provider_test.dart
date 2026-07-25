@@ -2523,13 +2523,13 @@ void main() {
   group('ServerSyncProvider mood scenes', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
-    late _FakeRhythmConnection connection;
+    late _HelloRhythmConnection connection;
     late ServerSyncProvider provider;
 
     setUp(() {
       roomProvider = RoomProvider();
       api = _FakeRhythmServerApi();
-      connection = _FakeRhythmConnection(api);
+      connection = _HelloRhythmConnection(api);
       provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
@@ -2625,7 +2625,7 @@ void main() {
       expect(fetched.map((scene) => scene.id), ['native-hue-aurora']);
     });
 
-    test('shows only Hue scenes carrying the palette capability marker',
+    test('keeps marked and ordinary Hue scenes available for tab grouping',
         () async {
       api.roomScenes['room-1'] = [
         _testScene('rhythm-scene'),
@@ -2637,12 +2637,38 @@ void main() {
 
       expect(
         fetched.map((scene) => scene.id),
-        ['rhythm-scene', 'native-hue-aurora'],
+        ['rhythm-scene', 'native-hue-aurora', 'legacy-hue-relax'],
       );
       expect(
         provider.scenesForRoom('room-1').map((scene) => scene.id),
-        isNot(contains('legacy-hue-relax')),
+        containsAll(['native-hue-aurora', 'legacy-hue-relax']),
       );
+    });
+
+    test('detects Hue bindings in mixed authoritative room topology', () async {
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'mixed-room',
+              'name': 'Studio',
+              'kind': 'room',
+              'hub_types': ['matter', 'hue'],
+            },
+            {
+              'id': 'matter-room',
+              'name': 'Office',
+              'kind': 'room',
+              'hub_types': ['matter'],
+            },
+          ],
+        }),
+      );
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.roomHasHueBinding('mixed-room'), isTrue);
+      expect(provider.roomHasHueBinding('matter-room'), isFalse);
     });
 
     test('applies a mood scene without issuing a duplicate preferences write',

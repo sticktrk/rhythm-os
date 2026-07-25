@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 /// Which kind of mood the sheet is editing.
-enum MoodTab { color, scenes }
+enum MoodTab { color, scenes, hue }
 
 typedef MoodSceneSelected = Future<bool> Function(
   RhythmSceneDefinition scene,
@@ -23,6 +23,8 @@ class MoodSheet extends StatefulWidget {
   final Future<List<RhythmSceneDefinition>> Function() scenesLoader;
   final ValueChanged<Color> onColorChanged;
   final MoodSceneSelected onSceneSelected;
+  final ValueChanged<MoodTab>? onTabChanged;
+  final bool showHueTab;
 
   const MoodSheet({
     super.key,
@@ -33,6 +35,8 @@ class MoodSheet extends StatefulWidget {
     this.initialSceneId,
     this.initialTab = MoodTab.color,
     this.initialScenes = const [],
+    this.onTabChanged,
+    this.showHueTab = false,
   });
 
   /// Show the mood picker as a modal bottom sheet.
@@ -45,6 +49,8 @@ class MoodSheet extends StatefulWidget {
     String? initialSceneId,
     MoodTab initialTab = MoodTab.color,
     List<RhythmSceneDefinition> initialScenes = const [],
+    ValueChanged<MoodTab>? onTabChanged,
+    bool showHueTab = false,
   }) {
     return showModalBottomSheet(
       context: context,
@@ -59,6 +65,8 @@ class MoodSheet extends StatefulWidget {
         initialSceneId: initialSceneId,
         initialTab: initialTab,
         initialScenes: initialScenes,
+        onTabChanged: onTabChanged,
+        showHueTab: showHueTab,
       ),
     );
   }
@@ -78,6 +86,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   late List<RhythmSceneDefinition> _scenes;
   late bool _loadingScenes;
   bool _scenesLoadStarted = false;
+  bool _showMoreHueScenes = false;
   int _sceneSelectionGeneration = 0;
   String? _selectedSceneId;
 
@@ -89,7 +98,9 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _tab = widget.initialTab;
+    _tab = widget.initialTab == MoodTab.hue && !widget.showHueTab
+        ? MoodTab.scenes
+        : widget.initialTab;
     final initialHsv = widget.initialColor == null
         ? const HSVColor.fromAHSV(1, 35, 0.85, 1)
         : HSVColor.fromColor(widget.initialColor!);
@@ -97,7 +108,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
     _saturation = initialHsv.saturation.clamp(0.0, 1.0);
     _scenes = widget.initialScenes;
     _selectedSceneId = widget.initialSceneId;
-    _loadingScenes = _tab == MoodTab.scenes && widget.initialScenes.isEmpty;
+    _loadingScenes = _tab != MoodTab.color && widget.initialScenes.isEmpty;
 
     _glowPulse = AnimationController(
       vsync: this,
@@ -108,7 +119,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 650),
     )..forward();
 
-    if (_tab == MoodTab.scenes) {
+    if (_tab != MoodTab.color) {
       _ensureScenesLoaded();
     }
   }
@@ -152,7 +163,11 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
 
   Color get _ambientColor {
     if (_tab == MoodTab.color) return _selectedColor;
-    final scene = _selectedScene ?? (_scenes.isNotEmpty ? _scenes.first : null);
+    final tabScenes = _tab == MoodTab.hue
+        ? _scenes.where((scene) => scene.isImportedHueScene)
+        : _scenes.where((scene) => !scene.isImportedHueScene);
+    final scene =
+        _selectedScene ?? (tabScenes.isNotEmpty ? tabScenes.first : null);
     return scene == null ? const Color(0xFFFF9500) : rhythmSceneColor(scene);
   }
 
@@ -212,7 +227,8 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
     if (_tab == tab) return;
     HapticFeedback.selectionClick();
     setState(() => _tab = tab);
-    if (tab == MoodTab.scenes) {
+    widget.onTabChanged?.call(tab);
+    if (tab != MoodTab.color) {
       _ensureScenesLoaded();
     }
   }
@@ -270,6 +286,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
                     tab: _tab,
                     accent: ambient,
                     onChanged: _switchTab,
+                    showHueTab: widget.showHueTab,
                   ),
                   const SizedBox(height: 22),
                   Flexible(
@@ -292,8 +309,11 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
                             if (current != null) current,
                           ],
                         ),
-                        child:
-                            _tab == MoodTab.color ? _colorPane() : _scenePane(),
+                        child: switch (_tab) {
+                          MoodTab.color => _colorPane(),
+                          MoodTab.scenes => _scenePane(),
+                          MoodTab.hue => _huePane(),
+                        },
                       ),
                     ),
                   ),
@@ -401,10 +421,167 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
 
   Widget _scenePane() {
     if (_loadingScenes) {
-      return const Padding(
-        key: ValueKey('scenes-loading'),
-        padding: EdgeInsets.symmetric(vertical: 48),
-        child: Center(
+      return _scenesLoadingState(MoodTab.scenes);
+    }
+    final scenes = _scenes.where((scene) => !scene.isImportedHueScene).toList();
+    if (scenes.isEmpty) {
+      return _scenesEmptyState();
+    }
+    return _sceneGrid(scenes, MoodTab.scenes);
+  }
+
+  Widget _huePane() {
+    if (_loadingScenes) {
+      return _scenesLoadingState(MoodTab.hue);
+    }
+    final paletteScenes =
+        _scenes.where((scene) => scene.isHuePaletteScene).toList();
+    final otherScenes = _scenes
+        .where((scene) => scene.isImportedHueScene && !scene.isHuePaletteScene)
+        .toList();
+    if (paletteScenes.isEmpty && otherScenes.isEmpty) {
+      return _hueScenesEmptyState();
+    }
+
+    return CustomScrollView(
+      key: const ValueKey(MoodTab.hue),
+      physics: const BouncingScrollPhysics(),
+      slivers: [
+        if (paletteScenes.isNotEmpty)
+          SliverGrid(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) => _animatedSceneTile(
+                paletteScenes[index],
+                index,
+              ),
+              childCount: paletteScenes.length,
+            ),
+            gridDelegate: _sceneGridDelegate,
+          ),
+        if (otherScenes.isNotEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.only(
+                top: paletteScenes.isEmpty ? 0 : 14,
+                bottom: _showMoreHueScenes ? 14 : 4,
+              ),
+              child: Semantics(
+                button: true,
+                expanded: _showMoreHueScenes,
+                child: InkWell(
+                  key: const Key('mood_hue_more_toggle'),
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => setState(
+                    () => _showMoreHueScenes = !_showMoreHueScenes,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'More',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          '${otherScenes.length}',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.5),
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        AnimatedRotation(
+                          duration: const Duration(milliseconds: 200),
+                          turns: _showMoreHueScenes ? 0.5 : 0,
+                          child: Icon(
+                            Icons.expand_more_rounded,
+                            color: Colors.white.withValues(alpha: 0.7),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        if (_showMoreHueScenes)
+          SliverGrid(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) => _animatedSceneTile(
+                otherScenes[index],
+                paletteScenes.length + index,
+              ),
+              childCount: otherScenes.length,
+            ),
+            gridDelegate: _sceneGridDelegate,
+          ),
+        const SliverToBoxAdapter(child: SizedBox(height: 4)),
+      ],
+    );
+  }
+
+  static const _sceneGridDelegate = SliverGridDelegateWithFixedCrossAxisCount(
+    crossAxisCount: 2,
+    mainAxisSpacing: 14,
+    crossAxisSpacing: 14,
+    childAspectRatio: 1.5,
+  );
+
+  Widget _sceneGrid(
+    List<RhythmSceneDefinition> scenes,
+    MoodTab tab,
+  ) {
+    return GridView.builder(
+      key: ValueKey(tab),
+      shrinkWrap: true,
+      padding: const EdgeInsets.only(bottom: 4),
+      physics: const BouncingScrollPhysics(),
+      gridDelegate: _sceneGridDelegate,
+      itemCount: scenes.length,
+      itemBuilder: (context, i) => _animatedSceneTile(scenes[i], i),
+    );
+  }
+
+  Widget _animatedSceneTile(RhythmSceneDefinition scene, int index) {
+    final start = (index * 0.06).clamp(0.0, 0.6);
+    final anim = CurvedAnimation(
+      parent: _enter,
+      curve: Interval(
+        start,
+        (start + 0.5).clamp(0.0, 1.0),
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    return AnimatedBuilder(
+      animation: anim,
+      builder: (context, child) => Opacity(
+        opacity: anim.value,
+        child: Transform.translate(
+          offset: Offset(0, (1 - anim.value) * 16),
+          child: child,
+        ),
+      ),
+      child: _SceneTile(
+        scene: scene,
+        selected: scene.id == _selectedSceneId,
+        pulse: _glowPulse,
+        onTap: () => _onSceneTap(scene),
+      ),
+    );
+  }
+
+  Widget _scenesLoadingState(MoodTab tab) => Padding(
+        key: ValueKey('${tab.name}-loading'),
+        padding: const EdgeInsets.symmetric(vertical: 48),
+        child: const Center(
           child: SizedBox(
             width: 26,
             height: 26,
@@ -412,49 +589,6 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
           ),
         ),
       );
-    }
-    if (_scenes.isEmpty) {
-      return _scenesEmptyState();
-    }
-    return GridView.builder(
-      key: const ValueKey(MoodTab.scenes),
-      shrinkWrap: true,
-      padding: const EdgeInsets.only(bottom: 4),
-      physics: const BouncingScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        mainAxisSpacing: 14,
-        crossAxisSpacing: 14,
-        childAspectRatio: 1.5,
-      ),
-      itemCount: _scenes.length,
-      itemBuilder: (context, i) {
-        final scene = _scenes[i];
-        final start = (i * 0.06).clamp(0.0, 0.6);
-        final anim = CurvedAnimation(
-          parent: _enter,
-          curve: Interval(start, (start + 0.5).clamp(0.0, 1.0),
-              curve: Curves.easeOutCubic),
-        );
-        return AnimatedBuilder(
-          animation: anim,
-          builder: (context, child) => Opacity(
-            opacity: anim.value,
-            child: Transform.translate(
-              offset: Offset(0, (1 - anim.value) * 16),
-              child: child,
-            ),
-          ),
-          child: _SceneTile(
-            scene: scene,
-            selected: scene.id == _selectedSceneId,
-            pulse: _glowPulse,
-            onTap: () => _onSceneTap(scene),
-          ),
-        );
-      },
-    );
-  }
 
   Widget _scenesEmptyState() {
     return Padding(
@@ -489,6 +623,32 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       ),
     );
   }
+
+  Widget _hueScenesEmptyState() {
+    return Padding(
+      key: const ValueKey('hue-scenes-empty'),
+      padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.lightbulb_outline_rounded,
+            size: 36,
+            color: Colors.white.withValues(alpha: 0.3),
+          ),
+          const SizedBox(height: 14),
+          const Text(
+            'No Hue scenes',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Segmented pill toggle for switching between Color and Scenes.
@@ -496,11 +656,13 @@ class _MoodTabToggle extends StatelessWidget {
   final MoodTab tab;
   final Color accent;
   final ValueChanged<MoodTab> onChanged;
+  final bool showHueTab;
 
   const _MoodTabToggle({
     required this.tab,
     required this.accent,
     required this.onChanged,
+    required this.showHueTab,
   });
 
   @override
@@ -518,11 +680,14 @@ class _MoodTabToggle extends StatelessWidget {
           AnimatedAlign(
             duration: const Duration(milliseconds: 260),
             curve: Curves.easeOutCubic,
-            alignment: tab == MoodTab.color
-                ? Alignment.centerLeft
-                : Alignment.centerRight,
+            alignment: switch (tab) {
+              MoodTab.color => Alignment.centerLeft,
+              MoodTab.scenes =>
+                showHueTab ? Alignment.center : Alignment.centerRight,
+              MoodTab.hue => Alignment.centerRight,
+            },
             child: FractionallySizedBox(
-              widthFactor: 0.5,
+              widthFactor: showHueTab ? 1 / 3 : 0.5,
               heightFactor: 1,
               child: Container(
                 decoration: BoxDecoration(
@@ -549,6 +714,8 @@ class _MoodTabToggle extends StatelessWidget {
               children: [
                 _segment(MoodTab.color, Icons.palette_rounded, 'Color'),
                 _segment(MoodTab.scenes, Icons.auto_awesome_rounded, 'Scenes'),
+                if (showHueTab)
+                  _segment(MoodTab.hue, Icons.lightbulb_rounded, 'Hue'),
               ],
             ),
           ),

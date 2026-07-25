@@ -1040,6 +1040,7 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
     expect(find.byKey(const Key('mood_color_wheel')), findsOneWidget);
+    expect(find.byKey(const Key('mood_tab_hue')), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, hasLength(1));
     final call = connection.api.nodePreferenceCalls.single;
     expect(call.nodeId, 'room-1');
