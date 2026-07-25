@@ -434,6 +434,36 @@ void main() {
     expect(find.text('Adjusted 1 of 2 rooms.'), findsOneWidget);
   });
 
+  testWidgets('global action result auto-dismisses while offering undo',
+      (tester) async {
+    await _pumpAllRooms(
+      tester,
+      rooms: const [_room1],
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-dim')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('global-room-action-undo')),
+      findsOneWidget,
+    );
+    expect(tester.widget<SnackBar>(find.byType(SnackBar)).persist, isFalse);
+
+    await tester.pump(const Duration(seconds: 8));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('global-room-action-undo')),
+      findsNothing,
+    );
+  });
+
   testWidgets('global reset uses reset action and exposes brightness undo',
       (tester) async {
     final harness = await _pumpAllRooms(

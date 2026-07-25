@@ -965,6 +965,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     messenger.showSnackBar(
       SnackBar(
         duration: const Duration(seconds: 8),
+        persist: false,
         content: Text('$verb $completed of $eligible rooms.'),
         action: offerUndo && completed > 0 && _globalUndoSnapshot != null
             ? SnackBarAction(
