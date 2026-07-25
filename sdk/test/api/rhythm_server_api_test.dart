@@ -1383,6 +1383,27 @@ void main() {
       verify(() => dio.get('api/scenes')).called(1);
     });
 
+    test('getScenes sends room target for native scene discovery', () async {
+      when(() => dio.get(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/scenes'),
+            statusCode: 200,
+            data: {
+              'scenes': [sceneJson(id: 'hue-arctic')],
+            },
+          ));
+
+      final scenes = await api.getScenes(targetId: 'room-1');
+
+      expect(scenes.single.id, 'hue-arctic');
+      verify(() => dio.get(
+            'api/scenes',
+            queryParameters: {'target_id': 'room-1'},
+          )).called(1);
+    });
+
     test('upsertScene posts the scene definition', () async {
       when(() => dio.post(any(), data: any(named: 'data')))
           .thenAnswer((_) async => Response(

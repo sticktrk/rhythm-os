@@ -682,8 +682,16 @@ async fn get_profiles(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_profiles(&state)
 }
 
-async fn get_scenes(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_scenes(&state)
+#[derive(serde::Deserialize)]
+struct ScenesQuery {
+    target_id: Option<String>,
+}
+
+async fn get_scenes(
+    State(state): State<SharedState>,
+    Query(query): Query<ScenesQuery>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_get_scenes(&state, query.target_id.as_deref())).await
 }
 
 async fn post_scene(State(state): State<SharedState>, Json(body): Json<Value>) -> ApiResponse {

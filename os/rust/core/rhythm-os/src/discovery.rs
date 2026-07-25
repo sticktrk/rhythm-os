@@ -9,6 +9,7 @@ use anyhow::Result;
 use rhythm_core::runtime::hub_registry::DeviceType;
 
 use crate::canonical::identity::DiscoveredIdentity;
+use crate::scenes::SceneDefinition;
 
 /// A room discovered from the hub (Hue room, HA area, etc.).
 pub struct DiscoveredRoom {
@@ -88,6 +89,23 @@ pub trait HubDiscovery: Send + Sync {
     /// the event stream replays current state don't need this).
     fn discover_motion_state(&self) -> Result<Vec<DiscoveredMotionState>> {
         Ok(vec![])
+    }
+
+    /// Discover native scenes assigned to one hub-native room.
+    ///
+    /// Returned definitions are ephemeral projections for user-facing scene
+    /// pickers. The native integration remains authoritative; callers must not
+    /// persist these definitions as Rhythm-owned scenes.
+    fn discover_scenes(&self, _room_id: &str) -> Result<Vec<SceneDefinition>> {
+        Ok(vec![])
+    }
+
+    /// Recall a native scene by its integration-owned external ID.
+    ///
+    /// Integrations that expose native scenes should override this together
+    /// with [`HubDiscovery::discover_scenes`].
+    fn recall_scene(&self, _scene_id: &str, _transition_ms: Option<u32>) -> Result<()> {
+        anyhow::bail!("Native scene recall is not supported by this integration")
     }
 
     /// Discover devices with native hub automation configured.

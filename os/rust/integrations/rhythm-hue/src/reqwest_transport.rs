@@ -20,6 +20,16 @@ fn identify_light_body() -> serde_json::Value {
     })
 }
 
+fn scene_recall_body(transition_ms: Option<u32>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "recall": { "action": "active" }
+    });
+    if let Some(duration) = transition_ms {
+        body["recall"]["duration"] = serde_json::json!(duration);
+    }
+    body
+}
+
 fn light_control_body(
     on: bool,
     brightness: Option<u8>,
@@ -295,6 +305,36 @@ impl HueTransport for ReqwestHueTransport {
         Ok(resp.json()?)
     }
 
+    fn recall_scene(
+        &self,
+        username: &str,
+        scene_id: &str,
+        transition_ms: Option<u32>,
+    ) -> Result<()> {
+        let url = format!("{}/clip/v2/resource/scene/{}", self.base_url(), scene_id);
+        let body = scene_recall_body(transition_ms);
+
+        let resp = self
+            .client
+            .put(&url)
+            .header("hue-application-key", username)
+            .json(&body)
+            .send()?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "PUT scene/{} recall failed with status {}: {}",
+                scene_id,
+                status,
+                body
+            ));
+        }
+
+        Ok(())
+    }
+
     fn update_room_children(
         &self,
         username: &str,
@@ -349,6 +389,20 @@ mod tests {
             identify_light_body(),
             serde_json::json!({
                 "identify": { "action": "identify" }
+            })
+        );
+    }
+
+    #[test]
+    fn scene_recall_body_uses_active_action_and_optional_duration() {
+        assert_eq!(
+            scene_recall_body(None),
+            serde_json::json!({"recall": {"action": "active"}})
+        );
+        assert_eq!(
+            scene_recall_body(Some(750)),
+            serde_json::json!({
+                "recall": {"action": "active", "duration": 750}
             })
         );
     }

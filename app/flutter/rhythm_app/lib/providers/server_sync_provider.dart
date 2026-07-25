@@ -270,6 +270,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved scenes (presets) from the server, used for scene-backed Mood.
   List<RhythmSceneDefinition> _scenes = const [];
 
+  /// Room-scoped scene catalogs, including integration-owned native scenes.
+  final Map<String, List<RhythmSceneDefinition>> _roomScenes = {};
+
   /// Local scene selection while the server catches up to Mood edits.
   final Map<String, String?> _optimisticMoodSceneIds = {};
 
@@ -392,6 +395,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved scenes (presets) available to use as moods.
   List<RhythmSceneDefinition> get scenes => _userVisibleScenes(_scenes);
 
+  /// Saved and native scenes applicable to [roomId].
+  List<RhythmSceneDefinition> scenesForRoom(String roomId) =>
+      _userVisibleScenes(_roomScenes[roomId] ?? _scenes);
+
   /// The scene id currently bound as the given room's mood, if any.
   String? moodSceneIdForRoom(String roomId) {
     if (_optimisticMoodSceneIds.containsKey(roomId)) {
@@ -412,24 +419,38 @@ class ServerSyncProvider extends ChangeNotifier {
     for (final scene in _scenes) {
       if (scene.id == id) return scene;
     }
+    for (final scenes in _roomScenes.values) {
+      for (final scene in scenes) {
+        if (scene.id == id) return scene;
+      }
+    }
     return null;
   }
 
-  /// Fetch the latest scenes from the server, caching the result. Returns the
-  /// cached list when offline or in demo mode.
-  Future<List<RhythmSceneDefinition>> fetchScenes() async {
+  /// Fetch the latest scenes from the server, optionally including native
+  /// integration scenes for [roomId]. Returns the matching cache when offline.
+  Future<List<RhythmSceneDefinition>> fetchScenes({String? roomId}) async {
     if (HueServiceLocator.isDemoMode) {
       _scenes = await DemoServerApi.instance.getScenes();
       notifyListeners();
+      return roomId == null ? scenes : scenesForRoom(roomId);
+    }
+    if (!_connection.connected) {
+      return roomId == null ? scenes : scenesForRoom(roomId);
+    }
+    final fetched = await _connection.api.getScenes(targetId: roomId);
+    if (roomId == null) {
+      if (fetched.isNotEmpty || _scenes.isEmpty) {
+        _scenes = fetched;
+        notifyListeners();
+      }
       return scenes;
     }
-    if (!_connection.connected) return scenes;
-    final fetched = await _connection.api.getScenes();
-    if (fetched.isNotEmpty || _scenes.isEmpty) {
-      _scenes = fetched;
+    if (fetched.isNotEmpty || !_roomScenes.containsKey(roomId)) {
+      _roomScenes[roomId] = fetched;
       notifyListeners();
     }
-    return scenes;
+    return scenesForRoom(roomId);
   }
 
   /// Apply [sceneId] to [roomId] and bind it as that room's Mood scene.
@@ -442,6 +463,9 @@ class ServerSyncProvider extends ChangeNotifier {
     (int, int, int)? color,
     int? transitionMs,
   }) {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    final hadPreviousOverride = _optimisticMoodSceneIds.containsKey(roomId);
+    final previousOverride = _optimisticMoodSceneIds[roomId];
     if (color != null) {
       _roomProvider.setRoomColorLocal(
         roomId,
@@ -473,11 +497,24 @@ class ServerSyncProvider extends ChangeNotifier {
       );
       return true;
     }
-    if (!_connection.connected) return false;
-    _connection.api.applyScene(
-      sceneId: sceneId,
-      targetId: roomId,
-      transitionMs: transitionMs,
+    unawaited(
+      _connection.api
+          .applyScene(
+        sceneId: sceneId,
+        targetId: roomId,
+        transitionMs: transitionMs,
+      )
+          .then((result) {
+        if (result != null || _optimisticMoodSceneIds[roomId] != sceneId) {
+          return;
+        }
+        if (hadPreviousOverride) {
+          _optimisticMoodSceneIds[roomId] = previousOverride;
+        } else {
+          _optimisticMoodSceneIds.remove(roomId);
+        }
+        notifyListeners();
+      }),
     );
     return true;
   }
@@ -2657,6 +2694,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
     _activeMode = null;
     _activeProfileId = null;
+    _scenes = const [];
+    _roomScenes.clear();
+    _optimisticMoodSceneIds.clear();
     _helloNodes = [];
     _helloRooms = [];
     _clearStandbyEnabledOptimisticStates();

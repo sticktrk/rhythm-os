@@ -68,6 +68,14 @@ impl HueTransport for Arc<SpyHueTransport> {
     ) -> anyhow::Result<serde_json::Value> {
         (**self).get_resources(username, resource_type)
     }
+    fn recall_scene(
+        &self,
+        username: &str,
+        scene_id: &str,
+        transition_ms: Option<u32>,
+    ) -> anyhow::Result<()> {
+        (**self).recall_scene(username, scene_id, transition_ms)
+    }
     fn update_room_children(
         &self,
         username: &str,
@@ -108,6 +116,10 @@ pub enum HueTransportCall {
     },
     GetResources {
         resource_type: String,
+    },
+    RecallScene {
+        scene_id: String,
+        transition_ms: Option<u32>,
     },
     UpdateRoomChildren {
         room_id: String,
@@ -341,6 +353,25 @@ impl HueTransport for SpyHueTransport {
             .get(resource_type)
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"data": []})))
+    }
+
+    fn recall_scene(
+        &self,
+        _username: &str,
+        scene_id: &str,
+        transition_ms: Option<u32>,
+    ) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::RecallScene {
+                scene_id: scene_id.to_string(),
+                transition_ms,
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: recall_scene failed");
+        }
+        Ok(())
     }
 
     fn update_room_children(

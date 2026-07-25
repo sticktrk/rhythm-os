@@ -250,8 +250,8 @@ class _RoomCardState extends State<RoomCard> {
       initialTab: activeSceneId != null ? MoodTab.scenes : MoodTab.color,
       initialColor: initialColor,
       initialSceneId: activeSceneId,
-      initialScenes: sync.scenes,
-      scenesLoader: () => sync.fetchScenes(),
+      initialScenes: sync.scenesForRoom(widget.roomId),
+      scenesLoader: () => sync.fetchScenes(roomId: widget.roomId),
       onColorChanged: (color) {
         final r = (color.r * 255).round();
         final g = (color.g * 255).round();

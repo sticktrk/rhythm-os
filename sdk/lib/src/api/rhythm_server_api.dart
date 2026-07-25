@@ -767,10 +767,18 @@ class RhythmServerApi {
   // Scenes
   // =========================================================================
 
-  /// Fetch all scene definitions from the server.
-  Future<List<RhythmSceneDefinition>> getScenes() async {
+  /// Fetch scene definitions from the server.
+  ///
+  /// When [targetId] is provided, capable appliances also include ephemeral
+  /// native scenes that apply to that room.
+  Future<List<RhythmSceneDefinition>> getScenes({String? targetId}) async {
     try {
-      final response = await _dio.get('api/scenes');
+      final response = targetId == null
+          ? await _dio.get('api/scenes')
+          : await _dio.get(
+              'api/scenes',
+              queryParameters: {'target_id': targetId},
+            );
       return _parseScenesResponse(response.data);
     } catch (e) {
       _log.warning('getScenes failed', e);

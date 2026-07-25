@@ -39,6 +39,7 @@ use crate::bundle::{
     LEGACY_BACKUP_SCHEMA_VERSION, PROFILE_BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
+use crate::discovery::HubDiscovery;
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
     factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
@@ -4071,9 +4072,71 @@ fn do_scene_apply_inner(
 }
 
 pub fn build_scenes(state: &SharedState) -> Result<String> {
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    build_scenes_for_target(state, None)
+}
+
+fn scene_sources_for_target(
+    s: &AppState,
+    target_id: &str,
+) -> Vec<(HubKey, String, Arc<dyn HubDiscovery>)> {
+    let room_id = if s.topology.get(target_id).is_some() {
+        Some(target_id)
+    } else {
+        s.topology.device_parent_room_id(target_id)
+    };
+    let Some(room) = room_id.and_then(|room_id| s.topology.get(room_id)) else {
+        return Vec::new();
+    };
+
+    room.hub_room_bindings
+        .iter()
+        .filter_map(|binding| {
+            let discovery = s
+                .hubs
+                .get(&binding.hub_key)
+                .and_then(|hub| hub.discovery.clone())?;
+            Some((
+                binding.hub_key.clone(),
+                binding.hub_room_id.clone(),
+                discovery,
+            ))
+        })
+        .collect()
+}
+
+pub fn build_scenes_for_target(state: &SharedState, target_id: Option<&str>) -> Result<String> {
+    let (mut scenes, sources) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let scenes = s.scenes.values().cloned().collect::<Vec<_>>();
+        let sources = target_id
+            .map(|target_id| scene_sources_for_target(&s, target_id))
+            .unwrap_or_default();
+        (scenes, sources)
+    };
+
+    let mut known_ids: HashSet<String> = scenes.iter().map(|scene| scene.id.clone()).collect();
+    for (hub_key, hub_room_id, discovery) in sources {
+        match discovery.discover_scenes(&hub_room_id) {
+            Ok(discovered) => {
+                for scene in discovered {
+                    if known_ids.insert(scene.id.clone()) {
+                        scenes.push(scene);
+                    }
+                }
+            }
+            Err(error) => warn!(
+                target: "native_scenes",
+                "Failed to discover scenes for target={} hub={} room={}: {}",
+                target_id.unwrap_or_default(),
+                hub_key,
+                hub_room_id,
+                error
+            ),
+        }
+    }
+
     serde_json::to_string(&serde_json::json!({
-        "scenes": s.scenes.values().cloned().collect::<Vec<_>>()
+        "scenes": scenes
     }))
     .map_err(|e| anyhow::anyhow!("serialize scenes: {}", e))
 }
@@ -4139,8 +4202,109 @@ pub fn do_scene_apply(
     scene_id: &str,
     request: SceneApplyRequest,
 ) -> Result<String> {
-    let response = do_scene_apply_inner(state, scene_id, request, true, true, None)?;
+    let is_stored = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes.contains_key(scene_id)
+    };
+    let response = if is_stored {
+        do_scene_apply_inner(state, scene_id, request, true, true, None)?
+    } else {
+        do_native_scene_apply(state, scene_id, request)?
+    };
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
+}
+
+fn do_native_scene_apply(
+    state: &SharedState,
+    scene_id: &str,
+    request: SceneApplyRequest,
+) -> Result<SceneApplyResponse> {
+    let target_id = resolve_node_id(state, &request.target_id);
+    let sources = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        scene_sources_for_target(&s, &target_id)
+    };
+    let mut discovery_errors = Vec::new();
+
+    for (hub_key, hub_room_id, discovery) in sources {
+        let scenes = match discovery.discover_scenes(&hub_room_id) {
+            Ok(scenes) => scenes,
+            Err(error) => {
+                discovery_errors.push(format!("hub {} room {}: {}", hub_key, hub_room_id, error));
+                continue;
+            }
+        };
+        let Some(scene) = scenes.into_iter().find(|scene| scene.id == scene_id) else {
+            continue;
+        };
+        let external_id = match &scene.source {
+            SceneSource::Imported {
+                external_id: Some(external_id),
+                ..
+            } => external_id.as_str(),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Native scene '{}' has no external scene identity",
+                    scene_id
+                ));
+            }
+        };
+
+        let (runtime, mut affected_node_ids) = {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let runtime = s
+                .hub_runtime()
+                .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+            let affected: Vec<String> = light_scene_target_scope_node_ids(&s, &runtime, &target_id)
+                .into_iter()
+                .collect();
+            (runtime, affected)
+        };
+        if affected_node_ids.is_empty() {
+            affected_node_ids.push(target_id.clone());
+        }
+        discovery
+            .recall_scene(external_id, request.transition_ms)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to recall native scene '{}' on hub {}: {}",
+                    scene_id,
+                    hub_key,
+                    error
+                )
+            })?;
+
+        set_scene_committed_state(state, &runtime, scene_id, &target_id, &affected_node_ids);
+        if let Ok(mut s) = state.lock() {
+            clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
+        }
+        persist_rooms(state);
+        emit_node_state_event_after_apply(state, &runtime, &target_id);
+        info!(
+            target: "native_scenes",
+            "Recalled native scene target={} hub={} room={} scene={}",
+            target_id,
+            hub_key,
+            hub_room_id,
+            scene_id
+        );
+        return Ok(SceneApplyResponse {
+            scene_id: scene_id.to_string(),
+            target_id,
+            affected_node_ids,
+            unresolved_node_ids: Vec::new(),
+            preview_id: None,
+        });
+    }
+
+    if !discovery_errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Scene '{}' could not be resolved because native discovery failed: {}",
+            scene_id,
+            discovery_errors.join("; ")
+        ));
+    }
+    Err(anyhow::anyhow!("Scene '{}' not found", scene_id))
 }
 
 fn record_scene_preview_session(
@@ -13817,6 +13981,93 @@ mod tests {
         setup_state_at_hour(snapshots, 12.0)
     }
 
+    struct NativeSceneDiscovery {
+        scenes: Vec<SceneDefinition>,
+        recalls: Arc<Mutex<Vec<(String, Option<u32>)>>>,
+    }
+
+    impl crate::discovery::HubDiscovery for NativeSceneDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<crate::discovery::DiscoveredRoom>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<crate::discovery::DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_scenes(&self, _room_id: &str) -> Result<Vec<SceneDefinition>> {
+            Ok(self.scenes.clone())
+        }
+
+        fn recall_scene(&self, scene_id: &str, transition_ms: Option<u32>) -> Result<()> {
+            self.recalls
+                .lock()
+                .unwrap()
+                .push((scene_id.to_string(), transition_ms));
+            Ok(())
+        }
+    }
+
+    fn imported_hue_scene(id: &str, external_id: &str) -> SceneDefinition {
+        SceneDefinition {
+            id: id.to_string(),
+            name: "Hue Aurora".to_string(),
+            description: Some("From Philips Hue".to_string()),
+            source: SceneSource::Imported {
+                provider: "hue".to_string(),
+                external_id: Some(external_id.to_string()),
+            },
+            light: Some(LightSceneLayer {
+                default_transition_ms: None,
+                default_output: Some(LightSceneOutput {
+                    power: LightScenePower::On,
+                    brightness: 70,
+                    color: Some(LightSceneColor::Kelvin { kelvin: 4200 }),
+                    transition_ms: None,
+                }),
+                palette: Vec::new(),
+                entries: Vec::new(),
+            }),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    fn install_native_scene_source(
+        state: &SharedState,
+        scene: SceneDefinition,
+    ) -> Arc<Mutex<Vec<(String, Option<u32>)>>> {
+        let hub_type = HubType::new("hue");
+        let hub_key = HubKey::new(hub_type.clone(), "hue-bridge");
+        let recalls = Arc::new(Mutex::new(Vec::new()));
+        let discovery = NativeSceneDiscovery {
+            scenes: vec![scene],
+            recalls: recalls.clone(),
+        };
+        let mut room = crate::topology::TopologyRoom::new("room1", "Room 1");
+        room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+            hub_key: hub_key.clone(),
+            hub_room_id: "hue-room-1".to_string(),
+            control_id: "hue-group-1".to_string(),
+            light_device_ids: vec!["hue-light-1".to_string()],
+        });
+
+        let mut app = state.lock().unwrap();
+        app.topology.insert_room(room);
+        app.hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key,
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: None,
+                discovery: Some(Arc::new(discovery)),
+                shutdown: Default::default(),
+            },
+        );
+        recalls
+    }
+
     fn setup_state_at_hour(
         snapshots: Vec<RoomSnapshot>,
         current_hour: f32,
@@ -16789,6 +17040,66 @@ mod tests {
                 .mood_scene_id,
             None
         );
+    }
+
+    #[test]
+    fn room_scoped_scene_list_merges_native_scenes_without_persisting_them() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let native = imported_hue_scene("hue-native-1", "native-1");
+        install_native_scene_source(&state, native);
+
+        let scoped: serde_json::Value =
+            serde_json::from_str(&build_scenes_for_target(&state, Some("room1")).unwrap()).unwrap();
+        let unscoped: serde_json::Value =
+            serde_json::from_str(&build_scenes_for_target(&state, None).unwrap()).unwrap();
+
+        assert!(scoped["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scene| scene["id"] == "hue-native-1"));
+        assert!(!unscoped["scenes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scene| scene["id"] == "hue-native-1"));
+        assert!(!state.lock().unwrap().scenes.contains_key("hue-native-1"));
+    }
+
+    #[test]
+    fn applying_native_scene_recalls_external_id_and_commits_room_mood() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let native = imported_hue_scene("hue-native-1", "native-1");
+        let recalls = install_native_scene_source(&state, native);
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &state,
+                "hue-native-1",
+                SceneApplyRequest {
+                    target_id: "room1".to_string(),
+                    transition_ms: Some(850),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(response.scene_id, "hue-native-1");
+        assert_eq!(
+            recalls.lock().unwrap().as_slice(),
+            &[("native-1".to_string(), Some(850))]
+        );
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("room1")
+                .unwrap()
+                .profile_settings
+                .mood_scene_id
+                .as_deref(),
+            Some("hue-native-1")
+        );
+        assert!(runtime.applied_commands().is_empty());
     }
 
     #[test]
