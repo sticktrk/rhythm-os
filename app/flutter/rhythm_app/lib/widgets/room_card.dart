@@ -2006,19 +2006,6 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  Positioned.fill(
-                    child: Padding(
-                      padding: const EdgeInsets.all(6),
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.10),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
                   Positioned(
                     top: 12,
                     child: Icon(
