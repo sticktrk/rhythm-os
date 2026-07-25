@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../../services/analytics_service.dart';
 import '../../services/device_pairing_code.dart';
 import '../../widgets/solar_orbit.dart';
 
@@ -32,6 +33,13 @@ bool get supportsDevicePairingCamera {
       defaultTargetPlatform == TargetPlatform.iOS ||
       defaultTargetPlatform == TargetPlatform.macOS;
 }
+
+String _pairingCodeAnalyticsKind(DevicePairingCodeKind kind) => switch (kind) {
+      DevicePairingCodeKind.matter => 'matter',
+      DevicePairingCodeKind.homeKit => 'homekit',
+      DevicePairingCodeKind.hue => 'hue',
+      DevicePairingCodeKind.unknown => 'unknown',
+    };
 
 class DevicePairingScannerScreen extends StatefulWidget {
   const DevicePairingScannerScreen({
@@ -84,6 +92,7 @@ class _DevicePairingScannerScreenState
   @override
   void initState() {
     super.initState();
+    AnalyticsService().logScreenView('device_pairing_scanner');
     if (widget.cameraBuilder == null) {
       _controller = MobileScannerController(
         formats: const [BarcodeFormat.qrCode],
@@ -116,13 +125,17 @@ class _DevicePairingScannerScreenState
     if (codes.isEmpty) return;
 
     final code = codes.cast<DevicePairingCode?>().firstWhere(
-          (candidate) => candidate?.kind == DevicePairingCodeKind.matter,
-          orElse: () => null,
-        ) ??
+              (candidate) => candidate?.kind == DevicePairingCodeKind.matter,
+              orElse: () => null,
+            ) ??
         codes.first;
 
     _handledDetection = true;
     if (code.kind == DevicePairingCodeKind.matter) {
+      AnalyticsService().logDevicePairingCodeDetected(
+        codeKind: _pairingCodeAnalyticsKind(code.kind),
+        outcome: 'continued_to_pairing',
+      );
       HapticFeedback.mediumImpact();
       Navigator.of(context).pop(
         DevicePairingScannerResult.matter(code.payload),
@@ -130,6 +143,10 @@ class _DevicePairingScannerScreenState
       return;
     }
 
+    AnalyticsService().logDevicePairingCodeDetected(
+      codeKind: _pairingCodeAnalyticsKind(code.kind),
+      outcome: 'guidance_shown',
+    );
     HapticFeedback.lightImpact();
     setState(() {
       _guidance = guidanceForDevicePairingCode(code.kind);
@@ -346,6 +363,10 @@ class _DevicePairingScannerScreenState
               width: double.infinity,
               child: FilledButton.tonalIcon(
                 onPressed: () {
+                  AnalyticsService().logDevicePairingCodeDetected(
+                    codeKind: 'manual',
+                    outcome: 'manual_entry_selected',
+                  );
                   Navigator.of(context).pop(
                     const DevicePairingScannerResult.enterCode(),
                   );

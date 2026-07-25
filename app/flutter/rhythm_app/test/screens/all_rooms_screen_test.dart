@@ -39,6 +39,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<RhythmDispatchResult> nodeActionBatchResult(
     List<({String nodeId, String action})> actions, {
     int? dispatchSpacingMs,
+    String? correlationId,
   }) async {
     actionBatches.add(List.of(actions));
     final completer = actionBatchCompleter;
@@ -54,6 +55,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<RhythmDispatchResult> nodeCurveBrightnessBatchResult(
     List<({String nodeId, int brightness})> items, {
     int? dispatchSpacingMs,
+    String? correlationId,
   }) async {
     brightnessBatches.add(List.of(items));
     return RhythmDispatchResult(

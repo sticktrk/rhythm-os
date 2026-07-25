@@ -151,26 +151,31 @@ class RhythmServerApi {
 
   /// Dispatch actions for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeActionBatch(
-      List<({String nodeId, String action})> actions,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, String action})> actions, {
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
     return (await nodeActionBatchResult(
       actions,
       dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
     ))
         .states;
   }
 
   /// Dispatch actions for multiple nodes in a single request.
   Future<RhythmDispatchResult> nodeActionBatchResult(
-      List<({String nodeId, String action})> actions,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, String action})> actions, {
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
     if (actions.isEmpty) return const RhythmDispatchResult();
     try {
       final response = await _dio.put(
         'api/nodes/action',
         data: _nodesBatchBody([
           for (final a in actions) {'node_id': a.nodeId, 'action': a.action}
-        ], dispatchSpacingMs: dispatchSpacingMs),
+        ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId),
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheDispatchResponse(response.data);
@@ -182,22 +187,26 @@ class RhythmServerApi {
 
   /// Dispatch actions for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomActionBatch(
-      List<({String roomId, String action})> actions,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, String action})> actions, {
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) {
     return nodeActionBatch([
       for (final action in actions)
         (nodeId: action.roomId, action: action.action),
-    ], dispatchSpacingMs: dispatchSpacingMs);
+    ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId);
   }
 
   /// Dispatch actions for multiple rooms in a single request.
   Future<RhythmDispatchResult> roomActionBatchResult(
-      List<({String roomId, String action})> actions,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, String action})> actions, {
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) {
     return nodeActionBatchResult([
       for (final action in actions)
         (nodeId: action.roomId, action: action.action),
-    ], dispatchSpacingMs: dispatchSpacingMs);
+    ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId);
   }
 
   /// Apply a curve brightness modifier to a node.
@@ -381,23 +390,28 @@ class RhythmServerApi {
 
   /// Apply brightness curve modifiers to multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeCurveBrightnessBatch(
-      List<({String nodeId, int brightness})> items,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, int brightness})> items, {
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
     return (await nodeCurveBrightnessBatchResult(
       items,
       dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
     ))
         .states;
   }
 
   /// Apply brightness curve modifiers to multiple nodes in a single request.
   Future<RhythmDispatchResult> nodeCurveBrightnessBatchResult(
-      List<({String nodeId, int brightness})> items,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, int brightness})> items, {
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
     if (items.isEmpty) return const RhythmDispatchResult();
     return _putNodeCurveModifierBatch([
       for (final i in items) {'node_id': i.nodeId, 'brightness': i.brightness}
-    ], dispatchSpacingMs: dispatchSpacingMs);
+    ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId);
   }
 
   /// Apply color-temperature curve modifiers to multiple nodes in a single request.
@@ -843,12 +857,14 @@ class RhythmServerApi {
     required String sceneId,
     required String targetId,
     int? transitionMs,
+    String? correlationId,
   }) {
     return _postSceneAction(
       'api/scenes/${Uri.encodeComponent(sceneId)}/apply',
       {
         'target_id': targetId,
         if (transitionMs != null) 'transition_ms': transitionMs,
+        if (correlationId != null) 'correlation_id': correlationId,
       },
       logName: 'applyScene',
     );
@@ -2091,12 +2107,17 @@ class RhythmServerApi {
   Future<RhythmDispatchResult> _putNodeCurveModifierBatch(
     List<Map<String, dynamic>> nodes, {
     int? dispatchSpacingMs,
+    String? correlationId,
   }) async {
     if (nodes.isEmpty) return const RhythmDispatchResult();
     try {
       final response = await _dio.put(
         'api/nodes/curve',
-        data: _nodesBatchBody(nodes, dispatchSpacingMs: dispatchSpacingMs),
+        data: _nodesBatchBody(
+          nodes,
+          dispatchSpacingMs: dispatchSpacingMs,
+          correlationId: correlationId,
+        ),
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheDispatchResponse(response.data);
@@ -2340,12 +2361,14 @@ class RhythmServerApi {
   Object _nodesBatchBody(
     List<Map<String, dynamic>> nodes, {
     int? dispatchSpacingMs,
+    String? correlationId,
   }) {
     final normalizedSpacing = _normalizedDispatchSpacingMs(dispatchSpacingMs);
-    if (normalizedSpacing == null) return nodes;
+    if (normalizedSpacing == null && correlationId == null) return nodes;
     return {
       'nodes': nodes,
-      'dispatch_spacing_ms': normalizedSpacing,
+      if (normalizedSpacing != null) 'dispatch_spacing_ms': normalizedSpacing,
+      if (correlationId != null) 'correlation_id': correlationId,
     };
   }
 }

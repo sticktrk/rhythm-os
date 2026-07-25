@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
+import 'package:uuid/uuid.dart';
 
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
@@ -14,11 +15,13 @@ import 'matter_device_add_screen.dart';
 Future<void> startMatterPairingFlow(
   BuildContext context, {
   MatterAddMethod? preferredMethod,
+  String analyticsSource = 'unknown',
 }) async {
   final homeProvider = context.read<HomeProvider>();
   final syncProvider = context.read<ServerSyncProvider>();
   final serverHub = homeProvider.activeServerHub;
   if (serverHub == null) return;
+  final journeyId = 'matter-pair-${const Uuid().v4()}';
 
   final addMethod = await _resolveMatterAddMethod(
     context,
@@ -40,6 +43,8 @@ Future<void> startMatterPairingFlow(
       endpoint: serverEndpoint.endpoint,
       authToken: serverEndpoint.hub.token,
       addMethod: addMethod,
+      analyticsSource: analyticsSource,
+      journeyId: journeyId,
     );
   } else {
     while (pairingResult == null) {
@@ -52,6 +57,8 @@ Future<void> startMatterPairingFlow(
         endpoint: serverEndpoint.endpoint,
         authToken: serverEndpoint.hub.token,
         addMethod: addMethod,
+        analyticsSource: analyticsSource,
+        journeyId: journeyId,
         initialSetupPayload:
             scanResult.action == DevicePairingScannerAction.matter
                 ? scanResult.payload

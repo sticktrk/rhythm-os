@@ -50,6 +50,11 @@ fn mutation_items(body: &Value) -> Result<Vec<Value>, String> {
     Ok(vec![body.clone()])
 }
 
+fn correlation_id_from_body(body: &Value) -> Option<String> {
+    let correlation_id = body.get("correlation_id")?.as_str()?.trim();
+    (!correlation_id.is_empty() && correlation_id.len() <= 128).then(|| correlation_id.to_string())
+}
+
 fn dispatch_spacing_from_body(body: &Value) -> Result<Duration, String> {
     let Some(value) = body.get("dispatch_spacing_ms") else {
         return Ok(commands::default_http_batch_dispatch_spacing());
@@ -1646,6 +1651,7 @@ pub fn handle_delete_scene(state: &SharedState, scene_id: &str) -> ApiResponse {
 }
 
 pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
     let request: crate::scenes::SceneApplyRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
         Err(e) => return ApiResponse::bad_request(&format!("Invalid scene apply request: {}", e)),
@@ -1655,6 +1661,7 @@ pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value
         Ok(json) => {
             let mut record = crate::activity::LightActivityRecord::app(&target_id, "apply_scene");
             record.payload = Some(json!({"scene_id": scene_id}));
+            record.correlation_id = correlation_id;
             crate::activity::record_light_activity(state, record);
             ApiResponse::json_ok(json)
         }
@@ -1904,6 +1911,7 @@ pub fn handle_room_action(state: &SharedState, body: &Value, persist: bool) -> A
 /// Dispatch node action(s). Batch actions are queued and paced on the
 /// background dispatch worker so HTTP cannot fan out directly to hubs.
 pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
     let items = match mutation_items(body) {
         Ok(items) => items,
         Err(e) => return ApiResponse::bad_request(&e),
@@ -1948,6 +1956,8 @@ pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> A
                 crate::activity::http_action_id(action),
             );
             record.payload = Some(json!({"request_action": action}));
+            record.correlation_id = correlation_id.clone();
+            record.fanout_of = correlation_id.clone();
             crate::activity::record_light_activity(state, record);
         }
         return nodes_response(results, batch, dispatch_spacing);
@@ -1967,6 +1977,7 @@ pub fn handle_node_action(state: &SharedState, body: &Value, persist: bool) -> A
             crate::activity::http_action_id(action),
         );
         record.payload = Some(json!({"request_action": action}));
+        record.correlation_id = correlation_id.clone();
         crate::activity::record_light_activity(state, record);
     }
 
@@ -2109,6 +2120,7 @@ pub fn handle_set_node_brightness(state: &SharedState, body: &Value, persist: bo
 /// targets move the node along the active curve, not to a one-shot hardware
 /// color state.
 pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
     let items = match mutation_items(body) {
         Ok(items) => items,
         Err(e) => return ApiResponse::bad_request(&e),
@@ -2133,6 +2145,7 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
         updates.push((node_id, modifier));
     }
 
+    let batch = updates.len() > 1;
     let mut results = Vec::with_capacity(updates.len());
     for (node_id, _) in &updates {
         match commands::build_node_state(state, node_id) {
@@ -2169,6 +2182,10 @@ pub fn handle_set_node_curve(state: &SharedState, body: &Value, persist: bool) -
             after: Some(value.clone()),
         });
         record.payload = Some(json!({"axis": axis, "value": value}));
+        record.correlation_id = correlation_id.clone();
+        if batch {
+            record.fanout_of = correlation_id.clone();
+        }
         crate::activity::record_light_activity(state, record);
     }
 
@@ -4169,10 +4186,13 @@ mod tests {
         let rx = attach_work_queue(&state);
         let r = handle_node_action(
             &state,
-            &json!([
-                {"node_id": "room1", "action": "on"},
-                {"node_id": "room2", "action": "on"}
-            ]),
+            &json!({
+                "correlation_id": "global-room-123",
+                "nodes": [
+                    {"node_id": "room1", "action": "on"},
+                    {"node_id": "room2", "action": "on"}
+                ]
+            }),
             false,
         );
         assert_eq!(r.status, 200);
@@ -4183,6 +4203,12 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::QueuedNodeAction { .. }
         ));
+        let state = state.lock().unwrap();
+        assert_eq!(state.light_activity.len(), 2);
+        assert!(state.light_activity.iter().all(|event| {
+            event.correlation_id.as_deref() == Some("global-room-123")
+                && event.fanout_of.as_deref() == Some("global-room-123")
+        }));
     }
 
     #[test]
@@ -4290,6 +4316,7 @@ mod tests {
             &state,
             &json!({
                 "dispatch_spacing_ms": 250,
+                "correlation_id": "global-room-brightness-123",
                 "nodes": [
                     {"node_id": "room1", "brightness": 50},
                     {"node_id": "room2", "color_temperature": 3200}
@@ -4305,6 +4332,54 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodeCurveModifier { .. }
         ));
+        let state = state.lock().unwrap();
+        assert_eq!(state.light_activity.len(), 2);
+        assert!(state.light_activity.iter().all(|event| {
+            event.correlation_id.as_deref() == Some("global-room-brightness-123")
+                && event.fanout_of.as_deref() == Some("global-room-brightness-123")
+        }));
+    }
+
+    #[test]
+    fn scene_apply_records_app_correlation_for_cloud_activity() {
+        let state = handler_state_with_runtime();
+        commands::do_scene_upsert(
+            &state,
+            crate::scenes::SceneDefinition {
+                id: "analytics-scene".to_string(),
+                name: "Analytics Scene".to_string(),
+                description: None,
+                source: crate::scenes::SceneSource::User,
+                light: Some(crate::scenes::LightSceneLayer {
+                    default_transition_ms: None,
+                    default_output: Some(crate::scenes::LightSceneOutput {
+                        power: crate::scenes::LightScenePower::On,
+                        brightness: 50,
+                        color: Some(crate::scenes::LightSceneColor::Kelvin { kelvin: 3000 }),
+                        transition_ms: None,
+                    }),
+                    palette: Vec::new(),
+                    entries: Vec::new(),
+                }),
+                extensions: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let response = handle_post_scene_apply(
+            &state,
+            "analytics-scene",
+            &json!({
+                "target_id": "room1",
+                "correlation_id": "mood-scene-123"
+            }),
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let state = state.lock().unwrap();
+        let activity = state.light_activity.first().unwrap();
+        assert_eq!(activity.action_id, "apply_scene");
+        assert_eq!(activity.correlation_id.as_deref(), Some("mood-scene-123"));
     }
 
     #[test]
