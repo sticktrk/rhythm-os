@@ -988,7 +988,8 @@ void main() {
     );
   });
 
-  testWidgets('mood segment sends mood room state', (tester) async {
+  testWidgets('first Scenes jewel tap activates Mood and opens the picker',
+      (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1033,9 +1034,11 @@ void main() {
     );
 
     await _tapRoomSegment(tester, 'Scenes');
+    await tester.pump(const Duration(milliseconds: 300));
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
+    expect(find.byKey(const Key('mood_color_wheel')), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, hasLength(1));
     final call = connection.api.nodePreferenceCalls.single;
     expect(call.nodeId, 'room-1');

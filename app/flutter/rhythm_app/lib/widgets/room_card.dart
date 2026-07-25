@@ -97,6 +97,24 @@ class _RoomCardState extends State<RoomCard> {
     _applyModeChange(newMode);
   }
 
+  /// The Scenes jewel is both a mode switch and the doorway into the picker.
+  /// Entering Scenes should not require a second tap just to choose something.
+  void _onScenesJewelPressed() {
+    if (!FirstRunExplainer.hasSeen(_moodExplainerId)) {
+      _introduceMood();
+      return;
+    }
+
+    final alreadyInMood = context
+            .read<RoomProvider>()
+            .getDisplayRoomState(widget.roomId) ==
+        RoomModeState.mood;
+    _applyModeChange(RoomMode.mood);
+    if (!alreadyInMood && mounted) {
+      _showMoodScenePicker();
+    }
+  }
+
   /// Show the one-time Mood explainer, then switch the room to Mood and open
   /// the scene/color picker so the user can act on what they just learned.
   Future<void> _introduceMood() async {
@@ -1235,10 +1253,7 @@ class _RoomCardState extends State<RoomCard> {
                                     active: mode == RoomMode.mood,
                                     palette: moodPalette,
                                     enabled: !isTransitioning,
-                                    onPressed: mode == RoomMode.mood
-                                        ? _showMoodScenePicker
-                                        : () =>
-                                            _onModeChanged(RoomMode.mood),
+                                    onPressed: _onScenesJewelPressed,
                                   ),
                                 ],
                               ),
