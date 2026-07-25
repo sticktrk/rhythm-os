@@ -123,6 +123,7 @@ void main() {
           'provider': 'hue',
           'external_id': 'abc',
         },
+        'extensions': {'hue_palette_scene': true},
         'light': {
           'entries': [
             {
@@ -145,9 +146,38 @@ void main() {
       expect(scene.source.kind, RhythmSceneSourceKind.imported);
       expect(scene.source.provider, 'hue');
       expect(scene.source.externalId, 'abc');
+      expect(scene.isImportedHueScene, isTrue);
+      expect(scene.isHuePaletteScene, isTrue);
       expect(color?.kind, RhythmLightColorKind.rgbXy);
       expect(color?.rgb?.r, 255);
       expect(color?.xy?.x, 0.45);
+    });
+
+    test('requires the palette marker to recognize an imported Hue scene', () {
+      final unmarked = RhythmSceneDefinition.fromJson({
+        'id': 'legacy-hue-scene',
+        'name': 'Legacy Hue Scene',
+        'source': {
+          'kind': 'imported',
+          'provider': 'Hue',
+          'external_id': 'legacy',
+        },
+      });
+      final otherProvider = RhythmSceneDefinition.fromJson({
+        'id': 'ha-scene',
+        'name': 'Home Assistant Scene',
+        'source': {
+          'kind': 'imported',
+          'provider': 'homeassistant',
+          'external_id': 'scene.relax',
+        },
+        'extensions': {'hue_palette_scene': true},
+      });
+
+      expect(unmarked.isImportedHueScene, isTrue);
+      expect(unmarked.isHuePaletteScene, isFalse);
+      expect(otherProvider.isImportedHueScene, isFalse);
+      expect(otherProvider.isHuePaletteScene, isFalse);
     });
   });
 }

@@ -19,6 +19,11 @@ class AnalyticsService {
   /// Whether analytics is ready to use.
   bool get isInitialized => _initialized;
 
+  @visibleForTesting
+  void resetForTesting() {
+    _initialized = false;
+  }
+
   AnalyticsBackend? get _analytics {
     if (!BackendProvider.isInitialized) return null;
     return BackendProvider.instance.analytics;
@@ -234,6 +239,41 @@ class AnalyticsService {
   /// Track refreshing the rooms experience.
   Future<void> logRoomsRefreshed({required String source}) async {
     await logEvent('rooms_refreshed', {'source': source});
+  }
+
+  /// Track opening the room Mood picker without exposing room or scene IDs.
+  Future<void> logMoodPickerOpened({
+    required String roomSource,
+    required bool hasHueTab,
+  }) async {
+    await logEvent('mood_picker_opened', {
+      'room_source': roomSource,
+      'has_hue_tab': hasHueTab ? 1 : 0,
+    });
+  }
+
+  /// Track movement between the low-cardinality Mood picker surfaces.
+  Future<void> logMoodPickerTabChanged({
+    required String roomSource,
+    required String tab,
+  }) async {
+    await logEvent('mood_picker_tab_changed', {
+      'room_source': roomSource,
+      'tab': tab,
+    });
+  }
+
+  /// Track scene application outcome by integration category, never identity.
+  Future<void> logMoodSceneSelected({
+    required String roomSource,
+    required String sceneCategory,
+    required bool success,
+  }) async {
+    await logEvent('mood_scene_selected', {
+      'room_source': roomSource,
+      'scene_category': sceneCategory,
+      'success': success ? 1 : 0,
+    });
   }
 
   /// Track entering room layout edit mode.

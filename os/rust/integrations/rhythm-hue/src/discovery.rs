@@ -344,6 +344,30 @@ impl<H: HueTransport> HueDiscovery<H> {
         })
     }
 
+    fn scene_palette_outputs(scene: &serde_json::Value) -> Vec<LightSceneOutput> {
+        ["color", "color_temperature"]
+            .into_iter()
+            .flat_map(|kind| {
+                scene
+                    .pointer(&format!("/palette/{kind}"))
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(Self::scene_output)
+            .collect()
+    }
+
+    fn scene_action_outputs(scene: &serde_json::Value) -> Vec<LightSceneOutput> {
+        scene
+            .get("actions")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("action").and_then(Self::scene_output))
+            .collect()
+    }
+
     fn scenes_for_room(response: &serde_json::Value, room_id: &str) -> Vec<SceneDefinition> {
         let mut scenes: Vec<_> = response
             .get("data")
@@ -364,18 +388,31 @@ impl<H: HueTransport> HueDiscovery<H> {
                     .and_then(|value| value.as_str())
                     .unwrap_or("Hue scene")
                     .trim();
-                let palette: Vec<_> = scene
-                    .get("actions")
-                    .and_then(|value| value.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry.get("action").and_then(Self::scene_output))
-                    .collect();
+                let native_palette = Self::scene_palette_outputs(scene);
+                let is_palette_scene = !native_palette.is_empty();
+                let palette = if is_palette_scene {
+                    native_palette
+                } else {
+                    Self::scene_action_outputs(scene)
+                };
                 if palette
                     .iter()
                     .all(|output| output.power == LightScenePower::Off)
                 {
                     return None;
+                }
+
+                let mut extensions = [(
+                    "hue_room_id".to_string(),
+                    serde_json::Value::String(room_id.to_string()),
+                )]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>();
+                if is_palette_scene {
+                    extensions.insert(
+                        "hue_palette_scene".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
                 }
 
                 Some(SceneDefinition {
@@ -399,12 +436,7 @@ impl<H: HueTransport> HueDiscovery<H> {
                         palette,
                         entries: Vec::new(),
                     }),
-                    extensions: [(
-                        "hue_room_id".to_string(),
-                        serde_json::Value::String(room_id.to_string()),
-                    )]
-                    .into_iter()
-                    .collect(),
+                    extensions,
                 })
             })
             .collect();
@@ -414,6 +446,17 @@ impl<H: HueTransport> HueDiscovery<H> {
                 .cmp(&right.name.to_lowercase())
                 .then_with(|| left.id.cmp(&right.id))
         });
+        let palette_count = scenes
+            .iter()
+            .filter(|scene| {
+                scene.extensions.get("hue_palette_scene") == Some(&serde_json::Value::Bool(true))
+            })
+            .count();
+        debug!(
+            "Hue scene catalog classified: palette={}, other={}",
+            palette_count,
+            scenes.len().saturating_sub(palette_count)
+        );
         scenes
     }
 }
@@ -1140,6 +1183,20 @@ mod tests {
                     "id": "scene-cool",
                     "metadata": {"name": "Arctic aurora"},
                     "group": {"rid": "room-1", "rtype": "room"},
+                    "palette": {
+                        "color": [
+                            {
+                                "color": {"xy": {"x": 0.21, "y": 0.24}},
+                                "dimming": {"brightness": 63.4}
+                            }
+                        ],
+                        "color_temperature": [
+                            {
+                                "color_temperature": {"mirek": 250},
+                                "dimming": {"brightness": 40}
+                            }
+                        ]
+                    },
                     "actions": [
                         {
                             "target": {"rid": "light-1", "rtype": "light"},
@@ -1158,6 +1215,17 @@ mod tests {
                             }
                         }
                     ]
+                },
+                {
+                    "id": "scene-static",
+                    "metadata": {"name": "Ordinary static scene"},
+                    "group": {"rid": "room-1", "rtype": "room"},
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "color_temperature": {"mirek": 300}
+                        }
+                    }]
                 },
                 {
                     "id": "scene-other-room",
@@ -1186,7 +1254,7 @@ mod tests {
 
         let scenes = HueDiscovery::<StaticHueTransport>::scenes_for_room(&response, "room-1");
 
-        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes.len(), 2);
         let scene = &scenes[0];
         assert_eq!(scene.id, "native-hue-scene-cool");
         assert_eq!(scene.name, "Arctic aurora");
@@ -1207,6 +1275,26 @@ mod tests {
         assert_eq!(
             light.palette[1].color,
             Some(LightSceneColor::Kelvin { kelvin: 4000 })
+        );
+        assert_eq!(
+            scene.extensions.get("hue_palette_scene"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let ordinary = &scenes[1];
+        assert_eq!(ordinary.id, "native-hue-scene-static");
+        assert_eq!(ordinary.name, "Ordinary static scene");
+        assert_eq!(
+            ordinary
+                .light
+                .as_ref()
+                .and_then(|light| light.palette.first())
+                .and_then(|output| output.color.clone()),
+            Some(LightSceneColor::Kelvin { kelvin: 3333 })
+        );
+        assert_eq!(
+            ordinary.extensions.get("hue_palette_scene"),
+            None,
+            "ordinary Hue scenes must remain explicitly unmarked"
         );
     }
 

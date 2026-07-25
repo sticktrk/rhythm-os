@@ -42,6 +42,23 @@ RhythmSceneDefinition _decodedPaletteScene(String id) =>
       },
     });
 
+RhythmSceneDefinition _huePaletteScene(String id) =>
+    _decodedPaletteScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+      extensions: const {'hue_palette_scene': true},
+    );
+
+RhythmSceneDefinition _ordinaryHueScene(String id) =>
+    _decodedPaletteScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+    );
+
 void main() {
   test('scene swatch samples palette outputs', () {
     expect(
@@ -136,6 +153,98 @@ void main() {
     expect(loaderCalls, 1);
     expect(find.byKey(const Key('mood_scene_refreshed-scene')), findsOneWidget);
     expect(find.byKey(const Key('mood_scene_cached-scene')), findsNothing);
+  });
+
+  testWidgets('Hue tab leads with palettes and expands ordinary Hue scenes',
+      (tester) async {
+    final hue = _huePaletteScene('hue-aurora');
+    final ordinaryHue = _ordinaryHueScene('hue-relax');
+    final saved = _decodedPaletteScene('saved-palette');
+    final otherImported = _decodedPaletteScene('ha-palette').copyWith(
+      source: const RhythmSceneSource.imported(
+        provider: 'homeassistant',
+        externalId: 'scene.palette',
+      ),
+      extensions: const {'hue_palette_scene': true},
+    );
+    final changedTabs = <MoodTab>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialTab: MoodTab.scenes,
+            initialScenes: [hue, ordinaryHue, saved, otherImported],
+            scenesLoader: () async => [hue, ordinaryHue, saved, otherImported],
+            showHueTab: true,
+            onTabChanged: changedTabs.add,
+            onColorChanged: (_) {},
+            onSceneSelected: (_) async => true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('mood_tab_hue')), findsOneWidget);
+    expect(find.byKey(const Key('mood_scene_saved-palette')), findsOneWidget);
+    expect(find.byKey(const Key('mood_scene_ha-palette')), findsOneWidget);
+    expect(find.byKey(const Key('mood_scene_hue-aurora')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('mood_tab_hue')));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(changedTabs, [MoodTab.hue]);
+    expect(find.byKey(const Key('mood_scene_hue-aurora')), findsOneWidget);
+    expect(find.byKey(const Key('mood_scene_hue-relax')), findsNothing);
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_hue-aurora')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_saved-palette')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_ha-palette')),
+      findsNothing,
+    );
+
+    tester
+        .widget<InkWell>(find.byKey(const Key('mood_hue_more_toggle')))
+        .onTap!();
+    await tester.pump();
+    await tester.drag(
+      find.byKey(const ValueKey(MoodTab.hue)),
+      const Offset(0, -180),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('mood_scene_hue-relax')), findsOneWidget);
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_hue-relax')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('non-Hue rooms keep the two-tab picker', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialScenes: [_decodedPaletteScene('saved-palette')],
+            scenesLoader: () async => [_decodedPaletteScene('saved-palette')],
+            onColorChanged: (_) {},
+            onSceneSelected: (_) async => true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('mood_tab_color')), findsOneWidget);
+    expect(find.byKey(const Key('mood_tab_scenes')), findsOneWidget);
+    expect(find.byKey(const Key('mood_tab_hue')), findsNothing);
   });
 
   testWidgets('restores the prior selection when scene apply fails',

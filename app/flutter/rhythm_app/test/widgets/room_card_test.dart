@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' show SemanticsAction;
 
 import 'package:dio/dio.dart';
@@ -1039,6 +1040,7 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
     expect(find.byKey(const Key('mood_color_wheel')), findsOneWidget);
+    expect(find.byKey(const Key('mood_tab_hue')), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, hasLength(1));
     final call = connection.api.nodePreferenceCalls.single;
     expect(call.nodeId, 'room-1');
@@ -1147,21 +1149,56 @@ void main() {
     expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
     expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
     expect(_hardOffAction(), findsOneWidget);
-    expect(find.text('Fully off'), findsOneWidget);
+    expect(find.text('Full off'), findsOneWidget);
+    final lowGlowBrightness = roomProvider.getBrightness('room-1') ?? 50;
+    final lowGlowKelvin = roomProvider.getKelvin('room-1') ?? 3000;
+    final lowGlowCct = ColorUtils.cctToColor(lowGlowKelvin);
+    final lowGlowTint =
+        (0.20 + math.sqrt(lowGlowBrightness.clamp(1, 100) / 100.0) * 0.30)
+            .clamp(0.20, 0.50)
+            .toDouble();
+    final expectedLowGlowSurface = Color.lerp(
+      const Color(0xFF141210),
+      lowGlowCct,
+      lowGlowTint,
+    );
     expect(
       _roomCardSurfaceColor(tester, 'room-1'),
-      const Color(0xFF171A20),
+      expectedLowGlowSurface,
     );
     expect(
       find.byKey(const ValueKey('room-card-low-glow-halo-room-1')),
       findsOneWidget,
     );
-    final lowGlowCardRect = tester.getRect(
-      find.byKey(const ValueKey('room-card-surface-room-1')),
+    final powerSurface = tester.widget<AnimatedContainer>(
+      find.byKey(
+        const ValueKey('room-card-power-toggle-surface-room-1'),
+      ),
+    );
+    final powerGradient =
+        (powerSurface.decoration as BoxDecoration).gradient as LinearGradient;
+    final expectedPowerDeep = Color.lerp(
+      const Color(0xFF141210),
+      lowGlowCct,
+      lowGlowTint,
+    )!;
+    expect(
+      powerGradient.colors,
+      [
+        Color.lerp(expectedPowerDeep, lowGlowCct, 0.22),
+        expectedPowerDeep,
+      ],
+    );
+    final titleRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-title-room-1')),
     );
     final hardOffRect = tester.getRect(_hardOffAction());
-    expect(hardOffRect.left, closeTo(lowGlowCardRect.left + 12, 0.1));
-    expect(hardOffRect.width, lessThan(lowGlowCardRect.width / 2));
+    expect(hardOffRect.left, greaterThan(titleRect.right));
+    expect(
+      (hardOffRect.center.dy - titleRect.center.dy).abs(),
+      lessThan(8),
+    );
+    expect(hardOffRect.bottom, lessThan(tester.getRect(_powerToggle()).top));
     final powerSemantics = tester.getSemantics(_powerToggle());
     expect(powerSemantics.label, 'Room power');
     expect(powerSemantics.value, 'Low glow');
