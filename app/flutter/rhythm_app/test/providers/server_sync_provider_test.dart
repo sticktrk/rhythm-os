@@ -806,6 +806,23 @@ RhythmSceneDefinition _testPaletteScene(String id) => RhythmSceneDefinition(
       ),
     );
 
+RhythmSceneDefinition _testHuePaletteScene(String id) =>
+    _testPaletteScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+      extensions: const {'hue_palette_scene': true},
+    );
+
+RhythmSceneDefinition _testUnmarkedHueScene(String id) =>
+    _testScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+    );
+
 RhythmSceneDefinition _testOffScene(String id) => RhythmSceneDefinition(
       id: id,
       name: 'Off Scene',
@@ -2513,13 +2530,13 @@ void main() {
   group('ServerSyncProvider mood scenes', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
-    late _FakeRhythmConnection connection;
+    late _HelloRhythmConnection connection;
     late ServerSyncProvider provider;
 
     setUp(() {
       roomProvider = RoomProvider();
       api = _FakeRhythmServerApi();
-      connection = _FakeRhythmConnection(api);
+      connection = _HelloRhythmConnection(api);
       provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
@@ -2551,11 +2568,11 @@ void main() {
       api.scenes = [_testScene('rhythm-scene')];
       api.roomScenes['room-1'] = [
         _testScene('rhythm-scene'),
-        _testScene('native-hue-room-1'),
+        _testHuePaletteScene('native-hue-room-1'),
       ];
       api.roomScenes['room-2'] = [
         _testScene('rhythm-scene'),
-        _testScene('native-hue-room-2'),
+        _testHuePaletteScene('native-hue-room-2'),
       ];
 
       await provider.fetchScenes(roomId: 'room-1');
@@ -2580,7 +2597,7 @@ void main() {
         () async {
       api.roomScenes['room-1'] = [
         _testScene('stored-old'),
-        _testScene('native-hue-aurora'),
+        _testHuePaletteScene('native-hue-aurora'),
       ];
       await provider.fetchScenes(roomId: 'room-1');
 
@@ -2595,7 +2612,7 @@ void main() {
     });
 
     test('clears a room cache after a successful empty refresh', () async {
-      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      api.roomScenes['room-1'] = [_testHuePaletteScene('native-hue-aurora')];
       await provider.fetchScenes(roomId: 'room-1');
 
       api.roomScenes['room-1'] = const [];
@@ -2606,13 +2623,59 @@ void main() {
     });
 
     test('retains a room cache when the catalog request fails', () async {
-      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      api.roomScenes['room-1'] = [_testHuePaletteScene('native-hue-aurora')];
       await provider.fetchScenes(roomId: 'room-1');
 
       api.failedSceneCatalogTargets.add('room-1');
       final fetched = await provider.fetchScenes(roomId: 'room-1');
 
       expect(fetched.map((scene) => scene.id), ['native-hue-aurora']);
+    });
+
+    test('keeps marked and ordinary Hue scenes available for tab grouping',
+        () async {
+      api.roomScenes['room-1'] = [
+        _testScene('rhythm-scene'),
+        _testHuePaletteScene('native-hue-aurora'),
+        _testUnmarkedHueScene('legacy-hue-relax'),
+      ];
+
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(
+        fetched.map((scene) => scene.id),
+        ['rhythm-scene', 'native-hue-aurora', 'legacy-hue-relax'],
+      );
+      expect(
+        provider.scenesForRoom('room-1').map((scene) => scene.id),
+        containsAll(['native-hue-aurora', 'legacy-hue-relax']),
+      );
+    });
+
+    test('detects Hue bindings in mixed authoritative room topology', () async {
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': [
+            {
+              'id': 'mixed-room',
+              'name': 'Studio',
+              'kind': 'room',
+              'hub_types': ['matter', 'hue'],
+            },
+            {
+              'id': 'matter-room',
+              'name': 'Office',
+              'kind': 'room',
+              'hub_types': ['matter'],
+            },
+          ],
+        }),
+      );
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.roomHasHueBinding('mixed-room'), isTrue);
+      expect(provider.roomHasHueBinding('matter-room'), isFalse);
     });
 
     test('applies a mood scene without issuing a duplicate preferences write',

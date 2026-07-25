@@ -19,6 +19,11 @@ class AnalyticsService {
   /// Whether analytics is ready to use.
   bool get isInitialized => _initialized;
 
+  @visibleForTesting
+  void resetForTesting() {
+    _initialized = false;
+  }
+
   AnalyticsBackend? get _analytics {
     if (!BackendProvider.isInitialized) return null;
     return BackendProvider.instance.analytics;
@@ -255,15 +260,6 @@ class AnalyticsService {
     });
   }
 
-  /// Track opening the room-scoped Mood scene picker.
-  Future<void> logMoodScenePickerOpened({
-    required bool hasSelectedScene,
-  }) async {
-    await logEvent('mood_scene_picker_opened', {
-      'has_selected_scene': hasSelectedScene ? 1 : 0,
-    });
-  }
-
   /// Track a room-scoped scene catalog result without scene identifiers.
   Future<void> logMoodSceneCatalogLoaded({
     required int sceneCount,
@@ -289,6 +285,41 @@ class AnalyticsService {
       'scene_source': sceneSource,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track opening the room Mood picker without exposing room or scene IDs.
+  Future<void> logMoodPickerOpened({
+    required String roomSource,
+    required bool hasHueTab,
+  }) async {
+    await logEvent('mood_picker_opened', {
+      'room_source': roomSource,
+      'has_hue_tab': hasHueTab ? 1 : 0,
+    });
+  }
+
+  /// Track movement between the low-cardinality Mood picker surfaces.
+  Future<void> logMoodPickerTabChanged({
+    required String roomSource,
+    required String tab,
+  }) async {
+    await logEvent('mood_picker_tab_changed', {
+      'room_source': roomSource,
+      'tab': tab,
+    });
+  }
+
+  /// Track scene application outcome by integration category, never identity.
+  Future<void> logMoodSceneSelected({
+    required String roomSource,
+    required String sceneCategory,
+    required bool success,
+  }) async {
+    await logEvent('mood_scene_selected', {
+      'room_source': roomSource,
+      'scene_category': sceneCategory,
+      'success': success ? 1 : 0,
     });
   }
 

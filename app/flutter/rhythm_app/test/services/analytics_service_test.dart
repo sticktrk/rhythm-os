@@ -6,6 +6,7 @@ import '../helpers/capturing_analytics_backend.dart';
 
 void main() {
   late CapturingAnalyticsBackend backend;
+  late AnalyticsService analytics;
 
   setUp(() async {
     backend = CapturingAnalyticsBackend();
@@ -14,14 +15,17 @@ void main() {
       auth: OfflineAuthBackend(),
       analytics: backend,
     );
-    await AnalyticsService().initialize();
+    analytics = AnalyticsService();
+    analytics.resetForTesting();
+    await analytics.initialize();
   });
 
-  tearDown(BackendProvider.resetForTesting);
+  tearDown(() {
+    analytics.resetForTesting();
+    BackendProvider.resetForTesting();
+  });
 
   test('recent feature events use stable privacy-safe properties', () async {
-    final analytics = AnalyticsService();
-
     await analytics.logDevicePairingCodeDetected(
       codeKind: 'homekit',
       outcome: 'guidance_shown',
@@ -86,11 +90,56 @@ void main() {
     }
   });
 
+  test('Mood picker analytics use privacy-bounded categories', () async {
+    await analytics.logMoodPickerOpened(
+      roomSource: 'matter',
+      hasHueTab: true,
+    );
+    await analytics.logMoodPickerTabChanged(
+      roomSource: 'matter',
+      tab: 'hue',
+    );
+    await analytics.logMoodSceneSelected(
+      roomSource: 'matter',
+      sceneCategory: 'hue_palette',
+      success: true,
+    );
+
+    expect(
+      backend.events.map((event) => event.name),
+      [
+        'mood_picker_opened',
+        'mood_picker_tab_changed',
+        'mood_scene_selected',
+      ],
+    );
+    expect(
+      backend.events[0].properties,
+      containsPair('has_hue_tab', 1),
+    );
+    expect(
+      backend.events[1].properties,
+      containsPair('tab', 'hue'),
+    );
+    expect(
+      backend.events[2].properties,
+      containsPair('scene_category', 'hue_palette'),
+    );
+    expect(
+      backend.events[2].properties,
+      containsPair('success', 1),
+    );
+    expect(
+      backend.events.expand((event) => event.properties.keys),
+      isNot(contains(anyOf('room_id', 'scene_id', 'scene_name'))),
+    );
+  });
+
   test('analytics remains a no-op when the backend is unavailable', () async {
     BackendProvider.resetForTesting();
 
     await expectLater(
-      AnalyticsService().logMoodSceneApplyCompleted(
+      analytics.logMoodSceneApplyCompleted(
         journeyId: 'mood-scene-offline',
         sceneSource: 'rhythm',
         outcome: 'failed',
