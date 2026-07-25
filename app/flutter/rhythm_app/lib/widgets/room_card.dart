@@ -2040,22 +2040,6 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
                       ),
                     ),
                   ),
-                  Positioned(
-                    top: 7,
-                    right: 8,
-                    child: Container(
-                      width: 7,
-                      height: 7,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: secondary,
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.48),
-                          width: 0.75,
-                        ),
-                      ),
-                    ),
-                  ),
                 ],
               ),
             ),
