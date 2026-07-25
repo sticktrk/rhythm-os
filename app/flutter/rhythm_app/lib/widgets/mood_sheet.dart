@@ -833,19 +833,32 @@ class _SceneTile extends StatelessWidget {
                   child:
                       MoodPaletteBadge(colors: swatch, size: 22, glow: false),
                 ),
-                if (selected)
+                if (scene.isHuePaletteScene || selected)
                   Positioned(
                     top: 10,
                     right: 10,
-                    child: Container(
-                      width: 22,
-                      height: 22,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.white,
-                      ),
-                      child: Icon(Icons.check_rounded,
-                          size: 15, color: _shade(primary, 0.5)),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (scene.isHuePaletteScene)
+                          _HueSceneBadge(sceneId: scene.id),
+                        if (scene.isHuePaletteScene && selected)
+                          const SizedBox(width: 6),
+                        if (selected)
+                          Container(
+                            width: 22,
+                            height: 22,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.white,
+                            ),
+                            child: Icon(
+                              Icons.check_rounded,
+                              size: 15,
+                              color: _shade(primary, 0.5),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 Positioned(
@@ -891,6 +904,40 @@ class _SceneTile extends StatelessWidget {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+class _HueSceneBadge extends StatelessWidget {
+  final String sceneId;
+
+  const _HueSceneBadge({required this.sceneId});
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Philips Hue scene',
+      child: Container(
+        key: Key('mood_scene_hue_badge_$sceneId'),
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFF111722).withValues(alpha: 0.78),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.24),
+          ),
+        ),
+        child: const Text(
+          'Hue',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 9.5,
+            height: 1,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.2,
+          ),
+        ),
       ),
     );
   }

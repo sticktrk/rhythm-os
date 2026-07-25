@@ -72,6 +72,7 @@ List<RhythmSceneDefinition> _userVisibleScenes(
     scenes
         .where((scene) =>
             !_isGeneratedMoodSceneId(scene.id) &&
+            (!scene.isImportedHueScene || scene.isHuePaletteScene) &&
             _firstLitSceneOutput(scene) != null)
         .toList();
 

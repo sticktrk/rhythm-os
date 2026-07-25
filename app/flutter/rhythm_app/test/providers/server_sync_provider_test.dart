@@ -799,6 +799,23 @@ RhythmSceneDefinition _testPaletteScene(String id) => RhythmSceneDefinition(
       ),
     );
 
+RhythmSceneDefinition _testHuePaletteScene(String id) =>
+    _testPaletteScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+      extensions: const {'hue_palette_scene': true},
+    );
+
+RhythmSceneDefinition _testUnmarkedHueScene(String id) =>
+    _testScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+    );
+
 RhythmSceneDefinition _testOffScene(String id) => RhythmSceneDefinition(
       id: id,
       name: 'Off Scene',
@@ -2544,11 +2561,11 @@ void main() {
       api.scenes = [_testScene('rhythm-scene')];
       api.roomScenes['room-1'] = [
         _testScene('rhythm-scene'),
-        _testScene('native-hue-room-1'),
+        _testHuePaletteScene('native-hue-room-1'),
       ];
       api.roomScenes['room-2'] = [
         _testScene('rhythm-scene'),
-        _testScene('native-hue-room-2'),
+        _testHuePaletteScene('native-hue-room-2'),
       ];
 
       await provider.fetchScenes(roomId: 'room-1');
@@ -2573,7 +2590,7 @@ void main() {
         () async {
       api.roomScenes['room-1'] = [
         _testScene('stored-old'),
-        _testScene('native-hue-aurora'),
+        _testHuePaletteScene('native-hue-aurora'),
       ];
       await provider.fetchScenes(roomId: 'room-1');
 
@@ -2588,7 +2605,7 @@ void main() {
     });
 
     test('clears a room cache after a successful empty refresh', () async {
-      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      api.roomScenes['room-1'] = [_testHuePaletteScene('native-hue-aurora')];
       await provider.fetchScenes(roomId: 'room-1');
 
       api.roomScenes['room-1'] = const [];
@@ -2599,13 +2616,33 @@ void main() {
     });
 
     test('retains a room cache when the catalog request fails', () async {
-      api.roomScenes['room-1'] = [_testScene('native-hue-aurora')];
+      api.roomScenes['room-1'] = [_testHuePaletteScene('native-hue-aurora')];
       await provider.fetchScenes(roomId: 'room-1');
 
       api.failedSceneCatalogTargets.add('room-1');
       final fetched = await provider.fetchScenes(roomId: 'room-1');
 
       expect(fetched.map((scene) => scene.id), ['native-hue-aurora']);
+    });
+
+    test('shows only Hue scenes carrying the palette capability marker',
+        () async {
+      api.roomScenes['room-1'] = [
+        _testScene('rhythm-scene'),
+        _testHuePaletteScene('native-hue-aurora'),
+        _testUnmarkedHueScene('legacy-hue-relax'),
+      ];
+
+      final fetched = await provider.fetchScenes(roomId: 'room-1');
+
+      expect(
+        fetched.map((scene) => scene.id),
+        ['rhythm-scene', 'native-hue-aurora'],
+      );
+      expect(
+        provider.scenesForRoom('room-1').map((scene) => scene.id),
+        isNot(contains('legacy-hue-relax')),
+      );
     });
 
     test('applies a mood scene without issuing a duplicate preferences write',

@@ -42,6 +42,15 @@ RhythmSceneDefinition _decodedPaletteScene(String id) =>
       },
     });
 
+RhythmSceneDefinition _huePaletteScene(String id) =>
+    _decodedPaletteScene(id).copyWith(
+      source: RhythmSceneSource.imported(
+        provider: 'hue',
+        externalId: id,
+      ),
+      extensions: const {'hue_palette_scene': true},
+    );
+
 void main() {
   test('scene swatch samples palette outputs', () {
     expect(
@@ -136,6 +145,47 @@ void main() {
     expect(loaderCalls, 1);
     expect(find.byKey(const Key('mood_scene_refreshed-scene')), findsOneWidget);
     expect(find.byKey(const Key('mood_scene_cached-scene')), findsNothing);
+  });
+
+  testWidgets('labels only explicitly recognized Hue palette scenes',
+      (tester) async {
+    final hue = _huePaletteScene('hue-aurora');
+    final saved = _decodedPaletteScene('saved-palette');
+    final otherImported = _decodedPaletteScene('ha-palette').copyWith(
+      source: const RhythmSceneSource.imported(
+        provider: 'homeassistant',
+        externalId: 'scene.palette',
+      ),
+      extensions: const {'hue_palette_scene': true},
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialTab: MoodTab.scenes,
+            initialScenes: [hue, saved, otherImported],
+            scenesLoader: () async => [hue, saved, otherImported],
+            onColorChanged: (_) {},
+            onSceneSelected: (_) async => true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_hue-aurora')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_saved-palette')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const Key('mood_scene_hue_badge_ha-palette')),
+      findsNothing,
+    );
   });
 
   testWidgets('restores the prior selection when scene apply fails',

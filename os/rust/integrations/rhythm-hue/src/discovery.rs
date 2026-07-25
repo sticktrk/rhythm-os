@@ -344,6 +344,20 @@ impl<H: HueTransport> HueDiscovery<H> {
         })
     }
 
+    fn scene_palette_outputs(scene: &serde_json::Value) -> Vec<LightSceneOutput> {
+        ["color", "color_temperature"]
+            .into_iter()
+            .flat_map(|kind| {
+                scene
+                    .pointer(&format!("/palette/{kind}"))
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(Self::scene_output)
+            .collect()
+    }
+
     fn scenes_for_room(response: &serde_json::Value, room_id: &str) -> Vec<SceneDefinition> {
         let mut scenes: Vec<_> = response
             .get("data")
@@ -364,17 +378,8 @@ impl<H: HueTransport> HueDiscovery<H> {
                     .and_then(|value| value.as_str())
                     .unwrap_or("Hue scene")
                     .trim();
-                let palette: Vec<_> = scene
-                    .get("actions")
-                    .and_then(|value| value.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry.get("action").and_then(Self::scene_output))
-                    .collect();
-                if palette
-                    .iter()
-                    .all(|output| output.power == LightScenePower::Off)
-                {
+                let palette = Self::scene_palette_outputs(scene);
+                if palette.is_empty() {
                     return None;
                 }
 
@@ -399,10 +404,16 @@ impl<H: HueTransport> HueDiscovery<H> {
                         palette,
                         entries: Vec::new(),
                     }),
-                    extensions: [(
-                        "hue_room_id".to_string(),
-                        serde_json::Value::String(room_id.to_string()),
-                    )]
+                    extensions: [
+                        (
+                            "hue_room_id".to_string(),
+                            serde_json::Value::String(room_id.to_string()),
+                        ),
+                        (
+                            "hue_palette_scene".to_string(),
+                            serde_json::Value::Bool(true),
+                        ),
+                    ]
                     .into_iter()
                     .collect(),
                 })
@@ -1140,6 +1151,20 @@ mod tests {
                     "id": "scene-cool",
                     "metadata": {"name": "Arctic aurora"},
                     "group": {"rid": "room-1", "rtype": "room"},
+                    "palette": {
+                        "color": [
+                            {
+                                "color": {"xy": {"x": 0.21, "y": 0.24}},
+                                "dimming": {"brightness": 63.4}
+                            }
+                        ],
+                        "color_temperature": [
+                            {
+                                "color_temperature": {"mirek": 250},
+                                "dimming": {"brightness": 40}
+                            }
+                        ]
+                    },
                     "actions": [
                         {
                             "target": {"rid": "light-1", "rtype": "light"},
@@ -1158,6 +1183,17 @@ mod tests {
                             }
                         }
                     ]
+                },
+                {
+                    "id": "scene-static",
+                    "metadata": {"name": "Ordinary static scene"},
+                    "group": {"rid": "room-1", "rtype": "room"},
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "color_temperature": {"mirek": 300}
+                        }
+                    }]
                 },
                 {
                     "id": "scene-other-room",
@@ -1207,6 +1243,10 @@ mod tests {
         assert_eq!(
             light.palette[1].color,
             Some(LightSceneColor::Kelvin { kelvin: 4000 })
+        );
+        assert_eq!(
+            scene.extensions.get("hue_palette_scene"),
+            Some(&serde_json::Value::Bool(true))
         );
     }
 

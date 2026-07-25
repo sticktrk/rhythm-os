@@ -524,6 +524,13 @@ class RhythmSceneDefinition {
 
   bool get isValidForSave => id.isNotEmpty && name.isNotEmpty && light.isValid;
 
+  bool get isImportedHueScene =>
+      source.kind == RhythmSceneSourceKind.imported &&
+      source.provider?.trim().toLowerCase() == 'hue';
+
+  bool get isHuePaletteScene =>
+      isImportedHueScene && extensions['hue_palette_scene'] == true;
+
   List<String> get validationErrors {
     final errors = <String>[];
     if (id.isEmpty) errors.add('id is required');
