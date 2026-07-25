@@ -61,7 +61,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), '34970112332');
       await tester.pump();
-      final transmitButton = find.text('Add Matter Device');
+      final transmitButton = find.text('Add Bulb');
       await tester.ensureVisible(transmitButton);
 
       await tester.tap(transmitButton);
@@ -76,6 +76,42 @@ void main() {
       if (!releaseResponse.isCompleted) {
         releaseResponse.complete();
       }
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('starts pairing immediately for a scanned Matter payload',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    var pairRequestCount = 0;
+    try {
+      final api = _FakeRhythmMatterApi(
+        onPair: (receiveTimeout) async {
+          pairRequestCount += 1;
+          return const RhythmMatterPairingResponse(
+            httpStatus: 200,
+            status: 'failed',
+            error: 'test failure',
+          );
+        },
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MatterDeviceAddScreen(
+            endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+            addMethod: MatterAddMethod.automatic,
+            initialSetupPayload: 'MT:Y.K908OC16750648G00',
+            pairingApi: api,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+
+      expect(pairRequestCount, 1);
+      expect(find.textContaining('Pairing failed.'), findsOneWidget);
+    } finally {
       debugDefaultTargetPlatformOverride = null;
     }
   });

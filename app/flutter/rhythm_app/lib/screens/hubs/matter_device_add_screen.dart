@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -16,7 +15,7 @@ import '../../widgets/bulb_pairing_instructions.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 import 'matter_add_method.dart';
-import 'matter_qr_scanner_screen.dart';
+import 'device_pairing_scanner_screen.dart';
 
 class MatterDevicePairingResult {
   const MatterDevicePairingResult({
@@ -48,12 +47,14 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required this.endpoint,
     required this.addMethod,
     this.authToken,
+    this.initialSetupPayload,
     @visibleForTesting this.pairingApi,
   });
 
   final HubEndpoint endpoint;
   final MatterAddMethod addMethod;
   final String? authToken;
+  final String? initialSetupPayload;
   final RhythmMatterApi? pairingApi;
 
   static Future<MatterDevicePairingResult?> show(
@@ -61,6 +62,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required HubEndpoint endpoint,
     required MatterAddMethod addMethod,
     String? authToken,
+    String? initialSetupPayload,
   }) {
     return Navigator.of(context).push(
       PageRouteBuilder(
@@ -71,6 +73,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
             endpoint: endpoint,
             addMethod: addMethod,
             authToken: authToken,
+            initialSetupPayload: initialSetupPayload,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -137,6 +140,17 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       duration: const Duration(milliseconds: 2400),
     )..repeat();
     _setupPayloadController.addListener(_handlePayloadChanged);
+    final initialSetupPayload = widget.initialSetupPayload;
+    if (initialSetupPayload != null &&
+        isLikelyMatterSetupPayload(initialSetupPayload)) {
+      _phase = _PairingPhase.pairing;
+      _setupPayloadController.text = initialSetupPayload;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _startPairing();
+        }
+      });
+    }
   }
 
   @override
@@ -170,10 +184,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   bool get _supportsQrScan {
-    if (kIsWeb) return false;
-    return defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS ||
-        defaultTargetPlatform == TargetPlatform.macOS;
+    return supportsDevicePairingCamera;
   }
 
   String get _setupPayload =>
@@ -211,8 +222,16 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   Future<void> _scanQrCode() async {
-    final payload = await MatterQrScannerScreen.show(context);
-    if (!mounted || payload == null) return;
+    final result = await DevicePairingScannerScreen.show(
+      context,
+      showEnterCodeAction: false,
+    );
+    final payload = result?.payload;
+    if (!mounted ||
+        result?.action != DevicePairingScannerAction.matter ||
+        payload == null) {
+      return;
+    }
 
     _setupPayloadController.text = payload;
     _setupPayloadController.selection = TextSelection.collapsed(
@@ -224,7 +243,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   Future<void> _startPairing() async {
     final setupPayload = _setupPayload;
-    if (setupPayload.isEmpty || _pairingRequestInFlight) return;
+    if (!isLikelyMatterSetupPayload(setupPayload) ||
+        _pairingRequestInFlight) {
+      return;
+    }
 
     _pairingRequestInFlight = true;
     try {
@@ -485,14 +507,16 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               ? 'Paste the setup payload or the code printed on the device.'
               : (_looksLikeMatterPayload
                   ? 'Ready to send to the server.'
-                  : 'This does not look like a typical setup code, but you '
-                      'can still try adding the device.'),
+                  : 'Enter a Matter QR payload or the numeric Matter setup '
+                      'code printed on the device.'),
           isValidLooking: _looksLikeMatterPayload,
         ),
         const SizedBox(height: 28),
         _PrimaryTransmitButton(
-          label: widget.addMethod.actionLabel,
-          enabled: _hasSetupPayload && !_pairingRequestInFlight,
+          label: 'Add Bulb',
+          enabled: _hasSetupPayload &&
+              _looksLikeMatterPayload &&
+              !_pairingRequestInFlight,
           onTap: _startPairing,
         ),
         const SizedBox(height: 40),
