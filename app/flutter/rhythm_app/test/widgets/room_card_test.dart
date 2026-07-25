@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/widgets/first_run_explainer.dart';
 import 'package:rhythm_app/widgets/room_card.dart';
+import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -263,6 +265,41 @@ Color _roomCardSurfaceColor(WidgetTester tester, String roomId) {
 Finder _roomSegment(String label, {String roomId = 'room-1'}) =>
     find.byKey(ValueKey('room-card-segment-$roomId-${label.toLowerCase()}'));
 
+Finder _powerToggle({String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-power-toggle-$roomId'));
+
+Finder _powerToggleIcon({String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-power-toggle-icon-$roomId'));
+
+Finder _powerToggleLabel({String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-power-toggle-label-$roomId'));
+
+Finder _scenesControl({String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-control-pill-$roomId-scenes'));
+
+Finder _hardOffAction({String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-hard-off-$roomId'));
+
+Finder _brightnessSlider({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-brightness-slider-$roomId'),
+    );
+
+Finder _cctSlider({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-cct-slider-$roomId'),
+    );
+
+Finder _sceneBrightnessSlider({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-scene-brightness-slider-$roomId'),
+    );
+
+Finder _scenePicker({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-scene-picker-$roomId'),
+    );
+
+Finder _scenePalette({String roomId = 'room-1'}) => find.byKey(
+      ValueKey('room-card-scene-palette-$roomId'),
+    );
+
 Future<void> _tapRoomSegment(
   WidgetTester tester,
   String label, {
@@ -369,6 +406,12 @@ void main() {
     final title = find.byKey(const ValueKey('room-card-title-room-1'));
     final activity = find.byKey(const ValueKey('room-card-activity-room-1'));
     final motion = find.byKey(const ValueKey('room-card-motion-room-1'));
+    final titleText = tester.widget<Text>(title);
+    expect(titleText.style?.fontSize, 20);
+    expect(titleText.style?.fontWeight, FontWeight.w700);
+    expect(titleText.style?.letterSpacing, -0.35);
+    expect(titleText.maxLines, 2);
+    expect(find.byIcon(Icons.meeting_room_rounded), findsOneWidget);
     expect(
       tester.getCenter(title).dx,
       lessThan(tester.getCenter(activity).dx),
@@ -587,7 +630,8 @@ void main() {
     );
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNotNull);
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -601,11 +645,10 @@ void main() {
     await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNull);
 
-    await tester.tap(_roomSegment('Off'));
-    await tester.pump();
-
+    expect(tester.widget<GestureDetector>(_powerToggle()).onTap, isNull);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
     expect(find.text('Settings'), findsNothing);
 
@@ -618,8 +661,11 @@ void main() {
       transitioning: false,
       lightsOn: true,
     );
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
 
+    expect(roomProvider.isRoomTransitioning('room-1'), isFalse);
+    expect(roomProvider.isNodeDispatchPending('room-1'), isFalse);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
@@ -669,7 +715,8 @@ void main() {
     );
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNotNull);
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -683,7 +730,8 @@ void main() {
     await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(tester.widget<Slider>(find.byType(Slider)).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
+    expect(tester.widget<Slider>(_cctSlider()).onChanged, isNotNull);
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -903,10 +951,15 @@ void main() {
       ),
     );
 
-    await _tapRoomSegment(tester, 'On');
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
+
+    await tester.tap(_powerToggle());
     await tester.pump();
 
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, isEmpty);
     expect(
       connection.api.nodeActionCalls,
@@ -923,9 +976,20 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1));
     await tester.pump(const Duration(milliseconds: 200));
     expect(activitySpinner, findsNothing);
+
+    await tester.tap(_powerToggle());
+    await tester.pump();
+
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(
+      connection.api.nodePreferenceCalls.single.state,
+      RoomModeState.hardOff,
+    );
   });
 
-  testWidgets('mood segment sends mood room state', (tester) async {
+  testWidgets('first Scenes jewel tap activates Mood and opens the picker',
+      (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -970,9 +1034,11 @@ void main() {
     );
 
     await _tapRoomSegment(tester, 'Scenes');
+    await tester.pump(const Duration(milliseconds: 300));
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.mood);
+    expect(find.byKey(const Key('mood_color_wheel')), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, hasLength(1));
     final call = connection.api.nodePreferenceCalls.single;
     expect(call.nodeId, 'room-1');
@@ -982,8 +1048,9 @@ void main() {
     expect(call.profileSettings, {'mood_enabled': true});
   });
 
-  testWidgets('off segment sends standby when room standby is enabled',
+  testWidgets('low-glow power is reversible with a separate hard Off action',
       (tester) async {
+    final semantics = tester.ensureSemantics();
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1050,17 +1117,132 @@ void main() {
     await tester.pump();
 
     expect(serverSync.standbyEnabledForNode('room-1'), isTrue);
+    expect(_roomSegment('Off'), findsNothing);
+    expect(_roomSegment('On'), findsNothing);
+    expect(_roomSegment('Scenes'), findsOneWidget);
+    expect(_powerToggle(), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-card-control-pill-room-1-off')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-card-control-pill-room-1-scenes')),
+      findsOneWidget,
+    );
+    expect(find.text('Off'), findsNothing);
+    expect(find.text('On'), findsOneWidget);
+    expect(find.text('Scenes'), findsOneWidget);
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
+    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+    final onIconColor = tester.widget<Icon>(_powerToggleIcon()).color;
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(_hardOffAction(), findsNothing);
 
-    await _tapRoomSegment(tester, 'Off');
+    tester.widget<GestureDetector>(_powerToggle()).onTap!();
+    await tester.pump();
 
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
-    expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.standby);
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
+    expect(_hardOffAction(), findsOneWidget);
+    expect(find.text('Fully off'), findsOneWidget);
+    expect(
+      _roomCardSurfaceColor(tester, 'room-1'),
+      const Color(0xFF171A20),
+    );
+    expect(
+      find.byKey(const ValueKey('room-card-low-glow-halo-room-1')),
+      findsOneWidget,
+    );
+    final lowGlowCardRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-surface-room-1')),
+    );
+    final hardOffRect = tester.getRect(_hardOffAction());
+    expect(hardOffRect.left, closeTo(lowGlowCardRect.left + 12, 0.1));
+    expect(hardOffRect.width, lessThan(lowGlowCardRect.width / 2));
+    final powerSemantics = tester.getSemantics(_powerToggle());
+    expect(powerSemantics.label, 'Room power');
+    expect(powerSemantics.value, 'Low glow');
+    expect(powerSemantics.hint, 'Turn on and reset to the curve');
+    expect(
+      powerSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    final hardOffSemantics =
+        tester.getSemantics(find.bySemanticsLabel('Turn room off completely'));
+    expect(
+      hardOffSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    final scenesSemantics = tester.getSemantics(_scenesControl());
+    expect(scenesSemantics.label, 'Scenes');
+    expect(scenesSemantics.value, 'Inactive');
+    expect(scenesSemantics.hint, 'Use a scene');
+    expect(
+      scenesSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    expect(
+      tester.widget<Icon>(_powerToggleIcon()).icon,
+      Icons.brightness_low_rounded,
+    );
+    final dimIconColor = tester.widget<Icon>(_powerToggleIcon()).color;
+    expect(dimIconColor, isNot(onIconColor));
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
     expect(connection.api.nodePreferenceCalls, hasLength(1));
-    final call = connection.api.nodePreferenceCalls.single;
-    expect(call.nodeId, 'room-1');
-    expect(call.rhythmEnabled, isTrue);
-    expect(call.state, RoomModeState.standby);
-    expect(call.state?.wireValue, 'standby');
+    expect(
+      connection.api.nodePreferenceCalls[0].state,
+      RoomModeState.standby,
+    );
+
+    tester.widget<GestureDetector>(_powerToggle()).onTap!();
+    await tester.pump();
+
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(_hardOffAction(), findsNothing);
+    expect(
+      connection.api.nodeActionCalls,
+      [(nodeId: 'room-1', action: 'reset')],
+    );
+
+    tester.widget<GestureDetector>(_powerToggle()).onTap!();
+    await tester.pump();
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
+    expect(_hardOffAction(), findsOneWidget);
+
+    await tester.tap(_hardOffAction());
+    await tester.pump();
+
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isFalse);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Off');
+    final offIconColor = tester.widget<Icon>(_powerToggleIcon()).color;
+    expect(offIconColor, isNot(dimIconColor));
+    expect(_hardOffAction(), findsNothing);
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
+    expect(connection.api.nodePreferenceCalls, hasLength(3));
+    expect(
+      connection.api.nodePreferenceCalls[2].state,
+      RoomModeState.hardOff,
+    );
+
+    tester.widget<GestureDetector>(_powerToggle()).onTap!();
+    await tester.pump();
+
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(tester.widget<Icon>(_powerToggleIcon()).color, isNot(offIconColor));
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
+    expect(connection.api.nodeActionCalls, hasLength(2));
+    semantics.dispose();
   });
 
   testWidgets('first Mood tap shows the explainer and defers the mode change',
@@ -1126,7 +1308,7 @@ void main() {
     expect(connection.api.nodePreferenceCalls, isEmpty);
   });
 
-  testWidgets('standby uses on segment and disabled brightness slider',
+  testWidgets('Low glow shows sliders and either slider returns the room to On',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -1182,19 +1364,63 @@ void main() {
       ),
     );
 
-    expect(find.text('Off'), findsOneWidget);
-    expect(find.text('On'), findsOneWidget);
-    expect(find.text('Dim'), findsOneWidget);
-    expect(find.byType(Slider), findsNothing);
+    expect(_powerToggle(), findsOneWidget);
+    expect(find.text('Off'), findsNothing);
+    expect(find.text('On'), findsNothing);
+    expect(_roomSegment('Scenes'), findsOneWidget);
+    expect(_roomSegment('Low glow'), findsNothing);
+    expect(_roomSegment('Bright'), findsNothing);
+    expect(find.byType(Slider), findsNWidgets(2));
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
+    expect(_hardOffAction(), findsOneWidget);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
 
-    await tester.tap(_roomSegment('Off'));
+    tester.widget<Slider>(_brightnessSlider()).onChanged!(35);
     await tester.pump();
 
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(tester.widget<Slider>(_brightnessSlider()).value, 35);
     expect(connection.api.nodePreferenceCalls, isEmpty);
+
+    tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(35);
+    await tester.pump();
+
+    expect(connection.api.nodeCurveBrightnessCalls, hasLength(1));
+    expect(
+      connection.api.nodeCurveBrightnessCalls.single,
+      (nodeId: 'room-1', brightness: 35),
+    );
+
+    roomProvider.setRoomLightsOnLocal('room-1', true);
+    roomProvider.setRoomStateLocal('room-1', RoomModeState.standby);
+    await tester.pump();
+
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
+
+    tester.widget<Slider>(_cctSlider()).onChanged!(3200);
+    await tester.pump();
+
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+
+    tester.widget<Slider>(_cctSlider()).onChangeEnd!(3200);
+    await tester.pump();
+
+    expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
+    final cctCall = connection.api.nodeCurveColorTemperatureCalls.single;
+    expect(cctCall.nodeId, 'room-1');
+    expect(cctCall.kelvin, 3200);
+    expect(cctCall.preserveBrightness, isTrue);
   });
 
-  testWidgets('dim segment applies minimum manual brightness', (tester) async {
+  testWidgets('on room mirrors Power and Scenes jewels around the sliders',
+      (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1249,14 +1475,48 @@ void main() {
       ),
     );
 
-    await _tapRoomSegment(tester, 'Dim');
-
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(_roomSegment('Low glow'), findsNothing);
+    expect(_roomSegment('Bright'), findsNothing);
+    expect(_powerToggle(), findsOneWidget);
+    expect(_roomSegment('Off'), findsNothing);
+    expect(_roomSegment('On'), findsNothing);
+    expect(_roomSegment('Scenes'), findsOneWidget);
+    expect(_brightnessSlider(), findsOneWidget);
+    expect(_cctSlider(), findsOneWidget);
+    expect(
+      tester.getCenter(_cctSlider()).dy,
+      greaterThan(tester.getCenter(_brightnessSlider()).dy),
+    );
+    final powerRect = tester.getRect(_powerToggle());
+    final scenesRect = tester.getRect(_scenesControl());
+    final scenesDecoration =
+        tester.widget<AnimatedContainer>(_scenesControl()).decoration
+            as BoxDecoration;
+    expect(scenesDecoration.shape, BoxShape.circle);
+    final sliderStackRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-slider-stack-room-1')),
+    );
+    expect(sliderStackRect.left, closeTo(powerRect.right + 8, 0.1));
+    expect(sliderStackRect.center.dy, closeTo(powerRect.center.dy, 0.1));
+    expect(scenesRect.left, closeTo(sliderStackRect.right + 8, 0.1));
+    expect(scenesRect.center.dy, closeTo(powerRect.center.dy, 0.1));
+    expect(scenesRect.size, powerRect.size);
+    final cardRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-surface-room-1')),
+    );
+    final cardWidth = cardRect.width;
+    expect(scenesRect.right, closeTo(cardRect.right - 12, 0.1));
+    expect(
+      tester.getSize(_brightnessSlider()).width,
+      closeTo(cardWidth - 152, 0.1),
+    );
+    expect(
+      tester.getSize(_cctSlider()).width,
+      closeTo(cardWidth - 152, 0.1),
+    );
     expect(connection.api.nodePreferenceCalls, isEmpty);
-    expect(connection.api.nodeCurveBrightnessCalls, hasLength(1));
-    final call = connection.api.nodeCurveBrightnessCalls.single;
-    expect(call.nodeId, 'room-1');
-    expect(call.brightness, 1);
+    expect(connection.api.nodeCurveBrightnessCalls, isEmpty);
+    expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
   });
 
   testWidgets('active brightness slider uses curve modifier endpoint',
@@ -1315,9 +1575,9 @@ void main() {
       ),
     );
 
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(67);
+    tester.widget<Slider>(_brightnessSlider()).onChanged!(67);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(67);
+    tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(67);
     await tester.pump();
 
     expect(connection.api.nodeBrightnessCalls, isEmpty);
@@ -1384,15 +1644,9 @@ void main() {
       ),
     );
 
-    tester
-        .widget<GestureDetector>(
-          find.byKey(const ValueKey('room-card-slider-mode-room-1')),
-        )
-        .onTap!();
+    tester.widget<Slider>(_cctSlider()).onChanged!(3200);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(3200);
-    await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3200);
+    tester.widget<Slider>(_cctSlider()).onChangeEnd!(3200);
     await tester.pump();
 
     expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
@@ -1460,19 +1714,12 @@ void main() {
       ),
     );
 
-    tester
-        .widget<GestureDetector>(
-          find.byKey(const ValueKey('room-card-slider-mode-room-1')),
-        )
-        .onTap!();
-    await tester.pump(const Duration(milliseconds: 350));
-
-    final cctSlider = tester.widget<Slider>(find.byType(Slider));
+    final cctSlider = tester.widget<Slider>(_cctSlider());
     expect(cctSlider.min, 3000);
     expect(cctSlider.max, 6500);
     cctSlider.onChanged!(3000);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(3000);
+    tester.widget<Slider>(_cctSlider()).onChangeEnd!(3000);
     await tester.pump();
 
     expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
@@ -1555,8 +1802,9 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
   });
 
-  testWidgets('mood brightness slider uses mood-scoped color endpoint',
+  testWidgets('active Scenes shows palette picker and Mood brightness slider',
       (tester) async {
+    final semantics = tester.ensureSemantics();
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1609,12 +1857,62 @@ void main() {
       ),
     );
 
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(35);
+    expect(find.byType(Slider), findsOneWidget);
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
+    expect(_sceneBrightnessSlider(), findsOneWidget);
+    expect(_scenePicker(), findsOneWidget);
+    expect(_scenePalette(), findsOneWidget);
+    final scenesSemantics = tester.getSemantics(_scenesControl());
+    expect(scenesSemantics.label, 'Scenes');
+    expect(scenesSemantics.value, 'Active');
+    expect(scenesSemantics.hint, 'Choose a scene');
+    final powerRect = tester.getRect(_powerToggle());
+    final scenesRect = tester.getRect(_scenesControl());
+    final sceneSliderRowRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-scene-slider-row-room-1')),
+    );
+    expect(sceneSliderRowRect.left, closeTo(powerRect.right + 8, 0.1));
+    expect(sceneSliderRowRect.top, closeTo(powerRect.top, 0.1));
+    expect(scenesRect.left, closeTo(sceneSliderRowRect.right + 8, 0.1));
+    expect(scenesRect.center.dy, closeTo(powerRect.center.dy, 0.1));
+    expect(scenesRect.size, powerRect.size);
+    final cardRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-surface-room-1')),
+    );
+    expect(scenesRect.right, closeTo(cardRect.right - 12, 0.1));
+    expect(
+      tester.widget<GestureDetector>(_scenePicker()).onTap,
+      isNotNull,
+    );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const ValueKey('room-card-reset-ring-room-1')),
+          )
+          .opacity,
+      1,
+    );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(
+              const ValueKey('room-card-reset-control-opacity-room-1'),
+            ),
+          )
+          .opacity,
+      1,
+    );
+    expect(find.text('Reset'), findsOneWidget);
+
+    tester.widget<Slider>(_sceneBrightnessSlider()).onChanged!(35);
     await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(35);
+    tester.widget<Slider>(_sceneBrightnessSlider()).onChangeEnd!(35);
     await tester.pump();
 
     expect(connection.api.nodeBrightnessCalls, isEmpty);
+    expect(connection.api.nodeCurveBrightnessCalls, isEmpty);
+    expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
     expect(connection.api.nodeColorCalls, hasLength(1));
     final call = connection.api.nodeColorCalls.single;
     expect(call.nodeId, 'room-1');
@@ -1624,44 +1922,49 @@ void main() {
     expect(call.g, 80);
     expect(call.b, 240);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
+
+    tester
+        .widget<GestureDetector>(
+          find.byKey(const ValueKey('room-card-reset-control-room-1')),
+        )
+        .onTap!();
+    await tester.pump();
+
+    expect(
+      connection.api.nodeActionCalls,
+      [(nodeId: 'room-1', action: 'reset')],
+    );
+    semantics.dispose();
   });
 
-  testWidgets('mood color picker uses slider brightness over active cache',
+  testWidgets('room detail orb is a power control without countdown controls',
       (tester) async {
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.binding.setSurfaceSize(const Size(390, 900));
 
-    final roomProvider = RoomProvider();
-    await roomProvider.addRoom(
-      const RoomDto(
-        id: 'room-1',
-        name: 'Kitchen',
-        source: RoomSourceDto.hue,
-        kind: RoomNodeKind.room,
-        deviceIds: ['light-1'],
-        rhythmEnabled: true,
-        disabled: false,
-        lightsOn: true,
-        timeOffsetMinutes: 0,
-        brightnessOffset: 0,
-      ),
+    const room = RoomDto(
+      id: 'room-1',
+      name: 'Kitchen',
+      source: RoomSourceDto.hue,
+      kind: RoomNodeKind.room,
+      deviceIds: ['light-1'],
+      rhythmEnabled: true,
+      disabled: false,
+      lightsOn: false,
+      timeOffsetMinutes: 0,
+      brightnessOffset: 0,
     );
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(room);
     await roomProvider.applyServerNodeState(
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
       brightnessOffset: 0,
-      state: RoomModeState.active,
-      lightsOn: true,
-      brightness: 44,
-    );
-    roomProvider.setRoomStateLocal('room-1', RoomModeState.mood);
-    roomProvider.setRoomColorLocal(
-      'room-1',
-      20,
-      80,
-      240,
-      rememberAsMood: true,
+      state: RoomModeState.hardOff,
+      lightsOn: false,
+      brightness: 42,
+      kelvin: 3000,
     );
 
     final homeProvider = _FakeHomeProvider();
@@ -1681,32 +1984,46 @@ void main() {
           ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
           ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
         ],
-        child: MaterialApp(
-          home: Scaffold(
-            body: RoomCard(
-              roomId: 'room-1',
-              globalConfig: defaultCurveConfig,
-            ),
-          ),
+        child: const MaterialApp(
+          home: Scaffold(body: RoomSettingsSheet(room: room)),
         ),
       ),
     );
-
-    tester.widget<Slider>(find.byType(Slider)).onChanged!(13);
-    await tester.pump();
-    tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(13);
     await tester.pump();
 
-    await _tapRoomSegment(tester, 'Scenes');
-    await tester.pump(const Duration(milliseconds: 300));
-    final amberWheelPoint =
-        tester.getCenter(find.byKey(const Key('mood_color_wheel'))) +
-            const Offset(40, 0);
-    await tester.tapAt(amberWheelPoint);
+    final powerControl = find.byKey(const ValueKey('room-detail-power-room-1'));
+    final powerStatus =
+        find.byKey(const ValueKey('room-detail-power-status-room-1'));
+
+    expect(powerControl, findsOneWidget);
+    expect(find.byIcon(Icons.power_settings_new_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.play_arrow_rounded), findsNothing);
+    expect(find.byIcon(Icons.pause_rounded), findsNothing);
+    expect(find.text('Paused'), findsNothing);
+    expect(tester.widget<Text>(powerStatus).data, 'Off');
+
+    tester.widget<GestureDetector>(powerControl).onTap!();
     await tester.pump();
 
-    expect(connection.api.nodeColorCalls, hasLength(2));
-    expect(connection.api.nodeColorCalls.first.brightness, 13);
-    expect(connection.api.nodeColorCalls.last.brightness, 13);
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
+    expect(roomProvider.getRoom('room-1')?.rhythmEnabled, isTrue);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(tester.widget<Text>(powerStatus).data, 'On');
+    expect(
+      connection.api.nodeActionCalls,
+      [(nodeId: 'room-1', action: 'reset')],
+    );
+
+    tester.widget<GestureDetector>(powerControl).onTap!();
+    await tester.pump();
+
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isFalse);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
+    expect(tester.widget<Text>(powerStatus).data, 'Off');
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(
+      connection.api.nodePreferenceCalls.single.state,
+      RoomModeState.hardOff,
+    );
   });
 }

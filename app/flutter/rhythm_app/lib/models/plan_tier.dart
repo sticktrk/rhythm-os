@@ -20,8 +20,7 @@ enum Entitlement {
   /// soon.
   multiUserAccess,
 
-  /// Standby lighting: per-room standby state and the standby section in the
-  /// light profile editor.
+  /// Low-glow lighting, backed by the appliance Standby state.
   standby,
 
   /// Advanced day-mode timing controls: motion timeout, light transition, and
@@ -95,7 +94,7 @@ extension EntitlementX on Entitlement {
         Entitlement.cloudBackupRestore => 'Cloud Backup & Restore',
         Entitlement.multiDeviceSync => 'All Rooms Sync',
         Entitlement.multiUserAccess => 'Multi-user Access',
-        Entitlement.standby => 'Standby Lighting',
+        Entitlement.standby => 'Low glow lighting',
         Entitlement.advancedDayControls => 'Advanced Day Controls',
         Entitlement.sleepPrimarySettings => 'Sleep Primary Settings',
         Entitlement.transitionButton => 'Button Trigger',
@@ -108,7 +107,7 @@ extension EntitlementX on Entitlement {
         Entitlement.multiDeviceSync =>
           'Restore All Rooms layout on a new phone',
         Entitlement.multiUserAccess => 'Share a hub with multiple users',
-        Entitlement.standby => 'Standby scenes for day and sleep modes',
+        Entitlement.standby => 'Keep inactive rooms softly lit',
         Entitlement.advancedDayControls =>
           'Custom motion timeout, transition, and interval',
         Entitlement.sleepPrimarySettings => 'Custom sleep brightness and color',

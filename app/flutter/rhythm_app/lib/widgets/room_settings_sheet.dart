@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -13,11 +11,12 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmDevice,
         RhythmDeviceType,
         RhythmMode,
+        RoomModeState,
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
 import 'device_detail_sheet.dart';
 import 'info_tooltip.dart';
-import 'off_behavior_switch.dart';
+import 'low_glow_switch.dart';
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
@@ -137,8 +136,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ),
             if (widget.enableLivePreview) ...[
               // Room orb preview with live CCT + light output
-              Selector<RoomProvider,
-                  (int?, int?, (int, int, int)?, bool, bool, DateTime?)>(
+              Selector<RoomProvider, (int?, int?, (int, int, int)?, bool)>(
                 selector: (_, rp) {
                   final r = rp.getRoom(room.id);
                   return (
@@ -146,21 +144,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     rp.getKelvin(room.id),
                     rp.getRoomColor(room.id),
                     r?.lightsOn ?? false,
-                    r?.rhythmEnabled ?? false,
-                    rp.getLastTickTime(room.id),
                   );
                 },
                 builder: (context, data, _) {
-                  final (
-                    brightness,
-                    kelvin,
-                    color,
-                    lightsOn,
-                    rhythmEnabled,
-                    lastTickTime
-                  ) = data;
-                  final intervalSecs =
-                      context.read<ServerSyncProvider>().rhythmIntervalSecs;
+                  final (brightness, kelvin, color, lightsOn) = data;
                   return _AnimatedRoomOrb(
                     roomId: room.id,
                     roomName: room.name,
@@ -170,9 +157,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                         ? Color.fromARGB(255, color.$1, color.$2, color.$3)
                         : null,
                     lightsOn: lightsOn,
-                    rhythmEnabled: rhythmEnabled,
-                    rhythmIntervalSecs: intervalSecs,
-                    lastTickTime: lastTickTime,
                   );
                 },
               ),
@@ -298,22 +282,21 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       key: const ValueKey('rhythm'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
-        // Standby is its own room-level behavior, not a Day/Sleep override —
-        // so it sits above the per-mode profile groups as a standalone card.
+        // Low glow is the user-facing name for the room's existing Standby
+        // preference, independent of the Day/Sleep profile selection.
         _buildSettingsGroup('', [
           _SettingsRow(
             icon: Icons.bedtime_outlined,
-            label: 'Off Behavior',
+            label: 'Low glow',
             labelInfo: const InfoTooltip(
-              eyebrow: 'OFF BEHAVIOR',
+              eyebrow: 'LOW GLOW',
               accentColor: Color(0xFF7C83FF),
               iconSize: 15,
-              message: 'What this room does when it switches off. Off cuts the '
-                  'lights fully. Dim keeps them in a low, ready state '
-                  'instead of going dark.',
+              message: 'Keep this room softly lit when motion times out or '
+                  'you turn it off. Motion or On restores normal lighting.',
             ),
-            trailing: OffBehaviorSwitch(
-              standby: standbyEnabled,
+            trailing: LowGlowSwitch(
+              value: standbyEnabled,
               onChanged: (val) => _setStandbyEnabled(context, val),
             ),
             onTap: () => _setStandbyEnabled(context, !standbyEnabled),
@@ -817,7 +800,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 }
 
-
 /// A single row in the settings sheet.
 class _SettingsRow extends StatelessWidget {
   final IconData icon;
@@ -1016,12 +998,7 @@ class _ToggleSwitch extends StatelessWidget {
   }
 }
 
-/// Animated room orb with countdown ring when rhythm is active.
-///
-/// Tap to toggle rhythm on/off. Shows:
-/// - Active: depleting countdown ring + breathing glow + "Rhythm" label
-/// - Paused: static orb + "Paused ▶" hint
-/// - Off: grey circle + "Off"
+/// Room power control with live CCT and output visuals.
 class _AnimatedRoomOrb extends StatefulWidget {
   final String roomId;
   final String roomName;
@@ -1029,9 +1006,6 @@ class _AnimatedRoomOrb extends StatefulWidget {
   final int? kelvin;
   final Color? directColor;
   final bool lightsOn;
-  final bool rhythmEnabled;
-  final int rhythmIntervalSecs;
-  final DateTime? lastTickTime;
 
   const _AnimatedRoomOrb({
     required this.roomId,
@@ -1040,117 +1014,47 @@ class _AnimatedRoomOrb extends StatefulWidget {
     required this.kelvin,
     this.directColor,
     required this.lightsOn,
-    required this.rhythmEnabled,
-    required this.rhythmIntervalSecs,
-    this.lastTickTime,
   });
 
   @override
   State<_AnimatedRoomOrb> createState() => _AnimatedRoomOrbState();
 }
 
-class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
-    with TickerProviderStateMixin {
-  late Ticker _ticker;
-  late AnimationController _pulseController;
-  late AnimationController _activeController;
+class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb> {
   bool _pressed = false;
-  double _countdownProgress = 1.0;
-
-  bool get _active => widget.rhythmEnabled && widget.lightsOn;
-
-  @override
-  void initState() {
-    super.initState();
-    _ticker = createTicker(_onTick);
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 3000),
-    );
-    _activeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 500),
-      value: _active ? 1.0 : 0.0,
-    );
-    _activeController.addStatusListener(_onActiveStatus);
-    if (_active) {
-      _ticker.start();
-      _pulseController.repeat(reverse: true);
-    }
-  }
-
-  void _onTick(Duration elapsed) {
-    final lastTick = widget.lastTickTime;
-    if (lastTick == null || widget.rhythmIntervalSecs <= 0) {
-      if (_countdownProgress != 1.0) {
-        setState(() => _countdownProgress = 1.0);
-      }
-      return;
-    }
-    final elapsedSecs =
-        DateTime.now().difference(lastTick).inMilliseconds / 1000.0;
-    final progress =
-        (1.0 - elapsedSecs / widget.rhythmIntervalSecs).clamp(0.0, 1.0);
-    if ((_countdownProgress - progress).abs() > 0.001) {
-      setState(() => _countdownProgress = progress);
-    }
-  }
-
-  void _onActiveStatus(AnimationStatus status) {
-    if (status == AnimationStatus.dismissed) {
-      _ticker.stop();
-      _pulseController.stop();
-    }
-  }
-
-  @override
-  void didUpdateWidget(_AnimatedRoomOrb old) {
-    super.didUpdateWidget(old);
-    if (old.rhythmEnabled != widget.rhythmEnabled ||
-        old.lightsOn != widget.lightsOn) {
-      _syncAnimations();
-    }
-  }
-
-  void _syncAnimations() {
-    if (_active) {
-      if (!_ticker.isActive) _ticker.start();
-      if (!_pulseController.isAnimating) {
-        _pulseController.repeat(reverse: true);
-      }
-      _activeController.animateTo(1.0,
-          duration: const Duration(milliseconds: 500), curve: Curves.easeOut);
-    } else {
-      _activeController.animateTo(0.0,
-          duration: const Duration(milliseconds: 600), curve: Curves.easeIn);
-    }
-  }
 
   void _onTap() {
-    HapticFeedback.lightImpact();
-    final newEnabled = !widget.rhythmEnabled;
     final roomProvider = context.read<RoomProvider>();
-    roomProvider.setRoomRhythmEnabled(widget.roomId, newEnabled);
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.pushNodePreferences(widget.roomId, rhythmEnabled: newEnabled);
-  }
 
-  @override
-  void dispose() {
-    _activeController.removeStatusListener(_onActiveStatus);
-    _ticker.dispose();
-    _pulseController.dispose();
-    _activeController.dispose();
-    super.dispose();
+    if (widget.lightsOn) {
+      HapticFeedback.heavyImpact();
+      roomProvider.setRoomLightsOnLocal(widget.roomId, false);
+      roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.hardOff);
+      unawaited(
+        serverSync.pushNodePreferences(
+          widget.roomId,
+          state: RoomModeState.hardOff,
+        ),
+      );
+      return;
+    }
+
+    HapticFeedback.mediumImpact();
+    roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+    roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
+    serverSync.dispatchResetNode(widget.roomId);
   }
 
   @override
   Widget build(BuildContext context) {
     final effectiveBrightness = widget.brightness ?? 0;
     final effectiveKelvin = widget.kelvin ?? 3000;
-    final cctColor = !widget.lightsOn
-        ? CelestialColors.textSecondary
-        : widget.directColor ?? ColorUtils.cctToColor(effectiveKelvin);
+    final liveColor =
+        widget.directColor ?? ColorUtils.cctToColor(effectiveKelvin);
+    final orbColor =
+        widget.lightsOn ? liveColor : CelestialColors.textSecondary;
     final glowAlpha =
         widget.lightsOn ? 0.15 + (effectiveBrightness / 100.0) * 0.25 : 0.05;
     final borderAlpha =
@@ -1159,69 +1063,56 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _onTap,
-          onTapDown: (_) => setState(() => _pressed = true),
-          onTapUp: (_) => setState(() => _pressed = false),
-          onTapCancel: () => setState(() => _pressed = false),
-          child: AnimatedScale(
-            scale: _pressed ? 0.93 : 1.0,
-            duration: const Duration(milliseconds: 100),
-            curve: Curves.easeInOut,
-            child: SizedBox(
-              width: 100,
-              height: 100,
-              child: AnimatedBuilder(
-                animation: Listenable.merge([
-                  _pulseController,
-                  _activeController,
-                ]),
-                builder: (context, child) {
-                  final activeT = _activeController.value;
-                  final pulse = _pulseController.value;
-                  final extraGlow = activeT * pulse * 0.12;
-                  final extraSpread = activeT * pulse * 3.0;
-
-                  return CustomPaint(
-                    foregroundPainter: _CountdownRingPainter(
-                      progress: _countdownProgress,
-                      color: cctColor,
-                      opacity: activeT,
-                    ),
-                    child: Center(
-                      child: Container(
-                        width: 80,
-                        height: 80,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color:
-                              cctColor.withValues(alpha: glowAlpha + extraGlow),
-                          border: Border.all(
-                            color: cctColor.withValues(alpha: borderAlpha),
-                            width: 2,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: cctColor.withValues(
-                                alpha:
-                                    (widget.lightsOn ? 0.2 : 0.05) + extraGlow,
-                              ),
-                              blurRadius: 16 + extraSpread * 2,
-                              spreadRadius: 2 + extraSpread,
-                            ),
-                          ],
-                        ),
-                        child: child,
-                      ),
-                    ),
-                  );
-                },
+        Semantics(
+          button: true,
+          toggled: widget.lightsOn,
+          label: '${widget.roomName} power',
+          hint: widget.lightsOn ? 'Turn lights off' : 'Turn lights on',
+          child: GestureDetector(
+            key: ValueKey('room-detail-power-${widget.roomId}'),
+            behavior: HitTestBehavior.opaque,
+            onTap: _onTap,
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            child: AnimatedScale(
+              scale: _pressed ? 0.93 : 1.0,
+              duration: const Duration(milliseconds: 100),
+              curve: Curves.easeInOut,
+              child: SizedBox(
+                width: 100,
+                height: 100,
                 child: Center(
-                  child: Icon(
-                    _active ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                    color: cctColor,
-                    size: 32,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOut,
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: orbColor.withValues(alpha: glowAlpha),
+                      border: Border.all(
+                        color: orbColor.withValues(alpha: borderAlpha),
+                        width: 2,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: orbColor.withValues(
+                            alpha: widget.lightsOn ? 0.24 : 0.04,
+                          ),
+                          blurRadius: widget.lightsOn ? 20 : 8,
+                          spreadRadius: widget.lightsOn ? 4 : 0,
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      Icons.power_settings_new_rounded,
+                      color: widget.lightsOn
+                          ? liveColor
+                          : CelestialColors.textSecondary
+                              .withValues(alpha: 0.55),
+                      size: 32,
+                    ),
                   ),
                 ),
               ),
@@ -1236,13 +1127,13 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
             directColor: widget.directColor,
           ),
           const SizedBox(height: 6),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _onTap,
-            child: _RhythmStatusLabel(
-              active: _active,
-              pulseAnimation: _pulseController,
-              color: cctColor,
+          Text(
+            'On',
+            key: ValueKey('room-detail-power-status-${widget.roomId}'),
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
             ),
           ),
         ] else
@@ -1250,6 +1141,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
             padding: const EdgeInsets.only(top: 8),
             child: Text(
               'Off',
+              key: ValueKey('room-detail-power-status-${widget.roomId}'),
               style: TextStyle(
                 color: CelestialColors.textSecondary.withValues(alpha: 0.6),
                 fontSize: 14,
@@ -1260,130 +1152,4 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb>
       ],
     );
   }
-}
-
-/// Label below the orb showing rhythm state with visual hints.
-class _RhythmStatusLabel extends StatelessWidget {
-  final bool active;
-  final Animation<double> pulseAnimation;
-  final Color color;
-
-  const _RhythmStatusLabel({
-    required this.active,
-    required this.pulseAnimation,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 250),
-      child: active
-          ? Row(
-              key: const ValueKey(true),
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AnimatedBuilder(
-                  animation: pulseAnimation,
-                  builder: (context, _) => Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: color.withValues(
-                          alpha: 0.4 + pulseAnimation.value * 0.6),
-                      boxShadow: [
-                        BoxShadow(
-                          color: color.withValues(
-                              alpha: pulseAnimation.value * 0.4),
-                          blurRadius: 4,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  'Rhythm',
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            )
-          : Row(
-              key: const ValueKey(false),
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.play_arrow_rounded,
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                  size: 14,
-                ),
-                const SizedBox(width: 2),
-                Text(
-                  'Paused',
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-    );
-  }
-}
-
-/// Countdown ring that depletes over the rhythm interval.
-class _CountdownRingPainter extends CustomPainter {
-  final double progress; // 1.0 = full, 0.0 = empty
-  final Color color;
-  final double opacity;
-
-  _CountdownRingPainter({
-    required this.progress,
-    required this.color,
-    required this.opacity,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (opacity <= 0.01) return;
-
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - 3;
-    const strokeWidth = 3.0;
-
-    // Background track
-    canvas.drawCircle(
-      center,
-      radius,
-      Paint()
-        ..color = color.withValues(alpha: 0.15 * opacity)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = strokeWidth,
-    );
-
-    // Depleting arc — starts at 12-o'clock, sweeps clockwise
-    if (progress > 0.005) {
-      canvas.drawArc(
-        Rect.fromCircle(center: center, radius: radius),
-        -math.pi / 2,
-        2 * math.pi * progress,
-        false,
-        Paint()
-          ..color = color.withValues(alpha: 0.7 * opacity)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = strokeWidth
-          ..strokeCap = StrokeCap.round,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(_CountdownRingPainter old) =>
-      progress != old.progress || opacity != old.opacity || color != old.color;
 }

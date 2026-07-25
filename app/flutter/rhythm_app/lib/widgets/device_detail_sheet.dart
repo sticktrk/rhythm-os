@@ -5,7 +5,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
 import '../services/matter_removal_flow.dart';
-import 'off_behavior_switch.dart';
+import 'low_glow_switch.dart';
 import 'room_picker_sheet.dart';
 import 'segmented_tab_bar.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -348,7 +348,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
     );
-    // Standby (Off Behavior) is a node-level setting. It only applies to a
+    // Low glow (the Standby preference) is a node-level setting. It applies to a
     // light that is its own addressable node (an "individual bulb" that shows
     // as its own card) — the same nodes a room's standby toggle governs.
     final isStandbyCapable = device.type == RhythmDeviceType.light &&
@@ -521,13 +521,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     ]);
   }
 
-  /// Per-bulb "Off Behavior" — mirrors the room-level standby control. Off cuts
-  /// the light fully; Standby keeps it in a low, ready state.
+  /// Per-bulb Low glow preference, backed by the existing Standby contract.
   Widget _buildOffBehaviorSection(RhythmDevice device) {
     final standby = context.select<ServerSyncProvider, bool>(
       (sync) => sync.standbyEnabledForNode(device.id),
     );
-    return _buildGroup('Off Behavior', [
+    return _buildGroup('Low glow', [
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
         child: Row(
@@ -537,7 +536,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'When turned off',
+                    'Keep softly lit',
                     style: TextStyle(
                       color: CelestialColors.textPrimary,
                       fontSize: 14,
@@ -545,7 +544,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'Dim keeps a low, ready glow instead of going dark.',
+                    'Stays low after motion times out or you turn it off.',
                     style: TextStyle(
                       color: CelestialColors.textSecondary.withValues(alpha: 0.6),
                       fontSize: 11,
@@ -556,8 +555,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               ),
             ),
             const SizedBox(width: 12),
-            OffBehaviorSwitch(
-              standby: standby,
+            LowGlowSwitch(
+              value: standby,
               onChanged: (val) => _setStandbyEnabled(device, val),
             ),
           ],
@@ -574,7 +573,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
   // ── Tab content ──────────────────────────────────────────────────────────
 
-  /// Settings tab: Off Behavior (standby) + Move.
+  /// Settings tab: Low glow (Standby preference) + Move.
   Widget _buildSettingsTab(
     BuildContext context,
     RhythmDevice device,

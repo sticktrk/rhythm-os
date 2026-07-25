@@ -1,13 +1,14 @@
 import 'dart:math' as math;
 import 'dart:async';
-import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmDispatchResult, RhythmMode, RoomModeState;
 import '../providers/room_page_provider.dart';
+import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
 import '../widgets/editable_room_card.dart';
@@ -84,14 +85,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   static const _edgeScrollIntentThreshold = 16.0;
   static const _edgeScrollDelay = Duration(milliseconds: 375);
   static const _headerControlHeight = 38.0;
-  static const _maxSearchResults = 32;
-
-  final TextEditingController _searchController = TextEditingController();
-  final FocusNode _searchFocusNode = FocusNode();
-  String _searchQuery = '';
-  bool _searchOverlayOpen = false;
-  List<_RoomSearchEntry> _searchIndex = const [];
-  int _searchIndexSignature = 0;
+  bool _globalActionPending = false;
+  bool _globalSliderExpanded = false;
+  double? _globalSliderValue;
+  List<_GlobalRoomBrightness>? _globalUndoSnapshot;
 
   // Overlay-based drag state
   OverlayEntry? _dragOverlay;
@@ -115,26 +112,10 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   int _currentPage = 0;
 
   @override
-  void initState() {
-    super.initState();
-    _searchFocusNode.addListener(_handleSearchFocusChanged);
-    _rebuildSearchIndexIfNeeded();
-  }
-
-  @override
-  void didUpdateWidget(AllRoomsScreen oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _rebuildSearchIndexIfNeeded();
-  }
-
-  @override
   void dispose() {
     _edgeScrollTimer?.cancel();
     _removeTrackedPointerRoute();
     _dragOverlay?.remove();
-    _searchFocusNode.removeListener(_handleSearchFocusChanged);
-    _searchFocusNode.dispose();
-    _searchController.dispose();
     super.dispose();
   }
 
@@ -144,138 +125,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     AnalyticsService().logRoomsRefreshed(source: 'all_rooms_pull_to_refresh');
   }
 
-  void _handleSearchFocusChanged() {
-    if (!mounted) return;
-    setState(() {
-      if (_searchFocusNode.hasFocus) _searchOverlayOpen = true;
-    });
-  }
-
-  void _handleSearchChanged(String value) {
-    if (_searchQuery == value) return;
-    setState(() {
-      _searchQuery = value;
-      _searchOverlayOpen = true;
-    });
-  }
-
-  void _clearSearch() {
-    _searchController.clear();
-    _handleSearchChanged('');
-    _searchFocusNode.requestFocus();
-  }
-
-  void _dismissSearch() {
-    _searchController.clear();
-    _searchFocusNode.unfocus();
-    setState(() {
-      _searchQuery = '';
-      _searchOverlayOpen = false;
-    });
-  }
-
-  bool _showSearchOverlay(bool editMode) {
-    if (editMode) return false;
-    return _searchOverlayOpen &&
-        (_searchFocusNode.hasFocus || _searchQuery.trim().isNotEmpty);
-  }
-
   double _headerVerticalPadding(bool isLandscape) => isLandscape ? 4.0 : 10.0;
-
-  double _headerHeight(bool isLandscape) =>
-      _headerControlHeight + (_headerVerticalPadding(isLandscape) * 2);
-
-  void _rebuildSearchIndexIfNeeded() {
-    final signature = _roomSearchSignature(widget.rooms);
-    if (signature == _searchIndexSignature) return;
-    _searchIndexSignature = signature;
-    _searchIndex = [
-      for (final room in widget.rooms) _RoomSearchEntry(room),
-    ];
-  }
-
-  int _roomSearchSignature(List<RoomDto> rooms) {
-    var hash = Object.hash(rooms.length, 0);
-    for (final room in rooms) {
-      hash = Object.hash(
-        hash,
-        room.id,
-        room.name,
-        room.source,
-        room.kind,
-        room.parentId,
-        Object.hashAll(room.deviceIds),
-      );
-    }
-    return hash;
-  }
-
-  List<_RoomSearchHit> _searchHits() {
-    final query = _normalizeSearchText(_searchQuery);
-    final hits = <_RoomSearchHit>[];
-    if (query.isEmpty) {
-      return const [];
-    }
-
-    for (final entry in _searchIndex) {
-      final score = _scoreRoomSearch(entry, query);
-      if (score >= 0) hits.add(_RoomSearchHit(entry: entry, score: score));
-    }
-    hits.sort((a, b) {
-      final scoreCompare = b.score.compareTo(a.score);
-      if (scoreCompare != 0) return scoreCompare;
-      return a.entry.sortName.compareTo(b.entry.sortName);
-    });
-    return hits.take(_maxSearchResults).toList(growable: false);
-  }
-
-  int _scoreRoomSearch(_RoomSearchEntry entry, String query) {
-    final name = entry.normalizedName;
-    final searchable = entry.normalizedSearchText;
-
-    if (name == query) return 10000 - name.length;
-    if (name.startsWith(query)) return 9000 - name.length;
-    if (entry.normalizedWords.any((word) => word.startsWith(query))) {
-      return 8600 - name.length;
-    }
-
-    final nameContains = name.indexOf(query);
-    if (nameContains >= 0) return 8200 - nameContains;
-
-    final textContains = searchable.indexOf(query);
-    if (textContains >= 0) return 7600 - textContains;
-
-    return _subsequenceSearchScore(searchable, query);
-  }
-
-  int _subsequenceSearchScore(String searchable, String query) {
-    var queryIndex = 0;
-    var lastMatch = -1;
-    var firstMatch = -1;
-    var gapPenalty = 0;
-    var contiguousBonus = 0;
-
-    for (var i = 0; i < searchable.length && queryIndex < query.length; i++) {
-      if (searchable.codeUnitAt(i) != query.codeUnitAt(queryIndex)) {
-        continue;
-      }
-      if (firstMatch == -1) firstMatch = i;
-      if (lastMatch >= 0) {
-        final gap = i - lastMatch - 1;
-        gapPenalty += gap;
-        if (gap == 0) contiguousBonus += 12;
-      }
-      lastMatch = i;
-      queryIndex++;
-    }
-
-    if (queryIndex != query.length) return -1;
-    return 6200 -
-        (firstMatch * 18) -
-        (gapPenalty * 14) -
-        (searchable.length - query.length).clamp(0, 160).toInt() +
-        contiguousBonus;
-  }
 
   // -- Drag handle callbacks --------------------------------------------------
 
@@ -622,7 +472,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final pageCount = pageProvider.pageCount;
     final clampedPage =
         pageCount == 0 ? 0 : _currentPage.clamp(0, pageCount - 1);
-    final showSearchOverlay = _showSearchOverlay(pageProvider.editMode);
 
     return Stack(
       children: [
@@ -672,11 +521,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               totalPages: pageCount,
               pageController: widget.pageController,
             ),
-          ),
-        if (showSearchOverlay)
-          _buildSearchOverlay(
-            isLandscape: isLandscape,
-            bottomPad: bottomPad,
           ),
       ],
     );
@@ -1000,167 +844,460 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(20, vPad, 20, vPad),
-      child: Row(
+      child: Column(
         children: [
-          _HomeChooserButton(
-            onTap: widget.onHomeChooserTap,
+          Row(
+            children: [
+              _HomeChooserButton(onTap: widget.onHomeChooserTap),
+              const SizedBox(width: 8),
+              Expanded(child: _buildGlobalActionDock()),
+              const SizedBox(width: 8),
+              _SunButton(onTap: () => SunPositionScreen.show(context)),
+            ],
           ),
-          const SizedBox(width: 12),
-          Expanded(child: _buildSearchField()),
-          const SizedBox(width: 12),
-          _SunButton(
-            onTap: () => SunPositionScreen.show(context),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: _globalSliderExpanded
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: _buildGlobalBrightnessPanel(),
+                  )
+                : const SizedBox.shrink(),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildSearchField() {
-    final active = _searchFocusNode.hasFocus || _searchQuery.isNotEmpty;
-    final borderColor = active
-        ? CelestialColors.accentBlue.withValues(alpha: 0.55)
-        : CelestialColors.orbitRing.withValues(alpha: 0.75);
+  List<_GlobalRoomTarget> _eligibleGlobalRoomTargets() {
+    final roomProvider = context.read<RoomProvider>();
+    final provisional = <_GlobalRoomTarget>[];
 
-    return SizedBox(
-      height: _headerControlHeight,
-      child: TextField(
-        key: const ValueKey('room_quick_search_field'),
-        controller: _searchController,
-        focusNode: _searchFocusNode,
-        onChanged: _handleSearchChanged,
-        onTap: () => setState(() => _searchOverlayOpen = true),
-        textInputAction: TextInputAction.search,
-        style: const TextStyle(
-          color: CelestialColors.textPrimary,
-          fontSize: 14,
-          fontWeight: FontWeight.w500,
+    for (final listedRoom in widget.rooms) {
+      final room = roomProvider.getRoom(listedRoom.id) ?? listedRoom;
+      final isLightNode = room.kind == RoomNodeKind.room ||
+          room.kind == RoomNodeKind.lightDevice;
+      final state = roomProvider.getDisplayRoomState(room.id);
+      final isAdaptiveOn = state == RoomModeState.active ||
+          state == RoomModeState.wake ||
+          state == RoomModeState.warning;
+      if (!isLightNode ||
+          room.disabled ||
+          !room.rhythmEnabled ||
+          !room.lightsOn ||
+          !isAdaptiveOn ||
+          roomProvider.isRoomTransitioning(room.id) ||
+          roomProvider.isNodeDispatchPending(room.id)) {
+        continue;
+      }
+      provisional.add(
+        _GlobalRoomTarget(
+          room: room,
+          brightness:
+              (roomProvider.getBrightness(room.id) ?? 50).clamp(1, 100).toInt(),
         ),
-        cursorColor: CelestialColors.accentBlue,
-        decoration: InputDecoration(
-          hintText: 'Search rooms',
-          hintStyle: TextStyle(
-            color: CelestialColors.textSecondary.withValues(alpha: 0.72),
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-          ),
-          prefixIcon: Icon(
-            Icons.search_rounded,
-            color: active
-                ? CelestialColors.accentBlue
-                : CelestialColors.textSecondary.withValues(alpha: 0.78),
-            size: 20,
-          ),
-          prefixIconConstraints:
-              const BoxConstraints(minWidth: 38, minHeight: 38),
-          suffixIcon: _searchQuery.isEmpty
-              ? null
-              : IconButton(
-                  tooltip: 'Clear search',
-                  onPressed: _clearSearch,
-                  icon: const Icon(Icons.close_rounded, size: 18),
-                  color: CelestialColors.textSecondary,
-                  visualDensity: VisualDensity.compact,
-                ),
-          suffixIconConstraints:
-              const BoxConstraints(minWidth: 36, minHeight: 38),
-          filled: true,
-          fillColor: CelestialColors.backgroundCard.withValues(alpha: 0.84),
-          isDense: true,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 0,
-            vertical: 9,
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(20),
-            borderSide: BorderSide(color: borderColor),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(20),
-            borderSide: BorderSide(
-              color: CelestialColors.accentBlue.withValues(alpha: 0.75),
-              width: 1.2,
+      );
+    }
+
+    final parentIds = provisional
+        .where((target) => target.room.kind == RoomNodeKind.room)
+        .map((target) => target.room.id)
+        .toSet();
+    return provisional
+        .where(
+          (target) =>
+              target.room.kind != RoomNodeKind.lightDevice ||
+              !parentIds.contains(target.room.parentId),
+        )
+        .toList(growable: false);
+  }
+
+  int _completedDispatchCount(
+    RhythmDispatchResult? result,
+    List<_GlobalRoomTarget> attempted,
+  ) {
+    if (result == null) return 0;
+    final metadataCount = result.dispatchCount;
+    if (metadataCount != null) {
+      return metadataCount.clamp(0, attempted.length).toInt();
+    }
+    if (result.states.isEmpty) return 0;
+    final attemptedIds = attempted.map((target) => target.room.id).toSet();
+    return result.states
+        .map((state) => state.nodeId)
+        .where(attemptedIds.contains)
+        .toSet()
+        .length;
+  }
+
+  void _showGlobalProgress(String message) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 30),
+        content: Row(
+          key: const ValueKey('global-room-action-progress'),
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
             ),
-          ),
+            const SizedBox(width: 12),
+            Text(message),
+          ],
         ),
       ),
     );
   }
 
-  Widget _buildSearchOverlay({
-    required bool isLandscape,
-    required double bottomPad,
+  void _showGlobalResult({
+    required String verb,
+    required int completed,
+    required int eligible,
+    bool offerUndo = true,
   }) {
-    final hits = _searchHits();
-    final top = MediaQuery.of(context).padding.top + _headerHeight(isLandscape);
-    final queryActive = _normalizeSearchText(_searchQuery).isNotEmpty;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text('$verb $completed of $eligible rooms.'),
+        action: offerUndo && completed > 0 && _globalUndoSnapshot != null
+            ? SnackBarAction(
+                key: const ValueKey('global-room-action-undo'),
+                label: 'UNDO',
+                textColor: const Color(0xFFFFD166),
+                onPressed: _scheduleUndoGlobalRoomAction,
+              )
+            : null,
+      ),
+    );
+  }
 
-    return Positioned(
-      left: 0,
-      top: top,
-      right: 0,
-      bottom: 0,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _dismissSearch,
-              child: ClipRect(
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.58),
-                    ),
-                  ),
+  void _showNoEligibleRooms() {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('No adaptive rooms are currently on.'),
+      ),
+    );
+  }
+
+  Future<void> _runGlobalRoomAction(_GlobalRoomAction action) async {
+    if (_globalActionPending) return;
+    final eligible = _eligibleGlobalRoomTargets();
+    if (eligible.isEmpty) {
+      _showNoEligibleRooms();
+      return;
+    }
+
+    final serverSync = context.read<ServerSyncProvider>();
+    final dispatchable = eligible
+        .where((target) => serverSync.isRoomHubConnected(target.room.source))
+        .toList(growable: false);
+    final actionName = switch (action) {
+      _GlobalRoomAction.soften => 'Softening',
+      _GlobalRoomAction.boost => 'Boosting',
+      _GlobalRoomAction.reset => 'Resetting',
+    };
+    final resultVerb = action == _GlobalRoomAction.reset ? 'Reset' : 'Adjusted';
+
+    HapticFeedback.lightImpact();
+    setState(() => _globalActionPending = true);
+    _showGlobalProgress('$actionName ${eligible.length} rooms…');
+
+    RhythmDispatchResult? result;
+    if (dispatchable.isNotEmpty) {
+      final wireAction = switch (action) {
+        _GlobalRoomAction.soften => 'step_down',
+        _GlobalRoomAction.boost => 'step_up',
+        _GlobalRoomAction.reset => 'reset',
+      };
+      result = await serverSync.dispatchBatchNodeActionsResult([
+        for (final target in dispatchable)
+          (nodeId: target.room.id, action: wireAction),
+      ]);
+    }
+    if (!mounted) return;
+
+    final completed = _completedDispatchCount(result, dispatchable);
+    setState(() {
+      _globalActionPending = false;
+      _globalSliderValue = null;
+      _globalUndoSnapshot = completed == 0
+          ? null
+          : [
+              for (final target in dispatchable.take(completed))
+                _GlobalRoomBrightness(
+                  nodeId: target.room.id,
+                  brightness: target.brightness,
                 ),
+            ];
+    });
+    _showGlobalResult(
+      verb: resultVerb,
+      completed: completed,
+      eligible: eligible.length,
+    );
+  }
+
+  Future<void> _setGlobalBrightness(double value) async {
+    if (_globalActionPending) return;
+    final eligible = _eligibleGlobalRoomTargets();
+    if (eligible.isEmpty) {
+      _showNoEligibleRooms();
+      return;
+    }
+
+    final serverSync = context.read<ServerSyncProvider>();
+    final dispatchable = eligible
+        .where((target) => serverSync.isRoomHubConnected(target.room.source))
+        .toList(growable: false);
+    final brightness = value.round().clamp(1, 100).toInt();
+
+    HapticFeedback.selectionClick();
+    setState(() => _globalActionPending = true);
+    _showGlobalProgress('Setting ${eligible.length} rooms to $brightness%…');
+
+    RhythmDispatchResult? result;
+    if (dispatchable.isNotEmpty) {
+      result = await serverSync.dispatchBatchNodeCurveBrightnessResult([
+        for (final target in dispatchable)
+          (nodeId: target.room.id, brightness: brightness),
+      ]);
+    }
+    if (!mounted) return;
+
+    final completed = _completedDispatchCount(result, dispatchable);
+    setState(() {
+      _globalActionPending = false;
+      _globalSliderValue = brightness.toDouble();
+      _globalUndoSnapshot = completed == 0
+          ? null
+          : [
+              for (final target in dispatchable.take(completed))
+                _GlobalRoomBrightness(
+                  nodeId: target.room.id,
+                  brightness: target.brightness,
+                ),
+            ];
+    });
+    _showGlobalResult(
+      verb: 'Adjusted',
+      completed: completed,
+      eligible: eligible.length,
+    );
+  }
+
+  Future<void> _undoGlobalRoomAction() async {
+    if (_globalActionPending || _globalUndoSnapshot == null) return;
+    final snapshot = List<_GlobalRoomBrightness>.of(_globalUndoSnapshot!);
+    final currentlyEligible = {
+      for (final target in _eligibleGlobalRoomTargets()) target.room.id: target,
+    };
+    final serverSync = context.read<ServerSyncProvider>();
+    final restorable = snapshot
+        .where(
+          (saved) =>
+              currentlyEligible.containsKey(saved.nodeId) &&
+              serverSync.isRoomHubConnected(
+                currentlyEligible[saved.nodeId]!.room.source,
+              ),
+        )
+        .toList(growable: false);
+
+    if (restorable.isEmpty) {
+      _globalUndoSnapshot = null;
+      _showNoEligibleRooms();
+      return;
+    }
+
+    setState(() {
+      _globalActionPending = true;
+      _globalUndoSnapshot = null;
+    });
+    _showGlobalProgress('Restoring ${restorable.length} rooms…');
+    final result = await serverSync.dispatchBatchNodeCurveBrightnessResult([
+      for (final saved in restorable)
+        (nodeId: saved.nodeId, brightness: saved.brightness),
+    ]);
+    if (!mounted) return;
+
+    final attemptedTargets = [
+      for (final saved in restorable) currentlyEligible[saved.nodeId]!,
+    ];
+    final completed = _completedDispatchCount(result, attemptedTargets);
+    setState(() {
+      _globalActionPending = false;
+      _globalSliderValue = null;
+    });
+    _showGlobalResult(
+      verb: 'Restored',
+      completed: completed,
+      eligible: snapshot.length,
+      offerUndo: false,
+    );
+  }
+
+  void _scheduleUndoGlobalRoomAction() {
+    // SnackBarAction dismisses its parent after invoking onPressed. Let that
+    // exit animation finish so it cannot also dismiss Undo's progress/result.
+    Future<void>.delayed(const Duration(milliseconds: 260), () {
+      if (mounted) _undoGlobalRoomAction();
+    });
+  }
+
+  void _toggleGlobalBrightnessPanel() {
+    if (_globalActionPending) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _globalSliderExpanded = !_globalSliderExpanded;
+      if (!_globalSliderExpanded) _globalSliderValue = null;
+    });
+  }
+
+  Widget _buildGlobalActionDock() {
+    final enabled = !_globalActionPending;
+    return Container(
+      key: const ValueKey('global-room-action-dock'),
+      height: _headerControlHeight,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.82),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.16),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _GlobalActionButton(
+              key: const ValueKey('global-room-action-dim'),
+              icon: Icons.brightness_low_rounded,
+              label: 'Soften',
+              enabled: enabled,
+              onTap: () => _runGlobalRoomAction(_GlobalRoomAction.soften),
+            ),
+          ),
+          const _GlobalActionDivider(),
+          Expanded(
+            child: _GlobalActionButton(
+              key: const ValueKey('global-room-action-bright'),
+              icon: Icons.brightness_high_rounded,
+              label: 'Boost',
+              enabled: enabled,
+              onTap: () => _runGlobalRoomAction(_GlobalRoomAction.boost),
+            ),
+          ),
+          const _GlobalActionDivider(),
+          Expanded(
+            child: _GlobalActionButton(
+              key: const ValueKey('global-room-action-reset'),
+              icon: Icons.restart_alt_rounded,
+              label: 'Reset',
+              enabled: enabled,
+              onTap: () => _runGlobalRoomAction(_GlobalRoomAction.reset),
+            ),
+          ),
+          const _GlobalActionDivider(),
+          SizedBox(
+            width: 36,
+            child: _GlobalActionButton(
+              key: const ValueKey('global-room-action-expand'),
+              icon: _globalSliderExpanded
+                  ? Icons.expand_less_rounded
+                  : Icons.tune_rounded,
+              label: _globalSliderExpanded
+                  ? 'Hide exact brightness'
+                  : 'Set exact brightness',
+              showLabel: false,
+              enabled: enabled,
+              selected: _globalSliderExpanded,
+              onTap: _toggleGlobalBrightnessPanel,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGlobalBrightnessPanel() {
+    context.watch<RoomProvider>();
+    final targets = _eligibleGlobalRoomTargets();
+    final average = targets.isEmpty
+        ? 50.0
+        : targets
+                .map((target) => target.brightness)
+                .reduce((left, right) => left + right) /
+            targets.length;
+    final value = (_globalSliderValue ?? average).clamp(1.0, 100.0).toDouble();
+    final enabled = !_globalActionPending && targets.isNotEmpty;
+
+    return Container(
+      key: const ValueKey('global-room-slider-panel'),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: CelestialColors.accentBlue.withValues(alpha: 0.26),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.wb_sunny_rounded,
+            size: 18,
+            color: Color(0xFFFFC857),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 6,
+                activeTrackColor: const Color(0xFFFFC857),
+                inactiveTrackColor:
+                    CelestialColors.orbitRing.withValues(alpha: 0.55),
+                thumbColor: const Color(0xFFFFD978),
+                overlayColor: const Color(0xFFFFC857).withValues(alpha: 0.16),
+              ),
+              child: Slider(
+                key: const ValueKey('global-room-brightness-slider'),
+                value: value,
+                min: 1,
+                max: 100,
+                onChanged: enabled
+                    ? (next) => setState(() => _globalSliderValue = next)
+                    : null,
+                onChangeEnd: enabled ? _setGlobalBrightness : null,
               ),
             ),
           ),
-          Positioned.fill(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                  child: Align(
-                    alignment: Alignment.topCenter,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxWidth: 640,
-                        maxHeight: math.max(92, constraints.maxHeight - 8),
-                      ),
-                      child: !queryActive
-                          ? const SizedBox.shrink()
-                          : hits.isEmpty
-                              ? _SearchEmptyState(queryActive: queryActive)
-                              : ListView.builder(
-                                  key: const ValueKey(
-                                      'room_quick_search_results'),
-                                  shrinkWrap: true,
-                                  padding: EdgeInsets.only(bottom: bottomPad),
-                                  keyboardDismissBehavior:
-                                      ScrollViewKeyboardDismissBehavior.onDrag,
-                                  itemCount: hits.length,
-                                  itemBuilder: (context, index) {
-                                    final room = hits[index].entry.room;
-                                    return Padding(
-                                      padding:
-                                          const EdgeInsets.only(bottom: 12),
-                                      child: RoomCard(
-                                        key:
-                                            ValueKey('quick-search-${room.id}'),
-                                        roomId: room.id,
-                                        globalConfig: widget.globalConfig,
-                                        curveData: widget.curveData,
-                                      ),
-                                    );
-                                  },
-                                ),
-                    ),
-                  ),
-                );
-              },
+          SizedBox(
+            width: 42,
+            child: Text(
+              '${value.round()}%',
+              textAlign: TextAlign.end,
+              style: TextStyle(
+                color: enabled
+                    ? CelestialColors.textPrimary
+                    : CelestialColors.textSecondary.withValues(alpha: 0.6),
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],
@@ -1169,95 +1306,105 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   }
 }
 
-String _normalizeSearchText(String value) {
-  final buffer = StringBuffer();
-  for (final codeUnit in value.toLowerCase().codeUnits) {
-    final isDigit = codeUnit >= 48 && codeUnit <= 57;
-    final isLetter = codeUnit >= 97 && codeUnit <= 122;
-    if (isDigit || isLetter) buffer.writeCharCode(codeUnit);
-  }
-  return buffer.toString();
-}
+enum _GlobalRoomAction { soften, boost, reset }
 
-String _roomSourceLabel(RoomSourceDto source) => switch (source) {
-      RoomSourceDto.hue => 'Hue',
-      RoomSourceDto.homeAssistant => 'Home Assistant',
-      RoomSourceDto.matter => 'Matter',
-      RoomSourceDto.bridge => 'Bridge',
-      RoomSourceDto.unknown => 'Unknown',
-    };
-
-String _roomKindLabel(RoomNodeKind kind) => switch (kind) {
-      RoomNodeKind.room => 'Room',
-      RoomNodeKind.lightDevice => 'Light',
-      RoomNodeKind.switchDevice => 'Switch',
-      RoomNodeKind.motionSensor => 'Motion Sensor',
-      RoomNodeKind.sensor => 'Sensor',
-      RoomNodeKind.button => 'Button',
-      RoomNodeKind.otherDevice => 'Device',
-    };
-
-class _RoomSearchEntry {
-  _RoomSearchEntry(this.room)
-      : sortName = room.name.toLowerCase(),
-        normalizedName = _normalizeSearchText(room.name),
-        normalizedWords = room.name
-            .split(RegExp(r'\s+'))
-            .map(_normalizeSearchText)
-            .where((word) => word.isNotEmpty)
-            .toList(growable: false),
-        normalizedSearchText = _normalizeSearchText(
-          [
-            room.name,
-            room.id,
-            room.parentId,
-            _roomSourceLabel(room.source),
-            _roomKindLabel(room.kind),
-            ...room.deviceIds,
-          ].whereType<String>().join(' '),
-        );
-
-  final RoomDto room;
-  final String sortName;
-  final String normalizedName;
-  final List<String> normalizedWords;
-  final String normalizedSearchText;
-}
-
-class _RoomSearchHit {
-  const _RoomSearchHit({
-    required this.entry,
-    required this.score,
+class _GlobalRoomTarget {
+  const _GlobalRoomTarget({
+    required this.room,
+    required this.brightness,
   });
 
-  final _RoomSearchEntry entry;
-  final int score;
+  final RoomDto room;
+  final int brightness;
 }
 
-class _SearchEmptyState extends StatelessWidget {
-  const _SearchEmptyState({required this.queryActive});
+class _GlobalRoomBrightness {
+  const _GlobalRoomBrightness({
+    required this.nodeId,
+    required this.brightness,
+  });
 
-  final bool queryActive;
+  final String nodeId;
+  final int brightness;
+}
+
+class _GlobalActionDivider extends StatelessWidget {
+  const _GlobalActionDivider();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      key: const ValueKey('room_quick_search_empty'),
-      height: 92,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.9),
-        ),
-      ),
-      child: Text(
-        queryActive ? 'No matching rooms' : 'No rooms',
-        style: TextStyle(
-          color: CelestialColors.textSecondary.withValues(alpha: 0.9),
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
+      width: 1,
+      height: 20,
+      color: CelestialColors.orbitRing.withValues(alpha: 0.55),
+    );
+  }
+}
+
+class _GlobalActionButton extends StatelessWidget {
+  const _GlobalActionButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+    this.showLabel = true,
+    this.selected = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool enabled;
+  final VoidCallback onTap;
+  final bool showLabel;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = enabled
+        ? selected
+            ? CelestialColors.accentBlue
+            : CelestialColors.textPrimary
+        : CelestialColors.textSecondary.withValues(alpha: 0.38);
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      selected: selected,
+      label: label,
+      child: Tooltip(
+        message: label,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            color: selected
+                ? CelestialColors.accentBlue.withValues(alpha: 0.14)
+                : Colors.transparent,
+            alignment: Alignment.center,
+            padding: EdgeInsets.symmetric(horizontal: showLabel ? 5 : 0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 16, color: color),
+                if (showLabel) ...[
+                  const SizedBox(width: 3),
+                  Flexible(
+                    child: Text(
+                      label,
+                      overflow: TextOverflow.fade,
+                      softWrap: false,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.15,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );

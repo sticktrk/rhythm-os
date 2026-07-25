@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,24 +27,62 @@ class _FakeHomeProvider extends HomeProvider {
 class _FakeRhythmServerApi extends RhythmServerApi {
   _FakeRhythmServerApi() : super(Dio());
 
+  final List<List<({String nodeId, String action})>> actionBatches = [];
+  final List<List<({String nodeId, int brightness})>> brightnessBatches = [];
+  Completer<RhythmDispatchResult>? actionBatchCompleter;
+  int? nextDispatchCount;
+
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
+
+  @override
+  Future<RhythmDispatchResult> nodeActionBatchResult(
+    List<({String nodeId, String action})> actions, {
+    int? dispatchSpacingMs,
+  }) async {
+    actionBatches.add(List.of(actions));
+    final completer = actionBatchCompleter;
+    if (completer != null) return completer.future;
+    return RhythmDispatchResult(
+      metadata: RhythmDispatchMetadata(
+        dispatchCount: nextDispatchCount ?? actions.length,
+      ),
+    );
+  }
+
+  @override
+  Future<RhythmDispatchResult> nodeCurveBrightnessBatchResult(
+    List<({String nodeId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) async {
+    brightnessBatches.add(List.of(items));
+    return RhythmDispatchResult(
+      metadata: RhythmDispatchMetadata(
+        dispatchCount: nextDispatchCount ?? items.length,
+      ),
+    );
+  }
 }
 
 class _TestRhythmConnection extends RhythmConnection {
-  _TestRhythmConnection() : _api = _FakeRhythmServerApi();
+  _TestRhythmConnection({
+    bool connected = true,
+  })  : _connected = connected,
+        _api = _FakeRhythmServerApi();
 
-  final RhythmServerApi _api;
-
-  @override
-  RhythmServerApi get api => _api;
-
-  @override
-  bool get connected => false;
+  final bool _connected;
+  final _FakeRhythmServerApi _api;
 
   @override
-  RhythmConnectionState get connectionState =>
-      RhythmConnectionState.disconnected;
+  _FakeRhythmServerApi get api => _api;
+
+  @override
+  bool get connected => _connected;
+
+  @override
+  RhythmConnectionState get connectionState => _connected
+      ? RhythmConnectionState.connected
+      : RhythmConnectionState.disconnected;
 
   @override
   Stream<RhythmHello> get helloEvents => const Stream<RhythmHello>.empty();
@@ -192,9 +232,15 @@ const _switch1 = RoomDto(
 );
 
 class _AllRoomsHarness {
-  const _AllRoomsHarness({required this.roomPageProvider});
+  const _AllRoomsHarness({
+    required this.roomPageProvider,
+    required this.roomProvider,
+    required this.api,
+  });
 
   final RoomPageProvider roomPageProvider;
+  final RoomProvider roomProvider;
+  final _FakeRhythmServerApi api;
 }
 
 Future<_AllRoomsHarness> _pumpAllRooms(
@@ -253,7 +299,11 @@ Future<_AllRoomsHarness> _pumpAllRooms(
   );
   await tester.pump();
 
-  return _AllRoomsHarness(roomPageProvider: roomPageProvider);
+  return _AllRoomsHarness(
+    roomPageProvider: roomPageProvider,
+    roomProvider: roomProvider,
+    api: connection.api,
+  );
 }
 
 void main() {
@@ -272,67 +322,180 @@ void main() {
     expect(opened, isTrue);
   });
 
-  testWidgets('quick search fuzzy filters rooms and reuses room cards',
+  testWidgets('global action dock replaces search and expands exact slider',
       (tester) async {
     await _pumpAllRooms(
       tester,
       rooms: const [_room1, _bedroom, _garage],
     );
 
-    await tester.tap(find.byKey(const ValueKey('room_quick_search_field')));
-    await tester.pump();
-
+    expect(find.byKey(const ValueKey('room_quick_search_field')), findsNothing);
     expect(
-      find.byKey(const ValueKey('room_quick_search_results')),
+      find.byKey(const ValueKey('global-room-action-dock')),
+      findsOneWidget,
+    );
+    expect(find.text('Soften'), findsOneWidget);
+    expect(find.text('Boost'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('global-room-action-dock')),
+        matching: find.text('Reset'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-slider-panel')),
       findsNothing,
     );
-    expect(find.byKey(const ValueKey('quick-search-room-1')), findsNothing);
 
-    await tester.enterText(
-      find.byKey(const ValueKey('room_quick_search_field')),
-      'ktc',
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-expand')),
     );
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
 
     expect(
-      find.byKey(const ValueKey('room_quick_search_results')),
-      findsOneWidget,
-    );
-    final kitchenResult = find.byKey(const ValueKey('quick-search-room-1'));
-    expect(kitchenResult, findsOneWidget);
-    expect(find.byKey(const ValueKey('quick-search-bedroom')), findsNothing);
-    expect(
-      find.descendant(of: kitchenResult, matching: find.text('Off')),
+      find.byKey(const ValueKey('global-room-slider-panel')),
       findsOneWidget,
     );
     expect(
-      find.descendant(of: kitchenResult, matching: find.text('On')),
+      find.byKey(const ValueKey('global-room-brightness-slider')),
       findsOneWidget,
     );
   });
 
-  testWidgets('quick search backdrop tap clears and closes the overlay',
+  testWidgets(
+      'global actions target only adaptive-on nodes and collapse child bulbs',
       (tester) async {
-    await _pumpAllRooms(
+    final harness = await _pumpAllRooms(
       tester,
-      rooms: const [_room1, _bedroom, _garage],
+      rooms: const [_room1, _bulb1, _bedroom, _garage, _switch1],
     );
-
-    final searchField = find.byKey(const ValueKey('room_quick_search_field'));
-    await tester.tap(searchField);
-    await tester.enterText(searchField, 'kit');
+    harness.roomProvider.setRoomStateLocal(
+      _bedroom.id,
+      RoomModeState.mood,
+    );
+    harness.roomProvider.setRoomStateLocal(
+      _garage.id,
+      RoomModeState.standby,
+    );
     await tester.pump();
 
-    expect(find.byKey(const ValueKey('quick-search-room-1')), findsOneWidget);
-
-    await tester.tapAt(const Offset(195, 760));
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-dim')),
+    );
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
 
+    expect(harness.api.actionBatches, hasLength(1));
+    expect(harness.api.actionBatches.single, [
+      (nodeId: 'room-1', action: 'step_down'),
+    ]);
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('room_quick_search_results')),
-      findsNothing,
+      find.byKey(const ValueKey('global-room-action-undo')),
+      findsOneWidget,
     );
-    expect(tester.widget<TextField>(searchField).controller?.text, isEmpty);
+  });
+
+  testWidgets(
+      'global command locks duplicate taps and reports partial progress',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+    final pending = Completer<RhythmDispatchResult>();
+    harness.api.actionBatchCompleter = pending;
+
+    final boost = find.byKey(const ValueKey('global-room-action-bright'));
+    await tester.tap(boost);
+    await tester.tap(boost);
+    await tester.pump();
+
+    expect(harness.api.actionBatches, hasLength(1));
+    expect(harness.api.actionBatches.single, [
+      (nodeId: 'room-1', action: 'step_up'),
+      (nodeId: 'bedroom', action: 'step_up'),
+    ]);
+    expect(
+      find.byKey(const ValueKey('global-room-action-progress')),
+      findsOneWidget,
+    );
+
+    pending.complete(
+      const RhythmDispatchResult(
+        metadata: RhythmDispatchMetadata(dispatchCount: 1),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Adjusted 1 of 2 rooms.'), findsOneWidget);
+  });
+
+  testWidgets('global reset uses reset action and exposes brightness undo',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-reset')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(harness.api.actionBatches.single, [
+      (nodeId: 'room-1', action: 'reset'),
+      (nodeId: 'bedroom', action: 'reset'),
+    ]);
+    expect(find.text('Reset 2 of 2 rooms.'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-undo')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(harness.api.brightnessBatches.single, [
+      (nodeId: 'room-1', brightness: 50),
+      (nodeId: 'bedroom', brightness: 50),
+    ]);
+  });
+
+  testWidgets('expanded slider applies one exact batch to adaptive-on rooms',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-expand')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    final slider = find.byKey(const ValueKey('global-room-brightness-slider'));
+
+    await tester.drag(slider, const Offset(90, 0));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(harness.api.brightnessBatches, hasLength(1));
+    final applied = harness.api.brightnessBatches.single;
+    expect(applied.map((item) => item.nodeId), ['room-1', 'bedroom']);
+    expect(applied.first.brightness, greaterThan(50));
+    expect(
+      applied.every((item) => item.brightness == applied.first.brightness),
+      isTrue,
+    );
+    expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
   });
 
   testWidgets('room cards show the default room icon', (tester) async {

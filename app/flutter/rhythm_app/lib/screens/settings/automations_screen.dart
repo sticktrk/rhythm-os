@@ -419,7 +419,7 @@ class _ManualModeToggleState extends State<_ManualModeToggle> {
   }
 }
 
-/// Detail screen for a mode's per-room On / Standby / Off behavior — what each
+/// Detail screen for a mode's per-room On / Low glow / Off behavior — what each
 /// room does when Day or Sleep engages.
 class ModeBehaviorDetailScreen extends StatelessWidget {
   final RhythmMode mode;
