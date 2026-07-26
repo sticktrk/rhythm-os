@@ -917,6 +917,10 @@ fn parse_profile_settings_patch(
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
         motion_activation_enabled,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
+        replace_profile_overrides: body
+            .get("replace_profile_overrides")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }))
 }
 
@@ -2718,6 +2722,10 @@ pub fn handle_put_node_profile_overrides(
             Ok(None) => return ApiResponse::bad_request("Missing profile_overrides"),
             Err(e) => return ApiResponse::bad_request(&e),
         };
+        let replace_profile_overrides = body
+            .get("replace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         updates.push(commands::QueuedNodePreferencesPatch {
             node_id: commands::resolve_node_id(state, raw_node_id),
             rhythm_enabled: None,
@@ -2726,6 +2734,7 @@ pub fn handle_put_node_profile_overrides(
             target_state: None,
             room_profile: Some(commands::RoomProfileSettingsPatch {
                 profile_overrides: Some(profile_overrides),
+                replace_profile_overrides,
                 ..Default::default()
             }),
         });
@@ -2756,8 +2765,11 @@ pub fn handle_put_node_profile_overrides(
         return ApiResponse::server_error(e);
     }
     for update in &updates {
-        let mut record =
-            crate::activity::LightActivityRecord::app(&update.node_id, "set_light_preferences");
+        let mut record = crate::activity::LightActivityRecord::app(
+            &update.node_id,
+            "set_light_profile_overrides",
+        );
+        record.correlation_id = correlation_id_from_body(body);
         let profile_override_keys = update
             .room_profile
             .as_ref()
@@ -2765,6 +2777,18 @@ pub fn handle_put_node_profile_overrides(
             .and_then(|profile_overrides| profile_overrides.as_ref())
             .map(|overrides| overrides.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
+        let mut profile_override_fields = update
+            .room_profile
+            .as_ref()
+            .and_then(|profile| profile.profile_overrides.as_ref())
+            .and_then(|profile_overrides| profile_overrides.as_ref())
+            .into_iter()
+            .flat_map(|overrides| overrides.values())
+            .filter_map(Option::as_ref)
+            .flat_map(LightProfileNodeOverride::field_names)
+            .collect::<Vec<_>>();
+        profile_override_fields.sort_unstable();
+        profile_override_fields.dedup();
         let clear_profile_overrides = update
             .room_profile
             .as_ref()
@@ -2773,7 +2797,13 @@ pub fn handle_put_node_profile_overrides(
         record.payload = Some(json!({
             "profile_overrides_touched": true,
             "profile_override_keys": profile_override_keys,
+            "profile_override_fields": profile_override_fields,
             "clear_profile_overrides": clear_profile_overrides,
+            "replace_profile_overrides": update
+                .room_profile
+                .as_ref()
+                .is_some_and(|profile| profile.replace_profile_overrides),
+            "status": "accepted",
         }));
         crate::activity::record_light_activity(state, record);
     }
@@ -5561,8 +5591,12 @@ mod tests {
             &state,
             &json!({
                 "node_id": "standalone-light",
+                "replace": true,
+                "correlation_id": "room-light-settings-123",
                 "profile_overrides": {
                     "rhythm": {
+                        "min_brightness": 8,
+                        "max_brightness": 72,
                         "motion_timeout_secs": {"mode": "fixed", "value": 60}
                     }
                 }
@@ -5580,11 +5614,21 @@ mod tests {
         assert_eq!(s.light_activity.len(), 1);
         let event = &s.light_activity[0];
         assert_eq!(event.node_id, "standalone-light");
-        assert_eq!(event.action_id, "set_light_preferences");
+        assert_eq!(event.action_id, "set_light_profile_overrides");
+        assert_eq!(
+            event.correlation_id.as_deref(),
+            Some("room-light-settings-123")
+        );
         let payload = event.payload.as_ref().unwrap();
         assert_eq!(payload["profile_overrides_touched"], true);
         assert_eq!(payload["profile_override_keys"], json!(["rhythm"]));
+        assert_eq!(
+            payload["profile_override_fields"],
+            json!(["max_brightness", "min_brightness", "motion_timeout_secs"])
+        );
         assert_eq!(payload["clear_profile_overrides"], false);
+        assert_eq!(payload["replace_profile_overrides"], true);
+        assert_eq!(payload["status"], "accepted");
     }
 
     #[test]

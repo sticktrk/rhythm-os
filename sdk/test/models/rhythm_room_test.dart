@@ -257,6 +257,10 @@ void main() {
             'motion_activation_enabled': false,
             'profile_overrides': {
               'rhythm': {
+                'min_brightness': 8,
+                'max_brightness': 76,
+                'min_color_temp': 1900,
+                'max_color_temp': 4300,
                 'motion_timeout_secs': {'mode': 'fixed', 'value': 450},
               },
               'focus': {
@@ -281,9 +285,55 @@ void main() {
           room.profileSettings?.profileOverrides['rhythm']?.motionTimeoutSecs,
           450,
         );
+        final rhythmOverride =
+            room.profileSettings!.profileOverrides['rhythm']!;
+        expect(rhythmOverride.minBrightness, 8);
+        expect(rhythmOverride.maxBrightness, 76);
+        expect(rhythmOverride.minColorTemp, 1900);
+        expect(rhythmOverride.maxColorTemp, 4300);
+        expect(rhythmOverride.hasVisualOverrides, isTrue);
+        final effective = rhythmOverride.applyTo(
+          const RhythmCurveConfig(
+            id: 'rhythm',
+            minBrightness: 1,
+            maxBrightness: 100,
+            minColorTemp: 2200,
+            maxColorTemp: 6500,
+          ),
+        );
+        expect(effective.minBrightness, 8);
+        expect(effective.maxBrightness, 76);
+        expect(effective.minColorTemp, 1900);
+        expect(effective.maxColorTemp, 4300);
+        final difference = RhythmLightProfileNodeOverride.between(
+          const RhythmCurveConfig(
+            id: 'rhythm',
+            minBrightness: 1,
+            maxBrightness: 100,
+            minColorTemp: 2200,
+            maxColorTemp: 6500,
+          ),
+          effective,
+          raw: const {'future_override': 'preserved'},
+        );
+        expect(difference.minBrightness, 8);
+        expect(difference.maxBrightness, 76);
+        expect(difference.changedFields, [
+          'min_color_temp',
+          'max_color_temp',
+          'min_brightness',
+          'max_brightness',
+          'motion_timeout_secs',
+        ]);
+        expect(difference.raw, {'future_override': 'preserved'});
+        expect(difference.toJson()['future_override'], 'preserved');
         expect(room.profileSettings?.profileOverrides['focus']?.fadeMs, 800);
         expect(room.profileSettings?.toJson()['profile_overrides'], {
           'rhythm': {
+            'min_color_temp': 1900,
+            'max_color_temp': 4300,
+            'min_brightness': 8,
+            'max_brightness': 76,
             'motion_timeout_secs': {'mode': 'fixed', 'value': 450},
           },
           'focus': {

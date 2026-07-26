@@ -140,7 +140,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       ({
         String nodeId,
         Map<String, dynamic>? profileOverrides,
+        bool replace,
+        String? correlationId,
       })> nodeProfileOverrideCalls = [];
+  bool nodeProfileOverridesSucceeds = true;
   final List<
       ({
         String nodeId,
@@ -260,14 +263,19 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<void> nodeProfileOverridesSet({
+  Future<bool> nodeProfileOverridesSet({
     required String nodeId,
     required Map<String, dynamic>? profileOverrides,
+    bool replace = false,
+    String? correlationId,
   }) async {
     nodeProfileOverrideCalls.add((
       nodeId: nodeId,
       profileOverrides: profileOverrides,
+      replace: replace,
+      correlationId: correlationId,
     ));
+    return nodeProfileOverridesSucceeds;
   }
 
   @override
@@ -1230,6 +1238,181 @@ void main() {
       );
       expect(provider.motionActivationEnabledForNode('room-1'), isTrue);
       expect(api.motionActivationCalls, isEmpty);
+    });
+  });
+
+  group('ServerSyncProvider room light profile overrides', () {
+    RhythmHello roomLightHello({bool supported = true}) {
+      return RhythmHello.fromJson({
+        'version': '0.6.533-beta',
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': supported
+              ? [RhythmFeature.roomLightProfileOverrides]
+              : <String>[],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'motion_activation_enabled': false,
+              'profile_overrides': {
+                'sleep': {
+                  'motion_timeout_secs': {'mode': 'fixed', 'value': 900},
+                },
+              },
+            },
+          },
+        ],
+      });
+    }
+
+    testWidgets('capability gates writes and supported save preserves siblings',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(roomLightHello(supported: false));
+      await tester.pump();
+      expect(
+        provider.lightProfileOverridesSupportedForNode('room-1'),
+        isFalse,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'rhythm',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(minBrightness: 8),
+          correlationId: 'room-light-settings-unsupported',
+        ),
+        isFalse,
+      );
+      expect(api.nodeProfileOverrideCalls, isEmpty);
+
+      connection.emitHello(roomLightHello());
+      await tester.pump();
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'rhythm',
+          profileOverride: const RhythmLightProfileNodeOverride(
+            minBrightness: 8,
+            maxBrightness: 72,
+          ),
+          correlationId: 'room-light-settings-123',
+        ),
+        isTrue,
+      );
+      expect(provider.hasNodeLightProfileOverrides('room-1'), isTrue);
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.profileOverrides['sleep']
+            ?.motionTimeoutSecs,
+        900,
+      );
+      final call = api.nodeProfileOverrideCalls.single;
+      expect(call.replace, isTrue);
+      expect(call.correlationId, 'room-light-settings-123');
+      expect(call.profileOverrides, {
+        'rhythm': {
+          'min_brightness': 8,
+          'max_brightness': 72,
+        },
+      });
+    });
+
+    testWidgets('rejected save rolls optimistic override back', (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..nodeProfileOverridesSucceeds = false;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(roomLightHello());
+      await tester.pump();
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'rhythm',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(minBrightness: 8),
+          correlationId: 'room-light-settings-failed',
+        ),
+        isFalse,
+      );
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.profileOverrides
+            .containsKey('rhythm'),
+        isFalse,
+      );
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.profileOverrides['sleep']
+            ?.motionTimeoutSecs,
+        900,
+      );
+    });
+
+    testWidgets('reset clears overrides but preserves other room preferences',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(roomLightHello());
+      await tester.pump();
+      expect(
+        await provider.resetNodeLightProfileOverrides(
+          'room-1',
+          correlationId: 'room-light-settings-reset',
+        ),
+        isTrue,
+      );
+      final settings = provider.nodeById('room-1')?.profileSettings;
+      expect(settings?.profileOverrides, isEmpty);
+      expect(settings?.motionActivationEnabled, isFalse);
+      final call = api.nodeProfileOverrideCalls.single;
+      expect(call.profileOverrides, isNull);
+      expect(call.replace, isTrue);
     });
   });
 

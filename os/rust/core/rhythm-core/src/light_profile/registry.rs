@@ -730,6 +730,34 @@ mod tests {
     }
 
     #[test]
+    fn active_profile_override_changes_effective_room_output_ranges() {
+        let registry = LightProfileRegistry::new();
+        let mut settings = RoomProfileSettings::default();
+        settings.profile_overrides.insert(
+            RHYTHM_PROFILE_ID.into(),
+            LightProfileNodeOverride {
+                min_brightness: Some(18),
+                max_brightness: Some(64),
+                min_color_temp: Some(2_700),
+                max_color_temp: Some(4_100),
+                ..Default::default()
+            },
+        );
+
+        let profile = registry.profile_for_room_state(
+            RhythmMode::Day,
+            RoomModeState::Active,
+            Some(&settings),
+        );
+        let values = profile.calculate(&test_context(12.0));
+
+        assert_eq!(profile.min_brightness(), 18);
+        assert_eq!(profile.max_brightness(), 64);
+        assert!((18..=64).contains(&values.brightness));
+        assert!((2_700..=4_100).contains(&values.kelvin));
+    }
+
+    #[test]
     fn null_idle_mapping_ignores_custom_day_idle_profile() {
         let mut registry = LightProfileRegistry::new();
         let ctx = test_context(12.0);

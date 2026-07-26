@@ -52,6 +52,22 @@ void main() {
       completedCount: 2,
       outcome: 'partial',
     );
+    await analytics.logRoomLightSettingsOpened(
+      hasOverrides: true,
+      overrideProfileCount: 1,
+    );
+    await analytics.logRoomLightSettingsSaveCompleted(
+      journeyId: 'room-light-settings-123',
+      profile: 'rhythm',
+      outcome: 'succeeded',
+      changedFieldCount: 2,
+    );
+    await analytics.logRoomLightSettingsResetCompleted(
+      journeyId: 'room-light-settings-456',
+      profile: 'all',
+      outcome: 'failed',
+      failureStage: 'request',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -60,6 +76,9 @@ void main() {
         'matter_pairing_completed',
         'mood_scene_apply_completed',
         'global_room_action_completed',
+        'room_light_settings_opened',
+        'room_light_settings_save_completed',
+        'room_light_settings_reset_completed',
       ],
     );
     expect(
@@ -73,6 +92,14 @@ void main() {
     expect(
       backend.events[3].properties,
       containsPair('completed_count', 2),
+    );
+    expect(
+      backend.events[5].properties,
+      containsPair('changed_field_count', 2),
+    );
+    expect(
+      backend.events[6].properties,
+      containsPair('failure_stage', 'request'),
     );
 
     final serialized = backend.events

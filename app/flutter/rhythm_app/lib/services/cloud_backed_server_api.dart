@@ -277,13 +277,17 @@ class CloudBackedServerApi {
     );
   }
 
-  Future<void> nodeProfileOverridesSet({
+  Future<bool> nodeProfileOverridesSet({
     required String nodeId,
     required Map<String, dynamic>? profileOverrides,
+    bool replace = false,
+    String? correlationId,
   }) {
     return _delegate.nodeProfileOverridesSet(
       nodeId: nodeId,
       profileOverrides: profileOverrides,
+      replace: replace,
+      correlationId: correlationId,
     );
   }
 

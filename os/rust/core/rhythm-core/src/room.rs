@@ -795,10 +795,55 @@ pub fn default_mode_transition_configs() -> Vec<ModeTransitionConfig> {
     ])
 }
 
-/// Per-node timer overrides for one resolved light profile.
+/// Per-node overrides for one resolved light profile.
+///
+/// Every field is optional so a room continues to inherit later global profile
+/// changes for values it has not customized.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct LightProfileNodeOverride {
+    /// Optional per-node curve-shape override for this profile.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub curve: Option<crate::LightCurveShape>,
+
+    /// Optional per-node minimum brightness override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub min_brightness: Option<u8>,
+
+    /// Optional per-node maximum brightness override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub max_brightness: Option<u8>,
+
+    /// Optional per-node minimum color-temperature override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub min_color_temp: Option<u16>,
+
+    /// Optional per-node maximum color-temperature override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub max_color_temp: Option<u16>,
+
+    /// Optional per-node dim-step-count override.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub max_dim_steps: Option<u8>,
+
     /// Optional per-node fade override for this profile.
     #[cfg_attr(
         feature = "serde",
@@ -812,24 +857,134 @@ pub struct LightProfileNodeOverride {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub motion_timeout_secs: Option<TimerSetting>,
+
+    /// Optional per-node background rhythm interval override for this profile.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub rhythm_interval_secs: Option<TimerSetting>,
 }
 
 impl LightProfileNodeOverride {
     pub fn is_empty(&self) -> bool {
-        self.fade_ms.is_none() && self.motion_timeout_secs.is_none()
+        self.curve.is_none()
+            && self.min_brightness.is_none()
+            && self.max_brightness.is_none()
+            && self.min_color_temp.is_none()
+            && self.max_color_temp.is_none()
+            && self.max_dim_steps.is_none()
+            && self.fade_ms.is_none()
+            && self.motion_timeout_secs.is_none()
+            && self.rhythm_interval_secs.is_none()
+    }
+
+    /// Merge the fields present in a partial patch while preserving newer
+    /// fields unknown to an older client.
+    pub fn merge_from(&mut self, patch: &Self) {
+        if patch.curve.is_some() {
+            self.curve = patch.curve.clone();
+        }
+        if patch.min_brightness.is_some() {
+            self.min_brightness = patch.min_brightness;
+        }
+        if patch.max_brightness.is_some() {
+            self.max_brightness = patch.max_brightness;
+        }
+        if patch.min_color_temp.is_some() {
+            self.min_color_temp = patch.min_color_temp;
+        }
+        if patch.max_color_temp.is_some() {
+            self.max_color_temp = patch.max_color_temp;
+        }
+        if patch.max_dim_steps.is_some() {
+            self.max_dim_steps = patch.max_dim_steps;
+        }
+        if patch.fade_ms.is_some() {
+            self.fade_ms = patch.fade_ms.clone();
+        }
+        if patch.motion_timeout_secs.is_some() {
+            self.motion_timeout_secs = patch.motion_timeout_secs.clone();
+        }
+        if patch.rhythm_interval_secs.is_some() {
+            self.rhythm_interval_secs = patch.rhythm_interval_secs.clone();
+        }
+    }
+
+    /// Clear the timer-only fields understood by clients predating visual room
+    /// overrides. This keeps an older app's "Auto" action from erasing visual
+    /// settings it could not display.
+    pub fn clear_legacy_timer_fields(&mut self) {
+        self.fade_ms = None;
+        self.motion_timeout_secs = None;
+    }
+
+    /// Stable, non-sensitive field names for diagnostics and analytics.
+    pub fn field_names(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.curve.is_some() {
+            fields.push("curve");
+        }
+        if self.min_brightness.is_some() {
+            fields.push("min_brightness");
+        }
+        if self.max_brightness.is_some() {
+            fields.push("max_brightness");
+        }
+        if self.min_color_temp.is_some() {
+            fields.push("min_color_temp");
+        }
+        if self.max_color_temp.is_some() {
+            fields.push("max_color_temp");
+        }
+        if self.max_dim_steps.is_some() {
+            fields.push("max_dim_steps");
+        }
+        if self.fade_ms.is_some() {
+            fields.push("fade_ms");
+        }
+        if self.motion_timeout_secs.is_some() {
+            fields.push("motion_timeout_secs");
+        }
+        if self.rhythm_interval_secs.is_some() {
+            fields.push("rhythm_interval_secs");
+        }
+        fields
     }
 
     fn apply_to_config(&self, config: &mut LightProfileConfig) {
+        if let Some(curve) = &self.curve {
+            config.curve = curve.clone();
+        }
+        if let Some(min_brightness) = self.min_brightness {
+            config.min_brightness = min_brightness;
+        }
+        if let Some(max_brightness) = self.max_brightness {
+            config.max_brightness = max_brightness;
+        }
+        if let Some(min_color_temp) = self.min_color_temp {
+            config.min_color_temp = min_color_temp;
+        }
+        if let Some(max_color_temp) = self.max_color_temp {
+            config.max_color_temp = max_color_temp;
+        }
+        if let Some(max_dim_steps) = self.max_dim_steps {
+            config.max_dim_steps = max_dim_steps;
+        }
         if let Some(fade_ms) = &self.fade_ms {
             config.fade_ms = fade_ms.clone();
         }
         if let Some(motion_timeout_secs) = &self.motion_timeout_secs {
             config.motion_timeout_secs = motion_timeout_secs.clone();
         }
+        if let Some(rhythm_interval_secs) = &self.rhythm_interval_secs {
+            config.rhythm_interval_secs = rhythm_interval_secs.clone();
+        }
+        config.normalize_float_precision();
     }
 }
 
-/// Per-room light profile selection and timer overrides.
+/// Per-room light profile selection and overrides.
 ///
 /// This layer sits on top of the globally active profile:
 /// - `profile_id`: optionally selects a different stored base profile for this room
@@ -837,7 +992,7 @@ impl LightProfileNodeOverride {
 /// - `mood_profile_id`: legacy compatibility field for stored profile payloads
 /// - timer fields: optionally override the selected profile's timer settings
 /// - `motion_activation_enabled`: room-level admission for motion automation
-/// - `profile_overrides`: optionally override timers for specific resolved profiles
+/// - `profile_overrides`: optionally override profile values for specific resolved profiles
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RoomProfileSettings {
@@ -947,7 +1102,7 @@ impl RoomProfileSettings {
         }
     }
 
-    /// Apply per-node timer overrides for a specific resolved profile.
+    /// Apply per-node overrides for a specific resolved profile.
     pub fn apply_to_config_for_profile(&self, profile_id: &str, config: &mut LightProfileConfig) {
         self.apply_to_config(config);
         if let Some(profile_override) = self.profile_overrides.get(profile_id) {
@@ -1092,7 +1247,7 @@ pub struct Room {
     #[cfg_attr(feature = "serde", serde(skip))]
     pub warning_active: bool,
 
-    /// Optional per-room base profile selection and timer overrides.
+    /// Optional per-room base profile selection and profile overrides.
     #[cfg_attr(
         feature = "serde",
         serde(
@@ -1617,6 +1772,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn light_profile_node_override_changes_only_explicit_profile_fields() {
+        let global = crate::default_rhythm_profile();
+        let mut effective = global.clone();
+        let profile_override = LightProfileNodeOverride {
+            min_brightness: Some(12),
+            max_brightness: Some(68),
+            max_color_temp: Some(4_200),
+            rhythm_interval_secs: Some(TimerSetting::Fixed { value: 90 }),
+            ..Default::default()
+        };
+
+        profile_override.apply_to_config(&mut effective);
+
+        assert_eq!(effective.min_brightness, 12);
+        assert_eq!(effective.max_brightness, 68);
+        assert_eq!(effective.max_color_temp, 4_200);
+        assert_eq!(
+            effective.rhythm_interval_secs,
+            TimerSetting::Fixed { value: 90 }
+        );
+        assert_eq!(effective.min_color_temp, global.min_color_temp);
+        assert_eq!(effective.curve, global.curve);
+        assert_eq!(
+            profile_override.field_names(),
+            vec![
+                "min_brightness",
+                "max_brightness",
+                "max_color_temp",
+                "rhythm_interval_secs"
+            ]
+        );
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn legacy_room_profile_settings_default_motion_activation_to_enabled() {
@@ -1649,6 +1838,7 @@ mod tests {
             LightProfileNodeOverride {
                 fade_ms: Some(TimerSetting::Fixed { value: 500 }),
                 motion_timeout_secs: Some(TimerSetting::Fixed { value: 75 }),
+                ..Default::default()
             },
         );
 

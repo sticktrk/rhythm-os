@@ -678,14 +678,31 @@ class RhythmServerApi {
   }
 
   /// Patch per-profile node overrides.
-  Future<void> nodeProfileOverridesSet({
+  ///
+  /// Returns whether the server accepted the mutation. When [replace] is true,
+  /// each supplied profile entry is the complete delta from its global
+  /// profile; otherwise older timer-only merge semantics are used.
+  Future<bool> nodeProfileOverridesSet({
     required String nodeId,
     required Map<String, dynamic>? profileOverrides,
+    bool replace = false,
+    String? correlationId,
   }) async {
-    await _safePut('api/nodes/profile-overrides', data: {
-      'node_id': nodeId,
-      'profile_overrides': _normalizeProfileOverrides(profileOverrides),
-    });
+    try {
+      await _dio.put('api/nodes/profile-overrides', data: {
+        'node_id': nodeId,
+        'profile_overrides': _normalizeProfileOverrides(profileOverrides),
+        if (replace) 'replace': true,
+        if (correlationId != null) 'correlation_id': correlationId,
+      });
+      return true;
+    } catch (e) {
+      _log.warning(
+        'nodeProfileOverridesSet failed node=$nodeId replace=$replace',
+        e,
+      );
+      return false;
+    }
   }
 
   /// Push room preferences (rhythm_enabled, disabled, state).
@@ -2325,7 +2342,8 @@ class RhythmServerApi {
       for (final entry in map.entries)
         entry.key: switch (entry.key) {
           'fade_ms' ||
-          'motion_timeout_secs' =>
+          'motion_timeout_secs' ||
+          'rhythm_interval_secs' =>
             _normalizeTimerSettingValue(entry.value),
           _ => entry.value,
         },

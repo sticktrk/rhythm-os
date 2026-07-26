@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' as sdk;
+import 'package:uuid/uuid.dart';
 import '../../config/feature_flags.dart';
 import '../../models/config_model.dart';
 import '../../models/plan_tier.dart';
@@ -28,18 +29,25 @@ class LightProfileScreen extends StatefulWidget {
   /// inside a host like `LightScreen` that supplies its own chrome and a single
   /// shared scroll view.
   final bool embedded;
+  final String? roomId;
+  final String? roomName;
 
   const LightProfileScreen({
     super.key,
     this.initialProfile,
     this.embedded = false,
+    this.roomId,
+    this.roomName,
   });
+
+  bool get isRoomScoped => roomId != null;
 
   @override
   State<LightProfileScreen> createState() => _LightProfileScreenState();
 }
 
 class _LightProfileScreenState extends State<LightProfileScreen> {
+  static const _uuid = Uuid();
   static const List<String> _profileOrder = [
     'rhythm',
     'sleep',
@@ -50,6 +58,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
 
   late String _selectedProfileId;
   final Map<String, sdk.RhythmCurveConfig> _profileConfigs = {};
+  final Map<String, sdk.RhythmCurveConfig> _globalProfileConfigs = {};
   List<sdk.RhythmModeConfig> _modeConfigs = const [];
   sdk.RhythmMode? _serverActiveMode;
 
@@ -192,6 +201,25 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         ..write(':')
         ..write(profile.hashCode)
         ..write('|');
+    }
+
+    if (widget.roomId != null) {
+      final overrides = _serverSync
+          .nodeById(widget.roomId!)
+          ?.profileSettings
+          ?.profileOverrides;
+      buffer
+        ..write('room:')
+        ..write(widget.roomId)
+        ..write(':');
+      for (final entry in (overrides?.entries ??
+          const <String, sdk.RhythmLightProfileNodeOverride>{}.entries)) {
+        buffer
+          ..write(entry.key)
+          ..write(':')
+          ..write(entry.value.toJson())
+          ..write('|');
+      }
     }
 
     return buffer.toString();
@@ -350,9 +378,26 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       }
 
       profileConfigs[selectedConfig.id] = selectedConfig;
-      _profileConfigs
+      _globalProfileConfigs
         ..clear()
         ..addAll(profileConfigs);
+      final roomOverrides = widget.roomId == null
+          ? const <String, sdk.RhythmLightProfileNodeOverride>{}
+          : syncProvider
+                  .nodeById(widget.roomId!)
+                  ?.profileSettings
+                  ?.profileOverrides ??
+              const <String, sdk.RhythmLightProfileNodeOverride>{};
+      final effectiveProfileConfigs = <String, sdk.RhythmCurveConfig>{
+        for (final entry in profileConfigs.entries)
+          entry.key:
+              roomOverrides[entry.key]?.applyTo(entry.value) ?? entry.value,
+      };
+      _profileConfigs
+        ..clear()
+        ..addAll(effectiveProfileConfigs);
+      selectedConfig =
+          effectiveProfileConfigs[selectedConfig.id] ?? selectedConfig;
       _applyProfileConfig(selectedConfig);
       final idleProfileId = _customIdleProfileIdForProfile(initialProfileId);
       final idleConfig = idleProfileId != null
@@ -361,6 +406,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           : null;
       if (idleConfig != null) {
         profileConfigs[idleConfig.id] = idleConfig;
+        _globalProfileConfigs[idleConfig.id] = idleConfig;
         _profileConfigs[idleConfig.id] = idleConfig;
       }
       if (idleConfig != null) {
@@ -553,15 +599,24 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         minBrightness: brightness,
         maxBrightness: brightness,
         maxDimSteps: base.maxDimSteps,
-        fadeMs: canUseSleepPrimary
-            ? (_fadeAuto ? null : _fadeMs.round())
-            : base.fadeMs,
-        motionTimeoutSecs: canUseSleepPrimary
-            ? (_motionTimeoutAuto ? null : _motionTimeoutSecs)
-            : base.motionTimeoutSecs,
-        rhythmIntervalSecs: canUseSleepPrimary
-            ? (_intervalAuto ? null : _intervalSecs.round())
-            : base.rhythmIntervalSecs,
+        fadeSetting: canUseSleepPrimary
+            ? _fadeAuto
+                ? const sdk.RhythmTimerSetting.auto()
+                : sdk.RhythmTimerSetting.fixed(_fadeMs.round())
+            : base.fadeSetting,
+        motionTimeoutSetting: canUseSleepPrimary
+            ? _motionTimeoutAuto
+                ? const sdk.RhythmTimerSetting.auto()
+                : sdk.RhythmTimerSetting.fixed(_motionTimeoutSecs)
+            : base.motionTimeoutSetting,
+        rhythmIntervalSetting: canUseSleepPrimary
+            ? _intervalAuto
+                ? const sdk.RhythmTimerSetting.auto()
+                : sdk.RhythmTimerSetting.fixed(_intervalSecs.round())
+            : base.rhythmIntervalSetting,
+        fadeMs: null,
+        motionTimeoutSecs: null,
+        rhythmIntervalSecs: null,
         curve: sdk.RhythmConstantCurve(
           brightness: 0,
           colorTemp: 0,
@@ -595,15 +650,24 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       minBrightness: _minBrightness.round(),
       maxBrightness: _maxBrightness.round(),
       maxDimSteps: _maxDimSteps.round(),
-      fadeMs: canUseAdvancedDay
-          ? (_fadeAuto ? null : _fadeMs.round())
-          : base.fadeMs,
-      motionTimeoutSecs: canUseAdvancedDay
-          ? (_motionTimeoutAuto ? null : _motionTimeoutSecs)
-          : base.motionTimeoutSecs,
-      rhythmIntervalSecs: canUseAdvancedDay
-          ? (_intervalAuto ? null : _intervalSecs.round())
-          : base.rhythmIntervalSecs,
+      fadeSetting: canUseAdvancedDay
+          ? _fadeAuto
+              ? const sdk.RhythmTimerSetting.auto()
+              : sdk.RhythmTimerSetting.fixed(_fadeMs.round())
+          : base.fadeSetting,
+      motionTimeoutSetting: canUseAdvancedDay
+          ? _motionTimeoutAuto
+              ? const sdk.RhythmTimerSetting.auto()
+              : sdk.RhythmTimerSetting.fixed(_motionTimeoutSecs)
+          : base.motionTimeoutSetting,
+      rhythmIntervalSetting: canUseAdvancedDay
+          ? _intervalAuto
+              ? const sdk.RhythmTimerSetting.auto()
+              : sdk.RhythmTimerSetting.fixed(_intervalSecs.round())
+          : base.rhythmIntervalSetting,
+      fadeMs: null,
+      motionTimeoutSecs: null,
+      rhythmIntervalSecs: null,
       curve: nextCurve,
     );
   }
@@ -693,6 +757,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   Future<void> _resetToDefaults() async {
+    if (widget.isRoomScoped) {
+      await _resetRoomProfileToHome();
+      return;
+    }
     final api = context.read<ServerSyncProvider>().api;
     final sdkConfig = await api.resetConfig(id: _selectedProfileId);
     if (!mounted) return;
@@ -705,6 +773,44 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       _curveConfigDirty = false;
     });
     AnalyticsService().logLightProfileReset(_selectedProfileId);
+  }
+
+  Future<void> _resetRoomProfileToHome() async {
+    final globalConfig = _globalProfileConfigs[_selectedProfileId];
+    if (globalConfig == null || widget.roomId == null) return;
+    final journeyId = 'room-light-settings-${_uuid.v4()}';
+    setState(() => _isSaving = true);
+    final succeeded =
+        await context.read<ServerSyncProvider>().setNodeLightProfileOverride(
+              widget.roomId!,
+              profileId: _selectedProfileId,
+              profileOverride: null,
+              correlationId: journeyId,
+            );
+    if (!mounted) return;
+    if (succeeded) {
+      _profileConfigs[_selectedProfileId] = globalConfig;
+      _applyProfileConfig(globalConfig);
+      _applyIdleFallback();
+      _serverConfigSignature = _currentServerConfigSignature();
+    }
+    setState(() {
+      _isSaving = false;
+      _curveConfigDirty = !succeeded;
+    });
+    AnalyticsService().logRoomLightSettingsResetCompleted(
+      journeyId: journeyId,
+      profile: _selectedProfileId,
+      outcome: succeeded ? 'succeeded' : 'failed',
+      failureStage: succeeded ? null : 'request',
+    );
+    _showSaveFeedback(
+      succeeded
+          ? '${widget.roomName ?? 'Room'} now follows home '
+              '${_profileTitle.toLowerCase()} settings.'
+          : 'Room light settings could not be reset.',
+      error: !succeeded,
+    );
   }
 
   void _showSaveFeedback(String message, {required bool error}) {
@@ -758,7 +864,37 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       );
     }
     if (!_connected) return _buildDisconnected();
+    if (widget.roomId != null &&
+        !_serverSync.lightProfileOverridesSupportedForNode(widget.roomId!)) {
+      return _buildRoomOverridesUnsupported();
+    }
     return _buildContent();
+  }
+
+  Widget _buildRoomOverridesUnsupported() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 34, horizontal: 22),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.system_update_rounded,
+            color: _Palette.textSecondary.withValues(alpha: 0.5),
+            size: 28,
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'Update the Rhythm appliance to customize this room.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: _Palette.textSecondary,
+              fontSize: 13,
+              height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildHeader() {
@@ -1741,8 +1877,8 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                   shape: BoxShape.circle,
                   color: color.withValues(alpha: 0.12),
                 ),
-                child: const Icon(Icons.wb_sunny_rounded,
-                    color: color, size: 18),
+                child:
+                    const Icon(Icons.wb_sunny_rounded, color: color, size: 18),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -1829,10 +1965,8 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
               maxThumbMin: 20,
               tint: color,
               divisions: 99,
-              onMinChanged: (v) =>
-                  _onCurveChanged(() => _minBrightness = v),
-              onMaxChanged: (v) =>
-                  _onCurveChanged(() => _maxBrightness = v),
+              onMinChanged: (v) => _onCurveChanged(() => _minBrightness = v),
+              onMaxChanged: (v) => _onCurveChanged(() => _maxBrightness = v),
             ),
           ),
         ],
@@ -1874,8 +2008,8 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                     ],
                   ),
                 ),
-                child: Icon(Icons.thermostat_rounded,
-                    color: warmColor, size: 18),
+                child:
+                    Icon(Icons.thermostat_rounded, color: warmColor, size: 18),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -1970,10 +2104,8 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                 }),
               ),
               divisions: 50,
-              onMinChanged: (v) =>
-                  _onCurveChanged(() => _minColorTemp = v),
-              onMaxChanged: (v) =>
-                  _onCurveChanged(() => _maxColorTemp = v),
+              onMinChanged: (v) => _onCurveChanged(() => _minColorTemp = v),
+              onMaxChanged: (v) => _onCurveChanged(() => _maxColorTemp = v),
             ),
           ),
         ],
@@ -2148,7 +2280,6 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       ),
     );
   }
-
 
   // ---------------------------------------------------------------------------
   // Shared widgets
@@ -2462,6 +2593,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   Future<void> _saveCurveConfig() async {
     if (_isSaving) return;
     final config = _buildDraftConfig();
+    if (widget.isRoomScoped) {
+      await _saveRoomCurveConfig(config);
+      return;
+    }
     final serverSync = context.read<ServerSyncProvider>();
     final api = serverSync.api;
     final activeProfileId = serverSync.activeProfileId;
@@ -2534,11 +2669,91 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     }
   }
 
+  Future<void> _saveRoomCurveConfig(
+    sdk.RhythmCurveConfig effectiveConfig,
+  ) async {
+    final globalConfig = _globalProfileConfigs[_selectedProfileId];
+    if (globalConfig == null || widget.roomId == null) {
+      _showSaveFeedback('Home light settings are still loading.', error: true);
+      return;
+    }
+    final profileOverride = sdk.RhythmLightProfileNodeOverride.between(
+      globalConfig,
+      effectiveConfig,
+      raw: _serverSync
+              .nodeById(widget.roomId!)
+              ?.profileSettings
+              ?.profileOverrides[_selectedProfileId]
+              ?.raw ??
+          const <String, dynamic>{},
+    );
+    final persistedOverride = profileOverride.isEmpty ? null : profileOverride;
+    final journeyId = 'room-light-settings-${_uuid.v4()}';
+    setState(() {
+      _curveConfigDirty = false;
+      _isSaving = true;
+    });
+    final succeeded =
+        await context.read<ServerSyncProvider>().setNodeLightProfileOverride(
+              widget.roomId!,
+              profileId: _selectedProfileId,
+              profileOverride: persistedOverride,
+              correlationId: journeyId,
+            );
+    if (!mounted) return;
+
+    if (!succeeded) {
+      setState(() {
+        _curveConfigDirty = true;
+        _isSaving = false;
+      });
+      AnalyticsService().logRoomLightSettingsSaveCompleted(
+        journeyId: journeyId,
+        profile: _selectedProfileId,
+        outcome: 'failed',
+        changedFieldCount: profileOverride.changedFields.length,
+        failureStage: 'request',
+      );
+      _showSaveFeedback(
+        '${widget.roomName ?? 'Room'} light settings could not be saved.',
+        error: true,
+      );
+      return;
+    }
+
+    _profileConfigs[_selectedProfileId] = effectiveConfig;
+    _applyProfileConfig(effectiveConfig);
+    _applyIdleFallback();
+    _serverConfigSignature = _currentServerConfigSignature();
+    setState(() => _isSaving = false);
+    AnalyticsService().logRoomLightSettingsSaveCompleted(
+      journeyId: journeyId,
+      profile: _selectedProfileId,
+      outcome: 'succeeded',
+      changedFieldCount: profileOverride.changedFields.length,
+    );
+    _showSaveFeedback(
+      persistedOverride == null
+          ? '${widget.roomName ?? 'Room'} now follows home ${_profileTitle.toLowerCase()} settings.'
+          : '${widget.roomName ?? 'Room'} ${_profileTitle.toLowerCase()} updated.',
+      error: false,
+    );
+  }
+
   Widget _buildResetToDefaultsButton() {
+    final roomOverride = widget.roomId == null
+        ? null
+        : _serverSync
+            .nodeById(widget.roomId!)
+            ?.profileSettings
+            ?.profileOverrides[_selectedProfileId];
+    if (widget.isRoomScoped && (roomOverride == null || roomOverride.isEmpty)) {
+      return const SizedBox.shrink();
+    }
     return GestureDetector(
       onTap: _confirmResetToDefaults,
       child: Text(
-        'Reset to Defaults',
+        widget.isRoomScoped ? 'Use Home Settings' : 'Reset to Defaults',
         style: TextStyle(
           color: _Palette.textSecondary.withValues(alpha: 0.3),
           fontSize: 12,
@@ -2554,13 +2769,19 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       builder: (dialogContext) => AlertDialog(
         backgroundColor: _Palette.card,
         title: Text(
-          'Reset $_profileTitle?',
+          widget.isRoomScoped
+              ? 'Use home $_profileTitle?'
+              : 'Reset $_profileTitle?',
           style: const TextStyle(color: _Palette.textPrimary),
         ),
         content: Text(
-          'This restores every setting in the ${_profileTitle.toLowerCase()} '
-          'to its factory default. Any customizations you have made will be '
-          'lost.',
+          widget.isRoomScoped
+              ? '${widget.roomName ?? 'This room'} will use the home '
+                  '${_profileTitle.toLowerCase()} again. Other room settings '
+                  'stay unchanged.'
+              : 'This restores every setting in the '
+                  '${_profileTitle.toLowerCase()} to its factory default. Any '
+                  'customizations you have made will be lost.',
           style: const TextStyle(color: _Palette.textSecondary),
         ),
         actions: [
@@ -2573,9 +2794,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text(
-              'Reset',
-              style: TextStyle(color: Colors.redAccent),
+            child: Text(
+              widget.isRoomScoped ? 'Use home settings' : 'Reset',
+              style: const TextStyle(color: Colors.redAccent),
             ),
           ),
         ],

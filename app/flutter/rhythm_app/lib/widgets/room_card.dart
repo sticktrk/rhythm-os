@@ -13,6 +13,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
+import '../screens/settings/light_screen.dart';
 import 'device_detail_sheet.dart';
 import 'first_run_explainer.dart';
 import 'mood_sheet.dart';
@@ -449,6 +450,28 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
+  void _openRoomLightSettings(String roomName) {
+    HapticFeedback.lightImpact();
+    LightScreen.showForRoom(
+      context,
+      roomId: widget.roomId,
+      roomName: roomName,
+    );
+  }
+
+  void _showRoomLightSettingsUnavailable(String roomName) {
+    HapticFeedback.lightImpact();
+    final version = context.read<ServerSyncProvider>().firmwareVersion;
+    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Update the Rhythm appliance$versionSuffix to customize light settings for $roomName.',
+        ),
+      ),
+    );
+  }
+
   double _effectiveCurveHour(RoomDto room) {
     final now = DateTime.now();
     final hour =
@@ -522,6 +545,13 @@ class _RoomCardState extends State<RoomCard> {
         final motionActivationPending =
             context.select<ServerSyncProvider, bool>(
           (p) => p.motionActivationPendingForNode(widget.roomId),
+        );
+        final roomLightSettingsSupported =
+            context.select<ServerSyncProvider, bool>(
+          (p) => p.lightProfileOverridesSupportedForNode(widget.roomId),
+        );
+        final hasRoomLightOverrides = context.select<ServerSyncProvider, bool>(
+          (p) => p.hasNodeLightProfileOverrides(widget.roomId),
         );
         // A recent light command that failed to physically reach its target.
         // Shown in the spinner slot once the in-flight state clears.
@@ -975,6 +1005,24 @@ class _RoomCardState extends State<RoomCard> {
                             ],
                           ),
                         ),
+                        if (room.kind == RoomNodeKind.room)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: _RoomLightSettingsButton(
+                                roomId: widget.roomId,
+                                customized: hasRoomLightOverrides,
+                                supported: roomLightSettingsSupported,
+                                color: iconColor,
+                                onPressed: roomLightSettingsSupported
+                                    ? () => _openRoomLightSettings(room.name)
+                                    : () => _showRoomLightSettingsUnavailable(
+                                          room.name,
+                                        ),
+                              ),
+                            ),
+                          ),
                         // Power and Scenes mirror each other across the active
                         // sliders so the primary choices anchor both edges.
                         Padding(
@@ -1367,6 +1415,96 @@ class _RoomCardState extends State<RoomCard> {
 // ---------------------------------------------------------------------------
 // Sub-widgets
 // ---------------------------------------------------------------------------
+
+class _RoomLightSettingsButton extends StatelessWidget {
+  const _RoomLightSettingsButton({
+    required this.roomId,
+    required this.customized,
+    required this.supported,
+    required this.color,
+    required this.onPressed,
+  });
+
+  final String roomId;
+  final bool customized;
+  final bool supported;
+  final Color color;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = customized ? const Color(0xFFF9A825) : color;
+    return Semantics(
+      button: true,
+      enabled: supported,
+      excludeSemantics: true,
+      label: 'Light settings',
+      value: customized
+          ? 'Custom room settings'
+          : supported
+              ? 'Using home settings'
+              : 'Appliance update required',
+      child: GestureDetector(
+        key: ValueKey('room-card-light-settings-$roomId'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onPressed,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.fromLTRB(9, 6, 10, 6),
+          decoration: BoxDecoration(
+            color: accent.withValues(
+              alpha: supported ? (customized ? 0.14 : 0.08) : 0.045,
+            ),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: accent.withValues(
+                alpha: supported ? (customized ? 0.34 : 0.16) : 0.08,
+              ),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                supported ? Icons.tune_rounded : Icons.system_update_rounded,
+                size: 14,
+                color: accent.withValues(alpha: supported ? 0.9 : 0.38),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'Light settings',
+                style: TextStyle(
+                  color: accent.withValues(alpha: supported ? 0.92 : 0.42),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.05,
+                ),
+              ),
+              if (customized) ...[
+                const SizedBox(width: 6),
+                Container(
+                  width: 5,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: accent,
+                    boxShadow: [
+                      BoxShadow(
+                        color: accent.withValues(alpha: 0.55),
+                        blurRadius: 6,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _RoomTransitionSpinner extends StatelessWidget {
   const _RoomTransitionSpinner({super.key, required this.color});

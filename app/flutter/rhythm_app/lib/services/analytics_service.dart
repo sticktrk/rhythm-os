@@ -554,6 +554,49 @@ class AnalyticsService {
     });
   }
 
+  /// Track discovery of room-scoped Light settings without room identifiers.
+  Future<void> logRoomLightSettingsOpened({
+    required bool hasOverrides,
+    required int overrideProfileCount,
+  }) async {
+    await logEvent('room_light_settings_opened', {
+      'has_overrides': hasOverrides ? 1 : 0,
+      'override_profile_count': overrideProfileCount,
+    });
+  }
+
+  /// Track the terminal outcome of a room profile save.
+  Future<void> logRoomLightSettingsSaveCompleted({
+    required String journeyId,
+    required String profile,
+    required String outcome,
+    required int changedFieldCount,
+    String? failureStage,
+  }) async {
+    await logEvent('room_light_settings_save_completed', {
+      'journey_id': journeyId,
+      'profile': profile,
+      'outcome': outcome,
+      'changed_field_count': changedFieldCount,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track the terminal outcome of returning a room to home Light settings.
+  Future<void> logRoomLightSettingsResetCompleted({
+    required String journeyId,
+    required String profile,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_light_settings_reset_completed', {
+      'journey_id': journeyId,
+      'profile': profile,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   // ===========================================================================
   // Hub Recovery Events
   // ===========================================================================

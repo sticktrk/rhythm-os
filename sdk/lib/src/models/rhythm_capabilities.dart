@@ -10,6 +10,8 @@ abstract final class RhythmDeviceOnboardingMethod {
 /// Stable feature IDs advertised by `/api/state.capabilities.features`.
 abstract final class RhythmFeature {
   static const String motionActivationToggle = 'motion_activation_toggle';
+  static const String roomLightProfileOverrides =
+      'room_light_profile_overrides';
 }
 
 /// Host capabilities advertised by the Rhythm server.

@@ -1019,6 +1019,9 @@ pub struct RoomProfileSettingsPatch {
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
     pub motion_activation_enabled: Option<Option<bool>>,
     pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
+    /// Replace complete per-profile override entries instead of applying the
+    /// legacy timer-only merge semantics.
+    pub replace_profile_overrides: bool,
 }
 
 impl RoomProfileSettingsPatch {
@@ -1056,15 +1059,37 @@ impl RoomProfileSettingsPatch {
                     for (profile_id, profile_override) in overrides {
                         match profile_override {
                             None => {
+                                if self.replace_profile_overrides {
+                                    settings.profile_overrides.remove(profile_id);
+                                } else if let Some(existing) =
+                                    settings.profile_overrides.get_mut(profile_id)
+                                {
+                                    existing.clear_legacy_timer_fields();
+                                    if existing.is_empty() {
+                                        settings.profile_overrides.remove(profile_id);
+                                    }
+                                }
+                            }
+                            Some(profile_override)
+                                if self.replace_profile_overrides
+                                    && profile_override.is_empty() =>
+                            {
                                 settings.profile_overrides.remove(profile_id);
                             }
-                            Some(profile_override) if profile_override.is_empty() => {
-                                settings.profile_overrides.remove(profile_id);
-                            }
-                            Some(profile_override) => {
+                            Some(profile_override) if self.replace_profile_overrides => {
                                 settings
                                     .profile_overrides
                                     .insert(profile_id.clone(), profile_override.clone());
+                            }
+                            Some(profile_override) => {
+                                let existing = settings
+                                    .profile_overrides
+                                    .entry(profile_id.clone())
+                                    .or_default();
+                                existing.merge_from(profile_override);
+                                if existing.is_empty() {
+                                    settings.profile_overrides.remove(profile_id);
+                                }
                             }
                         }
                     }
@@ -8238,6 +8263,7 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
                 })
                 .collect(),
         )),
+        replace_profile_overrides: true,
     }
 }
 
@@ -15149,6 +15175,69 @@ mod tests {
     }
 
     #[test]
+    fn legacy_timer_patch_preserves_visual_override_fields() {
+        let mut settings = RoomProfileSettings::default();
+        settings.profile_overrides.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+            LightProfileNodeOverride {
+                min_brightness: Some(9),
+                max_brightness: Some(74),
+                motion_timeout_secs: Some(TimerSetting::Fixed { value: 300 }),
+                ..Default::default()
+            },
+        );
+
+        let change_timer = RoomProfileSettingsPatch {
+            profile_overrides: Some(Some(BTreeMap::from([(
+                rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+                Some(LightProfileNodeOverride {
+                    motion_timeout_secs: Some(TimerSetting::Fixed { value: 600 }),
+                    ..Default::default()
+                }),
+            )]))),
+            ..Default::default()
+        };
+        change_timer.apply_to(&mut settings);
+        let updated = settings
+            .profile_overrides
+            .get(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap();
+        assert_eq!(updated.min_brightness, Some(9));
+        assert_eq!(updated.max_brightness, Some(74));
+        assert_eq!(
+            updated.motion_timeout_secs,
+            Some(TimerSetting::Fixed { value: 600 })
+        );
+
+        let clear_legacy_timers = RoomProfileSettingsPatch {
+            profile_overrides: Some(Some(BTreeMap::from([(
+                rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+                None,
+            )]))),
+            ..Default::default()
+        };
+        clear_legacy_timers.apply_to(&mut settings);
+        let preserved = settings
+            .profile_overrides
+            .get(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap();
+        assert_eq!(preserved.min_brightness, Some(9));
+        assert_eq!(preserved.max_brightness, Some(74));
+        assert_eq!(preserved.motion_timeout_secs, None);
+
+        let replace = RoomProfileSettingsPatch {
+            profile_overrides: Some(Some(BTreeMap::from([(
+                rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+                None,
+            )]))),
+            replace_profile_overrides: true,
+            ..Default::default()
+        };
+        replace.apply_to(&mut settings);
+        assert!(settings.profile_overrides.is_empty());
+    }
+
+    #[test]
     fn triage_copy_and_retry_dto_cover_status_matrix() {
         use crate::canonical::triage::{TriageKind, TriageStatus};
 
@@ -17532,6 +17621,56 @@ mod tests {
             .mood_scene_id
             .as_deref()
             == Some(scene_id.as_str())));
+    }
+
+    #[test]
+    fn backup_round_trips_room_light_profile_overrides() {
+        let mut source_room = make_snapshot("room1", false, false);
+        source_room.profile_settings.profile_overrides.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+            LightProfileNodeOverride {
+                min_brightness: Some(7),
+                max_brightness: Some(63),
+                max_color_temp: Some(4_100),
+                ..Default::default()
+            },
+        );
+        let (source_state, _source_runtime) = setup_state(vec![source_room]);
+
+        let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        let exported_override = bundle.configuration.rooms[0]
+            .room_profile
+            .profile_overrides
+            .get(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap();
+        assert_eq!(exported_override.min_brightness, Some(7));
+        assert_eq!(exported_override.max_brightness, Some(63));
+        assert_eq!(exported_override.max_color_temp, Some(4_100));
+
+        let (target_state, _target_runtime) =
+            setup_state(vec![make_snapshot("room1", false, false)]);
+        let target_storage = Arc::new(TestStorage::default());
+        target_state.lock().unwrap().storage = Some(target_storage.clone());
+        do_backup_restore(&target_state, bundle).unwrap();
+
+        let restored_rooms = target_storage.load_rooms().unwrap();
+        let restored = restored_rooms.get("room1").unwrap();
+        let restored_override = restored
+            .profile_settings
+            .profile_overrides
+            .get(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap();
+        assert_eq!(restored_override.min_brightness, Some(7));
+        assert_eq!(restored_override.max_brightness, Some(63));
+        assert_eq!(restored_override.max_color_temp, Some(4_100));
+
+        let reexported = build_backup_bundle_dto(&target_state, false).unwrap();
+        let reexported_override = reexported.configuration.rooms[0]
+            .room_profile
+            .profile_overrides
+            .get(rhythm_core::RHYTHM_PROFILE_ID)
+            .unwrap();
+        assert_eq!(reexported_override, restored_override);
     }
 
     #[test]

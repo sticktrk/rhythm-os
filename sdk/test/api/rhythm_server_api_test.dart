@@ -467,9 +467,16 @@ void main() {
       await api.nodeProfileOverridesSet(
         nodeId: 'node-1',
         profileOverrides: {
-          'rhythm': {'motion_timeout_secs': 600},
+          'rhythm': {
+            'min_brightness': 8,
+            'max_brightness': 72,
+            'rhythm_interval_secs': 90,
+            'motion_timeout_secs': 600,
+          },
           'sleep': null,
         },
+        replace: true,
+        correlationId: 'room-light-settings-123',
       );
 
       verify(() => dio.put(
@@ -478,6 +485,12 @@ void main() {
               'node_id': 'node-1',
               'profile_overrides': {
                 'rhythm': {
+                  'min_brightness': 8,
+                  'max_brightness': 72,
+                  'rhythm_interval_secs': {
+                    'mode': 'fixed',
+                    'value': 90,
+                  },
                   'motion_timeout_secs': {
                     'mode': 'fixed',
                     'value': 600,
@@ -485,9 +498,33 @@ void main() {
                 },
                 'sleep': null,
               },
+              'replace': true,
+              'correlation_id': 'room-light-settings-123',
             },
             queryParameters: null,
           )).called(1);
+    });
+
+    test('nodeProfileOverridesSet reports a rejected request', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(
+        DioException(
+          requestOptions: RequestOptions(path: 'api/nodes/profile-overrides'),
+        ),
+      );
+
+      final accepted = await api.nodeProfileOverridesSet(
+        nodeId: 'node-1',
+        profileOverrides: {
+          'rhythm': {'min_brightness': 8},
+        },
+        replace: true,
+      );
+
+      expect(accepted, isFalse);
     });
 
     test('nodePreferencesSet sends mood state', () async {

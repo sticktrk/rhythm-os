@@ -9,6 +9,8 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/providers/subscription_provider.dart';
+import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/widgets/first_run_explainer.dart';
 import 'package:rhythm_app/widgets/room_card.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
@@ -24,6 +26,36 @@ class _FakeHomeProvider extends HomeProvider {
 
   @override
   Future<void> onUserSignIn() async {}
+}
+
+class _FakeSubscriptionProvider extends ChangeNotifier
+    implements SubscriptionProvider {
+  @override
+  PlanTier get tier => PlanTier.pro;
+
+  @override
+  bool get isPro => true;
+
+  @override
+  bool has(Entitlement e) => !e.isComingSoon;
+
+  @override
+  bool isEligibleFor(Entitlement e) => true;
+
+  @override
+  bool get isDemoOverrideActive => false;
+
+  @override
+  PlanTier? get demoOverride => null;
+
+  @override
+  Future<void> setDemoOverride(PlanTier? tier) async {}
+
+  @override
+  Future<void> changePlan(PlanTier tier) async {}
+
+  @override
+  Future<void> refresh() async {}
 }
 
 class _FakeRhythmServerApi extends RhythmServerApi {
@@ -65,6 +97,27 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
+
+  @override
+  Future<RhythmModeResource?> getMode() async => const RhythmModeResource(
+        active: RhythmMode.day,
+        configs: [
+          RhythmModeConfig(
+            mode: RhythmMode.day,
+            activeProfileId: 'rhythm',
+          ),
+          RhythmModeConfig(
+            mode: RhythmMode.sleep,
+            activeProfileId: 'sleep',
+          ),
+        ],
+      );
+
+  @override
+  Future<List<RhythmCurveConfig>> getProfiles() async => const [
+        RhythmCurveConfig(id: 'rhythm', name: 'Day'),
+        RhythmCurveConfig(id: 'sleep', name: 'Sleep'),
+      ];
 
   @override
   Future<List<RhythmTopologyNode>> getTopologyNodes() async => const [];
@@ -321,6 +374,112 @@ void main() {
     // gating itself is covered by a dedicated test below.
     FirstRunExplainer.seenReader = (_) => true;
     FirstRunExplainer.seenWriter = (_) async {};
+  });
+
+  testWidgets('room card exposes customized Light settings affordance',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final connection = _TestRhythmConnection();
+    final subscription = _FakeSubscriptionProvider();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(subscription.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomLightProfileOverrides],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'profile_overrides': {
+                'rhythm': {
+                  'min_brightness': 8,
+                  'max_brightness': 72,
+                },
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+          ChangeNotifierProvider<SubscriptionProvider>.value(
+            value: subscription,
+          ),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final button = find.byKey(
+      const ValueKey('room-card-light-settings-room-1'),
+    );
+    expect(button, findsOneWidget);
+    expect(find.text('Light settings'), findsOneWidget);
+    expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
+    final semantics = tester.getSemantics(button);
+    expect(semantics.label, 'Light settings');
+    expect(semantics.value, 'Custom room settings');
+
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.text('Light settings · Room override'), findsOneWidget);
+    expect(find.text('Custom light settings'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-light-layer-custom-rhythm')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('header docks motion right and neutral tap disables motion only',
@@ -1526,9 +1685,9 @@ void main() {
     );
     final powerRect = tester.getRect(_powerToggle());
     final scenesRect = tester.getRect(_scenesControl());
-    final scenesDecoration =
-        tester.widget<AnimatedContainer>(_scenesControl()).decoration
-            as BoxDecoration;
+    final scenesDecoration = tester
+        .widget<AnimatedContainer>(_scenesControl())
+        .decoration as BoxDecoration;
     expect(scenesDecoration.shape, BoxShape.circle);
     final sliderStackRect = tester.getRect(
       find.byKey(const ValueKey('room-card-slider-stack-room-1')),
