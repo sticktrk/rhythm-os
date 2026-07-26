@@ -22,10 +22,12 @@ those two browser-safe settings.
 Two surfaces behind one Supabase sign-in:
 
 - **Home directory** (`/`, light theme) — a flat, searchable list of Homes
-  with optional customer email, location, and timezone metadata. It does not
-  expose customer or hub records and does not contact appliances.
+  with optional customer email, location, and timezone metadata. The list does
+  not expose customer or hub records and does not contact appliances. Selecting
+  a Home opens `/homes/:homeId`, which lists that Home's hubs without probing
+  them.
 - **Device console** (`/hubs/:hubId/*`, dark theme) — full-featured per-device
-  admin available by direct hub URL. Side-nav sections:
+  admin opened from a Home's hub list or by direct URL. Side-nav sections:
 
 | Route | Section |
 |---|---|

@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
+  ChevronRight,
   Home,
   Loader2,
   LogOut,
@@ -12,19 +14,12 @@ import {
 } from 'lucide-react';
 
 import { shortId } from '../../lib/format';
+import {
+  flattenHomes,
+  type HomeDirectoryItem
+} from '../../lib/supportHomes';
 import { useSession } from '../../state/SessionContext';
 import { useSnapshot } from '../../state/SnapshotContext';
-import type {
-  SupportCustomer,
-  SupportHome,
-  SupportSnapshot
-} from '../../types';
-
-type HomeDirectoryItem = {
-  home: SupportHome;
-  email: string | null;
-  searchText: string;
-};
 
 export default function DashboardPage() {
   const { signOut } = useSession();
@@ -165,7 +160,7 @@ export function HomeDirectoryView({
 function HomeDirectoryRow({ item }: { item: HomeDirectoryItem }) {
   const { home, email } = item;
   return (
-    <article className="homeDirectoryRow">
+    <Link className="homeDirectoryRow" to={`/homes/${home.id}`}>
       <div className="homeDirectoryIcon" aria-hidden="true">
         <Home size={20} />
       </div>
@@ -188,38 +183,11 @@ function HomeDirectoryRow({ item }: { item: HomeDirectoryItem }) {
         </div>
       </div>
       <div className="homeDirectoryId">Home {shortId(home.id)}</div>
-    </article>
+      <ChevronRight
+        className="homeDirectoryChevron"
+        aria-hidden="true"
+        size={18}
+      />
+    </Link>
   );
-}
-
-function customerEmail(customer: SupportCustomer): string | null {
-  const email = customer.customerEmail?.trim();
-  if (email) return email;
-
-  const label = customer.customerLabel.trim();
-  return label.includes('@') ? label : null;
-}
-
-export function flattenHomes(
-  snapshot: SupportSnapshot | null
-): HomeDirectoryItem[] {
-  if (!snapshot) return [];
-
-  return snapshot.customers.flatMap((customer) => {
-    const email = customerEmail(customer);
-    return customer.homes.map((entry) => {
-      const searchable = [
-        entry.home.id,
-        entry.home.name,
-        entry.home.locationCity,
-        entry.home.timezone,
-        email
-      ];
-      return {
-        home: entry.home,
-        email,
-        searchText: searchable.filter(Boolean).join(' ').toLowerCase()
-      };
-    });
-  });
 }
