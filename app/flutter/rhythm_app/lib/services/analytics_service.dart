@@ -231,6 +231,19 @@ class AnalyticsService {
     });
   }
 
+  /// Track the privacy-bounded expansion state of a room-card detail control.
+  Future<void> logRoomCardDetailToggled({
+    required String control,
+    required String roomMode,
+    required bool expanded,
+  }) async {
+    await logEvent('room_card_detail_toggled', {
+      'control': control,
+      'room_mode': roomMode,
+      'expanded': expanded ? 1 : 0,
+    });
+  }
+
   /// Track resetting an individual room back to its adaptive curve.
   Future<void> logRoomResetToCurve({required String roomId}) async {
     await logEvent('room_reset_to_curve', {'room_id': roomId});

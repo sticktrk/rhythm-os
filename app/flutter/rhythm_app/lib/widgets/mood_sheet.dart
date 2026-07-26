@@ -7,8 +7,14 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 /// Which kind of mood the sheet is editing.
 enum MoodTab { color, scenes, hue }
 
+typedef MoodColorChanged = void Function(
+  Color color,
+  int brightness,
+);
+
 typedef MoodSceneSelected = Future<bool> Function(
   RhythmSceneDefinition scene,
+  int brightness,
 );
 
 /// Slide-up "mood" card. A mood can be **either** a custom color or one of the
@@ -21,10 +27,12 @@ class MoodSheet extends StatefulWidget {
   final MoodTab initialTab;
   final List<RhythmSceneDefinition> initialScenes;
   final Future<List<RhythmSceneDefinition>> Function() scenesLoader;
-  final ValueChanged<Color> onColorChanged;
+  final MoodColorChanged onColorChanged;
   final MoodSceneSelected onSceneSelected;
+  final ValueChanged<int>? onBrightnessChanged;
   final ValueChanged<MoodTab>? onTabChanged;
   final bool showHueTab;
+  final int initialBrightness;
 
   const MoodSheet({
     super.key,
@@ -35,6 +43,8 @@ class MoodSheet extends StatefulWidget {
     this.initialSceneId,
     this.initialTab = MoodTab.color,
     this.initialScenes = const [],
+    this.initialBrightness = 50,
+    this.onBrightnessChanged,
     this.onTabChanged,
     this.showHueTab = false,
   });
@@ -43,12 +53,14 @@ class MoodSheet extends StatefulWidget {
   static Future<void> show(
     BuildContext context, {
     required Future<List<RhythmSceneDefinition>> Function() scenesLoader,
-    required ValueChanged<Color> onColorChanged,
+    required MoodColorChanged onColorChanged,
     required MoodSceneSelected onSceneSelected,
     Color? initialColor,
     String? initialSceneId,
     MoodTab initialTab = MoodTab.color,
     List<RhythmSceneDefinition> initialScenes = const [],
+    int initialBrightness = 50,
+    ValueChanged<int>? onBrightnessChanged,
     ValueChanged<MoodTab>? onTabChanged,
     bool showHueTab = false,
   }) {
@@ -65,6 +77,8 @@ class MoodSheet extends StatefulWidget {
         initialSceneId: initialSceneId,
         initialTab: initialTab,
         initialScenes: initialScenes,
+        initialBrightness: initialBrightness,
+        onBrightnessChanged: onBrightnessChanged,
         onTabChanged: onTabChanged,
         showHueTab: showHueTab,
       ),
@@ -81,6 +95,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   // Color state.
   late double _hue;
   late double _saturation;
+  late int _brightness;
 
   // Scene state.
   late List<RhythmSceneDefinition> _scenes;
@@ -106,6 +121,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
         : HSVColor.fromColor(widget.initialColor!);
     _hue = initialHsv.hue;
     _saturation = initialHsv.saturation.clamp(0.0, 1.0);
+    _brightness = widget.initialBrightness.clamp(1, 100);
     _scenes = widget.initialScenes;
     _selectedSceneId = widget.initialSceneId;
     _loadingScenes = _tab != MoodTab.color && widget.initialScenes.isEmpty;
@@ -179,12 +195,12 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       _saturation = saturation.clamp(0.0, 1.0);
       _selectedSceneId = null;
     });
-    if (commit) widget.onColorChanged(_selectedColor);
+    if (commit) widget.onColorChanged(_selectedColor, _brightness);
   }
 
   void _commitColor() {
     setState(() => _selectedSceneId = null);
-    widget.onColorChanged(_selectedColor);
+    widget.onColorChanged(_selectedColor, _brightness);
   }
 
   void _onColorWheel(Offset localPosition, Size size,
@@ -210,7 +226,7 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
     setState(() => _selectedSceneId = scene.id);
     var applied = false;
     try {
-      applied = await widget.onSceneSelected(scene);
+      applied = await widget.onSceneSelected(scene, _brightness);
     } catch (_) {
       applied = false;
     }
@@ -317,6 +333,8 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  _brightnessSlider(ambient),
                 ],
               ),
             ),
@@ -334,6 +352,71 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
           borderRadius: BorderRadius.circular(2),
         ),
       );
+
+  Widget _brightnessSlider(Color accent) {
+    return Semantics(
+      container: true,
+      label: 'Scene brightness',
+      value: '$_brightness percent',
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.wb_sunny_rounded,
+                  size: 16,
+                  color: Colors.white.withValues(alpha: 0.72),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Brightness',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.78),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '$_brightness%',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.58),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 10,
+              activeTrackColor: Color.lerp(accent, Colors.white, 0.18),
+              inactiveTrackColor: Colors.white.withValues(alpha: 0.10),
+              thumbColor: Colors.white,
+              overlayColor: accent.withValues(alpha: 0.16),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 24),
+            ),
+            child: Slider(
+              key: const Key('mood_brightness_slider'),
+              value: _brightness.toDouble(),
+              min: 1,
+              max: 100,
+              onChanged: (value) {
+                setState(() => _brightness = value.round());
+              },
+              onChangeEnd: (value) {
+                widget.onBrightnessChanged?.call(value.round());
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   // --- Color pane ----------------------------------------------------------
 
