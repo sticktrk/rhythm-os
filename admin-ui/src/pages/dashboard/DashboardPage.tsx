@@ -1,117 +1,41 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useMemo, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
-  Download,
-  FileText,
   Home,
-  KeyRound,
   Loader2,
   LogOut,
   Mail,
   MapPin,
   RefreshCw,
   Search,
-  Server,
-  ShieldCheck,
-  Trash2,
-  Users,
-  Wifi
+  ShieldCheck
 } from 'lucide-react';
 
-import {
-  applyHubUpdate,
-  checkHubUpdate,
-  deleteHub,
-  downloadDebugBundle,
-  fetchHubStatus,
-  fetchHubLogSources,
-  fetchHubLogTail,
-  probeHub
-} from '../../api';
-import { useConfirm } from '../../components/ui/ConfirmDialog';
-import {
-  LogPanel,
-  preferredLogSourceId,
-  type LogState
-} from '../../components/panels/LogPanel';
-import {
-  StatusPanel,
-  type StatusState
-} from '../../components/panels/StatusPanel';
-import {
-  errorMessage,
-  formatDateTime,
-  nonEmptyString,
-  shortId,
-  triggerBrowserDownload
-} from '../../lib/format';
+import { shortId } from '../../lib/format';
 import { useSession } from '../../state/SessionContext';
 import { useSnapshot } from '../../state/SnapshotContext';
 import type {
-  AdminApiHealth,
-  AdminApiReadiness,
-  DeviceOtaAction,
-  HomeListItem,
-  ProbeResult,
-  SupportHub,
+  SupportCustomer,
+  SupportHome,
   SupportSnapshot
 } from '../../types';
 
-type ProbeState = {
-  loading: boolean;
-  result?: ProbeResult;
-  error?: string;
+type HomeDirectoryItem = {
+  home: SupportHome;
+  email: string | null;
+  searchText: string;
 };
-
-type BundleState = {
-  loading: boolean;
-  error?: string;
-  fileName?: string;
-  downloadedAt?: string;
-  route?: 'remote' | 'local';
-};
-
-type OtaState = {
-  checking: boolean;
-  updating: boolean;
-  error?: string;
-  result?: DeviceOtaAction;
-};
-
-type DeleteState = {
-  loading: boolean;
-  error?: string;
-};
-
-const HUB_PROBE_STAGGER_MS = 350;
 
 export default function DashboardPage() {
-  const { accessToken, signOut } = useSession();
-  const confirm = useConfirm();
+  const { signOut } = useSession();
   const {
     snapshot,
     me,
-    health,
-    readiness,
     loading: loadingSnapshot,
     error: loadError,
     refresh
   } = useSnapshot();
-
   const [query, setQuery] = useState('');
-  const [selectedHomeId, setSelectedHomeId] = useState<string | null>(null);
-  const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>({});
-  const [bundleStates, setBundleStates] = useState<Record<string, BundleState>>({});
-  const [logStates, setLogStates] = useState<Record<string, LogState>>({});
-  const [statusStates, setStatusStates] = useState<Record<string, StatusState>>({});
-  const [otaStates, setOtaStates] = useState<Record<string, OtaState>>({});
-  const [deleteStates, setDeleteStates] = useState<Record<string, DeleteState>>(
-    {}
-  );
-  const probeStatesRef = useRef(probeStates);
-  const autoProbeHubIdsRef = useRef<Set<string>>(new Set());
 
   const homes = useMemo(() => flattenHomes(snapshot), [snapshot]);
   const filteredHomes = useMemo(() => {
@@ -119,357 +43,68 @@ export default function DashboardPage() {
     if (!needle) return homes;
     return homes.filter((item) => item.searchText.includes(needle));
   }, [homes, query]);
-  const selectedHome =
-    filteredHomes.find((item) => item.home.id === selectedHomeId) ??
-    filteredHomes[0] ??
-    null;
 
-  useEffect(() => {
-    if (!selectedHome && filteredHomes.length === 0) return;
-    if (selectedHomeId && filteredHomes.some((item) => item.home.id === selectedHomeId)) {
-      return;
-    }
-    setSelectedHomeId(filteredHomes[0]?.home.id ?? null);
-  }, [filteredHomes, selectedHome, selectedHomeId]);
-
-  useEffect(() => {
-    probeStatesRef.current = probeStates;
-  }, [probeStates]);
-
-  const updateProbeState = useCallback(
-    (hubId: string, updater: (current?: ProbeState) => ProbeState) => {
-      const next = {
-        ...probeStatesRef.current,
-        [hubId]: updater(probeStatesRef.current[hubId])
-      };
-      probeStatesRef.current = next;
-      setProbeStates(next);
-    },
-    []
+  return (
+    <HomeDirectoryView
+      homes={homes}
+      filteredHomes={filteredHomes}
+      loading={loadingSnapshot}
+      loadError={loadError}
+      query={query}
+      role={me?.staffStatus.role ?? 'staff'}
+      onQueryChange={setQuery}
+      onRefresh={() => void refresh()}
+      onSignOut={signOut}
+    />
   );
+}
 
-  const runHubProbe = useCallback(
-    async (hubId: string) => {
-      if (probeStatesRef.current[hubId]?.loading) return;
-
-      updateProbeState(hubId, (current) => ({
-        ...current,
-        loading: true,
-        error: undefined
-      }));
-
-      try {
-        const result = await probeHub(accessToken, hubId);
-        updateProbeState(hubId, () => ({
-          loading: false,
-          result
-        }));
-      } catch (error) {
-        updateProbeState(hubId, (current) => ({
-          ...current,
-          loading: false,
-          error: errorMessage(error)
-        }));
-      }
-    },
-    [accessToken, updateProbeState]
-  );
-
-  useEffect(() => {
-    const hubIds = homes.flatMap((item) => item.hubs.map((hub) => hub.id));
-    if (hubIds.length === 0) return;
-
-    const scheduled: Array<{
-      hubId: string;
-      timeoutId: number;
-      fired: boolean;
-    }> = [];
-    let delayMs = 0;
-
-    for (const hubId of hubIds) {
-      if (autoProbeHubIdsRef.current.has(hubId)) continue;
-      autoProbeHubIdsRef.current.add(hubId);
-
-      const entry = {
-        hubId,
-        timeoutId: 0,
-        fired: false
-      };
-      entry.timeoutId = window.setTimeout(() => {
-        entry.fired = true;
-        const state = probeStatesRef.current[hubId];
-        if (!state?.loading && !state?.result) {
-          void runHubProbe(hubId);
-        }
-      }, delayMs);
-      scheduled.push(entry);
-      delayMs += HUB_PROBE_STAGGER_MS;
-    }
-
-    return () => {
-      for (const entry of scheduled) {
-        if (!entry.fired) {
-          window.clearTimeout(entry.timeoutId);
-          autoProbeHubIdsRef.current.delete(entry.hubId);
-        }
-      }
-    };
-  }, [homes, runHubProbe]);
-
-  const handleProbe = useCallback(
-    async (hub: SupportHub) => {
-      await runHubProbe(hub.id);
-    },
-    [runHubProbe]
-  );
-
-  async function handleDownloadBundle(hub: SupportHub) {
-    setBundleStates((current) => ({
-      ...current,
-      [hub.id]: { ...current[hub.id], loading: true, error: undefined }
-    }));
-    try {
-      const bundle = await downloadDebugBundle(accessToken, hub.id);
-      triggerBrowserDownload(bundle.blob, bundle.fileName);
-      setBundleStates((current) => ({
-        ...current,
-        [hub.id]: {
-          loading: false,
-          fileName: bundle.fileName,
-          downloadedAt: new Date().toISOString(),
-          route: bundle.route
-        }
-      }));
-    } catch (error) {
-      setBundleStates((current) => ({
-        ...current,
-        [hub.id]: {
-          ...current[hub.id],
-          loading: false,
-          error: errorMessage(error)
-        }
-      }));
-    }
-  }
-
-  async function handleLoadStatus(hub: SupportHub) {
-    setStatusStates((current) => ({
-      ...current,
-      [hub.id]: {
-        ...current[hub.id],
-        loading: true,
-        opened: true,
-        error: undefined
-      }
-    }));
-
-    try {
-      const result = await fetchHubStatus(accessToken, hub.id);
-      setStatusStates((current) => ({
-        ...current,
-        [hub.id]: {
-          loading: false,
-          opened: true,
-          result
-        }
-      }));
-    } catch (error) {
-      setStatusStates((current) => ({
-        ...current,
-        [hub.id]: {
-          ...current[hub.id],
-          loading: false,
-          opened: true,
-          error: errorMessage(error)
-        }
-      }));
-    }
-  }
-
-  async function handleCheckUpdate(hub: SupportHub) {
-    setOtaStates((current) => ({
-      ...current,
-      [hub.id]: {
-        ...current[hub.id],
-        checking: true,
-        updating: current[hub.id]?.updating ?? false,
-        error: undefined
-      }
-    }));
-    try {
-      const result = await checkHubUpdate(accessToken, hub.id);
-      setOtaStates((current) => ({
-        ...current,
-        [hub.id]: {
-          checking: false,
-          updating: current[hub.id]?.updating ?? false,
-          result
-        }
-      }));
-      mergeOtaResultIntoStatus(hub.id, result);
-    } catch (error) {
-      setOtaStates((current) => ({
-        ...current,
-        [hub.id]: {
-          ...current[hub.id],
-          checking: false,
-          updating: current[hub.id]?.updating ?? false,
-          error: errorMessage(error)
-        }
-      }));
-    }
-  }
-
-  async function handleApplyUpdate(hub: SupportHub) {
-    const confirmed = window.confirm(`Run OTA update for ${hub.name}?`);
-    if (!confirmed) return;
-    setOtaStates((current) => ({
-      ...current,
-      [hub.id]: {
-        ...current[hub.id],
-        checking: current[hub.id]?.checking ?? false,
-        updating: true,
-        error: undefined
-      }
-    }));
-    try {
-      const result = await applyHubUpdate(accessToken, hub.id);
-      setOtaStates((current) => ({
-        ...current,
-        [hub.id]: {
-          checking: current[hub.id]?.checking ?? false,
-          updating: false,
-          result
-        }
-      }));
-      mergeOtaResultIntoStatus(hub.id, result);
-    } catch (error) {
-      setOtaStates((current) => ({
-        ...current,
-        [hub.id]: {
-          ...current[hub.id],
-          checking: current[hub.id]?.checking ?? false,
-          updating: false,
-          error: errorMessage(error)
-        }
-      }));
-    }
-  }
-
-  async function handleDeleteHub(hub: SupportHub) {
-    if (deleteStates[hub.id]?.loading) return;
-    const requiredText = `DELETE ${hub.name}`;
-    const accepted = await confirm({
-      title: `Delete ${hub.name}?`,
-      message:
-        'This deletes only this cloud hub record and its hub-scoped remote access, support, and activity data. The Home and physical Light Box are preserved and the device is not reset. A signed-in customer app that still has this Light Box locally may sync it back.',
-      confirmLabel: 'Delete hub',
-      danger: true,
-      requireTypedText: requiredText
-    });
-    if (!accepted) return;
-
-    setDeleteStates((current) => ({
-      ...current,
-      [hub.id]: { loading: true }
-    }));
-    try {
-      await deleteHub(accessToken, hub.id);
-      await refresh();
-      setDeleteStates((current) => ({
-        ...current,
-        [hub.id]: { loading: false }
-      }));
-    } catch (error) {
-      setDeleteStates((current) => ({
-        ...current,
-        [hub.id]: {
-          loading: false,
-          error: errorMessage(error)
-        }
-      }));
-    }
-  }
-
-  function mergeOtaResultIntoStatus(hubId: string, action: DeviceOtaAction) {
-    setStatusStates((current) => {
-      const existing = current[hubId];
-      if (!existing?.opened || !existing.result) return current;
-      return {
-        ...current,
-        [hubId]: {
-          ...existing,
-          result: {
-            ...existing.result,
-            ota: action.result
-          }
-        }
-      };
-    });
-  }
-
-  async function handleLoadLogs(hub: SupportHub, sourceId?: string) {
-    const existing = logStates[hub.id];
-    setLogStates((current) => ({
-      ...current,
-      [hub.id]: {
-        ...current[hub.id],
-        loading: true,
-        opened: true,
-        error: undefined
-      }
-    }));
-
-    try {
-      const sources =
-        existing?.sources ??
-        (await fetchHubLogSources(accessToken, hub.id)).sources;
-      const selectedSourceId =
-        sourceId ?? existing?.selectedSourceId ?? preferredLogSourceId(sources);
-      const tail = selectedSourceId
-        ? await fetchHubLogTail(accessToken, hub.id, selectedSourceId)
-        : undefined;
-
-      setLogStates((current) => ({
-        ...current,
-        [hub.id]: {
-          loading: false,
-          opened: true,
-          sources,
-          selectedSourceId,
-          tail
-        }
-      }));
-    } catch (error) {
-      setLogStates((current) => ({
-        ...current,
-        [hub.id]: {
-          ...current[hub.id],
-          loading: false,
-          opened: true,
-          error: errorMessage(error)
-        }
-      }));
-    }
-  }
-
+export function HomeDirectoryView({
+  homes,
+  filteredHomes,
+  loading,
+  loadError,
+  query,
+  role,
+  onQueryChange,
+  onRefresh,
+  onSignOut
+}: {
+  homes: HomeDirectoryItem[];
+  filteredHomes: HomeDirectoryItem[];
+  loading: boolean;
+  loadError: string | null;
+  query: string;
+  role: string;
+  onQueryChange: (value: string) => void;
+  onRefresh: () => void;
+  onSignOut: () => void;
+}) {
   return (
     <div className="appShell">
       <header className="topbar">
         <div>
           <div className="eyebrow">Rhythm Staff</div>
-          <h1>Customer Support</h1>
+          <h1>Homes</h1>
         </div>
         <div className="topbarActions">
           <div className="staffBadge">
             <ShieldCheck size={16} />
-            <span>{me?.staffStatus.role ?? 'staff'}</span>
+            <span>{role}</span>
           </div>
-          <button className="iconButton" type="button" onClick={() => void refresh()}>
+          <button
+            className="iconButton"
+            type="button"
+            onClick={onRefresh}
+          >
             <RefreshCw size={18} />
             <span>Refresh</span>
           </button>
-          <button className="iconButton danger" type="button" onClick={signOut}>
+          <button
+            className="iconButton danger"
+            type="button"
+            onClick={onSignOut}
+          >
             <LogOut size={18} />
             <span>Sign out</span>
           </button>
@@ -483,590 +118,108 @@ export default function DashboardPage() {
         </div>
       ) : null}
 
-      <ApiCapabilityNotice health={health} readiness={readiness} />
-
-      <section className="metrics" aria-label="Support totals">
-        <Metric icon={<Users size={20} />} label="Customers" value={snapshot?.totals.customers ?? 0} />
-        <Metric icon={<Home size={20} />} label="Homes" value={snapshot?.totals.homes ?? 0} />
-        <Metric icon={<Server size={20} />} label="Light Boxes" value={snapshot?.totals.hubs ?? 0} />
-        <Metric icon={<Activity size={20} />} label="Visible Results" value={filteredHomes.length} />
-      </section>
-
-      <main className="workspace">
-        <aside className="sidebar" aria-label="Homes">
-          <div className="searchBox">
+      <main className="homeDirectory" aria-label="Homes">
+        <div className="homeDirectoryHeader">
+          <div>
+            <div className="homeDirectoryTitle">All homes</div>
+            <div className="homeDirectoryCount">
+              {filteredHomes.length === homes.length
+                ? `${homes.length} ${homes.length === 1 ? 'home' : 'homes'}`
+                : `${filteredHomes.length} of ${homes.length} homes`}
+            </div>
+          </div>
+          <label className="searchBox homeDirectorySearch">
             <Search size={18} />
+            <span className="srOnly">Search homes</span>
             <input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search customer, email, home, hub"
+              onChange={(event) => onQueryChange(event.target.value)}
+              placeholder="Search homes or email"
             />
-          </div>
-          <div className="homeList">
-            {loadingSnapshot ? (
-              <div className="listState">
-                <Loader2 className="spin" size={18} />
-                <span>Loading homes</span>
-              </div>
-            ) : filteredHomes.length === 0 ? (
-              <div className="listState">No homes match this search.</div>
-            ) : (
-              filteredHomes.map((item) => {
-                const customerEmail = visibleCustomerEmail(item.customer);
-                return (
-                  <button
-                    type="button"
-                    className={`homeListItem ${
-                      item.home.id === selectedHome?.home.id ? 'selected' : ''
-                    }`}
-                    key={item.home.id}
-                    onClick={() => setSelectedHomeId(item.home.id)}
-                  >
-                    <span className="itemTitle">{item.home.name}</span>
-                    <span className="itemMeta">{item.customer.customerLabel}</span>
-                    {customerEmail ? (
-                      <span className="itemEmail">{customerEmail}</span>
-                    ) : null}
-                    <span className="itemMeta">
-                      {item.hubs.length} Light Box{item.hubs.length === 1 ? '' : 'es'}
-                    </span>
-                    <HomeListProbeSummary
-                      hubs={item.hubs}
-                      probeStates={probeStates}
-                    />
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </aside>
+          </label>
+        </div>
 
-        <section className="detailPane" aria-label="Selected home">
-          {selectedHome ? (
-            <HomeDetail
-              item={selectedHome}
-              probeStates={probeStates}
-              bundleStates={bundleStates}
-              statusStates={statusStates}
-              otaStates={otaStates}
-              deleteStates={deleteStates}
-              logStates={logStates}
-              canDelete={me?.staffStatus.isAdmin === true}
-              onProbe={handleProbe}
-              onDownloadBundle={handleDownloadBundle}
-              onLoadStatus={handleLoadStatus}
-              onCheckUpdate={handleCheckUpdate}
-              onApplyUpdate={handleApplyUpdate}
-              onDeleteHub={handleDeleteHub}
-              onLoadLogs={handleLoadLogs}
-            />
-          ) : (
-            <div className="emptyPane">
-              <Home size={28} />
-              <p>Select a home to inspect its Light Boxes.</p>
+        <div className="homeDirectoryList" aria-live="polite">
+          {loading ? (
+            <div className="listState">
+              <Loader2 className="spin" size={18} />
+              <span>Loading homes</span>
             </div>
+          ) : filteredHomes.length === 0 ? (
+            <div className="listState">
+              {homes.length === 0
+                ? 'No homes are available.'
+                : 'No homes match this search.'}
+            </div>
+          ) : (
+            filteredHomes.map((item) => (
+              <HomeDirectoryRow item={item} key={item.home.id} />
+            ))
           )}
-        </section>
+        </div>
       </main>
     </div>
   );
 }
 
-function ApiCapabilityNotice({
-  health,
-  readiness
-}: {
-  health: AdminApiHealth | null;
-  readiness: AdminApiReadiness | null;
-}) {
-  if (readiness?.remoteDebugReady) return null;
-  if (!readiness && !health) return null;
-  if (
-    !readiness &&
-    health?.serviceRoleConfigured &&
-    health.supportAccessConfigured
-  ) {
-    return null;
-  }
-
-  const missing =
-    readiness?.missing ??
-    [
-      health && !health.serviceRoleConfigured ? 'SUPABASE_SERVICE_ROLE_KEY' : null,
-      health && !health.supportAccessConfigured
-        ? 'SUPPORT_ACCESS_ENCRYPTION_KEY'
-        : null
-    ].filter((value): value is string => value !== null);
-
+function HomeDirectoryRow({ item }: { item: HomeDirectoryItem }) {
+  const { home, email } = item;
   return (
-    <div className="notice warning">
-      <AlertTriangle size={18} />
-      <span>
-        admin-api remote debugging is not ready; missing {missing.join(' and ')}.{' '}
-        {readiness?.notes[0] ?? 'Encrypted remote support needs matching server config.'}
-      </span>
-    </div>
-  );
-}
-
-function HomeListProbeSummary({
-  hubs,
-  probeStates
-}: {
-  hubs: SupportHub[];
-  probeStates: Record<string, ProbeState>;
-}) {
-  if (hubs.length === 0) return null;
-
-  return (
-    <span className="homeProbeList">
-      {hubs.map((hub) => {
-        const summary = homeProbeSummary(probeStates[hub.id]);
-        return (
-          <span className={`homeProbeLine ${summary.status}`} key={hub.id}>
-            <span className="homeProbeHub">{hub.name}</span>
-            <span className="homeProbeStatus">{summary.label}</span>
-          </span>
-        );
-      })}
-    </span>
-  );
-}
-
-function homeProbeSummary(state?: ProbeState): {
-  status: 'idle' | 'checking' | 'online' | 'auth' | 'offline' | 'error';
-  label: string;
-} {
-  if (state?.loading) return { status: 'checking', label: 'Checking' };
-  if (state?.error) return { status: 'error', label: 'Probe error' };
-
-  const result = state?.result;
-  if (!result) return { status: 'idle', label: 'Queued' };
-  if (result.status === 'online') {
-    const version = nonEmptyString(result.serverVersion);
-    const versionLabel = version
-      ? version.startsWith('v')
-        ? version
-        : `v${version}`
-      : null;
-    return {
-      status: 'online',
-      label: versionLabel ? `${versionLabel} · Success` : 'Success'
-    };
-  }
-  if (result.status === 'auth_required') {
-    return { status: 'auth', label: 'Auth required' };
-  }
-  return { status: 'offline', label: 'Offline' };
-}
-
-function Metric({
-  icon,
-  label,
-  value
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: number;
-}) {
-  return (
-    <div className="metric">
-      <div className="metricIcon">{icon}</div>
-      <div>
-        <div className="metricValue">{value}</div>
-        <div className="metricLabel">{label}</div>
+    <article className="homeDirectoryRow">
+      <div className="homeDirectoryIcon" aria-hidden="true">
+        <Home size={20} />
       </div>
-    </div>
-  );
-}
-
-function HomeDetail({
-  item,
-  probeStates,
-  bundleStates,
-  statusStates,
-  otaStates,
-  deleteStates,
-  logStates,
-  canDelete,
-  onProbe,
-  onDownloadBundle,
-  onLoadStatus,
-  onCheckUpdate,
-  onApplyUpdate,
-  onDeleteHub,
-  onLoadLogs
-}: {
-  item: HomeListItem;
-  probeStates: Record<string, ProbeState>;
-  bundleStates: Record<string, BundleState>;
-  statusStates: Record<string, StatusState>;
-  otaStates: Record<string, OtaState>;
-  deleteStates: Record<string, DeleteState>;
-  logStates: Record<string, LogState>;
-  canDelete: boolean;
-  onProbe: (hub: SupportHub) => void;
-  onDownloadBundle: (hub: SupportHub) => void;
-  onLoadStatus: (hub: SupportHub) => void;
-  onCheckUpdate: (hub: SupportHub) => void;
-  onApplyUpdate: (hub: SupportHub) => void;
-  onDeleteHub: (hub: SupportHub) => void;
-  onLoadLogs: (hub: SupportHub, sourceId?: string) => void;
-}) {
-  const customerEmail = visibleCustomerEmail(item.customer);
-  return (
-    <div className="homeDetail">
-      <div className="homeHeader">
-        <div>
-          <div className="eyebrow">{item.customer.customerLabel}</div>
-          <h2>{item.home.name}</h2>
-          <div className="homeMeta">
-            {item.home.locationCity ? (
-              <span>
-                <MapPin size={15} />
-                {item.home.locationCity}
-              </span>
-            ) : null}
-            {item.home.timezone ? <span>{item.home.timezone}</span> : null}
-            {customerEmail ? (
-              <span className="homeEmail">
-                <Mail size={15} />
-                {customerEmail}
-              </span>
-            ) : null}
-          </div>
-        </div>
-        <div className="homeIds">
-          <span>Home {shortId(item.home.id)}</span>
-          <span>Owner {shortId(item.home.ownerId)}</span>
-        </div>
-      </div>
-
-      <div className="sectionHeader">
-        <div>
-          <h3>Light Boxes</h3>
-          <p>{item.hubs.length} server hub record{item.hubs.length === 1 ? '' : 's'}</p>
-        </div>
-      </div>
-
-      {item.hubs.length === 0 ? (
-        <div className="emptyPane compact">No Light Boxes are synced for this home.</div>
-      ) : (
-        <div className="hubTable">
-          {item.hubs.map((hub) => (
-            <HubRow
-              key={hub.id}
-              hub={hub}
-              probeState={probeStates[hub.id]}
-              bundleState={bundleStates[hub.id]}
-              statusState={statusStates[hub.id]}
-              otaState={otaStates[hub.id]}
-              deleteState={deleteStates[hub.id]}
-              logState={logStates[hub.id]}
-              canDelete={canDelete}
-              onProbe={() => onProbe(hub)}
-              onDownloadBundle={() => onDownloadBundle(hub)}
-              onLoadStatus={() => onLoadStatus(hub)}
-              onCheckUpdate={() => onCheckUpdate(hub)}
-              onApplyUpdate={() => onApplyUpdate(hub)}
-              onDelete={() => onDeleteHub(hub)}
-              onLoadLogs={(sourceId) => onLoadLogs(hub, sourceId)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function HubRow({
-  hub,
-  probeState,
-  bundleState,
-  statusState,
-  otaState,
-  deleteState,
-  logState,
-  canDelete,
-  onProbe,
-  onDownloadBundle,
-  onLoadStatus,
-  onCheckUpdate,
-  onApplyUpdate,
-  onDelete,
-  onLoadLogs
-}: {
-  hub: SupportHub;
-  probeState?: ProbeState;
-  bundleState?: BundleState;
-  statusState?: StatusState;
-  otaState?: OtaState;
-  deleteState?: DeleteState;
-  logState?: LogState;
-  canDelete: boolean;
-  onProbe: () => void;
-  onDownloadBundle: () => void;
-  onLoadStatus: () => void;
-  onCheckUpdate: () => void;
-  onApplyUpdate: () => void;
-  onDelete: () => void;
-  onLoadLogs: (sourceId?: string) => void;
-}) {
-  const result = probeState?.result;
-  const otaBusy = Boolean(otaState?.checking || otaState?.updating);
-  return (
-    <div className="hubRow">
-      <div className="hubMain">
-        <div className="hubIcon">
-          <Server size={18} />
-        </div>
-        <div className="hubText">
-          <div className="hubTitle">{hub.name}</div>
-          <div className="hubMeta">
-            {hub.remoteEndpoint ? (
-              <span>Remote {hub.remoteEndpoint.baseUrl}</span>
-            ) : null}
-            <span>Local {hub.endpoint.baseUrl}</span>
-            {hub.serverInstanceId ? <span>{shortId(hub.serverInstanceId)}</span> : null}
-            {hub.lastConnected ? <span>Seen {formatDateTime(hub.lastConnected)}</span> : null}
-          </div>
-        </div>
-      </div>
-
-      <div className="tokenStrip">
-        <span className={hub.hasLegacyToken ? 'token ok' : 'token'}>
-          <KeyRound size={14} />
-          Legacy
-        </span>
-        <span className={hub.hasEncryptedToken ? 'token encrypted' : 'token'}>
-          <KeyRound size={14} />
-          Encrypted
-        </span>
-      </div>
-
-      <ProbeBadge state={probeState} />
-
-      <div className="hubActions">
-        <button className="probeButton" type="button" onClick={onProbe} disabled={probeState?.loading}>
-          {probeState?.loading ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
-          <span>Probe</span>
-        </button>
-        <button
-          className="probeButton"
-          type="button"
-          onClick={onCheckUpdate}
-          disabled={otaBusy}
-        >
-          {otaState?.checking ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
-          <span>Check</span>
-        </button>
-        <button
-          className="probeButton"
-          type="button"
-          onClick={onApplyUpdate}
-          disabled={otaBusy}
-        >
-          {otaState?.updating ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-          <span>Update</span>
-        </button>
-        <button
-          className="probeButton"
-          type="button"
-          onClick={onLoadStatus}
-          disabled={statusState?.loading}
-        >
-          {statusState?.loading ? <Loader2 className="spin" size={16} /> : <Activity size={16} />}
-          <span>Status</span>
-        </button>
-        <button
-          className="probeButton"
-          type="button"
-          onClick={onDownloadBundle}
-          disabled={bundleState?.loading}
-        >
-          {bundleState?.loading ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-          <span>Bundle</span>
-        </button>
-        <button
-          className="probeButton"
-          type="button"
-          onClick={() => onLoadLogs()}
-          disabled={logState?.loading}
-        >
-          {logState?.loading ? <Loader2 className="spin" size={16} /> : <FileText size={16} />}
-          <span>Logs</span>
-        </button>
-        <Link className="probeButton enter" to={`/hubs/${encodeURIComponent(hub.id)}/overview`}>
-          <Server size={16} />
-          <span>Enter</span>
-        </Link>
-        {canDelete ? (
-          <button
-            className="probeButton danger"
-            type="button"
-            onClick={onDelete}
-            disabled={deleteState?.loading}
-          >
-            {deleteState?.loading ? (
-              <Loader2 className="spin" size={16} />
-            ) : (
-              <Trash2 size={16} />
-            )}
-            <span>{deleteState?.loading ? 'Deleting' : 'Delete'}</span>
-          </button>
-        ) : null}
-      </div>
-
-      {result ? (
-        <div className="inventory">
-          {result.baseUrl ? <span>{result.route ?? 'route'} {result.baseUrl}</span> : null}
-          {result.serverVersion ? <span>v{result.serverVersion}</span> : null}
-          {result.checkedAt ? <span>Checked {formatDateTime(result.checkedAt)}</span> : null}
-          {result.inventory ? (
-            <>
-              <span>{result.inventory.lights} lights</span>
-              <span>{result.inventory.buttons} buttons</span>
-              <span>{result.inventory.motionSensors} motion</span>
-            </>
+      <div className="homeDirectoryMain">
+        <div className="homeDirectoryName">{home.name}</div>
+        <div className="homeDirectoryMeta">
+          {email ? (
+            <span>
+              <Mail size={15} />
+              {email}
+            </span>
           ) : null}
+          {home.locationCity ? (
+            <span>
+              <MapPin size={15} />
+              {home.locationCity}
+            </span>
+          ) : null}
+          {home.timezone ? <span>{home.timezone}</span> : null}
         </div>
-      ) : null}
-
-      {deleteState?.error || probeState?.error || result?.message || bundleState?.error || otaState?.error ? (
-        <div className="hubMessage">
-          {deleteState?.error ?? otaState?.error ?? bundleState?.error ?? probeState?.error ?? result?.message}
-        </div>
-      ) : null}
-
-      {otaState?.result ? (
-        <div className="hubMessage success">
-          {otaActionMessage(otaState.result)}
-          {' via '}
-          {otaState.result.route}
-          {otaState.result.completedAt ? ` at ${formatDateTime(otaState.result.completedAt)}` : ''}
-        </div>
-      ) : null}
-
-      {bundleState?.fileName ? (
-        <div className="hubMessage success">
-          Downloaded {bundleState.fileName}
-          {bundleState.route ? ` from ${bundleState.route}` : ''}
-          {bundleState.downloadedAt ? ` at ${formatDateTime(bundleState.downloadedAt)}` : ''}
-        </div>
-      ) : null}
-
-      {statusState?.opened ? (
-        <StatusPanel state={statusState} onRefresh={onLoadStatus} />
-      ) : null}
-
-      {logState?.opened ? (
-        <LogPanel
-          state={logState}
-          onSourceChange={(sourceId) => onLoadLogs(sourceId)}
-          onRefresh={() => onLoadLogs(logState.selectedSourceId)}
-        />
-      ) : null}
-    </div>
+      </div>
+      <div className="homeDirectoryId">Home {shortId(home.id)}</div>
+    </article>
   );
 }
 
-function ProbeBadge({ state }: { state?: ProbeState }) {
-  if (state?.loading) {
-    return (
-      <span className="statusBadge checking">
-        <Loader2 className="spin" size={14} />
-        Checking
-      </span>
-    );
-  }
-  if (state?.error) {
-    return (
-      <span className="statusBadge offline">
-        <AlertTriangle size={14} />
-        Error
-      </span>
-    );
-  }
-  const result = state?.result;
-  if (!result) return <span className="statusBadge idle">Not checked</span>;
-  if (result.status === 'online') {
-    return (
-      <span className="statusBadge online">
-        <Wifi size={14} />
-        Online {result.route ? `(${result.route})` : ''}
-      </span>
-    );
-  }
-  if (result.status === 'auth_required') {
-    return (
-      <span className="statusBadge auth">
-        <KeyRound size={14} />
-        Auth required
-      </span>
-    );
-  }
-  return (
-    <span className="statusBadge offline">
-      <AlertTriangle size={14} />
-      Offline
-    </span>
-  );
-}
-
-function otaActionMessage(action: DeviceOtaAction): string {
-  const message = nonEmptyString(action.result.message);
-  if (message) return message;
-
-  const latest = nonEmptyString(action.result.latest_version);
-  const current = nonEmptyString(action.result.current_version);
-  if (action.action === 'check') {
-    if (action.result.update_available === true && latest) {
-      return `Update available: v${latest}`;
-    }
-    if (action.result.update_available === false) {
-      return current ? `Already current: v${current}` : 'Already current';
-    }
-    return 'Update check completed';
-  }
-
-  return latest ? `Update requested: v${latest}` : 'Update requested';
-}
-
-function visibleCustomerEmail(customer: HomeListItem['customer']): string | null {
+function customerEmail(customer: SupportCustomer): string | null {
   const email = customer.customerEmail?.trim();
-  if (!email) return null;
+  if (email) return email;
 
   const label = customer.customerLabel.trim();
-  return email.toLowerCase() === label.toLowerCase() ? null : email;
+  return label.includes('@') ? label : null;
 }
 
-function flattenHomes(snapshot: SupportSnapshot | null): HomeListItem[] {
+export function flattenHomes(
+  snapshot: SupportSnapshot | null
+): HomeDirectoryItem[] {
   if (!snapshot) return [];
-  return snapshot.customers.flatMap((customer) =>
-    customer.homes.map((entry) => {
+
+  return snapshot.customers.flatMap((customer) => {
+    const email = customerEmail(customer);
+    return customer.homes.map((entry) => {
       const searchable = [
-        customer.customerLabel,
-        customer.customerEmail,
-        customer.customerName,
-        customer.ownerId,
         entry.home.id,
         entry.home.name,
         entry.home.locationCity,
         entry.home.timezone,
-        ...entry.hubs.flatMap((hub) => [
-          hub.id,
-          hub.name,
-          hub.endpoint.host,
-          hub.remoteEndpoint?.host,
-          hub.serverInstanceId
-        ])
+        email
       ];
       return {
-        customer,
         home: entry.home,
-        hubs: entry.hubs,
+        email,
         searchText: searchable.filter(Boolean).join(' ').toLowerCase()
       };
-    })
-  );
+    });
+  });
 }
