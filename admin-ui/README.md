@@ -21,13 +21,11 @@ those two browser-safe settings.
 
 Two surfaces behind one Supabase sign-in:
 
-- **Support dashboard** (`/`, light theme) — customer/home/hub inventory.
-  Per hub: probe, status, OTA check/update, debug bundle, log tails, and an
-  admin-only cloud hub delete action with typed confirmation. Deleting a hub
-  preserves its Home and physical Light Box; retained customer app state may
-  sync the hub back later.
+- **Home directory** (`/`, light theme) — a flat, searchable list of Homes
+  with optional customer email, location, and timezone metadata. It does not
+  expose customer or hub records and does not contact appliances.
 - **Device console** (`/hubs/:hubId/*`, dark theme) — full-featured per-device
-  admin opened by each hub row's **Enter** button. Side-nav sections:
+  admin available by direct hub URL. Side-nav sections:
 
 | Route | Section |
 |---|---|

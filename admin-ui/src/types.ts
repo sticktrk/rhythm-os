@@ -236,10 +236,3 @@ export type DeviceAdminProxyResponse = {
   preconditionBodySha256?: string;
   body: unknown;
 };
-
-export type HomeListItem = {
-  customer: SupportCustomer;
-  home: SupportHome;
-  hubs: SupportHub[];
-  searchText: string;
-};
