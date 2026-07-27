@@ -410,25 +410,24 @@ void main() {
     FirstRunExplainer.seenWriter = (_) async {};
   });
 
-  testWidgets('room card exposes customized Light settings affordance',
+  testWidgets('room page owns customized Light settings affordance',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     final roomProvider = RoomProvider();
-    await roomProvider.addRoom(
-      const RoomDto(
-        id: 'room-1',
-        name: 'Kitchen',
-        source: RoomSourceDto.hue,
-        kind: RoomNodeKind.room,
-        deviceIds: ['light-1'],
-        rhythmEnabled: true,
-        disabled: false,
-        lightsOn: true,
-        timeOffsetMinutes: 0,
-        brightnessOffset: 0,
-      ),
+    const room = RoomDto(
+      id: 'room-1',
+      name: 'Kitchen',
+      source: RoomSourceDto.hue,
+      kind: RoomNodeKind.room,
+      deviceIds: ['light-1'],
+      rhythmEnabled: true,
+      disabled: false,
+      lightsOn: true,
+      timeOffsetMinutes: 0,
+      brightnessOffset: 0,
     );
+    await roomProvider.addRoom(room);
     final connection = _TestRhythmConnection();
     final subscription = _FakeSubscriptionProvider();
     final serverSync = ServerSyncProvider(
@@ -494,12 +493,49 @@ void main() {
       ),
     );
 
+    expect(
+      find.byKey(const ValueKey('room-card-light-settings-room-1')),
+      findsNothing,
+    );
+    expect(find.text('Light settings'), findsNothing);
+    expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+          ChangeNotifierProvider<SubscriptionProvider>.value(
+            value: subscription,
+          ),
+        ],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: RoomSettingsSheet(
+              room: room,
+              enableLivePreview: false,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
     final button = find.byKey(
-      const ValueKey('room-card-light-settings-room-1'),
+      const ValueKey('room-settings-light-settings-room-1'),
     );
     expect(button, findsOneWidget);
     expect(find.text('Light settings'), findsOneWidget);
-    expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(
+              const ValueKey('room-settings-light-status-room-1'),
+            ),
+          )
+          .data,
+      'Custom',
+    );
     final semantics = tester.getSemantics(button);
     expect(semantics.label, 'Light settings');
     expect(semantics.value, 'Custom room settings');

@@ -5121,6 +5121,93 @@ void main() {
     expect(api.topologyDeleteRoomCalls, 0);
   });
 
+  testWidgets('room page explains unavailable Light settings capability',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final semantics = tester.ensureSemantics();
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['matter'],
+            'device_ids': ['light-1'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    final lightSettings = find.byKey(
+      const ValueKey('room-settings-light-settings-room-1'),
+    );
+    expect(lightSettings, findsOneWidget);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(
+              const ValueKey('room-settings-light-status-room-1'),
+            ),
+          )
+          .data,
+      'Update required',
+    );
+    final lightSettingsSemantics = tester.getSemantics(lightSettings);
+    expect(lightSettingsSemantics.label, 'Light settings');
+    expect(lightSettingsSemantics.value, 'Appliance update required');
+
+    await tester.tap(lightSettings);
+    await tester.pump();
+    expect(
+      find.text(
+        'Update the Rhythm appliance to customize light settings for Kitchen.',
+      ),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
   testWidgets('room settings standby switch pushes node preference',
       (tester) async {
     _registerWidgetCleanup(tester);

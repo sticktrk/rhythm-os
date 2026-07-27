@@ -14,6 +14,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RoomModeState,
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
+import '../screens/settings/light_screen.dart';
 import 'device_detail_sheet.dart';
 import 'info_tooltip.dart';
 import 'low_glow_switch.dart';
@@ -86,6 +87,28 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         context.read<ServerSyncProvider>().ensureRoomPreviewStateFresh(room.id),
       );
     });
+  }
+
+  void _openRoomLightSettings() {
+    HapticFeedback.lightImpact();
+    LightScreen.showForRoom(
+      context,
+      roomId: room.id,
+      roomName: room.name,
+    );
+  }
+
+  void _showRoomLightSettingsUnavailable() {
+    HapticFeedback.lightImpact();
+    final version = context.read<ServerSyncProvider>().firmwareVersion;
+    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Update the Rhythm appliance$versionSuffix to customize light settings for ${room.name}.',
+        ),
+      ),
+    );
   }
 
   @override
@@ -277,6 +300,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     final node = syncProvider.nodeById(room.id);
     final settings = node?.profileSettings;
     final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
+    final lightSettingsSupported =
+        syncProvider.lightProfileOverridesSupportedForNode(room.id);
+    final hasLightOverrides =
+        syncProvider.hasNodeLightProfileOverrides(room.id);
 
     return ListView(
       key: const ValueKey('rhythm'),
@@ -285,6 +312,11 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         // Low glow is the user-facing name for the room's existing Standby
         // preference, independent of the Day/Sleep profile selection.
         _buildSettingsGroup('', [
+          if (room.kind.isRoom)
+            _buildRoomLightSettingsRow(
+              supported: lightSettingsSupported,
+              customized: hasLightOverrides,
+            ),
           _SettingsRow(
             icon: Icons.bedtime_outlined,
             label: 'Low glow',
@@ -321,6 +353,65 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           ]),
         ],
       ],
+    );
+  }
+
+  Widget _buildRoomLightSettingsRow({
+    required bool supported,
+    required bool customized,
+  }) {
+    final status = customized
+        ? 'Custom'
+        : supported
+            ? 'Home'
+            : 'Update required';
+    final semanticsValue = customized
+        ? 'Custom room settings'
+        : supported
+            ? 'Using home settings'
+            : 'Appliance update required';
+    final accent =
+        customized ? const Color(0xFFF9A825) : CelestialColors.textSecondary;
+    final onPressed =
+        supported ? _openRoomLightSettings : _showRoomLightSettingsUnavailable;
+
+    return Semantics(
+      key: ValueKey('room-settings-light-settings-${room.id}'),
+      button: true,
+      enabled: supported,
+      excludeSemantics: true,
+      label: 'Light settings',
+      value: semanticsValue,
+      onTap: onPressed,
+      child: _SettingsRow(
+        icon: supported ? Icons.tune_rounded : Icons.system_update_rounded,
+        label: 'Light settings',
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              status,
+              key: ValueKey('room-settings-light-status-${room.id}'),
+              style: TextStyle(
+                color: accent.withValues(
+                  alpha: supported || customized ? 0.92 : 0.58,
+                ),
+                fontSize: 13,
+                fontWeight: customized ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(
+              supported
+                  ? Icons.chevron_right_rounded
+                  : Icons.info_outline_rounded,
+              size: 18,
+              color: accent.withValues(alpha: supported ? 0.72 : 0.46),
+            ),
+          ],
+        ),
+        onTap: onPressed,
+      ),
     );
   }
 
