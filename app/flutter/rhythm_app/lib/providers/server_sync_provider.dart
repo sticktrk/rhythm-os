@@ -210,6 +210,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// one request in flight per node so rapid taps cannot reorder the final
   /// persisted value.
   final Set<String> _motionActivationPending = {};
+  final Set<String> _lightProfileOverridePending = {};
   static const Uuid _uuid = Uuid();
 
   /// Raw topology graph from `/api/topology/nodes`.
@@ -875,6 +876,20 @@ class ServerSyncProvider extends ChangeNotifier {
         node?.profileSettings?.motionActivationEnabled != null;
   }
 
+  bool lightProfileOverridesSupportedForNode(String nodeId) {
+    if (HueServiceLocator.isDemoMode) return true;
+    return _capabilities?.supportsFeature(
+          RhythmFeature.roomLightProfileOverrides,
+        ) ==
+        true;
+  }
+
+  bool hasNodeLightProfileOverrides(String nodeId) {
+    final overrides = nodeById(nodeId)?.profileSettings?.profileOverrides;
+    return overrides != null &&
+        overrides.values.any((profileOverride) => !profileOverride.isEmpty);
+  }
+
   bool motionActivationPendingForNode(String nodeId) =>
       _motionActivationPending.contains(nodeId);
 
@@ -951,6 +966,26 @@ class ServerSyncProvider extends ChangeNotifier {
   ) {
     final previousSettings =
         previous.profileSettings ?? const RhythmNodeProfileSettings();
+    return _copyNodeWithProfileSettings(
+      previous,
+      RhythmNodeProfileSettings(
+        profileId: previousSettings.profileId,
+        moodEnabled: previousSettings.moodEnabled,
+        moodProfileId: previousSettings.moodProfileId,
+        moodSceneId: previousSettings.moodSceneId,
+        fadeSetting: previousSettings.fadeSetting,
+        motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+        motionActivationEnabled: enabled,
+        profileOverrides: previousSettings.profileOverrides,
+        raw: previousSettings.raw,
+      ),
+    );
+  }
+
+  RhythmRoom _copyNodeWithProfileSettings(
+    RhythmRoom previous,
+    RhythmNodeProfileSettings profileSettings,
+  ) {
     return RhythmRoom(
       id: previous.id,
       name: previous.name,
@@ -970,17 +1005,7 @@ class ServerSyncProvider extends ChangeNotifier {
       model: previous.model,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
-      profileSettings: RhythmNodeProfileSettings(
-        profileId: previousSettings.profileId,
-        moodEnabled: previousSettings.moodEnabled,
-        moodProfileId: previousSettings.moodProfileId,
-        moodSceneId: previousSettings.moodSceneId,
-        fadeSetting: previousSettings.fadeSetting,
-        motionTimeoutSetting: previousSettings.motionTimeoutSetting,
-        motionActivationEnabled: enabled,
-        profileOverrides: previousSettings.profileOverrides,
-        raw: previousSettings.raw,
-      ),
+      profileSettings: profileSettings,
       observedPower: previous.observedPower,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
@@ -1130,20 +1155,39 @@ class ServerSyncProvider extends ChangeNotifier {
     final next = Map<String, RhythmLightProfileNodeOverride>.from(current);
     final existing = next[profileId];
     if (setting == null) {
-      if (existing == null || existing.fadeSetting == null) {
+      if (existing == null) {
         next.remove(profileId);
       } else {
-        next[profileId] = RhythmLightProfileNodeOverride(
+        final updated = RhythmLightProfileNodeOverride(
+          curve: existing.curve,
+          minColorTemp: existing.minColorTemp,
+          maxColorTemp: existing.maxColorTemp,
+          minBrightness: existing.minBrightness,
+          maxBrightness: existing.maxBrightness,
+          maxDimSteps: existing.maxDimSteps,
           fadeSetting: existing.fadeSetting,
+          rhythmIntervalSetting: existing.rhythmIntervalSetting,
           raw: existing.raw,
         );
+        if (updated.isEmpty) {
+          next.remove(profileId);
+        } else {
+          next[profileId] = updated;
+        }
       }
       return Map.unmodifiable(next);
     }
 
     next[profileId] = RhythmLightProfileNodeOverride(
+      curve: existing?.curve,
+      minColorTemp: existing?.minColorTemp,
+      maxColorTemp: existing?.maxColorTemp,
+      minBrightness: existing?.minBrightness,
+      maxBrightness: existing?.maxBrightness,
+      maxDimSteps: existing?.maxDimSteps,
       fadeSetting: existing?.fadeSetting,
       motionTimeoutSetting: setting,
+      rhythmIntervalSetting: existing?.rhythmIntervalSetting,
       raw: existing?.raw ?? const <String, dynamic>{},
     );
     return Map.unmodifiable(next);
@@ -3278,18 +3322,169 @@ class ServerSyncProvider extends ChangeNotifier {
     );
   }
 
-  /// Patch per-profile overrides for one node.
-  void pushNodeProfileOverrides(
+  /// Patch legacy timer-only per-profile overrides for one node.
+  Future<bool> pushNodeProfileOverrides(
     String nodeId, {
     required Map<String, dynamic>? profileOverrides,
-  }) {
-    if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
-    if (!_connection.connected || _receivingFromServer) return;
+  }) async {
+    if (HueServiceLocator.isDemoMode) return true;
+    if (!_connection.connected || _receivingFromServer) return false;
     debugPrint('ServerSync: pushNodeProfileOverrides $nodeId');
-    api.nodeProfileOverridesSet(
+    return api.nodeProfileOverridesSet(
       nodeId: nodeId,
       profileOverrides: profileOverrides,
     );
+  }
+
+  /// Replace one complete room/profile delta and keep unrelated profile
+  /// overrides intact. Local state is optimistic and rolls back when the
+  /// server rejects the request.
+  Future<bool> setNodeLightProfileOverride(
+    String nodeId, {
+    required String profileId,
+    required RhythmLightProfileNodeOverride? profileOverride,
+    required String correlationId,
+  }) async {
+    final index = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (index == -1 ||
+        !lightProfileOverridesSupportedForNode(nodeId) ||
+        _lightProfileOverridePending.contains(nodeId) ||
+        (!HueServiceLocator.isDemoMode &&
+            (!_connection.connected || _receivingFromServer))) {
+      return false;
+    }
+
+    final previous = _helloNodes[index];
+    final previousSettings =
+        previous.profileSettings ?? const RhythmNodeProfileSettings();
+    final nextOverrides = Map<String, RhythmLightProfileNodeOverride>.from(
+      previousSettings.profileOverrides,
+    );
+    if (profileOverride == null || profileOverride.isEmpty) {
+      nextOverrides.remove(profileId);
+    } else {
+      nextOverrides[profileId] = profileOverride;
+    }
+    final nextSettings = RhythmNodeProfileSettings(
+      profileId: previousSettings.profileId,
+      moodEnabled: previousSettings.moodEnabled,
+      moodProfileId: previousSettings.moodProfileId,
+      moodSceneId: previousSettings.moodSceneId,
+      fadeSetting: previousSettings.fadeSetting,
+      motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+      motionActivationEnabled: previousSettings.motionActivationEnabled,
+      profileOverrides: Map.unmodifiable(nextOverrides),
+      raw: previousSettings.raw,
+    );
+    _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
+    _helloRooms = _buildRoomSummaries();
+    _lightProfileOverridePending.add(nodeId);
+    notifyListeners();
+
+    if (HueServiceLocator.isDemoMode) {
+      _lightProfileOverridePending.remove(nodeId);
+      return true;
+    }
+
+    var accepted = false;
+    try {
+      accepted = await api.nodeProfileOverridesSet(
+        nodeId: nodeId,
+        profileOverrides: {
+          profileId: profileOverride == null || profileOverride.isEmpty
+              ? null
+              : profileOverride.toJson(),
+        },
+        replace: true,
+        correlationId: correlationId,
+      );
+    } catch (error) {
+      debugPrint(
+        'ServerSync: room light profile override failed node=$nodeId profile=$profileId error=$error',
+      );
+    } finally {
+      _lightProfileOverridePending.remove(nodeId);
+    }
+    if (accepted) return true;
+
+    final currentIndex = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (currentIndex != -1 &&
+        identical(_helloNodes[currentIndex].profileSettings, nextSettings)) {
+      _helloNodes[currentIndex] = _copyNodeWithProfileSettings(
+        _helloNodes[currentIndex],
+        previousSettings,
+      );
+      _helloRooms = _buildRoomSummaries();
+      notifyListeners();
+    }
+    return false;
+  }
+
+  /// Clear every Day/Sleep profile delta for a room while retaining unrelated
+  /// room profile preferences.
+  Future<bool> resetNodeLightProfileOverrides(
+    String nodeId, {
+    required String correlationId,
+  }) async {
+    final index = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (index == -1 ||
+        !lightProfileOverridesSupportedForNode(nodeId) ||
+        _lightProfileOverridePending.contains(nodeId) ||
+        (!HueServiceLocator.isDemoMode &&
+            (!_connection.connected || _receivingFromServer))) {
+      return false;
+    }
+    final previous = _helloNodes[index];
+    final previousSettings =
+        previous.profileSettings ?? const RhythmNodeProfileSettings();
+    final nextSettings = RhythmNodeProfileSettings(
+      profileId: previousSettings.profileId,
+      moodEnabled: previousSettings.moodEnabled,
+      moodProfileId: previousSettings.moodProfileId,
+      moodSceneId: previousSettings.moodSceneId,
+      fadeSetting: previousSettings.fadeSetting,
+      motionTimeoutSetting: previousSettings.motionTimeoutSetting,
+      motionActivationEnabled: previousSettings.motionActivationEnabled,
+      raw: previousSettings.raw,
+    );
+    _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
+    _helloRooms = _buildRoomSummaries();
+    _lightProfileOverridePending.add(nodeId);
+    notifyListeners();
+
+    if (HueServiceLocator.isDemoMode) {
+      _lightProfileOverridePending.remove(nodeId);
+      return true;
+    }
+
+    var accepted = false;
+    try {
+      accepted = await api.nodeProfileOverridesSet(
+        nodeId: nodeId,
+        profileOverrides: null,
+        replace: true,
+        correlationId: correlationId,
+      );
+    } catch (error) {
+      debugPrint(
+        'ServerSync: room light profile reset failed node=$nodeId error=$error',
+      );
+    } finally {
+      _lightProfileOverridePending.remove(nodeId);
+    }
+    if (accepted) return true;
+
+    final currentIndex = _helloNodes.indexWhere((node) => node.id == nodeId);
+    if (currentIndex != -1 &&
+        identical(_helloNodes[currentIndex].profileSettings, nextSettings)) {
+      _helloNodes[currentIndex] = _copyNodeWithProfileSettings(
+        _helloNodes[currentIndex],
+        previousSettings,
+      );
+      _helloRooms = _buildRoomSummaries();
+      notifyListeners();
+    }
+    return false;
   }
 
   void pushRoomPreferences(String roomId,

@@ -269,8 +269,9 @@ pub struct HubStartupRetryDto {
 }
 
 /// API capability metadata in state snapshot.
-pub const API_SCHEMA_VERSION: u32 = 1;
+pub const API_SCHEMA_VERSION: u32 = 2;
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
+pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -284,7 +285,13 @@ impl Serialize for ApiCapabilitiesDto {
     {
         let mut state = serializer.serialize_struct("ApiCapabilitiesDto", 3)?;
         state.serialize_field("api_schema_version", &API_SCHEMA_VERSION)?;
-        state.serialize_field("features", &[FEATURE_MOTION_ACTIVATION_TOGGLE])?;
+        state.serialize_field(
+            "features",
+            &[
+                FEATURE_MOTION_ACTIVATION_TOGGLE,
+                FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
+            ],
+        )?;
         state.serialize_field("hubs", &self.hubs)?;
         state.end()
     }
@@ -1388,6 +1395,10 @@ mod tests {
         assert_eq!(
             json["capabilities"]["features"][0],
             FEATURE_MOTION_ACTIVATION_TOGGLE
+        );
+        assert_eq!(
+            json["capabilities"]["features"][1],
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
@@ -18,11 +19,20 @@ import 'light_profile_screen.dart';
 /// inline while the others stay tucked away. New profiles slot in by adding a
 /// single entry to [_kProfileLayers] — the screen scales without redesign.
 class LightScreen extends StatefulWidget {
-  const LightScreen({super.key, this.showBackButton = false});
+  const LightScreen({
+    super.key,
+    this.showBackButton = false,
+    this.roomId,
+    this.roomName,
+  });
 
   /// When pushed as its own route (e.g. from Settings) the header shows a back
   /// affordance; as an embedded tab body it doesn't.
   final bool showBackButton;
+  final String? roomId;
+  final String? roomName;
+
+  bool get isRoomScoped => roomId != null;
 
   /// Pushes the Light editor as a full route with a back button.
   static Future<void> show(BuildContext context) {
@@ -30,6 +40,34 @@ class LightScreen extends StatefulWidget {
     return Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => const LightScreen(showBackButton: true),
+      ),
+    );
+  }
+
+  /// Pushes the familiar Light editor scoped to one room's overrides.
+  static Future<void> showForRoom(
+    BuildContext context, {
+    required String roomId,
+    required String roomName,
+  }) {
+    final overrides = context
+            .read<ServerSyncProvider>()
+            .nodeById(roomId)
+            ?.profileSettings
+            ?.profileOverrides ??
+        const <String, RhythmLightProfileNodeOverride>{};
+    AnalyticsService().logRoomLightSettingsOpened(
+      hasOverrides: overrides.values.any((override) => !override.isEmpty),
+      overrideProfileCount:
+          overrides.values.where((override) => !override.isEmpty).length,
+    );
+    return Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LightScreen(
+          showBackButton: true,
+          roomId: roomId,
+          roomName: roomName,
+        ),
       ),
     );
   }
@@ -70,8 +108,11 @@ const List<_ProfileLayer> _kProfileLayers = [
 ];
 
 class _LightScreenState extends State<LightScreen> {
+  static const _uuid = Uuid();
+
   // Accordion: a single layer is expanded at a time. Defaults to the first.
   String? _expandedId = _kProfileLayers.first.id;
+  bool _resettingRoom = false;
 
   void _toggle(String id) {
     HapticFeedback.selectionClick();
@@ -91,23 +132,50 @@ class _LightScreenState extends State<LightScreen> {
                 padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
                 child: Consumer<ServerSyncProvider>(
                   builder: (context, sync, _) {
+                    final roomOverrides = widget.roomId == null
+                        ? const <String, RhythmLightProfileNodeOverride>{}
+                        : sync
+                                .nodeById(widget.roomId!)
+                                ?.profileSettings
+                                ?.profileOverrides ??
+                            const <String, RhythmLightProfileNodeOverride>{};
+                    final hasRoomOverrides = roomOverrides.values
+                        .any((profileOverride) => !profileOverride.isEmpty);
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        if (widget.isRoomScoped) ...[
+                          _buildRoomScopeBanner(
+                            sync,
+                            hasOverrides: hasRoomOverrides,
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         for (final layer in _kProfileLayers)
                           _ProfileLayerCard(
                             layer: layer,
-                            preview: _previewFor(_configFor(sync, layer.id)),
+                            preview: _previewFor(
+                              _effectiveConfigFor(
+                                sync,
+                                layer.id,
+                                roomOverrides,
+                              ),
+                            ),
+                            customized:
+                                !(roomOverrides[layer.id]?.isEmpty ?? true),
                             expanded: _expandedId == layer.id,
                             onToggle: () => _toggle(layer.id),
                             child: LightProfileScreen(
                               initialProfile: layer.id,
                               embedded: true,
+                              roomId: widget.roomId,
+                              roomName: widget.roomName,
                             ),
                           ),
                         // The Time Simulator scrubs the Day curve, so it only
                         // belongs here when Day is the active mode.
-                        if (sync.hasBeenSynced &&
+                        if (!widget.isRoomScoped &&
+                            sync.hasBeenSynced &&
                             sync.activeMode == RhythmMode.day) ...[
                           const SizedBox(height: 4),
                           const TimeSimulator(),
@@ -125,16 +193,45 @@ class _LightScreenState extends State<LightScreen> {
   }
 
   Widget _buildHeader() {
-    const title = Text(
-      'Light',
-      textAlign: TextAlign.center,
-      style: TextStyle(
-        color: CelestialColors.textPrimary,
-        fontSize: 18,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.3,
-      ),
-    );
+    final title = widget.isRoomScoped
+        ? Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.roomName ?? 'Room',
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.2,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Light settings · Room override',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.78),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.15,
+                ),
+              ),
+            ],
+          )
+        : const Text(
+            'Light',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+            ),
+          );
 
     if (!widget.showBackButton) {
       return Container(
@@ -164,7 +261,7 @@ class _LightScreenState extends State<LightScreen> {
               ),
             ),
           ),
-          const Expanded(child: title),
+          Expanded(child: title),
           const SizedBox(width: 40),
         ],
       ),
@@ -176,6 +273,172 @@ class _LightScreenState extends State<LightScreen> {
       if (profile.id == id) return profile;
     }
     return null;
+  }
+
+  RhythmCurveConfig? _effectiveConfigFor(
+    ServerSyncProvider sync,
+    String id,
+    Map<String, RhythmLightProfileNodeOverride> overrides,
+  ) {
+    final global = _configFor(sync, id);
+    if (global == null) return null;
+    return overrides[id]?.applyTo(global) ?? global;
+  }
+
+  Widget _buildRoomScopeBanner(
+    ServerSyncProvider sync, {
+    required bool hasOverrides,
+  }) {
+    final supported =
+        sync.lightProfileOverridesSupportedForNode(widget.roomId!);
+    final accent =
+        hasOverrides ? const Color(0xFFF9A825) : CelestialColors.accentBlue;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: accent.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: accent.withValues(alpha: 0.14),
+            ),
+            child: Icon(
+              supported
+                  ? hasOverrides
+                      ? Icons.tune_rounded
+                      : Icons.home_rounded
+                  : Icons.system_update_rounded,
+              size: 17,
+              color: accent,
+            ),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  supported
+                      ? hasOverrides
+                          ? 'Custom light settings'
+                          : 'Following home settings'
+                      : 'Appliance update required',
+                  style: const TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  supported
+                      ? hasOverrides
+                          ? 'Only changed values differ from the rest of your home.'
+                          : 'Changes to home Day and Sleep profiles flow into this room.'
+                      : 'Room light overrides are not supported by this appliance.',
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.78),
+                    fontSize: 11.5,
+                    height: 1.25,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (supported && hasOverrides) ...[
+            const SizedBox(width: 10),
+            TextButton(
+              key: ValueKey(
+                'room-light-settings-reset-all-${widget.roomId}',
+              ),
+              onPressed: _resettingRoom ? null : _confirmResetRoom,
+              style: TextButton.styleFrom(
+                foregroundColor: accent,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                visualDensity: VisualDensity.compact,
+              ),
+              child: _resettingRoom
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFFF9A825),
+                      ),
+                    )
+                  : const Text(
+                      'Use home',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmResetRoom() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Use home light settings?',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: Text(
+          '${widget.roomName ?? 'This room'} will follow the home Day and '
+          'Sleep settings again. Room scenes, motion activation, and power '
+          'state stay unchanged.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Use home settings'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final journeyId = 'room-light-settings-${_uuid.v4()}';
+    setState(() => _resettingRoom = true);
+    final succeeded =
+        await context.read<ServerSyncProvider>().resetNodeLightProfileOverrides(
+              widget.roomId!,
+              correlationId: journeyId,
+            );
+    if (!mounted) return;
+    setState(() => _resettingRoom = false);
+    AnalyticsService().logRoomLightSettingsResetCompleted(
+      journeyId: journeyId,
+      profile: 'all',
+      outcome: succeeded ? 'succeeded' : 'failed',
+      failureStage: succeeded ? null : 'request',
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          succeeded
+              ? '${widget.roomName ?? 'Room'} now follows home light settings.'
+              : 'Room light settings could not be reset.',
+        ),
+      ),
+    );
   }
 }
 
@@ -235,6 +498,7 @@ _LayerPreview _previewFor(RhythmCurveConfig? config) {
 class _ProfileLayerCard extends StatelessWidget {
   final _ProfileLayer layer;
   final _LayerPreview preview;
+  final bool customized;
   final bool expanded;
   final VoidCallback onToggle;
   final Widget child;
@@ -242,6 +506,7 @@ class _ProfileLayerCard extends StatelessWidget {
   const _ProfileLayerCard({
     required this.layer,
     required this.preview,
+    this.customized = false,
     required this.expanded,
     required this.onToggle,
     required this.child,
@@ -326,17 +591,37 @@ class _ProfileLayerCard extends StatelessWidget {
                     // Fixed-width so every bar starts at the same x regardless
                     // of name length (Day vs Sleep).
                     SizedBox(
-                      width: 64,
-                      child: Text(
-                        layer.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: CelestialColors.textPrimary,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.1,
-                        ),
+                      width: customized ? 82 : 64,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            layer.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: CelestialColors.textPrimary,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.1,
+                            ),
+                          ),
+                          if (customized)
+                            Text(
+                              'CUSTOM',
+                              key: ValueKey(
+                                'room-light-layer-custom-${layer.id}',
+                              ),
+                              style: TextStyle(
+                                color: accent.withValues(alpha: 0.88),
+                                fontSize: 8,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.7,
+                                height: 1.15,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                     const SizedBox(width: 14),

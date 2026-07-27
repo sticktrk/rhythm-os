@@ -1,5 +1,6 @@
 import '../json_parsing.dart';
-import 'rhythm_curve_config.dart' show RhythmTimerSetting;
+import 'rhythm_curve_config.dart'
+    show RhythmCurveConfig, RhythmCurveShape, RhythmTimerSetting;
 
 enum RhythmMode {
   day,
@@ -268,39 +269,175 @@ class RhythmNodeProfileSettings {
 }
 
 class RhythmLightProfileNodeOverride {
+  final RhythmCurveShape? curve;
+  final int? minColorTemp;
+  final int? maxColorTemp;
+  final int? minBrightness;
+  final int? maxBrightness;
+  final int? maxDimSteps;
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
+  final RhythmTimerSetting? rhythmIntervalSetting;
   final Map<String, dynamic> raw;
 
   const RhythmLightProfileNodeOverride({
+    this.curve,
+    this.minColorTemp,
+    this.maxColorTemp,
+    this.minBrightness,
+    this.maxBrightness,
+    this.maxDimSteps,
     this.fadeSetting,
     this.motionTimeoutSetting,
+    this.rhythmIntervalSetting,
     this.raw = const <String, dynamic>{},
   });
 
   int? get fadeMs => fadeSetting?.fixedValue;
   int? get motionTimeoutSecs => motionTimeoutSetting?.fixedValue;
+  int? get rhythmIntervalSecs => rhythmIntervalSetting?.fixedValue;
 
   bool get isEmpty =>
-      fadeSetting == null && motionTimeoutSetting == null && raw.isEmpty;
+      curve == null &&
+      minColorTemp == null &&
+      maxColorTemp == null &&
+      minBrightness == null &&
+      maxBrightness == null &&
+      maxDimSteps == null &&
+      fadeSetting == null &&
+      motionTimeoutSetting == null &&
+      rhythmIntervalSetting == null &&
+      raw.isEmpty;
+
+  bool get hasVisualOverrides =>
+      curve != null ||
+      minColorTemp != null ||
+      maxColorTemp != null ||
+      minBrightness != null ||
+      maxBrightness != null ||
+      maxDimSteps != null ||
+      rhythmIntervalSetting != null;
+
+  List<String> get changedFields => [
+        if (curve != null) 'curve',
+        if (minColorTemp != null) 'min_color_temp',
+        if (maxColorTemp != null) 'max_color_temp',
+        if (minBrightness != null) 'min_brightness',
+        if (maxBrightness != null) 'max_brightness',
+        if (maxDimSteps != null) 'max_dim_steps',
+        if (fadeSetting != null) 'fade_ms',
+        if (motionTimeoutSetting != null) 'motion_timeout_secs',
+        if (rhythmIntervalSetting != null) 'rhythm_interval_secs',
+      ];
 
   factory RhythmLightProfileNodeOverride.fromJson(Map<String, dynamic> json) {
+    final curveJson = jsonMap(json['curve']);
     final raw = Map<String, dynamic>.from(json)
+      ..remove('curve')
+      ..remove('min_color_temp')
+      ..remove('max_color_temp')
+      ..remove('min_brightness')
+      ..remove('max_brightness')
+      ..remove('max_dim_steps')
       ..remove('fade_ms')
-      ..remove('motion_timeout_secs');
+      ..remove('motion_timeout_secs')
+      ..remove('rhythm_interval_secs');
     return RhythmLightProfileNodeOverride(
+      curve: curveJson == null ? null : RhythmCurveShape.fromJson(curveJson),
+      minColorTemp: jsonInt(
+        json['min_color_temp'],
+        preferredKeys: const ['min_color_temp'],
+      ),
+      maxColorTemp: jsonInt(
+        json['max_color_temp'],
+        preferredKeys: const ['max_color_temp'],
+      ),
+      minBrightness: jsonInt(
+        json['min_brightness'],
+        preferredKeys: const ['min_brightness'],
+      ),
+      maxBrightness: jsonInt(
+        json['max_brightness'],
+        preferredKeys: const ['max_brightness'],
+      ),
+      maxDimSteps: jsonInt(
+        json['max_dim_steps'],
+        preferredKeys: const ['max_dim_steps'],
+      ),
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
+      rhythmIntervalSetting:
+          _timerSettingFromJson(json, 'rhythm_interval_secs'),
       raw: raw,
     );
   }
 
   Map<String, dynamic> toJson() => {
         ...raw,
+        if (curve != null) 'curve': curve!.toJson(),
+        if (minColorTemp != null) 'min_color_temp': minColorTemp,
+        if (maxColorTemp != null) 'max_color_temp': maxColorTemp,
+        if (minBrightness != null) 'min_brightness': minBrightness,
+        if (maxBrightness != null) 'max_brightness': maxBrightness,
+        if (maxDimSteps != null) 'max_dim_steps': maxDimSteps,
         if (fadeSetting != null) 'fade_ms': fadeSetting!.toJson(),
         if (motionTimeoutSetting != null)
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),
+        if (rhythmIntervalSetting != null)
+          'rhythm_interval_secs': rhythmIntervalSetting!.toJson(),
       };
+
+  RhythmCurveConfig applyTo(RhythmCurveConfig base) {
+    return base.copyWith(
+      curve: curve ?? base.curve,
+      minColorTemp: minColorTemp ?? base.minColorTemp,
+      maxColorTemp: maxColorTemp ?? base.maxColorTemp,
+      minBrightness: minBrightness ?? base.minBrightness,
+      maxBrightness: maxBrightness ?? base.maxBrightness,
+      maxDimSteps: maxDimSteps ?? base.maxDimSteps,
+      fadeSetting: fadeSetting ?? base.fadeSetting,
+      motionTimeoutSetting: motionTimeoutSetting ?? base.motionTimeoutSetting,
+      rhythmIntervalSetting:
+          rhythmIntervalSetting ?? base.rhythmIntervalSetting,
+    );
+  }
+
+  factory RhythmLightProfileNodeOverride.between(
+    RhythmCurveConfig global,
+    RhythmCurveConfig effective, {
+    Map<String, dynamic> raw = const <String, dynamic>{},
+  }) {
+    return RhythmLightProfileNodeOverride(
+      curve: effective.curve == global.curve ? null : effective.curve,
+      minColorTemp: effective.minColorTemp == global.minColorTemp
+          ? null
+          : effective.minColorTemp,
+      maxColorTemp: effective.maxColorTemp == global.maxColorTemp
+          ? null
+          : effective.maxColorTemp,
+      minBrightness: effective.minBrightness == global.minBrightness
+          ? null
+          : effective.minBrightness,
+      maxBrightness: effective.maxBrightness == global.maxBrightness
+          ? null
+          : effective.maxBrightness,
+      maxDimSteps: effective.maxDimSteps == global.maxDimSteps
+          ? null
+          : effective.maxDimSteps,
+      fadeSetting: effective.fadeSetting == global.fadeSetting
+          ? null
+          : effective.fadeSetting,
+      motionTimeoutSetting:
+          effective.motionTimeoutSetting == global.motionTimeoutSetting
+              ? null
+              : effective.motionTimeoutSetting,
+      rhythmIntervalSetting:
+          effective.rhythmIntervalSetting == global.rhythmIntervalSetting
+              ? null
+              : effective.rhythmIntervalSetting,
+      raw: raw,
+    );
+  }
 }
 
 Map<String, RhythmLightProfileNodeOverride> _profileOverridesFromJson(
