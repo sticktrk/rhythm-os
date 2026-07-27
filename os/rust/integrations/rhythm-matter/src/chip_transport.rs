@@ -102,6 +102,8 @@ pub struct ChipTransport {
     sidecar: Mutex<Option<Child>>,
     sidecar_config: Option<SidecarConfig>,
     sidecar_health: Mutex<SidecarHealth>,
+    sidecar_lifecycle_lock: Mutex<()>,
+    sidecar_generation: AtomicU64,
     initialized: AtomicBool,
     next_request_id: AtomicU64,
     commissioning_lock: Mutex<()>,
@@ -144,6 +146,8 @@ impl ChipTransport {
                 log_path: sidecar_log_path_from_env(std::env::var_os(CHIPD_LOGFILE_ENV)),
             }),
             sidecar_health: Mutex::new(SidecarHealth::Uninitialized),
+            sidecar_lifecycle_lock: Mutex::new(()),
+            sidecar_generation: AtomicU64::new(0),
             initialized: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
             commissioning_lock: Mutex::new(()),
@@ -169,6 +173,8 @@ impl ChipTransport {
             sidecar: Mutex::new(None),
             sidecar_config: None,
             sidecar_health: Mutex::new(SidecarHealth::Ready),
+            sidecar_lifecycle_lock: Mutex::new(()),
+            sidecar_generation: AtomicU64::new(0),
             initialized: AtomicBool::new(true),
             next_request_id: AtomicU64::new(1),
             commissioning_lock: Mutex::new(()),
@@ -196,6 +202,14 @@ impl ChipTransport {
     }
 
     fn ensure_sidecar(&self) -> Result<()> {
+        let _lifecycle = self
+            .sidecar_lifecycle_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+        self.ensure_sidecar_locked()
+    }
+
+    fn ensure_sidecar_locked(&self) -> Result<()> {
         if self.initialized.load(Ordering::SeqCst)
             && self.socket_path.exists()
             && matches!(
@@ -260,11 +274,12 @@ impl ChipTransport {
 
     fn call<T: serde::de::DeserializeOwned>(&self, request: ChipRpcRequest) -> Result<T> {
         self.ensure_sidecar()?;
+        let request_generation = self.sidecar_generation.load(Ordering::SeqCst);
         match self.send_rpc_envelope(request.clone()) {
             Ok(response) => match self.decode_rpc_response::<T>(response) {
                 Ok(value) => Ok(value),
                 Err(rpc_error) if is_uninitialized_controller_error(&rpc_error) => {
-                    self.recover_uninitialized_controller(request, rpc_error)
+                    self.recover_uninitialized_controller(request, rpc_error, request_generation)
                 }
                 Err(rpc_error) => Err(rpc_error),
             },
@@ -272,23 +287,39 @@ impl ChipTransport {
                 Err(first_error)
             }
             Err(first_error) => {
-                self.initialized.store(false, Ordering::SeqCst);
-                self.set_sidecar_health(SidecarHealth::Unavailable);
-                if self.sidecar_config.is_some() {
-                    self.restart_sidecar()?;
-                    self.ensure_sidecar()?;
-                    self.decode_rpc_response(self.send_rpc_envelope(request)?)
-                        .with_context(|| {
-                            format!(
-                                "CHIP RPC retry failed after restarting sidecar: {:#}",
-                                first_error
-                            )
-                        })
-                } else {
-                    Err(first_error)
-                }
+                self.recover_transport_failure(request, first_error, request_generation)
             }
         }
+    }
+
+    fn recover_transport_failure<T: serde::de::DeserializeOwned>(
+        &self,
+        request: ChipRpcRequest,
+        first_error: anyhow::Error,
+        failed_generation: u64,
+    ) -> Result<T> {
+        let _lifecycle = self
+            .sidecar_lifecycle_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+
+        if self.sidecar_generation.load(Ordering::SeqCst) == failed_generation {
+            self.initialized.store(false, Ordering::SeqCst);
+            self.set_sidecar_health(SidecarHealth::Unavailable);
+            if self.sidecar_config.is_none() {
+                return Err(first_error);
+            }
+            self.restart_sidecar()?;
+        }
+
+        self.ensure_sidecar_locked()?;
+        self.decode_rpc_response(self.send_rpc_envelope(request)?)
+            .with_context(|| {
+                format!(
+                    "CHIP RPC retry failed after sidecar recovery: {:#}",
+                    first_error
+                )
+            })
     }
 
     /// Recover from a chipd that responded with `Incorrect state` /
@@ -301,18 +332,26 @@ impl ChipTransport {
         &self,
         request: ChipRpcRequest,
         first_error: anyhow::Error,
+        failed_generation: u64,
     ) -> Result<T> {
-        self.initialized.store(false, Ordering::SeqCst);
-        self.set_sidecar_health(SidecarHealth::Recovering);
-        if self.sidecar_config.is_some() {
-            self.restart_sidecar().with_context(|| {
-                format!(
-                    "restarting CHIP sidecar after stuck-state error: {:#}",
-                    first_error
-                )
-            })?;
+        let _lifecycle = self
+            .sidecar_lifecycle_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+
+        if self.sidecar_generation.load(Ordering::SeqCst) == failed_generation {
+            self.initialized.store(false, Ordering::SeqCst);
+            self.set_sidecar_health(SidecarHealth::Recovering);
+            if self.sidecar_config.is_some() {
+                self.restart_sidecar().with_context(|| {
+                    format!(
+                        "restarting CHIP sidecar after stuck-state error: {:#}",
+                        first_error
+                    )
+                })?;
+            }
         }
-        self.ensure_sidecar().with_context(|| {
+        self.ensure_sidecar_locked().with_context(|| {
             format!(
                 "re-initializing CHIP controller after stuck-state error: {:#}",
                 first_error
@@ -467,6 +506,10 @@ impl ChipTransport {
         first_error: &anyhow::Error,
         reason: &str,
     ) -> Result<()> {
+        let _lifecycle = self
+            .sidecar_lifecycle_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
         self.initialized.store(false, Ordering::SeqCst);
         self.set_sidecar_health(SidecarHealth::Recovering);
 
@@ -476,7 +519,7 @@ impl ChipTransport {
             })?;
         }
 
-        self.ensure_sidecar().with_context(|| {
+        self.ensure_sidecar_locked().with_context(|| {
             format!(
                 "re-initializing CHIP controller after {reason}: {:#}",
                 first_error
@@ -631,6 +674,7 @@ impl ChipTransport {
         }
 
         *guard = Some(child);
+        self.sidecar_generation.fetch_add(1, Ordering::SeqCst);
         drop(guard);
 
         let deadline = Instant::now() + SIDECAR_START_TIMEOUT;
@@ -2421,6 +2465,58 @@ mod tests {
             vec!["set_on_off", "init_controller", "set_on_off"],
             "expected the transport to send the original request, then InitController to re-init, then retry the request"
         );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    /// Regression for issue #235: a request that was in flight against the old
+    /// chipd generation can fail after another caller has already restarted and
+    /// initialized the sidecar. That stale failure must retry against the new
+    /// generation instead of restarting it again and tearing down its commissioner.
+    #[test]
+    fn stale_sidecar_failures_do_not_restart_the_recovered_generation() {
+        let socket_path = temp_socket_path("ignore-stale-sidecar-failure");
+        let server =
+            spawn_fake_server_multi(socket_path.clone(), 2, |request| match request.request {
+                ChipRpcRequest::SetOnOff { .. } => {
+                    ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                }
+                ref other => panic!("stale recovery unexpectedly sent RPC: {other:?}"),
+            });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport.sidecar_generation.store(2, Ordering::SeqCst);
+
+        let _: ChipRpcEmpty = transport
+            .recover_transport_failure(
+                ChipRpcRequest::SetOnOff {
+                    node_id: 102,
+                    endpoint: 1,
+                    on: true,
+                },
+                anyhow::anyhow!("old sidecar closed the socket"),
+                1,
+            )
+            .expect("a stale transport failure should retry without reinitializing");
+
+        let _: ChipRpcEmpty = transport
+            .recover_uninitialized_controller(
+                ChipRpcRequest::SetOnOff {
+                    node_id: 102,
+                    endpoint: 1,
+                    on: false,
+                },
+                anyhow::anyhow!("old sidecar reported incorrect state"),
+                1,
+            )
+            .expect("a stale controller error should retry without reinitializing");
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| matches!(request.request, ChipRpcRequest::SetOnOff { .. })));
+        assert_eq!(transport.sidecar_generation.load(Ordering::SeqCst), 2);
 
         let _ = fs::remove_file(socket_path);
     }

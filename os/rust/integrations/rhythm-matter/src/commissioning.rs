@@ -175,9 +175,12 @@ fn summarize_commissioning_error(error: &anyhow::Error) -> String {
         return "Matter BLE commissioning reached the bulb, but macOS CoreBluetooth failed the GATT write. This matches the current official Matter controller behavior on this host. Try Linux/BlueZ or the appliance target for real commissioning.".to_string();
     }
 
+    if lower.contains("pasesession.cpp") {
+        return "Matter BLE pairing reached the device, but the BLE connection was lost during secure setup. Rhythm reset the Matter controller; wait a few seconds, keep the light close, and retry pairing.".to_string();
+    }
+
     if lower.contains("connectiondelegate timeout")
         || lower.contains("discovery timed out")
-        || lower.contains("pasesession.cpp")
         || lower.contains("blemanagerimpl.cpp")
         || lower.contains("chip error 0x00000032: timeout")
     {
@@ -856,7 +859,8 @@ mod tests {
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("timed out while discovering the bulb"));
+        assert!(message.contains("reached the device"));
+        assert!(message.contains("lost during secure setup"));
         assert!(!message.contains("PASESession.cpp"));
     }
 
