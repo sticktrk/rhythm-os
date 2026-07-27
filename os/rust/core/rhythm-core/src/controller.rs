@@ -182,6 +182,15 @@ pub trait LightController: Send + Sync {
     /// `true` if any lights in the room are on, `false` otherwise.
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool>;
 
+    /// Check power state for periodic background work.
+    ///
+    /// Integrations with authoritative push state can override this to avoid
+    /// a blocking live query on the periodic worker. Interactive callers keep
+    /// using [`Self::any_lights_on`].
+    async fn any_lights_on_for_periodic(&self, room_id: &str) -> LightControlResult<bool> {
+        self.any_lights_on(room_id).await
+    }
+
     /// Get the name of this controller (for logging/debugging).
     fn name(&self) -> &str;
 }
@@ -209,6 +218,10 @@ where
 
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
         (**self).any_lights_on(room_id).await
+    }
+
+    async fn any_lights_on_for_periodic(&self, room_id: &str) -> LightControlResult<bool> {
+        (**self).any_lights_on_for_periodic(room_id).await
     }
 
     fn name(&self) -> &str {
@@ -267,6 +280,18 @@ pub trait HubLightController: Send + Sync {
 
     /// Check if any lights are on for the given target.
     async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool>;
+
+    /// Check target power state for periodic background work.
+    ///
+    /// The default preserves existing integration behavior. Push-driven
+    /// integrations can return cached authoritative state instead of issuing
+    /// synchronous network I/O.
+    async fn any_lights_on_target_for_periodic(
+        &self,
+        target: &HubDispatchTarget,
+    ) -> LightControlResult<bool> {
+        self.any_lights_on_target(target).await
+    }
 
     /// Flash the target lights for physical identification.
     ///
@@ -360,6 +385,13 @@ where
 
     async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
         (**self).any_lights_on_target(target).await
+    }
+
+    async fn any_lights_on_target_for_periodic(
+        &self,
+        target: &HubDispatchTarget,
+    ) -> LightControlResult<bool> {
+        (**self).any_lights_on_target_for_periodic(target).await
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {

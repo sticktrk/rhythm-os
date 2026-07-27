@@ -225,6 +225,14 @@ pub trait RuntimeHandle: Send + Sync {
     /// Used for initial state sync on startup.
     fn any_lights_on(&self, room_id: &str) -> Result<bool>;
 
+    /// Query light state for periodic background work.
+    ///
+    /// The default keeps compatibility with runtimes whose controller does
+    /// not distinguish interactive and background state queries.
+    fn any_lights_on_for_periodic(&self, room_id: &str) -> Result<bool> {
+        self.any_lights_on(room_id)
+    }
+
     /// Get the current local hour from the time provider (0.0–24.0).
     fn current_hour(&self) -> f32;
 
@@ -1053,6 +1061,11 @@ where
     fn any_lights_on(&self, room_id: &str) -> Result<bool> {
         crate::runtime::executor::block_on(self.controller().any_lights_on(room_id))
             .map_err(|e| anyhow::anyhow!("any_lights_on failed: {}", e))
+    }
+
+    fn any_lights_on_for_periodic(&self, room_id: &str) -> Result<bool> {
+        crate::runtime::executor::block_on(self.controller().any_lights_on_for_periodic(room_id))
+            .map_err(|e| anyhow::anyhow!("periodic any_lights_on failed: {}", e))
     }
 
     fn current_hour(&self) -> f32 {

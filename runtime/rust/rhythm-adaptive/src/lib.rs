@@ -265,7 +265,7 @@ impl LightRuntime for RuntimeHandleAdaptiveRuntime {
                     RhythmPeriodicPlanOutcome::RequiresLightCheck => {
                         let lights_on = self
                             .inner
-                            .any_lights_on(&tick.node_id)
+                            .any_lights_on_for_periodic(&tick.node_id)
                             .map_err(map_handle_error)?;
                         match self
                             .inner

@@ -914,6 +914,37 @@ impl HubLightController for MatterLightController {
         Ok(false)
     }
 
+    async fn any_lights_on_target_for_periodic(
+        &self,
+        target: &HubDispatchTarget,
+    ) -> LightControlResult<bool> {
+        let device_ids = self.target_device_ids_for_target(target)?;
+
+        if device_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let mut indeterminate_count = 0usize;
+        for device_id in &device_ids {
+            let Some((node_id, endpoint)) = Self::parse_device_id(device_id) else {
+                continue;
+            };
+            match self.hub_data.observed_on_off(node_id, endpoint) {
+                Some(true) => return Ok(true),
+                Some(false) => {}
+                None => indeterminate_count += 1,
+            }
+        }
+
+        if indeterminate_count > 0 {
+            return Err(LightControlError::ConnectionError(format!(
+                "Matter periodic on/off state is indeterminate because {indeterminate_count} endpoint(s) have no fresh subscription report"
+            )));
+        }
+
+        Ok(false)
+    }
+
     fn name(&self) -> &str {
         "Matter"
     }
@@ -948,6 +979,14 @@ impl LightController for MatterLightController {
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
         let device_ids = self.target_device_ids(room_id)?;
         self.any_lights_on_target(&HubDispatchTarget::Devices {
+            native_ids: device_ids,
+        })
+        .await
+    }
+
+    async fn any_lights_on_for_periodic(&self, room_id: &str) -> LightControlResult<bool> {
+        let device_ids = self.target_device_ids(room_id)?;
+        self.any_lights_on_target_for_periodic(&HubDispatchTarget::Devices {
             native_ids: device_ids,
         })
         .await
@@ -1023,6 +1062,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
 
@@ -1134,6 +1174,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -1840,6 +1881,66 @@ mod tests {
     }
 
     #[test]
+    fn periodic_any_lights_on_uses_fresh_subscription_state_without_live_read() {
+        let (controller, spy, _) = make_controller();
+        controller.hub_data.record_on_off_observation(42, 1, true);
+
+        let result = block_on(controller.any_lights_on_for_periodic("kitchen")).unwrap();
+
+        assert!(result);
+        assert!(
+            !spy.operations()
+                .iter()
+                .any(|operation| matches!(operation, RecordedOperation::ReadOnOff { .. })),
+            "periodic state checks must not issue synchronous Matter reads"
+        );
+    }
+
+    #[test]
+    fn periodic_any_lights_on_without_fresh_subscription_state_does_not_live_read() {
+        let (controller, spy, _) = make_controller();
+
+        assert!(matches!(
+            block_on(controller.any_lights_on_for_periodic("kitchen")),
+            Err(LightControlError::ConnectionError(_))
+        ));
+        assert!(
+            !spy.operations()
+                .iter()
+                .any(|operation| matches!(operation, RecordedOperation::ReadOnOff { .. })),
+            "missing subscription state must fail quickly instead of falling back to a live read"
+        );
+    }
+
+    #[test]
+    fn periodic_any_lights_on_rejects_stale_subscription_state_without_live_read() {
+        let (controller, spy, _) = make_controller();
+        controller
+            .hub_data
+            .on_off_observations
+            .lock()
+            .unwrap()
+            .insert(
+                (42, 1),
+                (
+                    true,
+                    std::time::Instant::now() - std::time::Duration::from_secs(121),
+                ),
+            );
+
+        assert!(matches!(
+            block_on(controller.any_lights_on_for_periodic("kitchen")),
+            Err(LightControlError::ConnectionError(_))
+        ));
+        assert!(
+            !spy.operations()
+                .iter()
+                .any(|operation| matches!(operation, RecordedOperation::ReadOnOff { .. })),
+            "stale subscription state must fail quickly instead of falling back to a live read"
+        );
+    }
+
+    #[test]
     fn any_lights_on_backs_off_after_on_off_read_timeout() {
         let (controller, spy, _) = make_controller();
         spy.fail_read_node(42);
@@ -2131,6 +2232,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
 
@@ -2267,6 +2369,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2325,6 +2428,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2382,6 +2486,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2591,6 +2696,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
@@ -2784,6 +2890,7 @@ mod tests {
             decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);

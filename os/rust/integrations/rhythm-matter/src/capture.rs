@@ -196,6 +196,7 @@ mod tests {
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
+            on_off_observations: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
         }
     }
