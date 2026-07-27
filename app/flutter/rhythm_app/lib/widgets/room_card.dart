@@ -2155,6 +2155,7 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
         excludeSemantics: true,
         button: true,
         enabled: widget.enabled,
+        selected: widget.active,
         label: 'Scenes',
         value: widget.active ? 'Active' : 'Inactive',
         hint: widget.active ? 'Choose a scene' : 'Use a scene',
@@ -2206,17 +2207,23 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
                       ),
                       border: Border.all(
                         color: Colors.white.withValues(
-                          alpha: widget.active ? 0.62 : 0.34,
+                          alpha: widget.active ? 0.96 : 0.34,
                         ),
-                        width: widget.active ? 1.5 : 1,
+                        width: widget.active ? 2.5 : 1,
                       ),
                       boxShadow: [
+                        if (widget.active)
+                          BoxShadow(
+                            color: Colors.white.withValues(alpha: 0.30),
+                            blurRadius: 7,
+                            spreadRadius: 1,
+                          ),
                         BoxShadow(
                           color: primary.withValues(
-                            alpha: widget.active ? 0.42 : 0.24,
+                            alpha: widget.active ? 0.62 : 0.24,
                           ),
-                          blurRadius: widget.active ? 18 : 12,
-                          spreadRadius: widget.active ? 1 : 0,
+                          blurRadius: widget.active ? 22 : 12,
+                          spreadRadius: widget.active ? 2 : 0,
                         ),
                         BoxShadow(
                           color: Colors.black.withValues(alpha: 0.30),
@@ -2243,6 +2250,12 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
                             ),
                           ],
                         ),
+                        if (widget.active)
+                          _RoomJewelSelectionMarker(
+                            roomId: widget.roomId,
+                            controlName: 'scenes',
+                            accentColor: primary,
+                          ),
                       ],
                     ),
                   ),
@@ -2254,6 +2267,7 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
                   ),
                   label: 'Scenes',
                   enabled: widget.enabled,
+                  selected: widget.active,
                 ),
               ],
             ),
@@ -2269,22 +2283,85 @@ class _RoomJewelLabel extends StatelessWidget {
     super.key,
     required this.label,
     required this.enabled,
+    required this.selected,
   });
 
   final String label;
   final bool enabled;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      label,
-      maxLines: 1,
+    return AnimatedDefaultTextStyle(
+      duration: const Duration(milliseconds: 180),
       style: TextStyle(
-        color: Colors.white.withValues(alpha: enabled ? 0.92 : 0.64),
+        color: Colors.white.withValues(
+          alpha: !enabled
+              ? 0.64
+              : selected
+                  ? 1
+                  : 0.84,
+        ),
         fontSize: label.length > 6 ? 9 : 10,
         height: 1,
-        fontWeight: FontWeight.w700,
-        letterSpacing: -0.1,
+        fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+        letterSpacing: selected ? 0.05 : -0.1,
+        decoration: selected ? TextDecoration.underline : TextDecoration.none,
+        decorationColor: Colors.white.withValues(alpha: 0.95),
+        decorationThickness: 2,
+        shadows: selected
+            ? [
+                Shadow(
+                  color: Colors.white.withValues(alpha: 0.50),
+                  blurRadius: 7,
+                ),
+              ]
+            : null,
+      ),
+      child: Text(label, maxLines: 1),
+    );
+  }
+}
+
+class _RoomJewelSelectionMarker extends StatelessWidget {
+  const _RoomJewelSelectionMarker({
+    required this.roomId,
+    required this.controlName,
+    required this.accentColor,
+  });
+
+  final String roomId;
+  final String controlName;
+  final Color accentColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      top: 3,
+      right: 3,
+      child: Container(
+        key: ValueKey(
+          'room-card-control-selected-$roomId-$controlName',
+        ),
+        width: 16,
+        height: 16,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color.lerp(accentColor, const Color(0xFF111722), 0.68),
+          border: Border.all(color: Colors.white, width: 1.4),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.38),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: const Icon(
+          Icons.check_rounded,
+          size: 11,
+          color: Colors.white,
+        ),
       ),
     );
   }
@@ -2518,17 +2595,23 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
                         gradient: jewelGradient,
                         border: Border.all(
                           color: Colors.white.withValues(
-                            alpha: widget.selected ? 0.88 : 0.54,
+                            alpha: widget.selected ? 0.98 : 0.54,
                           ),
-                          width: widget.selected ? 1.5 : 1,
+                          width: widget.selected ? 2.5 : 1,
                         ),
                         boxShadow: [
+                          if (widget.selected)
+                            BoxShadow(
+                              color: Colors.white.withValues(alpha: 0.30),
+                              blurRadius: 7,
+                              spreadRadius: 1,
+                            ),
                           BoxShadow(
                             color: widget.primaryColor.withValues(
-                              alpha: widget.selected ? 0.30 : 0.12,
+                              alpha: widget.selected ? 0.58 : 0.12,
                             ),
-                            blurRadius: widget.selected ? 16 : 9,
-                            spreadRadius: widget.selected ? 1 : 0,
+                            blurRadius: widget.selected ? 22 : 9,
+                            spreadRadius: widget.selected ? 2 : 0,
                           ),
                           BoxShadow(
                             color: Colors.black.withValues(alpha: 0.28),
@@ -2579,6 +2662,12 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
                               ),
                             ],
                           ),
+                          if (widget.selected)
+                            _RoomJewelSelectionMarker(
+                              roomId: widget.roomId,
+                              controlName: widget.control.name,
+                              accentColor: widget.primaryColor,
+                            ),
                         ],
                       ),
                     ),
@@ -2590,6 +2679,7 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
                     ),
                     label: widget.label,
                     enabled: widget.enabled,
+                    selected: widget.selected,
                   ),
                 ],
               ),
@@ -2684,9 +2774,22 @@ class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
   }
 
   void _cycle() {
-    final positions = _positions;
-    final current = positions.indexOf(widget.state);
-    _select(positions[(current + 1) % positions.length]);
+    if (!widget.lowGlowEnabled) {
+      _select(
+        widget.state == _PowerToggleState.on
+            ? _PowerToggleState.off
+            : _PowerToggleState.on,
+      );
+      return;
+    }
+
+    _select(
+      switch (widget.state) {
+        _PowerToggleState.on => _PowerToggleState.standby,
+        _PowerToggleState.standby => _PowerToggleState.off,
+        _PowerToggleState.off => _PowerToggleState.on,
+      },
+    );
   }
 
   @override

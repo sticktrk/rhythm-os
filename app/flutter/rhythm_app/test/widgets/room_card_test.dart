@@ -351,6 +351,9 @@ Finder _colorControl({String roomId = 'room-1'}) =>
 Finder _jewelLabel(String control, {String roomId = 'room-1'}) =>
     find.byKey(ValueKey('room-card-control-label-$roomId-$control'));
 
+Finder _jewelSelectionMarker(String control, {String roomId = 'room-1'}) =>
+    find.byKey(ValueKey('room-card-control-selected-$roomId-$control'));
+
 Finder _brightnessSlider({String roomId = 'room-1'}) => find.byKey(
       ValueKey('room-card-brightness-slider-$roomId'),
     );
@@ -1444,29 +1447,6 @@ void main() {
     // thumb. Start by tapping the selected On position.
     await _tapPowerAt(tester, 0.95);
 
-    expect(roomProvider.getRoom('room-1')?.lightsOn, isFalse);
-    expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
-    expect(
-      tester.widget<AnimatedAlign>(_powerThumb()).alignment,
-      Alignment.centerLeft,
-    );
-    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Off');
-    expect(_brightnessSlider(), findsNothing);
-    expect(_cctSlider(), findsNothing);
-    expect(
-      tester.widget<GestureDetector>(_roomSegment('Brightness')).onTap,
-      isNull,
-    );
-    expect(tester.widget<GestureDetector>(_roomSegment('Color')).onTap, isNull);
-    expect(connection.api.nodePreferenceCalls, hasLength(1));
-    expect(
-      connection.api.nodePreferenceCalls.single.state,
-      RoomModeState.hardOff,
-    );
-
-    // Tapping the selected Off position advances to Low glow.
-    await _tapPowerAt(tester, 0.05);
-
     expect(roomProvider.getRoomState('room-1'), RoomModeState.standby);
     expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
     expect(
@@ -1474,9 +1454,9 @@ void main() {
       Alignment.center,
     );
     expect(tester.widget<Text>(_powerToggleLabel()).data, 'Low glow');
-    expect(connection.api.nodePreferenceCalls, hasLength(2));
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
     expect(
-      connection.api.nodePreferenceCalls.last.state,
+      connection.api.nodePreferenceCalls.single.state,
       RoomModeState.standby,
     );
 
@@ -1522,8 +1502,32 @@ void main() {
     );
     expect(find.byType(Slider), findsNothing);
 
-    // Tapping the selected Low glow position completes the three-state cycle.
+    // Low glow is the middle tap state even when the tap lands on the selected
+    // thumb, then the next tap advances to full Off.
     await _tapPowerAt(tester, 0.5);
+
+    expect(roomProvider.getRoom('room-1')?.lightsOn, isFalse);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
+    expect(
+      tester.widget<AnimatedAlign>(_powerThumb()).alignment,
+      Alignment.centerLeft,
+    );
+    expect(tester.widget<Text>(_powerToggleLabel()).data, 'Off');
+    expect(_brightnessSlider(), findsNothing);
+    expect(_cctSlider(), findsNothing);
+    expect(
+      tester.widget<GestureDetector>(_roomSegment('Brightness')).onTap,
+      isNull,
+    );
+    expect(tester.widget<GestureDetector>(_roomSegment('Color')).onTap, isNull);
+    expect(connection.api.nodePreferenceCalls, hasLength(2));
+    expect(
+      connection.api.nodePreferenceCalls.last.state,
+      RoomModeState.hardOff,
+    );
+
+    // Off completes the requested On -> Low glow -> Off -> On tap cycle.
+    await _tapPowerAt(tester, 0.05);
 
     expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
@@ -1985,11 +1989,16 @@ void main() {
       Tristate.isFalse,
     );
     expect(brightnessSemantics.hint, 'Show brightness control');
+    expect(_jewelSelectionMarker('scenes'), findsNothing);
+    expect(_jewelSelectionMarker('brightness'), findsNothing);
+    expect(_jewelSelectionMarker('color'), findsNothing);
 
     await _tapRoomSegment(tester, 'Brightness');
 
     expect(_brightnessSlider(), findsOneWidget);
     expect(_cctSlider(), findsNothing);
+    expect(_jewelSelectionMarker('brightness'), findsOneWidget);
+    expect(_jewelSelectionMarker('color'), findsNothing);
     expect(
       tester.getSize(_brightnessSlider()).width,
       closeTo(cardWidth - 24, 0.1),
@@ -2003,6 +2012,7 @@ void main() {
 
     await _tapRoomSegment(tester, 'Brightness');
     expect(find.byType(Slider), findsNothing);
+    expect(_jewelSelectionMarker('brightness'), findsNothing);
     await _tapRoomSegment(tester, 'Brightness');
     expect(_brightnessSlider(), findsOneWidget);
 
@@ -2010,6 +2020,8 @@ void main() {
 
     expect(_brightnessSlider(), findsNothing);
     expect(_cctSlider(), findsOneWidget);
+    expect(_jewelSelectionMarker('brightness'), findsNothing);
+    expect(_jewelSelectionMarker('color'), findsOneWidget);
     expect(
       tester.getSize(_cctSlider()).width,
       closeTo(cardWidth - 24, 0.1),
@@ -2424,10 +2436,27 @@ void main() {
     expect(scenesSemantics.label, 'Scenes');
     expect(scenesSemantics.value, 'Active');
     expect(scenesSemantics.hint, 'Choose a scene');
+    expect(
+      scenesSemantics.getSemanticsData().flagsCollection.isSelected,
+      Tristate.isTrue,
+    );
+    expect(_jewelSelectionMarker('scenes'), findsOneWidget);
+    expect(_jewelSelectionMarker('brightness'), findsOneWidget);
+    expect(_jewelSelectionMarker('color'), findsNothing);
     final scenesDecoration = tester
         .widget<AnimatedContainer>(_scenesControl())
         .decoration as BoxDecoration;
     final scenesGradient = scenesDecoration.gradient as LinearGradient;
+    final scenesBorder = scenesDecoration.border! as Border;
+    expect(scenesBorder.top.width, 2.5);
+    final scenesLabelStyle = tester.widget<AnimatedDefaultTextStyle>(
+      find.descendant(
+        of: _jewelLabel('scenes'),
+        matching: find.byType(AnimatedDefaultTextStyle),
+      ),
+    );
+    expect(scenesLabelStyle.style.fontWeight, FontWeight.w900);
+    expect(scenesLabelStyle.style.decoration, TextDecoration.underline);
     const moodBlue = Color.fromARGB(255, 20, 80, 240);
     expect(
       scenesGradient.colors.first,
