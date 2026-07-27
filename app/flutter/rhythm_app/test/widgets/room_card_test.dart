@@ -548,7 +548,7 @@ void main() {
     expect(find.text('Settings'), findsNothing);
   });
 
-  testWidgets('motion countdown tap does nothing', (tester) async {
+  testWidgets('motion countdown tap cancels motion activation', (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -586,6 +586,30 @@ void main() {
     addTearDown(serverSync.dispose);
     addTearDown(connection.dispose);
 
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'device_ids': ['light-1', 'motion-1'],
+            'devices': [
+              {'id': 'motion-1', 'type': 'motion'},
+            ],
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0,
+            'brightness_offset': 0,
+            'state': 'active',
+            'profile_settings': {'motion_activation_enabled': true},
+          },
+        ],
+      }),
+    );
+
     await tester.pumpWidget(
       MultiProvider(
         providers: [
@@ -608,7 +632,11 @@ void main() {
     );
     await tester.pump();
 
-    expect(connection.api.nodePreferenceCalls, isEmpty);
+    expect(connection.api.motionActivationCalls, hasLength(1));
+    expect(connection.api.motionActivationCalls.single.enabled, isFalse);
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isFalse);
+    expect(roomProvider.getMotionTimer('room-1'), isNull);
+    expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
     expect(
       roomProvider.getDisplayRoomState('room-1'),
       isNot(RoomModeState.hardOff),

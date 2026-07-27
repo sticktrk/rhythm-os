@@ -835,14 +835,11 @@ class _RoomCardState extends State<RoomCard> {
 
         final showActivitySpinner =
             _localActionPending || isTransitioning || isDispatchPending;
-        final VoidCallback? motionIndicatorTap =
-            motionTimer?.remainingSecs != null
-                ? null
-                : !motionActivationSupported
-                    ? () => _showMotionActivationUnavailable(room.name)
-                    : motionActivationEnabled
-                        ? () => _setMotionActivationEnabled(false)
-                        : null;
+        final VoidCallback? motionIndicatorTap = !motionActivationSupported
+            ? () => _showMotionActivationUnavailable(room.name)
+            : motionActivationEnabled
+                ? () => _setMotionActivationEnabled(false)
+                : null;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
@@ -2971,7 +2968,8 @@ class _MotionIndicatorState extends State<_MotionIndicator>
           : 'Motion timer for ${widget.roomName}',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        // Consume countdown taps so they do not open the room settings sheet.
+        // Consume taps when the indicator is not actionable so they do not
+        // open the room settings sheet.
         onTap: widget.onTap ?? () {},
         child: SizedBox(
           width: _roomHeaderActionHitSize,
