@@ -11,9 +11,13 @@ use rhythm_os::hub::HubEvent;
 use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
 use crate::transport::MatterTransport;
-use crate::transport::{CommissionedDevice, MatterDeviceInfo};
+use crate::transport::{
+    CommissionedDevice, MatterDeviceInfo, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+};
 
 const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
+const OBSERVED_ON_OFF_FRESHNESS: Duration =
+    Duration::from_secs(DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS as u64 * 2);
 
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 pub struct MatterHubData {
@@ -41,6 +45,8 @@ pub struct MatterHubData {
     pub recently_decommissioned: Mutex<HashMap<u64, Instant>>,
     /// Last time each node produced any successful Matter interaction.
     pub node_proof_of_life: Arc<Mutex<HashMap<u64, Instant>>>,
+    /// Latest authoritative On/Off subscription report by node and endpoint.
+    pub on_off_observations: Arc<Mutex<HashMap<(u64, u16), (bool, Instant)>>>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -98,6 +104,9 @@ impl MatterHubData {
         if let Ok(mut quirks) = self.device_quirks.lock() {
             quirks.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
         }
+        if let Ok(mut observations) = self.on_off_observations.lock() {
+            observations.retain(|(observed_node_id, _), _| *observed_node_id != node_id);
+        }
     }
 
     /// Mark whether a cached Matter node is currently reachable.
@@ -124,6 +133,24 @@ impl MatterHubData {
             .ok()
             .and_then(|proof| proof.get(&node_id).copied())
             .is_some_and(|proof_at| proof_at > marked_at)
+    }
+
+    /// Record an authoritative On/Off subscription report.
+    pub fn record_on_off_observation(&self, node_id: u64, endpoint: u16, lights_on: bool) {
+        if let Ok(mut observations) = self.on_off_observations.lock() {
+            observations.insert((node_id, endpoint), (lights_on, Instant::now()));
+        }
+        self.record_node_proof_of_life(node_id);
+    }
+
+    /// Return a fresh authoritative On/Off observation for periodic work.
+    pub fn observed_on_off(&self, node_id: u64, endpoint: u16) -> Option<bool> {
+        self.on_off_observations
+            .lock()
+            .ok()
+            .and_then(|observations| observations.get(&(node_id, endpoint)).copied())
+            .filter(|(_, observed_at)| observed_at.elapsed() <= OBSERVED_ON_OFF_FRESHNESS)
+            .map(|(lights_on, _)| lights_on)
     }
 
     /// Upsert basic cached Matter device info without treating it as a live
@@ -254,6 +281,7 @@ mod tests {
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
+            on_off_observations: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
         }
     }

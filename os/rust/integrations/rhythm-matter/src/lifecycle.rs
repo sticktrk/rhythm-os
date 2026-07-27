@@ -16,9 +16,9 @@ use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
 use crate::transport::{
-    CommissionedDevice, MatterControllerEvent, MatterControllerEventCursor, MatterDeviceInfo,
-    MatterSubscriptionTarget, MatterTransport, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-    DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+    CommissionedDevice, MatterAttributeValue, MatterControllerEvent, MatterControllerEventCursor,
+    MatterDeviceInfo, MatterSubscriptionTarget, MatterTransport,
+    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
 
 const MATTER_EVENT_LONG_POLL: Duration = Duration::from_secs(1);
@@ -83,11 +83,31 @@ fn subscribe_to_observed_state(transport: &dyn MatterTransport) {
     }
 }
 
+fn cache_on_off_observation(
+    report: &crate::transport::MatterAttributeReport,
+    observations: &Mutex<HashMap<(u64, u16), (bool, std::time::Instant)>>,
+) {
+    if report.cluster != crate::clusters::CLUSTER_ON_OFF_U32
+        || report.attr_id != crate::clusters::ATTR_ON_OFF_U32
+    {
+        return;
+    }
+
+    let MatterAttributeValue::Bool(lights_on) = &report.value;
+    if let Ok(mut observations) = observations.lock() {
+        observations.insert(
+            (report.node_id, report.endpoint),
+            (*lights_on, std::time::Instant::now()),
+        );
+    }
+}
+
 fn start_controller_event_stream(
     transport: Arc<dyn MatterTransport>,
     event_tx: std::sync::mpsc::Sender<HubEvent>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     node_proof_of_life: Arc<Mutex<HashMap<u64, std::time::Instant>>>,
+    on_off_observations: Arc<Mutex<HashMap<(u64, u16), (bool, std::time::Instant)>>>,
 ) {
     let spawn_result = std::thread::Builder::new()
         .name("matter-controller-events".to_string())
@@ -169,6 +189,7 @@ fn start_controller_event_stream(
                             ))
                         }
                         MatterControllerEvent::AttributeReport(report) => {
+                            cache_on_off_observation(&report, on_off_observations.as_ref());
                             if let Ok(mut proof) = node_proof_of_life.lock() {
                                 proof.insert(report.node_id, std::time::Instant::now());
                             }
@@ -244,6 +265,9 @@ pub fn connect_matter(
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
     let node_proof_of_life_for_closure = node_proof_of_life.clone();
     let node_proof_of_life_for_events = node_proof_of_life.clone();
+    let on_off_observations = Arc::new(Mutex::new(HashMap::new()));
+    let on_off_observations_for_closure = on_off_observations.clone();
+    let on_off_observations_for_events = on_off_observations.clone();
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let hub_data_event_tx = event_tx.clone();
@@ -275,6 +299,7 @@ pub fn connect_matter(
                 decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
                 recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
                 node_proof_of_life: node_proof_of_life_for_closure.clone(),
+                on_off_observations: on_off_observations_for_closure.clone(),
                 event_tx: hub_data_event_tx,
             }))
         },
@@ -284,6 +309,7 @@ pub fn connect_matter(
                 event_tx,
                 shutdown,
                 node_proof_of_life_for_events,
+                on_off_observations_for_events,
             );
             event_rx
         },
@@ -973,6 +999,7 @@ mod tests {
             event_tx,
             shutdown.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
@@ -992,6 +1019,29 @@ mod tests {
             HubEvent::Connected { .. }
         ));
         shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn on_off_subscription_reports_update_periodic_observation_cache() {
+        let observations = Mutex::new(HashMap::new());
+        let report = crate::transport::MatterAttributeReport {
+            node_id: 42,
+            endpoint: 2,
+            cluster: crate::clusters::CLUSTER_ON_OFF_U32,
+            attr_id: crate::clusters::ATTR_ON_OFF_U32,
+            value: MatterAttributeValue::Bool(true),
+        };
+
+        cache_on_off_observation(&report, &observations);
+
+        assert_eq!(
+            observations
+                .lock()
+                .unwrap()
+                .get(&(42, 2))
+                .map(|(lights_on, _)| *lights_on),
+            Some(true)
+        );
     }
 
     #[test]
