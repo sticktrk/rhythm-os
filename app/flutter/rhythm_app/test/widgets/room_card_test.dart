@@ -1217,6 +1217,13 @@ void main() {
       tester.widget<AnimatedAlign>(_powerThumb()).alignment,
       Alignment.centerRight,
     );
+    expect(
+      find.descendant(
+        of: _powerToggle(),
+        matching: find.byType(Icon),
+      ),
+      findsOneWidget,
+    );
     expect(tester.widget<Text>(_powerToggleLabel()).data, 'On');
     expect(find.text('Full off'), findsNothing);
     var powerSemantics = tester.getSemantics(_powerToggle());
@@ -1515,8 +1522,11 @@ void main() {
     expect(cctCall.preserveBrightness, isTrue);
   });
 
-  testWidgets('on room uses four even jewels with one on-demand detail',
+  testWidgets('on room keeps four even controls with pronounced Power',
       (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
     final analyticsBackend = CapturingAnalyticsBackend();
     await analyticsBackend.initialize();
     BackendProvider.setInstanceForTesting(
@@ -1612,11 +1622,21 @@ void main() {
         .widget<AnimatedContainer>(_scenesControl())
         .decoration as BoxDecoration;
     expect(scenesDecoration.shape, BoxShape.circle);
-    expect(brightnessRect.size, scenesRect.size);
-    expect(colorRect.size, scenesRect.size);
+    expect(brightnessRect.width, closeTo(scenesRect.width, 0.1));
+    expect(brightnessRect.height, closeTo(scenesRect.height, 0.1));
+    expect(colorRect.width, closeTo(scenesRect.width, 0.1));
+    expect(colorRect.height, closeTo(scenesRect.height, 0.1));
     expect(powerRect.width, greaterThan(scenesRect.width));
-    expect(powerRect.height, scenesRect.height);
-    expect(tester.getSize(_powerSwitch()).width, 70);
+    expect(powerRect.height, greaterThan(scenesRect.height));
+    expect(tester.getSize(_powerSwitch()), const Size(86, 40));
+    expect(colorRect.right, lessThan(powerRect.left));
+    expect(
+      find.descendant(
+        of: _powerToggle(),
+        matching: find.byType(Icon),
+      ),
+      findsOneWidget,
+    );
     expect(brightnessRect.center.dy, closeTo(scenesRect.center.dy, 0.1));
     expect(colorRect.center.dy, closeTo(scenesRect.center.dy, 0.1));
     expect(scenesRect.center.dy, closeTo(powerRect.center.dy, 0.1));
