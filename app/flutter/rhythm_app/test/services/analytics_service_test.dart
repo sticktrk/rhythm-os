@@ -52,6 +52,11 @@ void main() {
       completedCount: 2,
       outcome: 'partial',
     );
+    await analytics.logRoomCardDetailToggled(
+      control: 'color',
+      roomMode: 'on',
+      expanded: true,
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -60,6 +65,7 @@ void main() {
         'matter_pairing_completed',
         'mood_scene_apply_completed',
         'global_room_action_completed',
+        'room_card_detail_toggled',
       ],
     );
     expect(
@@ -73,6 +79,14 @@ void main() {
     expect(
       backend.events[3].properties,
       containsPair('completed_count', 2),
+    );
+    expect(
+      backend.events[4].properties,
+      {
+        'control': 'color',
+        'room_mode': 'on',
+        'expanded': 1,
+      },
     );
 
     final serialized = backend.events

@@ -127,6 +127,11 @@ write_store_build_receipt() {
 resolve_testflight_build_number() {
     local build_name
     local latest_build_number
+    local fastlane_output
+    local fastlane_status
+    local attempt=1
+    local max_attempts="${RHYTHM_TESTFLIGHT_BUILD_NUMBER_ATTEMPTS:-3}"
+    local retry_delay="${RHYTHM_TESTFLIGHT_BUILD_NUMBER_RETRY_DELAY_SECONDS:-10}"
 
     build_name="$(pubspec_build_name)"
     if [ -z "$build_name" ]; then
@@ -148,22 +153,34 @@ resolve_testflight_build_number() {
 
     echo "Checking latest TestFlight build for $IOS_APP_IDENTIFIER $build_name..."
 
-    set +e
-    local fastlane_output
-    fastlane_output=$(FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane run latest_testflight_build_number \
-        api_key_path:"$ASC_API_KEY_PATH" \
-        app_identifier:"$IOS_APP_IDENTIFIER" \
-        version:"$build_name" \
-        platform:"ios" \
-        initial_build_number:0 2>&1)
-    local fastlane_status=$?
-    set -e
+    while true; do
+        set +e
+        fastlane_output=$(FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 fastlane run latest_testflight_build_number \
+            api_key_path:"$ASC_API_KEY_PATH" \
+            app_identifier:"$IOS_APP_IDENTIFIER" \
+            version:"$build_name" \
+            platform:"ios" \
+            initial_build_number:0 2>&1)
+        fastlane_status=$?
+        set -e
 
-    if [ $fastlane_status -ne 0 ]; then
+        if [ "$fastlane_status" -eq 0 ]; then
+            break
+        fi
+
         echo "$fastlane_output"
-        echo "Error: failed to read latest TestFlight build number."
-        exit $fastlane_status
-    fi
+        if [ "$attempt" -ge "$max_attempts" ] || \
+            ! grep -Eiq 'server error got 5[0-9]{2}|service unavailable|temporar|timed? out|connection reset' \
+                <<<"$fastlane_output"; then
+            echo "Error: failed to read latest TestFlight build number."
+            exit "$fastlane_status"
+        fi
+
+        echo "App Store Connect read failed transiently; retrying in ${retry_delay}s ($attempt/$max_attempts)..."
+        sleep "$retry_delay"
+        attempt=$((attempt + 1))
+        retry_delay=$((retry_delay * 2))
+    done
 
     latest_build_number="$(printf '%s\n' "$fastlane_output" | sed -nE 's/.*Result:[^0-9]*([0-9]+).*/\1/p' | tail -1)"
     if ! [[ "$latest_build_number" =~ ^[0-9]+$ ]]; then

@@ -3052,8 +3052,43 @@ class ServerSyncProvider extends ChangeNotifier {
     return true;
   }
 
-  bool dispatchNodeBrightness(String nodeId, int brightness) =>
-      dispatchNodeCurveBrightness(nodeId, brightness);
+  /// Set direct node brightness through the server runtime.
+  ///
+  /// Unlike [dispatchNodeCurveBrightness], this preserves scene-backed Mood
+  /// and asks the server to update and reapply the bound scene brightness.
+  bool dispatchNodeBrightness(String nodeId, int brightness) {
+    if (HueServiceLocator.isDemoMode) {
+      final currentState = _roomProvider.getRoomState(nodeId);
+      final moodActive = currentState == RoomModeState.mood;
+      DemoServerApi.instance.updateRoomLightState(
+        nodeId,
+        on: true,
+        brightness: brightness,
+        kelvin: _roomProvider.getKelvin(nodeId),
+        state: moodActive ? RoomModeState.mood : RoomModeState.active,
+      );
+      _roomProvider.applyServerNodeState(
+        nodeId,
+        rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: moodActive ? RoomModeState.mood : RoomModeState.active,
+        lightsOn: true,
+        brightness: brightness,
+        kelvin: _roomProvider.getKelvin(nodeId),
+        moodEnabled: moodActive ? true : _roomProvider.isMoodEnabled(nodeId),
+        moodActive: moodActive,
+      );
+      return true;
+    }
+    if (!_connection.connected) return false;
+    _clearRecentDispatchFailure(nodeId);
+    _connection.api.nodeBrightness(
+      nodeId: nodeId,
+      brightness: brightness,
+    );
+    return true;
+  }
 
   bool dispatchBrightness(String roomId, int brightness) =>
       dispatchNodeCurveBrightness(roomId, brightness);
