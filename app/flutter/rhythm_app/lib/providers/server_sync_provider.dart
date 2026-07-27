@@ -210,6 +210,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// one request in flight per node so rapid taps cannot reorder the final
   /// persisted value.
   final Set<String> _motionActivationPending = {};
+  final Set<String> _lightProfileOverridePending = {};
   static const Uuid _uuid = Uuid();
 
   /// Raw topology graph from `/api/topology/nodes`.
@@ -3312,6 +3313,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 ||
         !lightProfileOverridesSupportedForNode(nodeId) ||
+        _lightProfileOverridePending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode &&
             (!_connection.connected || _receivingFromServer))) {
       return false;
@@ -3341,25 +3343,42 @@ class ServerSyncProvider extends ChangeNotifier {
     );
     _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
     _helloRooms = _buildRoomSummaries();
+    _lightProfileOverridePending.add(nodeId);
     notifyListeners();
 
-    if (HueServiceLocator.isDemoMode) return true;
+    if (HueServiceLocator.isDemoMode) {
+      _lightProfileOverridePending.remove(nodeId);
+      return true;
+    }
 
-    final accepted = await api.nodeProfileOverridesSet(
-      nodeId: nodeId,
-      profileOverrides: {
-        profileId: profileOverride == null || profileOverride.isEmpty
-            ? null
-            : profileOverride.toJson(),
-      },
-      replace: true,
-      correlationId: correlationId,
-    );
+    var accepted = false;
+    try {
+      accepted = await api.nodeProfileOverridesSet(
+        nodeId: nodeId,
+        profileOverrides: {
+          profileId: profileOverride == null || profileOverride.isEmpty
+              ? null
+              : profileOverride.toJson(),
+        },
+        replace: true,
+        correlationId: correlationId,
+      );
+    } catch (error) {
+      debugPrint(
+        'ServerSync: room light profile override failed node=$nodeId profile=$profileId error=$error',
+      );
+    } finally {
+      _lightProfileOverridePending.remove(nodeId);
+    }
     if (accepted) return true;
 
     final currentIndex = _helloNodes.indexWhere((node) => node.id == nodeId);
-    if (currentIndex != -1) {
-      _helloNodes[currentIndex] = previous;
+    if (currentIndex != -1 &&
+        identical(_helloNodes[currentIndex].profileSettings, nextSettings)) {
+      _helloNodes[currentIndex] = _copyNodeWithProfileSettings(
+        _helloNodes[currentIndex],
+        previousSettings,
+      );
       _helloRooms = _buildRoomSummaries();
       notifyListeners();
     }
@@ -3375,6 +3394,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 ||
         !lightProfileOverridesSupportedForNode(nodeId) ||
+        _lightProfileOverridePending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode &&
             (!_connection.connected || _receivingFromServer))) {
       return false;
@@ -3394,21 +3414,38 @@ class ServerSyncProvider extends ChangeNotifier {
     );
     _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
     _helloRooms = _buildRoomSummaries();
+    _lightProfileOverridePending.add(nodeId);
     notifyListeners();
 
-    if (HueServiceLocator.isDemoMode) return true;
+    if (HueServiceLocator.isDemoMode) {
+      _lightProfileOverridePending.remove(nodeId);
+      return true;
+    }
 
-    final accepted = await api.nodeProfileOverridesSet(
-      nodeId: nodeId,
-      profileOverrides: null,
-      replace: true,
-      correlationId: correlationId,
-    );
+    var accepted = false;
+    try {
+      accepted = await api.nodeProfileOverridesSet(
+        nodeId: nodeId,
+        profileOverrides: null,
+        replace: true,
+        correlationId: correlationId,
+      );
+    } catch (error) {
+      debugPrint(
+        'ServerSync: room light profile reset failed node=$nodeId error=$error',
+      );
+    } finally {
+      _lightProfileOverridePending.remove(nodeId);
+    }
     if (accepted) return true;
 
     final currentIndex = _helloNodes.indexWhere((node) => node.id == nodeId);
-    if (currentIndex != -1) {
-      _helloNodes[currentIndex] = previous;
+    if (currentIndex != -1 &&
+        identical(_helloNodes[currentIndex].profileSettings, nextSettings)) {
+      _helloNodes[currentIndex] = _copyNodeWithProfileSettings(
+        _helloNodes[currentIndex],
+        previousSettings,
+      );
       _helloRooms = _buildRoomSummaries();
       notifyListeners();
     }

@@ -144,6 +144,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         String? correlationId,
       })> nodeProfileOverrideCalls = [];
   bool nodeProfileOverridesSucceeds = true;
+  Completer<bool>? nodeProfileOverridesCompleter;
   final List<
       ({
         String nodeId,
@@ -275,6 +276,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       replace: replace,
       correlationId: correlationId,
     ));
+    final pending = nodeProfileOverridesCompleter;
+    if (pending != null) return pending.future;
     return nodeProfileOverridesSucceeds;
   }
 
@@ -1242,7 +1245,10 @@ void main() {
   });
 
   group('ServerSyncProvider room light profile overrides', () {
-    RhythmHello roomLightHello({bool supported = true}) {
+    RhythmHello roomLightHello({
+      bool supported = true,
+      bool motionActivationEnabled = false,
+    }) {
       return RhythmHello.fromJson({
         'version': '0.6.533-beta',
         'capabilities': {
@@ -1263,7 +1269,7 @@ void main() {
             'time_offset': 0.0,
             'brightness_offset': 0.0,
             'profile_settings': {
-              'motion_activation_enabled': false,
+              'motion_activation_enabled': motionActivationEnabled,
               'profile_overrides': {
                 'sleep': {
                   'motion_timeout_secs': {'mode': 'fixed', 'value': 900},
@@ -1339,6 +1345,67 @@ void main() {
           'max_brightness': 72,
         },
       });
+    });
+
+    testWidgets(
+        'pending save rejects overlap and does not roll back newer server state',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final pending = Completer<bool>();
+      final api = _FakeRhythmServerApi()
+        ..nodeProfileOverridesCompleter = pending;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(roomLightHello());
+      await tester.pump();
+      final firstSave = provider.setNodeLightProfileOverride(
+        'room-1',
+        profileId: 'rhythm',
+        profileOverride: const RhythmLightProfileNodeOverride(minBrightness: 8),
+        correlationId: 'room-light-settings-pending',
+      );
+      await tester.pump();
+
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'sleep',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 72),
+          correlationId: 'room-light-settings-overlap',
+        ),
+        isFalse,
+      );
+      expect(api.nodeProfileOverrideCalls, hasLength(1));
+
+      connection.emitHello(
+        roomLightHello(motionActivationEnabled: true),
+      );
+      await tester.pump();
+      pending.complete(false);
+      expect(await firstSave, isFalse);
+      await tester.pump();
+
+      expect(
+        provider.nodeById('room-1')?.profileSettings?.motionActivationEnabled,
+        isTrue,
+      );
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.profileOverrides
+            .containsKey('rhythm'),
+        isFalse,
+      );
     });
 
     testWidgets('rejected save rolls optimistic override back', (tester) async {
