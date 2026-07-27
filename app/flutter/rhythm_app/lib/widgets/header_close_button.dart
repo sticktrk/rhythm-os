@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'solar_orbit.dart' show CelestialColors;
 
-/// Circular ✕ button for the top-level menu headers (Presets, Settings).
+/// Circular ✕ button for the top-level menu headers
+/// (Presets, Lighting, Settings).
 ///
 /// These screens are reached by fanning out of the gear button and have no
 /// Home entry to return through, so each carries its own close affordance that

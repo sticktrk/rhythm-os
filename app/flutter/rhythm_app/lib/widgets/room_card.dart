@@ -2032,60 +2032,127 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
               widget.enabled ? (_) => setState(() => _pressed = false) : null,
           onTapCancel:
               widget.enabled ? () => setState(() => _pressed = false) : null,
-          child: SizedBox(
-            width: 56,
-            height: 68,
-            child: Column(
-              children: [
-                AnimatedScale(
-                  scale: _pressed ? 0.90 : 1.0,
-                  duration: const Duration(milliseconds: 110),
-                  curve: Curves.easeOut,
-                  child: AnimatedContainer(
+          child: _RoomJewelShell(
+            roomId: widget.roomId,
+            controlName: 'scenes',
+            label: 'Scenes',
+            pressed: _pressed,
+            selected: widget.active,
+            enabled: widget.enabled,
+            accentColor: primary,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color.lerp(
+                  primary,
+                  const Color(0xFF2A2133),
+                  widget.active ? 0.12 : 0.32,
+                )!,
+                Color.lerp(
+                  secondary,
+                  const Color(0xFF151A24),
+                  widget.active ? 0.12 : 0.32,
+                )!,
+              ],
+            ),
+            child: Icon(
+              Icons.auto_awesome_rounded,
+              size: 19,
+              color: Colors.white.withValues(alpha: 0.96),
+              shadows: [
+                Shadow(
+                  color: Colors.black.withValues(alpha: 0.48),
+                  blurRadius: 6,
+                  offset: const Offset(0, 1),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shared chrome for the circular control jewels: the gem surface, the
+/// selection treatment, and the caption underneath.
+///
+/// Selection borrows the card's orbital language — a thin accent ring floats
+/// around the chosen jewel with a lit marker docked on it, the same way a
+/// body rides the solar orbit — rather than a heavy white border competing
+/// with the gem itself.
+class _RoomJewelShell extends StatelessWidget {
+  const _RoomJewelShell({
+    required this.roomId,
+    required this.controlName,
+    required this.label,
+    required this.pressed,
+    required this.selected,
+    required this.enabled,
+    required this.accentColor,
+    required this.gradient,
+    required this.child,
+  });
+
+  final String roomId;
+  final String controlName;
+  final String label;
+  final bool pressed;
+  final bool selected;
+  final bool enabled;
+  final Color accentColor;
+  final Gradient gradient;
+  final Widget child;
+
+  static const double _size = 56;
+  static const double _ringInset = 5;
+  static const double _labelGap = 8;
+  static const double _height = _size + _labelGap + 10;
+
+  @override
+  Widget build(BuildContext context) {
+    final ringColor = Color.lerp(accentColor, Colors.white, 0.35)!;
+    return SizedBox(
+      width: _size,
+      height: _height,
+      child: Column(
+        children: [
+          AnimatedScale(
+            scale: pressed ? 0.92 : 1.0,
+            duration: const Duration(milliseconds: 110),
+            curve: Curves.easeOut,
+            child: SizedBox(
+              width: _size,
+              height: _size,
+              child: Stack(
+                clipBehavior: Clip.none,
+                alignment: Alignment.center,
+                children: [
+                  AnimatedContainer(
                     key: ValueKey(
-                      'room-card-control-pill-${widget.roomId}-scenes',
+                      'room-card-control-pill-$roomId-$controlName',
                     ),
-                    duration: const Duration(milliseconds: 280),
+                    duration: const Duration(milliseconds: 240),
                     curve: Curves.easeOutCubic,
-                    width: 56,
-                    height: 56,
+                    width: _size,
+                    height: _size,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          Color.lerp(
-                            primary,
-                            const Color(0xFF2A2133),
-                            widget.active ? 0.12 : 0.26,
-                          )!,
-                          Color.lerp(
-                            secondary,
-                            const Color(0xFF151A24),
-                            widget.active ? 0.12 : 0.26,
-                          )!,
-                        ],
-                      ),
+                      gradient: gradient,
                       border: Border.all(
-                        color: Colors.white.withValues(
-                          alpha: widget.active ? 0.96 : 0.34,
-                        ),
-                        width: widget.active ? 2.5 : 1,
+                        color: selected
+                            ? ringColor.withValues(alpha: 0.95)
+                            : Colors.white.withValues(alpha: 0.38),
+                        width: selected ? 1.4 : 1,
                       ),
                       boxShadow: [
-                        if (widget.active)
-                          BoxShadow(
-                            color: Colors.white.withValues(alpha: 0.30),
-                            blurRadius: 7,
-                            spreadRadius: 1,
-                          ),
                         BoxShadow(
-                          color: primary.withValues(
-                            alpha: widget.active ? 0.62 : 0.24,
+                          color: accentColor.withValues(
+                            alpha: selected ? 0.52 : 0.18,
                           ),
-                          blurRadius: widget.active ? 22 : 12,
-                          spreadRadius: widget.active ? 2 : 0,
+                          blurRadius: selected ? 20 : 12,
+                          spreadRadius: selected ? 1.5 : 0,
                         ),
                         BoxShadow(
                           color: Colors.black.withValues(alpha: 0.30),
@@ -2100,41 +2167,84 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
                         const Positioned.fill(
                           child: _RoomJewelDepthOverlay(),
                         ),
-                        Icon(
-                          Icons.auto_awesome_rounded,
-                          size: 19,
-                          color: Colors.white.withValues(alpha: 0.96),
-                          shadows: [
-                            Shadow(
-                              color: Colors.black.withValues(alpha: 0.48),
-                              blurRadius: 6,
-                              offset: const Offset(0, 1),
-                            ),
-                          ],
-                        ),
-                        if (widget.active)
-                          _RoomJewelSelectionMarker(
-                            roomId: widget.roomId,
-                            controlName: 'scenes',
-                            accentColor: primary,
-                          ),
+                        child,
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                _RoomJewelLabel(
-                  key: ValueKey(
-                    'room-card-control-label-${widget.roomId}-scenes',
+                  Positioned(
+                    left: -_ringInset,
+                    top: -_ringInset,
+                    right: -_ringInset,
+                    bottom: -_ringInset,
+                    child: IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity: selected ? 1.0 : 0.0,
+                        duration: Duration(milliseconds: selected ? 240 : 160),
+                        curve: Curves.easeOut,
+                        child: AnimatedScale(
+                          scale: selected ? 1.0 : 0.86,
+                          duration:
+                              Duration(milliseconds: selected ? 300 : 160),
+                          curve: selected ? Curves.easeOutBack : Curves.easeIn,
+                          // Dark keyline under the accent stroke keeps the
+                          // ring legible on light and CCT-tinted cards alike.
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.30),
+                                      width: 3.4,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Positioned.fill(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(0.9),
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: ringColor.withValues(
+                                          alpha: 0.95,
+                                        ),
+                                        width: 1.6,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-                  label: 'Scenes',
-                  enabled: widget.enabled,
-                  selected: widget.active,
-                ),
-              ],
+                  if (selected)
+                    _RoomJewelSelectionMarker(
+                      roomId: roomId,
+                      controlName: controlName,
+                      accentColor: accentColor,
+                    ),
+                ],
+              ),
             ),
           ),
-        ),
+          const SizedBox(height: _labelGap),
+          _RoomJewelLabel(
+            key: ValueKey(
+              'room-card-control-label-$roomId-$controlName',
+            ),
+            label: label,
+            enabled: enabled,
+            selected: selected,
+            accentColor: accentColor,
+          ),
+        ],
       ),
     );
   }
@@ -2146,11 +2256,13 @@ class _RoomJewelLabel extends StatelessWidget {
     required this.label,
     required this.enabled,
     required this.selected,
+    required this.accentColor,
   });
 
   final String label;
   final bool enabled;
   final bool selected;
+  final Color accentColor;
 
   @override
   Widget build(BuildContext context) {
@@ -2159,23 +2271,20 @@ class _RoomJewelLabel extends StatelessWidget {
       style: TextStyle(
         color: Colors.white.withValues(
           alpha: !enabled
-              ? 0.64
+              ? 0.60
               : selected
                   ? 1
-                  : 0.84,
+                  : 0.80,
         ),
         fontSize: label.length > 6 ? 9 : 10,
         height: 1,
-        fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
-        letterSpacing: selected ? 0.05 : -0.1,
-        decoration: selected ? TextDecoration.underline : TextDecoration.none,
-        decorationColor: Colors.white.withValues(alpha: 0.95),
-        decorationThickness: 2,
+        fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+        letterSpacing: selected ? 0.2 : 0.1,
         shadows: selected
             ? [
                 Shadow(
-                  color: Colors.white.withValues(alpha: 0.50),
-                  blurRadius: 7,
+                  color: accentColor.withValues(alpha: 0.60),
+                  blurRadius: 8,
                 ),
               ]
             : null,
@@ -2185,6 +2294,8 @@ class _RoomJewelLabel extends StatelessWidget {
   }
 }
 
+/// Lit marker docked on the selection ring at its upper-right — the same idea
+/// as the position indicator riding the solar orbit.
 class _RoomJewelSelectionMarker extends StatelessWidget {
   const _RoomJewelSelectionMarker({
     required this.roomId,
@@ -2199,58 +2310,104 @@ class _RoomJewelSelectionMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      top: 3,
-      right: 3,
-      child: Container(
-        key: ValueKey(
-          'room-card-control-selected-$roomId-$controlName',
-        ),
-        width: 16,
-        height: 16,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Color.lerp(accentColor, const Color(0xFF111722), 0.68),
-          border: Border.all(color: Colors.white, width: 1.4),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.38),
-              blurRadius: 4,
-              offset: const Offset(0, 1),
+      top: -3,
+      right: -3,
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0.5, end: 1),
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutBack,
+        builder: (context, scale, child) =>
+            Transform.scale(scale: scale, child: child),
+        child: Container(
+          key: ValueKey(
+            'room-card-control-selected-$roomId-$controlName',
+          ),
+          width: 15,
+          height: 15,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Color.lerp(accentColor, Colors.white, 0.24),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.95),
+              width: 1.2,
             ),
-          ],
-        ),
-        child: const Icon(
-          Icons.check_rounded,
-          size: 11,
-          color: Colors.white,
+            boxShadow: [
+              BoxShadow(
+                color: accentColor.withValues(alpha: 0.55),
+                blurRadius: 8,
+              ),
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.35),
+                blurRadius: 3,
+                offset: const Offset(0, 1),
+              ),
+            ],
+          ),
+          child: const Icon(
+            Icons.check_rounded,
+            size: 10,
+            color: Color(0xFF1F1710),
+          ),
         ),
       ),
     );
   }
 }
 
+/// Lapidary finish for the jewels: a grounding vignette along the lower rim,
+/// an off-center specular glint, and a hairline inner rim — depth without the
+/// wet-plastic gloss of a full-width highlight.
 class _RoomJewelDepthOverlay extends StatelessWidget {
   const _RoomJewelDepthOverlay();
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          stops: const [0, 0.42, 1],
-          colors: [
-            Colors.white.withValues(alpha: 0.34),
-            Colors.transparent,
-            Colors.black.withValues(alpha: 0.20),
-          ],
-        ),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.14),
-          width: 2,
-        ),
+    return IgnorePointer(
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  center: const Alignment(0, 1.15),
+                  radius: 1.05,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.26),
+                    Colors.transparent,
+                  ],
+                  stops: const [0, 0.72],
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  center: const Alignment(-0.42, -0.55),
+                  radius: 0.85,
+                  colors: [
+                    Colors.white.withValues(alpha: 0.28),
+                    Colors.white.withValues(alpha: 0),
+                  ],
+                  stops: const [0, 0.75],
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.10),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2268,10 +2425,10 @@ class _RoomControlRow extends StatelessWidget {
   });
 
   static const double _jewelSize = 56;
-  static const double _jewelHeight = 68;
+  static const double _jewelHeight = 74;
   static const double _powerWidth = 88;
   static const double _powerHeight = 64;
-  static const double _rowHeight = 68;
+  static const double _rowHeight = _jewelHeight;
 
   final Widget scenes;
   final Widget brightness;
@@ -2304,6 +2461,9 @@ class _RoomControlRow extends StatelessWidget {
         return SizedBox(
           height: _rowHeight,
           child: Stack(
+            // Selection glows and the orbit ring breathe past the row bounds;
+            // hard-edge clipping shears them into rectangles.
+            clipBehavior: Clip.none,
             children: [
               place(
                 child: scenes,
@@ -2404,9 +2564,11 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
           ],
         ),
     };
-    final iconColor = switch (widget.control) {
+    // Dark glyphs sit directly on both luminous gems; only the deep scenes
+    // gem carries a light glyph. One icon language across the row.
+    final glyphColor = switch (widget.control) {
       _RoomDetailControl.brightness => const Color(0xFF5A3908),
-      _RoomDetailControl.color => Colors.white,
+      _RoomDetailControl.color => const Color(0xFF262B33),
     };
 
     return AnimatedOpacity(
@@ -2435,115 +2597,21 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
                 widget.enabled ? (_) => setState(() => _pressed = false) : null,
             onTapCancel:
                 widget.enabled ? () => setState(() => _pressed = false) : null,
-            child: SizedBox(
-              width: 56,
-              height: 68,
-              child: Column(
-                children: [
-                  AnimatedScale(
-                    scale: _pressed ? 0.90 : 1.0,
-                    duration: const Duration(milliseconds: 110),
-                    curve: Curves.easeOut,
-                    child: AnimatedContainer(
-                      key: ValueKey(
-                        'room-card-control-pill-${widget.roomId}-${widget.control.name}',
-                      ),
-                      duration: const Duration(milliseconds: 220),
-                      curve: Curves.easeOutCubic,
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: jewelGradient,
-                        border: Border.all(
-                          color: Colors.white.withValues(
-                            alpha: widget.selected ? 0.98 : 0.54,
-                          ),
-                          width: widget.selected ? 2.5 : 1,
-                        ),
-                        boxShadow: [
-                          if (widget.selected)
-                            BoxShadow(
-                              color: Colors.white.withValues(alpha: 0.30),
-                              blurRadius: 7,
-                              spreadRadius: 1,
-                            ),
-                          BoxShadow(
-                            color: widget.primaryColor.withValues(
-                              alpha: widget.selected ? 0.58 : 0.12,
-                            ),
-                            blurRadius: widget.selected ? 22 : 9,
-                            spreadRadius: widget.selected ? 2 : 0,
-                          ),
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.28),
-                            blurRadius: 5,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          const Positioned.fill(
-                            child: _RoomJewelDepthOverlay(),
-                          ),
-                          if (widget.control == _RoomDetailControl.color)
-                            Container(
-                              width: 29,
-                              height: 29,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: const Color(0xFF202733).withValues(
-                                  alpha: 0.30,
-                                ),
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.22),
-                                ),
-                              ),
-                            ),
-                          Icon(
-                            widget.icon,
-                            size:
-                                widget.control == _RoomDetailControl.brightness
-                                    ? 22
-                                    : 19,
-                            color: iconColor.withValues(
-                              alpha: widget.enabled ? 0.92 : 0.62,
-                            ),
-                            shadows: [
-                              Shadow(
-                                color: Colors.black.withValues(
-                                  alpha: widget.control ==
-                                          _RoomDetailControl.brightness
-                                      ? 0.18
-                                      : 0.48,
-                                ),
-                                blurRadius: 5,
-                                offset: const Offset(0, 1),
-                              ),
-                            ],
-                          ),
-                          if (widget.selected)
-                            _RoomJewelSelectionMarker(
-                              roomId: widget.roomId,
-                              controlName: widget.control.name,
-                              accentColor: widget.primaryColor,
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  _RoomJewelLabel(
-                    key: ValueKey(
-                      'room-card-control-label-${widget.roomId}-${widget.control.name}',
-                    ),
-                    label: widget.label,
-                    enabled: widget.enabled,
-                    selected: widget.selected,
-                  ),
-                ],
+            child: _RoomJewelShell(
+              roomId: widget.roomId,
+              controlName: widget.control.name,
+              label: widget.label,
+              pressed: _pressed,
+              selected: widget.selected,
+              enabled: widget.enabled,
+              accentColor: widget.primaryColor,
+              gradient: jewelGradient,
+              child: Icon(
+                widget.icon,
+                size: widget.control == _RoomDetailControl.brightness ? 22 : 20,
+                color: glyphColor.withValues(
+                  alpha: widget.enabled ? 0.92 : 0.62,
+                ),
               ),
             ),
           ),

@@ -16,9 +16,43 @@ class DevicePairingGuidance {
   final String message;
 }
 
+class DevicePairingCodeDecision {
+  const DevicePairingCodeDecision({
+    required this.code,
+    required this.guidance,
+  });
+
+  final DevicePairingCode code;
+  final DevicePairingGuidance guidance;
+
+  bool get canContinue => code.kind == DevicePairingCodeKind.matter;
+}
+
+/// Shared intake processor for camera scans and manually entered codes.
+///
+/// Matter wins when a camera reports multiple codes in one frame. Everything
+/// else returns ecosystem-specific guidance without entering commissioning.
+DevicePairingCodeDecision? processDevicePairingCodes(Iterable<String> values) {
+  final codes = values
+      .map(classifyDevicePairingCode)
+      .where((code) => code.payload.isNotEmpty)
+      .toList();
+  if (codes.isEmpty) return null;
+
+  final code = codes.cast<DevicePairingCode?>().firstWhere(
+            (candidate) => candidate?.kind == DevicePairingCodeKind.matter,
+            orElse: () => null,
+          ) ??
+      codes.first;
+  return DevicePairingCodeDecision(
+    code: code,
+    guidance: guidanceForDevicePairingCode(code.kind),
+  );
+}
+
 DevicePairingCode classifyDevicePairingCode(String value) {
   final normalized = value.trim();
-  if (detectMatterSetupPayloadKind(normalized) == MatterSetupPayloadKind.qr) {
+  if (isLikelyMatterSetupPayload(normalized)) {
     return DevicePairingCode(
       kind: DevicePairingCodeKind.matter,
       payload: normalized,
@@ -26,7 +60,7 @@ DevicePairingCode classifyDevicePairingCode(String value) {
   }
 
   final upper = normalized.toUpperCase();
-  if (upper.startsWith('X-HM://')) {
+  if (upper.startsWith('X-HM://') || _isManualHomeKitCode(normalized)) {
     return DevicePairingCode(
       kind: DevicePairingCodeKind.homeKit,
       payload: normalized,
@@ -51,25 +85,29 @@ DevicePairingGuidance guidanceForDevicePairingCode(DevicePairingCodeKind kind) {
     DevicePairingCodeKind.homeKit => const DevicePairingGuidance(
         title: 'HomeKit isn’t supported',
         message:
-            'Rhythm can’t pair a bulb with its Apple Home code. Look for a '
+            'Rhythm can’t add this device with its Apple Home code. Look for a '
             'Matter QR code or Matter setup code instead.',
       ),
     DevicePairingCodeKind.hue => const DevicePairingGuidance(
-        title: 'Pair this bulb in the Hue app',
-        message: 'Use the Philips Hue app to add this bulb. Then return to '
-            'Add & Review and use Re-Sync to bring it into Rhythm.',
+        title: 'Pair this device in the Hue app',
+        message: 'Use the Philips Hue app to add this device. Then return to '
+            'Add & Review and use Sync Devices to bring it into Rhythm.',
       ),
     DevicePairingCodeKind.unknown => const DevicePairingGuidance(
-        title: 'Unknown QR code',
-        message:
-            'Rhythm doesn’t recognize this pairing code. Try the Matter QR '
-            'code or enter the Matter setup code printed beside it.',
+        title: 'Code not recognized',
+        message: 'Rhythm couldn’t identify this code. Check that you entered '
+            'the complete setup code, or try scanning the device QR code.',
       ),
     DevicePairingCodeKind.matter => const DevicePairingGuidance(
         title: 'Matter code',
         message: 'This Matter setup code is ready to pair.',
       ),
   };
+}
+
+bool _isManualHomeKitCode(String value) {
+  final compact = value.replaceAll(RegExp(r'[\s-]'), '');
+  return compact.length == 8 && RegExp(r'^\d+$').hasMatch(compact);
 }
 
 bool _isHuePairingCode(String normalized, String upper) {

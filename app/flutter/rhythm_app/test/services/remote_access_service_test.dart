@@ -169,6 +169,104 @@ void main() {
       expect(grants.single.token, 'owner-token');
     });
 
+    test('enable falls back to the saved tunnel when LAN is unreachable',
+        () async {
+      final configEndpoints = <String>[];
+      final remoteEndpoint = const HubEndpoint(
+        host: 'hub.devices.rhythm.lighting',
+        port: 443,
+        useSsl: true,
+      );
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': remoteEndpoint.toJson(),
+          'hostname': remoteEndpoint.host,
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(
+            baseUrl: baseUrl,
+            onPut: () async {
+              configEndpoints.add(baseUrl);
+              if (baseUrl.startsWith('http://192.168.5.123')) {
+                throw const RhythmApiException('LAN unavailable');
+              }
+            },
+          );
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(
+        _serverHub(remoteEndpoint: remoteEndpoint),
+      );
+
+      expect(configEndpoints, [
+        'http://192.168.5.123:54448',
+        'https://hub.devices.rhythm.lighting:443',
+      ]);
+      expect(result.routeVerified, isTrue);
+      expect(result.updatedHub.remoteEndpoint, remoteEndpoint);
+    });
+
+    test('enable can recover through the bootstrapped tunnel when LAN is stale',
+        () async {
+      final configEndpoints = <String>[];
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return _FakeRemoteAccessApi(
+            baseUrl: baseUrl,
+            onPut: () async {
+              configEndpoints.add(baseUrl);
+              if (baseUrl.startsWith('http://192.168.5.123')) {
+                throw const RhythmApiException('stale LAN endpoint');
+              }
+            },
+          );
+        },
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(_serverHub());
+
+      expect(configEndpoints, [
+        'http://192.168.5.123:54448',
+        'https://hub.devices.rhythm.lighting:443',
+      ]);
+      expect(result.routeVerified, isTrue);
+    });
+
     test('enable preserves a known durable identity when probes fail',
         () async {
       final supabase = _FakeSupabaseClient(

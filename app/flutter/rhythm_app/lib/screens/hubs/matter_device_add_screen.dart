@@ -12,7 +12,6 @@ import '../../services/analytics_service.dart';
 import '../../services/demo_server_api.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/matter_setup_payload.dart';
-import '../../widgets/bulb_pairing_instructions.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 import 'matter_add_method.dart';
@@ -49,6 +48,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required this.addMethod,
     this.authToken,
     this.initialSetupPayload,
+    this.initialInputMethod = 'camera',
     this.analyticsSource = 'unknown',
     this.journeyId,
     @visibleForTesting this.pairingApi,
@@ -58,6 +58,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
   final MatterAddMethod addMethod;
   final String? authToken;
   final String? initialSetupPayload;
+  final String initialInputMethod;
   final String analyticsSource;
   final String? journeyId;
   final RhythmMatterApi? pairingApi;
@@ -68,6 +69,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     required MatterAddMethod addMethod,
     String? authToken,
     String? initialSetupPayload,
+    String initialInputMethod = 'camera',
     String analyticsSource = 'unknown',
     String? journeyId,
   }) {
@@ -81,6 +83,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
             addMethod: addMethod,
             authToken: authToken,
             initialSetupPayload: initialSetupPayload,
+            initialInputMethod: initialInputMethod,
             analyticsSource: analyticsSource,
             journeyId: journeyId,
           );
@@ -154,7 +157,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     final initialSetupPayload = widget.initialSetupPayload;
     if (initialSetupPayload != null &&
         isLikelyMatterSetupPayload(initialSetupPayload)) {
-      _inputMethod = 'camera';
+      _inputMethod = widget.initialInputMethod;
       _phase = _PairingPhase.pairing;
       _setupPayloadController.text = initialSetupPayload;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -546,7 +549,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 14),
-        BulbPairingInstructions(showResetSection: _hasFailedOnce),
+        _buildDeviceReadinessCard(),
         const SizedBox(height: 30),
         const _SectionKicker(
           accent: _teal,
@@ -578,7 +581,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 28),
         _PrimaryTransmitButton(
-          label: 'Add Bulb',
+          label: 'Add Device',
           enabled: _hasSetupPayload &&
               _looksLikeMatterPayload &&
               !_pairingRequestInFlight,
@@ -586,6 +589,66 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 40),
       ],
+    );
+  }
+
+  Widget _buildDeviceReadinessCard() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _teal.withValues(alpha: 0.18)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: _teal.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: const Icon(
+              Icons.power_settings_new_rounded,
+              color: _teal,
+              size: 23,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Ready the device',
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  _hasFailedOnce
+                      ? 'Put the device back in pairing mode, then try its '
+                          'setup code again. Follow the device maker’s reset '
+                          'instructions if needed.'
+                      : 'Keep the device powered on and in pairing mode while '
+                          'Rhythm connects to it.',
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.78),
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -961,7 +1024,7 @@ class _HairlineRule extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Section kicker (matches the BulbPairingInstructions editorial header)
+// Editorial section kicker used throughout the pairing flow.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _SectionKicker extends StatelessWidget {

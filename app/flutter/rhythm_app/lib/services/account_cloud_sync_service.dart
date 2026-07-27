@@ -577,9 +577,45 @@ class AccountCloudSyncService {
       }
       localHubsByIdentity[serverInstanceId] = hub;
     }
-    if (localHubsByIdentity.isEmpty) return null;
+
+    final localHubsById = {
+      for (final hub in serverHubs) hub.id: hub,
+    };
 
     try {
+      if (localHubsById.isNotEmpty) {
+        final rows = await client
+            .from('hubs')
+            .select('id,home_id,server_instance_id')
+            .eq('type', HubType.server.name)
+            .inFilter('id', localHubsById.keys.toList(growable: false))
+            .limit(50);
+
+        for (final row in rows.whereType<Map>()) {
+          final existingHubId = row['id']?.toString();
+          final existingHomeId = row['home_id']?.toString();
+          if (existingHubId == null || existingHomeId == null) continue;
+          final localHub = localHubsById[existingHubId];
+          if (localHub == null) continue;
+          final existingServerInstanceId =
+              _cleanServerInstanceId(row['server_instance_id']?.toString());
+          if (existingHomeId != homeId ||
+              cloudServerHubIdentityChangeBlockedForTesting(
+                localHub: localHub,
+                existingServerInstanceId: existingServerInstanceId,
+              )) {
+            return (
+              serverInstanceId:
+                  _cleanServerInstanceId(localHub.serverInstanceId) ??
+                      'unknown',
+              existingHubId: existingHubId,
+              localHubId: localHub.id,
+            );
+          }
+        }
+      }
+
+      if (localHubsByIdentity.isEmpty) return null;
       final rows = await client
           .from('hubs')
           .select('id,home_id,server_instance_id')
@@ -678,6 +714,18 @@ bool hubTokenEncryptionUnavailableForTesting({
 }) {
   final token = hub.token?.trim();
   return encryptedToken == null && token != null && token.isNotEmpty;
+}
+
+@visibleForTesting
+bool cloudServerHubIdentityChangeBlockedForTesting({
+  required Hub localHub,
+  required String? existingServerInstanceId,
+}) {
+  final localIdentity = _cleanServerInstanceId(localHub.serverInstanceId);
+  final existingIdentity = _cleanServerInstanceId(existingServerInstanceId);
+  return localIdentity != null &&
+      existingIdentity != null &&
+      localIdentity != existingIdentity;
 }
 
 @visibleForTesting

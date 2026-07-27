@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
+import '../screens/settings/light_screen.dart';
 import '../services/matter_removal_flow.dart';
 import 'low_glow_switch.dart';
 import 'room_picker_sheet.dart';
@@ -76,8 +77,7 @@ Future<bool> showDeviceNodeAssignmentFlow(
   if (targetRoomId == null || !context.mounted) return false;
   final targetParentNodeId = targetRoomId.isEmpty ? null : targetRoomId;
   final selectedIsUnassigned = targetParentNodeId == null;
-  final assignmentChanged =
-      targetParentNodeId != normalizedCurrentParentNodeId;
+  final assignmentChanged = targetParentNodeId != normalizedCurrentParentNodeId;
   final activatesStandalone = selectedIsUnassigned &&
       allowNoRoom &&
       device.type == RhythmDeviceType.light;
@@ -348,12 +348,20 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
     );
-    // Low glow (the Standby preference) is a node-level setting. It applies to a
-    // light that is its own addressable node (an "individual bulb" that shows
-    // as its own card) — the same nodes a room's standby toggle governs.
-    final isStandbyCapable = device.type == RhythmDeviceType.light &&
+    // Low glow and profile overrides are node-level settings. Only expose
+    // them for bulbs that the server reports as independently addressable
+    // light nodes.
+    final isLightNode = device.type == RhythmDeviceType.light &&
         context.select<ServerSyncProvider, bool>(
           (sync) => sync.nodeById(device.id) != null,
+        );
+    final lightSettingsSupported = isLightNode &&
+        context.select<ServerSyncProvider, bool>(
+          (sync) => sync.lightProfileOverridesSupportedForNode(device.id),
+        );
+    final hasLightOverrides = isLightNode &&
+        context.select<ServerSyncProvider, bool>(
+          (sync) => sync.hasNodeLightProfileOverrides(device.id),
         );
 
     return Padding(
@@ -448,7 +456,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   _DeviceTab.settings => _buildSettingsTab(
                       context,
                       device,
-                      isStandbyCapable,
+                      isLightNode,
+                      lightSettingsSupported,
+                      hasLightOverrides,
                     ),
                   _DeviceTab.network =>
                     _buildNetworkTab(context, device, canUnpairMatter),
@@ -521,54 +531,34 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     ]);
   }
 
-  /// Per-bulb Low glow preference, backed by the existing Standby contract.
-  Widget _buildOffBehaviorSection(RhythmDevice device) {
-    final standby = context.select<ServerSyncProvider, bool>(
-      (sync) => sync.standbyEnabledForNode(device.id),
-    );
-    return _buildGroup('Low glow', [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Keep softly lit',
-                    style: TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Stays low after motion times out or you turn it off.',
-                    style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                      fontSize: 11,
-                      height: 1.3,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            LowGlowSwitch(
-              value: standby,
-              onChanged: (val) => _setStandbyEnabled(device, val),
-            ),
-          ],
-        ),
-      ),
-    ]);
-  }
-
   void _setStandbyEnabled(RhythmDevice device, bool enabled) {
     final sync = context.read<ServerSyncProvider>();
     sync.setNodeStandbyEnabledLocal(device.id, enabled);
     sync.pushNodePreferences(device.id, standbyEnabled: enabled);
+    HapticFeedback.selectionClick();
+  }
+
+  void _openBulbLightSettings(RhythmDevice device) {
+    HapticFeedback.lightImpact();
+    LightScreen.showForBulb(
+      context,
+      nodeId: device.id,
+      bulbName: _deviceDisplayName,
+    );
+  }
+
+  void _showBulbLightSettingsUnavailable() {
+    HapticFeedback.lightImpact();
+    final version = context.read<ServerSyncProvider>().firmwareVersion;
+    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Update the Rhythm appliance$versionSuffix to customize lighting '
+          'for $_deviceDisplayName.',
+        ),
+      ),
+    );
   }
 
   // ── Tab content ──────────────────────────────────────────────────────────
@@ -577,14 +567,33 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Widget _buildSettingsTab(
     BuildContext context,
     RhythmDevice device,
-    bool isStandbyCapable,
+    bool isLightNode,
+    bool lightSettingsSupported,
+    bool hasLightOverrides,
   ) {
+    final standbyEnabled = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.standbyEnabledForNode(device.id),
+    );
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
       children: [
-        if (isStandbyCapable) ...[
-          _buildOffBehaviorSection(device),
+        if (isLightNode) ...[
+          _buildGroup('', [
+            LightingOverrideRow(
+              nodeId: device.id,
+              supported: lightSettingsSupported,
+              customized: hasLightOverrides,
+              settingsKeyPrefix: 'device-settings-light',
+              onPressed: lightSettingsSupported
+                  ? () => _openBulbLightSettings(device)
+                  : _showBulbLightSettingsUnavailable,
+            ),
+            LowGlowSettingRow(
+              value: standbyEnabled,
+              onChanged: (value) => _setStandbyEnabled(device, value),
+            ),
+          ]),
           const SizedBox(height: 16),
         ],
         if (device.type == RhythmDeviceType.motion) ...[
@@ -1164,18 +1173,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 8),
-          child: Text(
-            title.toUpperCase(),
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.5,
+        if (title.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 8),
+            child: Text(
+              title.toUpperCase(),
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.5,
+              ),
             ),
           ),
-        ),
         Container(
           decoration: BoxDecoration(
             color: CelestialColors.backgroundDark.withValues(alpha: 0.5),

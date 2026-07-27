@@ -136,9 +136,20 @@ Widget _buildTestApp({
   );
 }
 
-Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
+Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
+  if (finder.evaluate().isEmpty) {
+    await tester.scrollUntilVisible(
+      finder,
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+  }
   await tester.ensureVisible(finder);
   await tester.pump();
+}
+
+Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
+  await _scrollTo(tester, finder);
   await tester.tap(finder);
   await tester.pumpAndSettle();
 }
@@ -224,6 +235,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await _scrollTo(tester, find.text('Merge Rooms'));
       expect(find.text('Merge Rooms'), findsOneWidget);
 
       await _tapVisible(tester, find.text('Merge Rooms'));
@@ -236,7 +248,7 @@ void main() {
       );
     });
 
-    testWidgets('shows Add Bulb at the same row size as Add a Room',
+    testWidgets('makes device scanning primary and separates sync from rooms',
         (tester) async {
       serverSyncProvider.matterPairingEnabled = true;
 
@@ -250,18 +262,44 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
 
-      expect(find.text('Add Bulb'), findsOneWidget);
-      expect(find.text('Add Matter Device'), findsNothing);
+      expect(find.text('Scan to Add Device'), findsOneWidget);
+      expect(find.text('NEW HARDWARE'), findsOneWidget);
+      expect(find.text('Add Bulb'), findsNothing);
+      expect(find.text('SYNC FROM A HUB'), findsOneWidget);
+      expect(
+        find.text(
+          'Bring in devices already paired with Home Assistant or Philips Hue.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Sync Devices'), findsOneWidget);
+      expect(find.text('CREATE A ROOM'), findsOneWidget);
+      expect(
+        find.text('Create a Rhythm room for organizing your devices.'),
+        findsOneWidget,
+      );
+      expect(find.text('No hardware'), findsNothing);
+      expect(find.text('Scan any device QR code'), findsOneWidget);
 
-      final addBulbSize = tester.getSize(find.widgetWithText(
-        SettingsRow,
-        'Add Bulb',
-      ));
-      final addRoomSize = tester.getSize(find.widgetWithText(
-        SettingsRow,
-        'Add a Room',
-      ));
-      expect(addBulbSize.height, addRoomSize.height);
+      final scanCardSize = tester.getSize(
+        find.byKey(const ValueKey('add-review-scan-device')),
+      );
+      final addRoomSize = tester.getSize(
+        find.widgetWithText(SettingsRow, 'Add a Room'),
+      );
+      expect(scanCardSize.height, greaterThan(addRoomSize.height));
+      expect(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('add-review-scan-device')),
+            )
+            .dy,
+        lessThan(tester.getTopLeft(find.text('SYNC FROM A HUB')).dy),
+      );
+      expect(
+        tester.getTopLeft(find.text('SYNC FROM A HUB')).dy,
+        lessThan(tester.getTopLeft(find.text('CREATE A ROOM')).dy),
+      );
     });
 
     testWidgets('reconnects after keeping a room binding separate',
@@ -298,6 +336,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await _scrollTo(tester, find.text('Assign Room'));
       expect(find.text('Assign Room'), findsOneWidget);
 
       await _tapVisible(tester, find.text('Assign Room'));
@@ -361,6 +400,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await _scrollTo(tester, find.text('Use Standalone'));
       expect(find.text('Use Standalone'), findsOneWidget);
       await _tapVisible(tester, find.text('Use Standalone'));
 
@@ -384,6 +424,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await _scrollTo(tester, find.text('Ignore Device'));
       expect(find.text('Ignore Device'), findsOneWidget);
       await _tapVisible(tester, find.text('Ignore Device'));
 

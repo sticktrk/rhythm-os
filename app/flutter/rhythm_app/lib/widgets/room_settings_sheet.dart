@@ -16,7 +16,6 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmTimerSetting;
 import '../screens/settings/light_screen.dart';
 import 'device_detail_sheet.dart';
-import 'info_tooltip.dart';
 import 'low_glow_switch.dart';
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
@@ -51,12 +50,11 @@ class RoomSettingsSheet extends StatefulWidget {
   State<RoomSettingsSheet> createState() => _RoomSettingsSheetState();
 }
 
-enum _SheetTab { rhythm, devices, settings }
+enum _SheetTab { light, motion, buttons }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
-  // Opens on the "Settings" tab (internally `rhythm`).
-  _SheetTab _selectedTab = _SheetTab.rhythm;
-  bool _deletingRoom = false;
+  _SheetTab _selectedTab = _SheetTab.light;
+  late String _roomName;
   final Map<String, RhythmTimerSetting> _motionTimeoutDrafts = {};
 
   RoomDto get room => widget.room;
@@ -64,6 +62,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   @override
   void initState() {
     super.initState();
+    _roomName = room.name;
     _refreshLivePreviewState();
   }
 
@@ -72,6 +71,9 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.room.id != widget.room.id) {
       _motionTimeoutDrafts.clear();
+      _roomName = room.name;
+    } else if (oldWidget.room.name != widget.room.name) {
+      _roomName = room.name;
     }
     if (oldWidget.room.id != widget.room.id ||
         oldWidget.enableLivePreview != widget.enableLivePreview) {
@@ -94,7 +96,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     LightScreen.showForRoom(
       context,
       roomId: room.id,
-      roomName: room.name,
+      roomName: _roomName,
     );
   }
 
@@ -105,7 +107,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Update the Rhythm appliance$versionSuffix to customize light settings for ${room.name}.',
+          'Update the Rhythm appliance$versionSuffix to customize light settings for $_roomName.',
         ),
       ),
     );
@@ -130,116 +132,196 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ),
           ],
         ),
-        child: Column(
+        child: Stack(
           children: [
-            // Drag handle
-            Padding(
-              padding: const EdgeInsets.only(top: 12, bottom: 8),
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: CelestialColors.orbitRing,
-                  borderRadius: BorderRadius.circular(2),
+            Column(
+              children: [
+                // Drag handle
+                Padding(
+                  padding: const EdgeInsets.only(top: 12, bottom: 8),
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: CelestialColors.orbitRing,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-            // Header
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-              child: Text(
-                room.name,
-                style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-            if (widget.enableLivePreview) ...[
-              // Room orb preview with live CCT + light output
-              Selector<RoomProvider, (int?, int?, (int, int, int)?, bool)>(
-                selector: (_, rp) {
-                  final r = rp.getRoom(room.id);
-                  return (
-                    rp.getBrightness(room.id),
-                    rp.getKelvin(room.id),
-                    rp.getRoomColor(room.id),
-                    r?.lightsOn ?? false,
-                  );
-                },
-                builder: (context, data, _) {
-                  final (brightness, kelvin, color, lightsOn) = data;
-                  return _AnimatedRoomOrb(
-                    roomId: room.id,
-                    roomName: room.name,
-                    brightness: brightness,
-                    kelvin: kelvin,
-                    directColor: color != null
-                        ? Color.fromARGB(255, color.$1, color.$2, color.$3)
-                        : null,
-                    lightsOn: lightsOn,
-                  );
-                },
-              ),
-              const SizedBox(height: 12),
-            ],
-            // Tab selector
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: SegmentedTabBar<_SheetTab>(
-                selected: _selectedTab,
-                onChanged: (tab) => setState(() => _selectedTab = tab),
-                tabs: const [
-                  SegmentedTab('Settings', _SheetTab.rhythm),
-                  SegmentedTab('Devices', _SheetTab.devices),
-                  SegmentedTab('Info', _SheetTab.settings),
+                _buildRoomHeader(context),
+                if (widget.enableLivePreview) ...[
+                  // Room orb preview with live CCT + light output
+                  Selector<RoomProvider, (int?, int?, (int, int, int)?, bool)>(
+                    selector: (_, rp) {
+                      final r = rp.getRoom(room.id);
+                      return (
+                        rp.getBrightness(room.id),
+                        rp.getKelvin(room.id),
+                        rp.getRoomColor(room.id),
+                        r?.lightsOn ?? false,
+                      );
+                    },
+                    builder: (context, data, _) {
+                      final (brightness, kelvin, color, lightsOn) = data;
+                      return _AnimatedRoomOrb(
+                        roomId: room.id,
+                        roomName: _roomName,
+                        brightness: brightness,
+                        kelvin: kelvin,
+                        directColor: color != null
+                            ? Color.fromARGB(255, color.$1, color.$2, color.$3)
+                            : null,
+                        lightsOn: lightsOn,
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
                 ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Tab content
-            Expanded(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: switch (_selectedTab) {
-                  _SheetTab.rhythm => _buildRhythmContent(context),
-                  _SheetTab.devices => _buildDevicesContent(context),
-                  _SheetTab.settings => _buildSettingsContent(context),
-                },
-              ),
-            ),
-            // Done button — pinned at bottom
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                20,
-                12,
-                20,
-                MediaQuery.of(context).padding.bottom + 16,
-              ),
-              child: SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: CelestialColors.sunWarm,
-                    foregroundColor: CelestialColors.backgroundDark,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(25),
-                    ),
-                    elevation: 0,
+                // Tab selector
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: SegmentedTabBar<_SheetTab>(
+                    key: const ValueKey('room-settings-tabs'),
+                    selected: _selectedTab,
+                    onChanged: (tab) => setState(() => _selectedTab = tab),
+                    tabs: const [
+                      SegmentedTab('Light', _SheetTab.light),
+                      SegmentedTab('Motion', _SheetTab.motion),
+                      SegmentedTab('Buttons', _SheetTab.buttons),
+                    ],
                   ),
-                  child: const Text(
-                    'DONE',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 2.0,
+                ),
+                const SizedBox(height: 16),
+                // Tab content
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 200),
+                    child: switch (_selectedTab) {
+                      _SheetTab.light => _buildLightContent(context),
+                      _SheetTab.motion => _buildMotionContent(context),
+                      _SheetTab.buttons => _buildButtonsContent(context),
+                    },
+                  ),
+                ),
+                // Done button — pinned at bottom
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    20,
+                    12,
+                    20,
+                    MediaQuery.of(context).padding.bottom + 16,
+                  ),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: CelestialColors.sunWarm,
+                        foregroundColor: CelestialColors.backgroundDark,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(25),
+                        ),
+                        elevation: 0,
+                      ),
+                      child: const Text(
+                        'DONE',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 2.0,
+                        ),
+                      ),
                     ),
                   ),
                 ),
+              ],
+            ),
+            Positioned(
+              top: 8,
+              right: 16,
+              child: _buildSourceBadge(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRoomHeader(BuildContext context) {
+    final canRename = room.kind.isRoom || room.kind == RoomNodeKind.lightDevice;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              _roomName,
+              key: const ValueKey('room-settings-room-name'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 19,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+              ),
+            ),
+          ),
+          if (canRename) ...[
+            const SizedBox(width: 5),
+            SizedBox(
+              width: 32,
+              height: 32,
+              child: IconButton(
+                key: const ValueKey('room-settings-rename'),
+                tooltip: room.kind.isRoom ? 'Rename room' : 'Rename light',
+                padding: EdgeInsets.zero,
+                onPressed: () => _showRenameDialog(context),
+                icon: Icon(
+                  Icons.edit_outlined,
+                  size: 17,
+                  color: CelestialColors.sunWarm.withValues(alpha: 0.84),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSourceBadge() {
+    final source = _sourceLabel(room.source);
+    return Semantics(
+      label: 'Source: $source',
+      child: Container(
+        key: const ValueKey('room-settings-source'),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.46),
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.32),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.hub_outlined,
+              size: 11,
+              color: CelestialColors.textSecondary.withValues(alpha: 0.72),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              source,
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ],
@@ -292,50 +374,70 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     );
   }
 
-  Widget _buildRhythmContent(BuildContext context) {
+  Widget _buildLightContent(BuildContext context) {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final hasMotionBehavior = context.select<RoomProvider, bool>(
-      (provider) => provider.hasMotionSensor(room.id),
-    );
-    final node = syncProvider.nodeById(room.id);
-    final settings = node?.profileSettings;
     final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
     final lightSettingsSupported =
         syncProvider.lightProfileOverridesSupportedForNode(room.id);
     final hasLightOverrides =
         syncProvider.hasNodeLightProfileOverrides(room.id);
+    final lights = syncProvider
+        .devicesForRoom(room.id)
+        .where((device) => device.type == RhythmDeviceType.light)
+        .toList(growable: false);
 
     return ListView(
-      key: const ValueKey('rhythm'),
+      key: const ValueKey('light'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
         // Low glow is the user-facing name for the room's existing Standby
         // preference, independent of the Day/Sleep profile selection.
         _buildSettingsGroup('', [
           if (room.kind.isRoom)
-            _buildRoomLightSettingsRow(
+            LightingOverrideRow(
+              nodeId: room.id,
               supported: lightSettingsSupported,
               customized: hasLightOverrides,
+              settingsKeyPrefix: 'room-settings-light',
+              onPressed: lightSettingsSupported
+                  ? _openRoomLightSettings
+                  : _showRoomLightSettingsUnavailable,
             ),
-          _SettingsRow(
-            icon: Icons.bedtime_outlined,
-            label: 'Low glow',
-            labelInfo: const InfoTooltip(
-              eyebrow: 'LOW GLOW',
-              accentColor: Color(0xFF7C83FF),
-              iconSize: 15,
-              message: 'Keep this room softly lit when motion times out or '
-                  'you turn it off. Motion or On restores normal lighting.',
-            ),
-            trailing: LowGlowSwitch(
-              value: standbyEnabled,
-              onChanged: (val) => _setStandbyEnabled(context, val),
-            ),
-            onTap: () => _setStandbyEnabled(context, !standbyEnabled),
+          LowGlowSettingRow(
+            value: standbyEnabled,
+            onChanged: (val) => _setStandbyEnabled(context, val),
           ),
         ]),
-        if (hasMotionBehavior) ...[
+        if (lights.isNotEmpty) ...[
           const SizedBox(height: 16),
+          _buildDeviceGroup('Lights', lights),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildMotionContent(BuildContext context) {
+    final syncProvider = context.watch<ServerSyncProvider>();
+    final hasMotionBehavior = context.select<RoomProvider, bool>(
+      (provider) => provider.hasMotionSensor(room.id),
+    );
+    final settings = syncProvider.nodeById(room.id)?.profileSettings;
+    final devices = syncProvider.devicesForRoom(room.id);
+    final motionSensors = devices
+        .where((device) => device.type == RhythmDeviceType.motion)
+        .toList(growable: false);
+    final contactSensors = devices
+        .where((device) => device.type == RhythmDeviceType.contact)
+        .toList(growable: false);
+
+    return ListView(
+      key: const ValueKey('motion'),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      children: [
+        if (motionSensors.isNotEmpty)
+          _buildDeviceGroup('Motion Sensors', motionSensors),
+        if (hasMotionBehavior) ...[
+          if (motionSensors.isNotEmpty) const SizedBox(height: 16),
           _buildSettingsGroup('Day Profile', [
             _buildMotionTimeoutRow(
               context,
@@ -352,66 +454,28 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ),
           ]),
         ],
+        if (contactSensors.isNotEmpty) ...[
+          if (motionSensors.isNotEmpty || hasMotionBehavior)
+            const SizedBox(height: 16),
+          _buildDeviceGroup('Contact Sensors', contactSensors),
+        ],
       ],
     );
   }
 
-  Widget _buildRoomLightSettingsRow({
-    required bool supported,
-    required bool customized,
-  }) {
-    final status = customized
-        ? 'Custom'
-        : supported
-            ? 'Home'
-            : 'Update required';
-    final semanticsValue = customized
-        ? 'Custom room settings'
-        : supported
-            ? 'Using home settings'
-            : 'Appliance update required';
-    final accent =
-        customized ? const Color(0xFFF9A825) : CelestialColors.textSecondary;
-    final onPressed =
-        supported ? _openRoomLightSettings : _showRoomLightSettingsUnavailable;
+  Widget _buildButtonsContent(BuildContext context) {
+    final buttons = context
+        .watch<ServerSyncProvider>()
+        .devicesForRoom(room.id)
+        .where((device) => device.type == RhythmDeviceType.button)
+        .toList(growable: false);
 
-    return Semantics(
-      key: ValueKey('room-settings-light-settings-${room.id}'),
-      button: true,
-      enabled: supported,
-      excludeSemantics: true,
-      label: 'Light settings',
-      value: semanticsValue,
-      onTap: onPressed,
-      child: _SettingsRow(
-        icon: supported ? Icons.tune_rounded : Icons.system_update_rounded,
-        label: 'Light settings',
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              status,
-              key: ValueKey('room-settings-light-status-${room.id}'),
-              style: TextStyle(
-                color: accent.withValues(
-                  alpha: supported || customized ? 0.92 : 0.58,
-                ),
-                fontSize: 13,
-                fontWeight: customized ? FontWeight.w700 : FontWeight.w500,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Icon(
-              supported
-                  ? Icons.chevron_right_rounded
-                  : Icons.info_outline_rounded,
-              size: 18,
-              color: accent.withValues(alpha: supported ? 0.72 : 0.46),
-            ),
-          ],
-        ),
-        onTap: onPressed,
-      ),
+    return ListView(
+      key: const ValueKey('buttons'),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      children: [
+        if (buttons.isNotEmpty) _buildDeviceGroup('Buttons', buttons),
+      ],
     );
   }
 
@@ -565,107 +629,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     return '${secs}s';
   }
 
-  Widget _buildSettingsContent(BuildContext context) {
-    final syncProvider = context.watch<ServerSyncProvider>();
-    final renameLabel = room.kind.isRoom ? 'Name' : 'Node Name';
-    final canRename = room.kind.isRoom || room.kind == RoomNodeKind.lightDevice;
-    final hideLabel = room.kind == RoomNodeKind.lightDevice
-        ? 'Hide this light'
-        : 'Hide this room';
-    final canDeleteRoom = _canDeleteRoom(syncProvider);
-    return ListView(
-      key: const ValueKey('settings'),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      children: [
-        _buildSettingsGroup('General', [
-          _SettingsRow(
-            icon: Icons.label_outline,
-            label: renameLabel,
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  room.name,
-                  style: const TextStyle(
-                    color: CelestialColors.textSecondary,
-                    fontSize: 14,
-                  ),
-                ),
-                if (canRename) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.edit_outlined,
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-                    size: 14,
-                  ),
-                ],
-              ],
-            ),
-            onTap: canRename ? () => _showRenameDialog(context) : null,
-          ),
-          _SettingsRow(
-            icon: Icons.hub_outlined,
-            label: 'Source',
-            trailing: Text(
-              _sourceLabel(room.source),
-              style: const TextStyle(
-                color: CelestialColors.textSecondary,
-                fontSize: 14,
-              ),
-            ),
-          ),
-          Selector<RoomProvider, bool>(
-            selector: (_, rp) => rp.getRoom(room.id)?.disabled ?? room.disabled,
-            builder: (context, isHidden, _) {
-              return _SettingsRow(
-                icon: Icons.visibility_off_outlined,
-                label: hideLabel,
-                trailing: _ToggleSwitch(
-                  value: isHidden,
-                  onChanged: (val) {
-                    context.read<RoomProvider>().toggleDisabled(room.id);
-                    HapticFeedback.selectionClick();
-                  },
-                ),
-                onTap: () {
-                  context.read<RoomProvider>().toggleDisabled(room.id);
-                  HapticFeedback.selectionClick();
-                },
-              );
-            },
-          ),
-        ]),
-        if (canDeleteRoom) ...[
-          const SizedBox(height: 16),
-          _buildSettingsGroup('Danger', [
-            _SettingsRow(
-              icon: Icons.delete_outline,
-              label: _deletingRoom ? 'Deleting Room...' : 'Delete Room',
-              trailing: _deletingRoom
-                  ? SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.red.shade300,
-                      ),
-                    )
-                  : Text(
-                      'Delete',
-                      style: TextStyle(
-                        color: Colors.red.shade300,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-              onTap: _deletingRoom ? null : () => _confirmDeleteRoom(context),
-            ),
-          ]),
-        ],
-      ],
-    );
-  }
-
   void _setStandbyEnabled(BuildContext context, bool enabled) {
     final syncProvider = context.read<ServerSyncProvider>();
     syncProvider.setNodeStandbyEnabledLocal(room.id, enabled);
@@ -673,24 +636,13 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     HapticFeedback.selectionClick();
   }
 
-  Widget _buildDevicesContent(BuildContext context) {
-    return ListView(
-      key: const ValueKey('devices'),
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      children: [
-        _buildDevicesSection(context),
-      ],
-    );
-  }
-
-  // _buildTogglePlaceholder removed — replaced by _ToggleSwitch widget
-
   Future<void> _showRenameDialog(BuildContext context) async {
-    final controller = TextEditingController(text: room.name);
+    final controller = TextEditingController(text: _roomName);
     final isRoom = room.kind.isRoom;
     final title = isRoom ? 'Rename Room' : 'Rename Bulb';
     final hintText = isRoom ? 'Room name' : 'Bulb name';
-    final newName = await showDialog<String>(
+    final canDeleteRoom = _canDeleteRoom(context.read<ServerSyncProvider>());
+    final result = await showDialog<({String? name, bool delete})>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
@@ -698,25 +650,48 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           title,
           style: const TextStyle(color: CelestialColors.textPrimary),
         ),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: CelestialColors.textPrimary),
-          decoration: InputDecoration(
-            hintText: hintText,
-            hintStyle: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-            ),
-            enabledBorder: UnderlineInputBorder(
-              borderSide: BorderSide(
-                color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              style: const TextStyle(color: CelestialColors.textPrimary),
+              decoration: InputDecoration(
+                hintText: hintText,
+                hintStyle: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                ),
+                enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(
+                    color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+                  ),
+                ),
+                focusedBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: CelestialColors.sunWarm),
+                ),
+              ),
+              onSubmitted: (value) => Navigator.of(ctx).pop(
+                (name: value.trim(), delete: false),
               ),
             ),
-            focusedBorder: const UnderlineInputBorder(
-              borderSide: BorderSide(color: CelestialColors.sunWarm),
-            ),
-          ),
-          onSubmitted: (value) => Navigator.of(ctx).pop(value.trim()),
+            if (canDeleteRoom) ...[
+              const SizedBox(height: 20),
+              TextButton.icon(
+                key: const ValueKey('room-settings-delete-room'),
+                onPressed: () => Navigator.of(ctx).pop(
+                  (name: null, delete: true),
+                ),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.red.shade300,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                label: const Text('Delete Room'),
+              ),
+            ],
+          ],
         ),
         actions: [
           TextButton(
@@ -729,7 +704,9 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ),
           ),
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            onPressed: () => Navigator.of(ctx).pop(
+              (name: controller.text.trim(), delete: false),
+            ),
             child: const Text(
               'Rename',
               style: TextStyle(color: CelestialColors.sunWarm),
@@ -739,9 +716,15 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       ),
     );
 
+    if (result?.delete == true && context.mounted) {
+      await _confirmDeleteRoom(context);
+      return;
+    }
+
+    final newName = result?.name;
     if (newName != null &&
         newName.isNotEmpty &&
-        newName != room.name &&
+        newName != _roomName &&
         context.mounted) {
       final http = context.read<ServerSyncProvider>().api;
       final success = isRoom
@@ -756,7 +739,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         );
         return;
       }
-      http.triggerSync();
+      setState(() => _roomName = newName);
+      unawaited(http.triggerSync());
     }
   }
 
@@ -787,7 +771,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           style: TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          'Delete "${room.name}" from the topology? Any remaining devices in this room will become unassigned.',
+          'Delete "$_roomName" from the topology? Any remaining devices in this room will become unassigned.',
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -819,14 +803,12 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     final syncProvider = context.read<ServerSyncProvider>();
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
-    setState(() => _deletingRoom = true);
 
     final success = await syncProvider.api.topologyDeleteRoom(room.id);
 
     if (!mounted) return;
 
     if (!success) {
-      setState(() => _deletingRoom = false);
       messenger.showSnackBar(
         const SnackBar(content: Text('Room deletion failed')),
       );
@@ -838,40 +820,13 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 
     navigator.pop();
     messenger.showSnackBar(
-      SnackBar(content: Text('Deleted ${room.name}')),
+      SnackBar(content: Text('Deleted $_roomName')),
     );
   }
 
-  Widget _buildDevicesSection(BuildContext context) {
-    final devices = context.read<ServerSyncProvider>().devicesForRoom(room.id);
-    if (devices.isEmpty) {
-      // Fallback: show summary from device IDs count
-      final summary =
-          context.read<ServerSyncProvider>().deviceSummaryForRoom(room.id);
-      if (summary.isEmpty) return const SizedBox.shrink();
-      return _buildSettingsGroup('Devices', [
-        _SettingsRow(
-          icon: Icons.devices_outlined,
-          label: summary,
-          trailing: const SizedBox.shrink(),
-        ),
-      ]);
-    }
-
-    // Sort: lights → buttons → motion
-    final sorted = List<RhythmDevice>.from(devices)
-      ..sort((a, b) {
-        const order = {
-          RhythmDeviceType.light: 0,
-          RhythmDeviceType.button: 1,
-          RhythmDeviceType.motion: 2,
-          RhythmDeviceType.contact: 3,
-        };
-        return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
-      });
-
-    return _buildSettingsGroup('Devices', [
-      for (final device in sorted) _DeviceRow(device: device, roomId: room.id),
+  Widget _buildDeviceGroup(String title, List<RhythmDevice> devices) {
+    return _buildSettingsGroup(title, [
+      for (final device in devices) _DeviceRow(device: device, roomId: room.id),
     ]);
   }
 
@@ -891,70 +846,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 }
 
-/// A single row in the settings sheet.
-class _SettingsRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Widget trailing;
-
-  /// Optional widget rendered immediately to the right of the label (e.g. an
-  /// info affordance), kept on the left side of the row.
-  final Widget? labelInfo;
-  final VoidCallback? onTap;
-
-  const _SettingsRow({
-    required this.icon,
-    required this.label,
-    required this.trailing,
-    this.labelInfo,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
-              size: 20,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Row(
-                children: [
-                  Flexible(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: CelestialColors.textPrimary,
-                        fontSize: 15,
-                      ),
-                    ),
-                  ),
-                  if (labelInfo != null) ...[
-                    const SizedBox(width: 4),
-                    labelInfo!,
-                  ],
-                ],
-              ),
-            ),
-            trailing,
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// A device row in the room settings Devices section.
+/// A device row in the matching room settings device section.
 class _DeviceRow extends StatelessWidget {
   final RhythmDevice device;
   final String roomId;
@@ -1041,52 +933,6 @@ class _DeviceRow extends StatelessWidget {
             const Color(0xFFFFB74D)
           ),
       };
-}
-
-/// Custom toggle switch matching the celestial design system.
-class _ToggleSwitch extends StatelessWidget {
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  const _ToggleSwitch({required this.value, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => onChanged(!value),
-      child: Container(
-        width: 44,
-        height: 26,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(13),
-          color: value
-              ? CelestialColors.sunWarm.withValues(alpha: 0.3)
-              : CelestialColors.orbitRing.withValues(alpha: 0.3),
-          border: Border.all(
-            color: value
-                ? CelestialColors.sunWarm.withValues(alpha: 0.6)
-                : CelestialColors.orbitRing.withValues(alpha: 0.5),
-            width: 1,
-          ),
-        ),
-        child: AnimatedAlign(
-          duration: const Duration(milliseconds: 200),
-          alignment: value ? Alignment.centerRight : Alignment.centerLeft,
-          child: Container(
-            width: 20,
-            height: 20,
-            margin: const EdgeInsets.symmetric(horizontal: 2),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: value
-                  ? CelestialColors.sunWarm
-                  : CelestialColors.textSecondary,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 /// Room power control with live CCT and output visuals.

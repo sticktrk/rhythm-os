@@ -16,6 +16,7 @@ import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/screens/server_disconnected_screen.dart';
 import 'package:rhythm_app/screens/settings/automations_screen.dart';
+import 'package:rhythm_app/screens/settings/light_screen.dart';
 import 'package:rhythm_app/screens/settings/settings_screen.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/widgets/hub_connection_loading_screen.dart';
@@ -926,6 +927,77 @@ void main() {
     expect(find.text('Kitchen'), findsOneWidget);
   });
 
+  testWidgets('navigation fan owns Lighting and Settings no longer lists it',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await _seedRoom(roomProvider);
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+    _emitSyncedHello(connection, withKitchen: true);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _selectNavigationFanItem(tester, 'Lighting');
+
+    final lightingScreen = find.byType(LightScreen);
+    expect(lightingScreen, findsOneWidget);
+    expect(
+      find.descendant(
+        of: lightingScreen,
+        matching: find.text('Lighting'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(SettingsScreen), findsNothing);
+
+    await tester.tap(
+      find.descendant(
+        of: lightingScreen,
+        matching: find.byIcon(Icons.close_rounded),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Kitchen'), findsOneWidget);
+
+    await _selectNavigationFanItem(tester, 'Settings');
+
+    final settingsScreen = find.byType(SettingsScreen);
+    expect(settingsScreen, findsOneWidget);
+    expect(
+      find.descendant(
+        of: settingsScreen,
+        matching: find.text('Your Light'),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: settingsScreen,
+        matching: find.text('Light'),
+      ),
+      findsNothing,
+    );
+  });
+
   testWidgets('settings fan opens report bug flow from the room grid',
       (tester) async {
     final roomProvider = RoomProvider();
@@ -957,10 +1029,12 @@ void main() {
     expect(find.text('Report Bug'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 300));
     final reportBugTop = tester.getTopLeft(find.text('Report Bug')).dy;
-    final presetsTop = tester.getTopLeft(find.text('Presets')).dy;
+    final scheduleTop = tester.getTopLeft(find.text('Schedule')).dy;
+    final lightingTop = tester.getTopLeft(find.text('Lighting')).dy;
     final settingsTop = tester.getTopLeft(find.text('Settings')).dy;
-    expect(reportBugTop, lessThan(presetsTop));
-    expect(presetsTop, lessThan(settingsTop));
+    expect(reportBugTop, lessThan(scheduleTop));
+    expect(scheduleTop, lessThan(lightingTop));
+    expect(lightingTop, lessThan(settingsTop));
 
     await tester.tap(find.text('Report Bug'));
     await tester.pump();
@@ -1138,7 +1212,7 @@ void main() {
 
     // The Automations list reads already-synced provider data, so opening it
     // must not trigger the profile-loading server API.
-    await _selectNavigationFanItem(tester, 'Presets');
+    await _selectNavigationFanItem(tester, 'Schedule');
 
     expect(find.text('Presets'), findsOneWidget);
     expect(api.getModeCallCount, 0);
@@ -1208,7 +1282,7 @@ void main() {
     await serverSync.dispatchSetActiveMode(RhythmMode.day);
     await tester.pump(const Duration(milliseconds: 10));
 
-    await _selectNavigationFanItem(tester, 'Presets');
+    await _selectNavigationFanItem(tester, 'Schedule');
 
     final presetsScreen = find.byType(AutomationsScreen);
     final sleepSegment = find.descendant(

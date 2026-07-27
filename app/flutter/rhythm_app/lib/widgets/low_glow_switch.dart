@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'info_tooltip.dart';
+import 'solar_orbit.dart' show CelestialColors;
 
 /// User-facing toggle for the existing Standby preference.
 ///
@@ -26,6 +28,157 @@ class LowGlowSwitch extends StatelessWidget {
         value: value,
         onChanged: onChanged,
         activeTrackColor: const Color(0xFF7C83FF),
+      ),
+    );
+  }
+}
+
+/// Shared room/bulb row for the node-level Low glow preference.
+class LowGlowSettingRow extends StatelessWidget {
+  const LowGlowSettingRow({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(!value),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        child: Row(
+          children: [
+            Icon(
+              Icons.bedtime_outlined,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      'Low glow',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 4),
+                  InfoTooltip(
+                    eyebrow: 'LOW GLOW',
+                    accentColor: Color(0xFF7C83FF),
+                    iconSize: 15,
+                    message: 'Keep a soft low glow after motion times out or '
+                        'you turn the light off. Motion or On restores normal '
+                        'lighting.',
+                  ),
+                ],
+              ),
+            ),
+            LowGlowSwitch(value: value, onChanged: onChanged),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shared room/bulb entry point for per-node lighting overrides.
+class LightingOverrideRow extends StatelessWidget {
+  const LightingOverrideRow({
+    super.key,
+    required this.nodeId,
+    required this.supported,
+    required this.customized,
+    required this.onPressed,
+    this.settingsKeyPrefix = 'node-lighting',
+  });
+
+  final String nodeId;
+  final bool supported;
+  final bool customized;
+  final VoidCallback onPressed;
+  final String settingsKeyPrefix;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = customized
+        ? 'Custom'
+        : supported
+            ? 'Auto'
+            : 'Update required';
+    final semanticsValue = customized
+        ? 'Custom light settings'
+        : supported
+            ? 'Using automatic settings'
+            : 'Appliance update required';
+    final accent =
+        customized ? const Color(0xFFF9A825) : CelestialColors.textSecondary;
+
+    return Semantics(
+      key: ValueKey('$settingsKeyPrefix-settings-$nodeId'),
+      button: true,
+      enabled: supported,
+      excludeSemantics: true,
+      label: 'Lighting',
+      value: semanticsValue,
+      onTap: onPressed,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          child: Row(
+            children: [
+              Icon(
+                supported ? Icons.tune_rounded : Icons.system_update_rounded,
+                color: CelestialColors.sunWarm.withValues(alpha: 0.8),
+                size: 20,
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Lighting',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+              Text(
+                status,
+                key: ValueKey('$settingsKeyPrefix-status-$nodeId'),
+                style: TextStyle(
+                  color: accent.withValues(
+                    alpha: supported || customized ? 0.92 : 0.58,
+                  ),
+                  fontSize: 13,
+                  fontWeight: customized ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                supported
+                    ? Icons.chevron_right_rounded
+                    : Icons.info_outline_rounded,
+                size: 18,
+                color: accent.withValues(alpha: supported ? 0.72 : 0.46),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -10,9 +10,31 @@ void main() {
       expect(result.payload, 'MT:Y.K908OC16750648G00');
     });
 
+    test('recognizes manually entered Matter setup codes', () {
+      final result = classifyDevicePairingCode('  3497-011-2332  ');
+
+      expect(result.kind, DevicePairingCodeKind.matter);
+      expect(result.payload, '3497-011-2332');
+    });
+
+    test('shared processor prioritizes a usable code', () {
+      final decision = processDevicePairingCodes([
+        'X-HM://0023ISYWY8H2B',
+        '34970112332',
+      ]);
+
+      expect(decision?.canContinue, isTrue);
+      expect(decision?.code.kind, DevicePairingCodeKind.matter);
+      expect(decision?.code.payload, '34970112332');
+    });
+
     test('recognizes HomeKit setup URIs case-insensitively', () {
       expect(
         classifyDevicePairingCode('x-hm://0023ISYWY8H2B').kind,
+        DevicePairingCodeKind.homeKit,
+      );
+      expect(
+        classifyDevicePairingCode('123-45-678').kind,
         DevicePairingCodeKind.homeKit,
       );
     });
@@ -50,11 +72,11 @@ void main() {
       );
       expect(
         guidanceForDevicePairingCode(DevicePairingCodeKind.hue).title,
-        'Pair this bulb in the Hue app',
+        'Pair this device in the Hue app',
       );
       expect(
         guidanceForDevicePairingCode(DevicePairingCodeKind.unknown).title,
-        'Unknown QR code',
+        'Code not recognized',
       );
     });
   });

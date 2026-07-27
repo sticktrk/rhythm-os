@@ -525,7 +525,7 @@ void main() {
       const ValueKey('room-settings-light-settings-room-1'),
     );
     expect(button, findsOneWidget);
-    expect(find.text('Light settings'), findsOneWidget);
+    expect(find.text('Lighting'), findsOneWidget);
     expect(
       tester
           .widget<Text>(
@@ -537,8 +537,8 @@ void main() {
       'Custom',
     );
     final semantics = tester.getSemantics(button);
-    expect(semantics.label, 'Light settings');
-    expect(semantics.value, 'Custom room settings');
+    expect(semantics.label, 'Lighting');
+    expect(semantics.value, 'Custom light settings');
 
     await tester.tap(button);
     await tester.pumpAndSettle();
@@ -2036,6 +2036,11 @@ void main() {
     expect(_jewelSelectionMarker('brightness'), findsOneWidget);
     expect(_jewelSelectionMarker('color'), findsNothing);
     expect(
+      tester.getRect(_jewelLabel('brightness')).top,
+      greaterThanOrEqualTo(brightnessRect.bottom + 8),
+      reason: 'The selected jewel ring must not overlap its label.',
+    );
+    expect(
       tester.getSize(_brightnessSlider()).width,
       closeTo(cardWidth - 24, 0.1),
     );
@@ -2058,6 +2063,11 @@ void main() {
     expect(_cctSlider(), findsOneWidget);
     expect(_jewelSelectionMarker('brightness'), findsNothing);
     expect(_jewelSelectionMarker('color'), findsOneWidget);
+    expect(
+      tester.getRect(_jewelLabel('color')).top,
+      greaterThanOrEqualTo(colorRect.bottom + 8),
+      reason: 'The selected jewel ring must not overlap its label.',
+    );
     expect(
       tester.getSize(_cctSlider()).width,
       closeTo(cardWidth - 24, 0.1),
@@ -2484,15 +2494,15 @@ void main() {
         .decoration as BoxDecoration;
     final scenesGradient = scenesDecoration.gradient as LinearGradient;
     final scenesBorder = scenesDecoration.border! as Border;
-    expect(scenesBorder.top.width, 2.5);
+    expect(scenesBorder.top.width, 1.4);
     final scenesLabelStyle = tester.widget<AnimatedDefaultTextStyle>(
       find.descendant(
         of: _jewelLabel('scenes'),
         matching: find.byType(AnimatedDefaultTextStyle),
       ),
     );
-    expect(scenesLabelStyle.style.fontWeight, FontWeight.w900);
-    expect(scenesLabelStyle.style.decoration, TextDecoration.underline);
+    expect(scenesLabelStyle.style.fontWeight, FontWeight.w800);
+    expect(scenesLabelStyle.style.decoration, isNull);
     const moodBlue = Color.fromARGB(255, 20, 80, 240);
     expect(
       scenesGradient.colors.first,

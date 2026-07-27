@@ -9,6 +9,8 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/providers/subscription_provider.dart';
+import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
@@ -18,6 +20,36 @@ import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+
+class _TestSubscriptionProvider extends ChangeNotifier
+    implements SubscriptionProvider {
+  @override
+  PlanTier get tier => PlanTier.pro;
+
+  @override
+  bool get isPro => true;
+
+  @override
+  bool has(Entitlement e) => !e.isComingSoon;
+
+  @override
+  bool isEligibleFor(Entitlement e) => true;
+
+  @override
+  bool get isDemoOverrideActive => false;
+
+  @override
+  PlanTier? get demoOverride => null;
+
+  @override
+  Future<void> setDemoOverride(PlanTier? tier) async {}
+
+  @override
+  Future<void> changePlan(PlanTier tier) async {}
+
+  @override
+  Future<void> refresh() async {}
+}
 
 class _TestHomeProvider extends HomeProvider {
   _TestHomeProvider(
@@ -104,6 +136,11 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   int topologyDeleteRoomCalls = 0;
   String? lastDeletedRoomId;
   bool topologyDeleteRoomResult = true;
+  int topologyRenameRoomCalls = 0;
+  String? lastRenamedRoomId;
+  String? lastRenamedRoomName;
+  bool topologyRenameRoomResult = true;
+  int triggerSyncCalls = 0;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
   List<RhythmInputBinding> inputBindings = const [];
   int createDaySleepToggleInputBindingCalls = 0;
@@ -549,6 +586,20 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<bool> topologyRenameRoom(String roomId, String name) async {
+    topologyRenameRoomCalls++;
+    lastRenamedRoomId = roomId;
+    lastRenamedRoomName = name;
+    return topologyRenameRoomResult;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> triggerSync() async {
+    triggerSyncCalls++;
+    return const {};
+  }
+
+  @override
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) async {
     return canonicalDevices[id];
   }
@@ -748,6 +799,9 @@ Widget _buildTestApp({
     providers: [
       ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
       ChangeNotifierProvider<ServerSyncProvider>.value(value: provider),
+      ChangeNotifierProvider<SubscriptionProvider>(
+        create: (_) => _TestSubscriptionProvider(),
+      ),
     ],
     child: MaterialApp(
       home: Scaffold(body: child),
@@ -781,7 +835,12 @@ Future<void> _selectRoomSettingsTab(
   WidgetTester tester,
   String label,
 ) async {
-  final labelFinder = find.text(label).last;
+  final labelFinder = find
+      .descendant(
+        of: find.byKey(const ValueKey('room-settings-tabs')),
+        matching: find.text(label),
+      )
+      .first;
   await tester.ensureVisible(labelFinder);
   final tapTarget = tester.getTopLeft(labelFinder) + const Offset(4, 4);
   await tester.tapAt(tapTarget);
@@ -1353,6 +1412,66 @@ void main() {
           'min_brightness': 8,
           'max_brightness': 72,
         },
+      });
+    });
+
+    testWidgets('existing override contract accepts light-device nodes',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'version': '0.6.533-beta',
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.roomLightProfileOverrides],
+            'hubs': const <dynamic>[],
+          },
+          'nodes': [
+            {
+              'id': 'light-1',
+              'name': 'Desk Lamp',
+              'kind': 'light_device',
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+            },
+          ],
+        }),
+      );
+      await tester.pump();
+
+      expect(
+        provider.lightProfileOverridesSupportedForNode('light-1'),
+        isTrue,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'light-1',
+          profileId: 'rhythm',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 64),
+          correlationId: 'bulb-light-settings-123',
+        ),
+        isTrue,
+      );
+      expect(provider.hasNodeLightProfileOverrides('light-1'), isTrue);
+      expect(api.nodeProfileOverrideCalls, hasLength(1));
+      expect(api.nodeProfileOverrideCalls.single.nodeId, 'light-1');
+      expect(api.nodeProfileOverrideCalls.single.profileOverrides, {
+        'rhythm': {'max_brightness': 64},
       });
     });
 
@@ -4238,6 +4357,225 @@ void main() {
     expect(connection.lastReconnectAuthoritative, isTrue);
   });
 
+  testWidgets('room page groups controls and devices into dedicated tabs',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final semantics = tester.ensureSemantics();
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomLightProfileOverrides],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['matter'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'standby_enabled': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'devices': [
+              {'id': 'light-1', 'type': 'light', 'name': 'Ceiling Light'},
+              {'id': 'button-1', 'type': 'button', 'name': 'Wall Button'},
+              {'id': 'motion-1', 'type': 'motion', 'name': 'Entry Motion'},
+              {'id': 'contact-1', 'type': 'contact', 'name': 'Patio Door'},
+            ],
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    roomProvider.markNodeHasSensor('room-1');
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: ['light-1', 'button-1', 'motion-1', 'contact-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    expect(find.text('Light'), findsNWidgets(2));
+    expect(find.text('Motion'), findsOneWidget);
+    expect(find.text('Buttons'), findsOneWidget);
+    expect(find.text('Info'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('room-settings-rename')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-source')),
+      findsOneWidget,
+    );
+    expect(find.text('Matter'), findsOneWidget);
+    expect(find.text('Hide this room'), findsNothing);
+    expect(find.text('Hide this light'), findsNothing);
+    expect(find.text('Lighting'), findsOneWidget);
+    expect(find.text('Low glow'), findsOneWidget);
+    expect(find.text('LIGHTS'), findsOneWidget);
+    expect(find.text('Ceiling Light'), findsOneWidget);
+    expect(find.text('Delete Room'), findsNothing);
+    expect(find.text('Entry Motion'), findsNothing);
+    expect(find.text('Wall Button'), findsNothing);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(
+              const ValueKey('room-settings-light-status-room-1'),
+            ),
+          )
+          .data,
+      'Auto',
+    );
+    expect(
+      tester.getTopLeft(find.text('Lighting')).dy,
+      lessThan(tester.getTopLeft(find.text('LIGHTS')).dy),
+    );
+    final roomNameRect = tester.getRect(
+      find.byKey(const ValueKey('room-settings-room-name')),
+    );
+    final renameRect = tester.getRect(
+      find.byKey(const ValueKey('room-settings-rename')),
+    );
+    final sourceRect = tester.getRect(
+      find.byKey(const ValueKey('room-settings-source')),
+    );
+    expect(renameRect.left, greaterThanOrEqualTo(roomNameRect.right));
+    expect(renameRect.left - roomNameRect.right, lessThanOrEqualTo(8));
+    expect(sourceRect.top, lessThan(roomNameRect.top));
+
+    final lightingSemantics = tester.getSemantics(
+      find.byKey(
+        const ValueKey('room-settings-light-settings-room-1'),
+      ),
+    );
+    expect(lightingSemantics.label, 'Lighting');
+    expect(lightingSemantics.value, 'Using automatic settings');
+
+    await _selectRoomSettingsTab(tester, 'Motion');
+
+    final motionContent = find.byKey(const ValueKey('motion'));
+    expect(
+      find.descendant(
+        of: motionContent,
+        matching: find.text('MOTION SENSORS'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: motionContent, matching: find.text('Entry Motion')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: motionContent, matching: find.text('Motion Timeout')),
+      findsNWidgets(2),
+    );
+    expect(
+      find.descendant(
+        of: motionContent,
+        matching: find.text('CONTACT SENSORS'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: motionContent, matching: find.text('Patio Door')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: motionContent, matching: find.text('Ceiling Light')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: motionContent, matching: find.text('Wall Button')),
+      findsNothing,
+    );
+
+    await _selectRoomSettingsTab(tester, 'Buttons');
+
+    final buttonsContent = find.byKey(const ValueKey('buttons'));
+    expect(
+      find.descendant(of: buttonsContent, matching: find.text('BUTTONS')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: buttonsContent, matching: find.text('Wall Button')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: buttonsContent, matching: find.text('Ceiling Light')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: buttonsContent, matching: find.text('Entry Motion')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('room-settings-rename')));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename Room'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-delete-room')),
+      findsOneWidget,
+    );
+    final deleteActionRect = tester.getRect(
+      find.byKey(const ValueKey('room-settings-delete-room')),
+    );
+    final cancelActionRect = tester.getRect(
+      find.widgetWithText(TextButton, 'Cancel'),
+    );
+    expect(deleteActionRect.bottom, lessThan(cancelActionRect.top));
+
+    await tester.enterText(find.byType(TextField), 'Dining Room');
+    await tester.tap(find.widgetWithText(TextButton, 'Rename'));
+    await tester.pumpAndSettle();
+
+    expect(api.topologyRenameRoomCalls, 1);
+    expect(api.lastRenamedRoomId, 'room-1');
+    expect(api.lastRenamedRoomName, 'Dining Room');
+    expect(api.triggerSyncCalls, 1);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-settings-room-name')),
+          )
+          .data,
+      'Dining Room',
+    );
+    semantics.dispose();
+  });
+
   testWidgets(
       'Hub picker always shows Matter and marks connected Hue and HA hubs',
       (tester) async {
@@ -4714,6 +5052,99 @@ void main() {
     expect(headerText.textAlign, TextAlign.center);
   });
 
+  testWidgets(
+      'addressable bulb uses shared Low glow and opens custom Lighting overrides',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Desk Lamp',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'version': '0.6.533-beta',
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomLightProfileOverrides],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'light-1',
+            'name': 'Desk Lamp',
+            'kind': 'light_device',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'standby_enabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'profile_overrides': {
+                'rhythm': {'max_brightness': 64},
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Desk Lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Lighting'), findsOneWidget);
+    expect(find.text('Custom'), findsOneWidget);
+    expect(find.text('Low glow'), findsOneWidget);
+    expect(find.text('Keep softly lit'), findsNothing);
+
+    await tester.tap(find.text('Low glow'));
+    await tester.pump();
+
+    expect(api.nodePreferenceCalls, hasLength(1));
+    expect(api.nodePreferenceCalls.single.nodeId, 'light-1');
+    expect(api.nodePreferenceCalls.single.standbyEnabled, isTrue);
+    expect(provider.standbyEnabledForNode('light-1'), isTrue);
+
+    await tester.tap(
+      find.byKey(
+        const ValueKey('device-settings-light-settings-light-1'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Light settings · Bulb override'), findsOneWidget);
+    expect(find.text('Custom light settings'), findsOneWidget);
+  });
+
   testWidgets('motion controls lightly select and save multiple rooms',
       (tester) async {
     _registerWidgetCleanup(tester);
@@ -4942,7 +5373,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Devices');
+    await _selectRoomSettingsTab(tester, 'Light');
     await tester.tap(find.text('Desk Lamp').last);
     await tester.pumpAndSettle();
 
@@ -5038,7 +5469,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Devices');
+    await _selectRoomSettingsTab(tester, 'Motion');
     await tester.tap(find.text('Kitchen Motion').last);
     await tester.pumpAndSettle();
 
@@ -5115,8 +5546,10 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Settings');
+    await tester.tap(find.byKey(const ValueKey('room-settings-rename')));
+    await tester.pumpAndSettle();
 
+    expect(find.text('Rename Room'), findsOneWidget);
     expect(find.text('Delete Room'), findsNothing);
     expect(api.topologyDeleteRoomCalls, 0);
   });
@@ -5194,7 +5627,7 @@ void main() {
       'Update required',
     );
     final lightSettingsSemantics = tester.getSemantics(lightSettings);
-    expect(lightSettingsSemantics.label, 'Light settings');
+    expect(lightSettingsSemantics.label, 'Lighting');
     expect(lightSettingsSemantics.value, 'Appliance update required');
 
     await tester.tap(lightSettings);
@@ -5265,7 +5698,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Settings');
+    await _selectRoomSettingsTab(tester, 'Light');
     await tester.tap(find.text('Low glow'));
     await tester.pump();
 
@@ -5386,7 +5819,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Settings');
+    await _selectRoomSettingsTab(tester, 'Light');
 
     expect(find.text('Low glow'), findsOneWidget);
     expect(find.text('DAY PROFILE'), findsNothing);
@@ -5395,7 +5828,7 @@ void main() {
     expect(find.byType(Slider), findsNothing);
   });
 
-  testWidgets('room settings rhythm tab pushes day and sleep motion timeouts',
+  testWidgets('room settings Motion tab pushes day and sleep motion timeouts',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5476,7 +5909,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Settings');
+    await _selectRoomSettingsTab(tester, 'Motion');
     expect(find.text('Motion Timeout'), findsNWidgets(2));
 
     await tester.tap(find.text('10m').first);
@@ -5618,9 +6051,16 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Info');
+    expect(find.text('Delete Room'), findsNothing);
 
-    expect(find.text('Delete Room'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('room-settings-rename')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Rename Room'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-delete-room')),
+      findsOneWidget,
+    );
 
     await tester.tap(find.text('Delete Room'));
     await tester.pump(const Duration(milliseconds: 250));

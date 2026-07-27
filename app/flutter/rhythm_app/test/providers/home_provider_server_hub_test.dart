@@ -247,6 +247,39 @@ void main() {
       expect(merged.serverInstanceId, 'srv-rpiz-a');
     });
 
+    test('cloud import never mixes a tunnel with a conflicting local Box', () {
+      final local = _serverHub(
+        id: '8d9238cf-567f-4507-b69b-cd6fd7a0346e',
+        host: '192.168.0.13',
+        token: 'other-house-token',
+        enabled: true,
+        serverInstanceId: 'srv-db768b1130ef45e69feb13e504e65458',
+      );
+      final cloud = Hub.server(
+        id: local.id,
+        homeId: 'home-1',
+        name: 'Anna Lake Box',
+        host: '192.168.5.10',
+        serverInstanceId: 'srv-0edeba3871eb2955198f015a01c17994',
+        remoteEndpoint: const HubEndpoint(
+          host: '8d9238cf-567f-4507-b69b-cd6fd7a0346e.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+
+      final merged = mergeCloudServerHubForLocalStorageForTesting(
+        cloudHub: cloud,
+        existingHubs: [local],
+      );
+
+      expect(merged.endpoint, cloud.endpoint);
+      expect(merged.remoteEndpoint, cloud.remoteEndpoint);
+      expect(merged.serverInstanceId, cloud.serverInstanceId);
+      expect(merged.token, cloud.token);
+      expect(merged.token, isNot(local.token));
+    });
+
     test('server pairing reuses existing Home by server identity', () {
       final home = Home.create(
         id: 'home-1',

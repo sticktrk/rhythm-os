@@ -571,8 +571,9 @@ class AnalyticsService {
   Future<void> logRoomLightSettingsOpened({
     required bool hasOverrides,
     required int overrideProfileCount,
+    String scope = 'room',
   }) async {
-    await logEvent('room_light_settings_opened', {
+    await logEvent('${scope}_light_settings_opened', {
       'has_overrides': hasOverrides ? 1 : 0,
       'override_profile_count': overrideProfileCount,
     });
@@ -585,8 +586,9 @@ class AnalyticsService {
     required String outcome,
     required int changedFieldCount,
     String? failureStage,
+    String scope = 'room',
   }) async {
-    await logEvent('room_light_settings_save_completed', {
+    await logEvent('${scope}_light_settings_save_completed', {
       'journey_id': journeyId,
       'profile': profile,
       'outcome': outcome,
@@ -601,8 +603,9 @@ class AnalyticsService {
     required String profile,
     required String outcome,
     String? failureStage,
+    String scope = 'room',
   }) async {
-    await logEvent('room_light_settings_reset_completed', {
+    await logEvent('${scope}_light_settings_reset_completed', {
       'journey_id': journeyId,
       'profile': profile,
       'outcome': outcome,

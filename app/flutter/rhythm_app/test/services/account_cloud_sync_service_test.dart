@@ -479,6 +479,31 @@ void main() {
       );
     });
 
+    test('blocks replacing the identity of an existing cloud hub', () {
+      final localHub = Hub.server(
+        id: '8d9238cf-567f-4507-b69b-cd6fd7a0346e',
+        homeId: 'b34cf80f-4373-4498-a675-9415ce450868',
+        name: 'Anna Lake Box',
+        host: '192.168.0.13',
+        serverInstanceId: 'srv-db768b1130ef45e69feb13e504e65458',
+      );
+
+      expect(
+        cloudServerHubIdentityChangeBlockedForTesting(
+          localHub: localHub,
+          existingServerInstanceId: 'srv-0edeba3871eb2955198f015a01c17994',
+        ),
+        isTrue,
+      );
+      expect(
+        cloudServerHubIdentityChangeBlockedForTesting(
+          localHub: localHub,
+          existingServerInstanceId: localHub.serverInstanceId,
+        ),
+        isFalse,
+      );
+    });
+
     test('groups account Homes with their server hubs', () {
       final homeA = Home.create(
         id: 'd5f28205-02de-4a39-a7fc-35777e4964c7',

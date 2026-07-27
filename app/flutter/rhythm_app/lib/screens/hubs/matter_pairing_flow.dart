@@ -8,6 +8,7 @@ import '../../providers/server_sync_provider.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/device_detail_sheet.dart';
+import 'device_pairing_code_entry_screen.dart';
 import 'device_pairing_scanner_screen.dart';
 import 'matter_add_method.dart';
 import 'matter_device_add_screen.dart';
@@ -37,7 +38,23 @@ Future<void> startMatterPairingFlow(
   if (!context.mounted) return;
 
   MatterDevicePairingResult? pairingResult;
-  if (!supportsDevicePairingCamera) {
+  while (pairingResult == null) {
+    if (!context.mounted) return;
+
+    DevicePairingScannerResult? intakeResult;
+    if (supportsDevicePairingCamera) {
+      final scanResult = await DevicePairingScannerScreen.show(context);
+      if (!context.mounted || scanResult == null) return;
+      intakeResult = scanResult.action == DevicePairingScannerAction.enterCode
+          ? await DevicePairingCodeEntryScreen.show(context)
+          : scanResult;
+      if (!context.mounted) return;
+      if (intakeResult == null) continue;
+    } else {
+      intakeResult = await DevicePairingCodeEntryScreen.show(context);
+      if (!context.mounted || intakeResult == null) return;
+    }
+
     pairingResult = await MatterDeviceAddScreen.show(
       context,
       endpoint: serverEndpoint.endpoint,
@@ -45,28 +62,11 @@ Future<void> startMatterPairingFlow(
       addMethod: addMethod,
       analyticsSource: analyticsSource,
       journeyId: journeyId,
+      initialSetupPayload: intakeResult.payload,
+      initialInputMethod: intakeResult.inputMethod,
     );
-  } else {
-    while (pairingResult == null) {
-      if (!context.mounted) return;
-      final scanResult = await DevicePairingScannerScreen.show(context);
-      if (!context.mounted || scanResult == null) return;
-
-      pairingResult = await MatterDeviceAddScreen.show(
-        context,
-        endpoint: serverEndpoint.endpoint,
-        authToken: serverEndpoint.hub.token,
-        addMethod: addMethod,
-        analyticsSource: analyticsSource,
-        journeyId: journeyId,
-        initialSetupPayload:
-            scanResult.action == DevicePairingScannerAction.matter
-                ? scanResult.payload
-                : null,
-      );
-    }
   }
-  if (!context.mounted || pairingResult == null) return;
+  if (!context.mounted) return;
 
   if (HueServiceLocator.isDemoMode) {
     await syncProvider.fullRefresh();

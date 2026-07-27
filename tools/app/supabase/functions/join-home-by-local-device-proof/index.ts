@@ -47,6 +47,11 @@ type DeviceTokenRow = {
   token_hash: string
 }
 
+type JoinProofVerification =
+  | { status: 'verified'; tokenRow: DeviceTokenRow }
+  | { status: 'binding_missing' }
+  | { status: 'invalid' }
+
 type JoinProof = {
   proof_version: string
   algorithm: string
@@ -88,10 +93,17 @@ Deno.serve((req) =>
       const proof = readJoinProof(body, serverInstanceId)
       if (proof instanceof Response) return proof
 
-      const tokenRow = await verifyJoinProof(adminClient, proof)
-      if (!tokenRow) {
+      const verification = await verifyJoinProof(adminClient, proof)
+      if (verification.status === 'binding_missing') {
+        return jsonResponse({
+          code: 'device_binding_missing',
+          error: 'The Box cloud binding no longer exists',
+        }, 404)
+      }
+      if (verification.status === 'invalid') {
         return jsonResponse({ error: 'Invalid local device proof' }, 403)
       }
+      const tokenRow = verification.tokenRow
 
       const stillAuthorized = await deviceTokenStillAuthorized(
         adminClient,
@@ -131,8 +143,10 @@ Deno.serve((req) =>
 async function verifyJoinProof(
   adminClient: any,
   proof: JoinProof,
-): Promise<DeviceTokenRow | null> {
+): Promise<JoinProofVerification> {
   const rows = await fetchCandidateDeviceTokens(adminClient, proof)
+  if (rows.length === 0) return { status: 'binding_missing' }
+
   for (const row of rows) {
     if (row.home_id !== proof.home_id || row.hub_id !== proof.hub_id) continue
     const identity = resolveServerIdentity(
@@ -142,9 +156,11 @@ async function verifyJoinProof(
     if (identity.status === 'conflict') continue
 
     const expected = await joinProofSignature(row.token_hash, proof)
-    if (constantTimeEqualHex(expected, proof.signature)) return row
+    if (constantTimeEqualHex(expected, proof.signature)) {
+      return { status: 'verified', tokenRow: row }
+    }
   }
-  return null
+  return { status: 'invalid' }
 }
 
 async function fetchCandidateDeviceTokens(

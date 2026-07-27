@@ -2749,6 +2749,11 @@ class RhythmServerHubManagementSection extends StatefulWidget {
     this.showConfigured = true,
     this.showAddOptions = true,
     this.showMatterAddOption = true,
+    this.addOptionsTitle = 'Add Device',
+    this.addOptionsSubtitle,
+    this.resyncLabel = 'Re-Sync',
+    this.resyncBusyLabel = 'Re-Syncing…',
+    this.resyncTrailingLabel = 'Add paired bulbs',
     this.onResynced,
   });
 
@@ -2761,8 +2766,15 @@ class RhythmServerHubManagementSection extends StatefulWidget {
   final bool showAddOptions;
 
   /// Render the direct Matter pairing row. Add & Review owns its universal
-  /// Add Bulb row, while Devices settings keeps the existing direct option.
+  /// device-scanning card, while Devices settings keeps the direct option.
   final bool showMatterAddOption;
+
+  /// Copy used when this section is presented as a hub-sync destination.
+  final String addOptionsTitle;
+  final String? addOptionsSubtitle;
+  final String resyncLabel;
+  final String resyncBusyLabel;
+  final String resyncTrailingLabel;
 
   /// Called after a "Re-Sync" completes, so a host (e.g. the Add & Review
   /// screen) can reload anything derived from the fresh device data.
@@ -2961,7 +2973,8 @@ class _RhythmServerHubManagementSectionState
     // Matter *can* be added directly, so it sits in its own card below the
     // read-only group (Re-Sync doesn't apply to it).
     return _buildSection(
-      title: 'Add Device',
+      title: widget.addOptionsTitle,
+      subtitle: widget.addOptionsSubtitle,
       children: [
         card([
           _buildHubOptionRow(
@@ -3016,7 +3029,7 @@ class _RhythmServerHubManagementSectionState
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                _isResyncing ? 'Re-Syncing…' : 'Re-Sync',
+                _isResyncing ? widget.resyncBusyLabel : widget.resyncLabel,
                 style: const TextStyle(
                   color: accent,
                   fontSize: 14,
@@ -3025,7 +3038,7 @@ class _RhythmServerHubManagementSectionState
               ),
             ),
             Text(
-              'Add paired bulbs',
+              widget.resyncTrailingLabel,
               style: TextStyle(
                 color: CelestialColors.textSecondary.withValues(alpha: 0.5),
                 fontSize: 12,
@@ -3257,21 +3270,39 @@ class _RhythmServerHubManagementSectionState
 
   Widget _buildSection({
     required String title,
+    String? subtitle,
     required List<Widget> children,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 10),
-          child: Text(
-            title,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0.8,
-            ),
+          padding: const EdgeInsets.only(left: 4, right: 4, bottom: 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              if (subtitle != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.58),
+                    fontSize: 13,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ],
           ),
         ),
         ...children,

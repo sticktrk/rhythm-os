@@ -10,16 +10,27 @@ import '../../widgets/solar_orbit.dart';
 enum DevicePairingScannerAction { matter, enterCode }
 
 class DevicePairingScannerResult {
-  const DevicePairingScannerResult._({required this.action, this.payload});
+  const DevicePairingScannerResult._({
+    required this.action,
+    this.payload,
+    this.inputMethod = 'camera',
+  });
 
-  const DevicePairingScannerResult.matter(String payload)
-      : this._(action: DevicePairingScannerAction.matter, payload: payload);
+  const DevicePairingScannerResult.matter(
+    String payload, {
+    String inputMethod = 'camera',
+  }) : this._(
+          action: DevicePairingScannerAction.matter,
+          payload: payload,
+          inputMethod: inputMethod,
+        );
 
   const DevicePairingScannerResult.enterCode()
       : this._(action: DevicePairingScannerAction.enterCode);
 
   final DevicePairingScannerAction action;
   final String? payload;
+  final String inputMethod;
 }
 
 typedef DevicePairingCameraBuilder = Widget Function(
@@ -118,17 +129,9 @@ class _DevicePairingScannerScreenState
   void _handleRawValues(Iterable<String> values) {
     if (_handledDetection) return;
 
-    final codes = values
-        .map(classifyDevicePairingCode)
-        .where((code) => code.payload.isNotEmpty)
-        .toList();
-    if (codes.isEmpty) return;
-
-    final code = codes.cast<DevicePairingCode?>().firstWhere(
-              (candidate) => candidate?.kind == DevicePairingCodeKind.matter,
-              orElse: () => null,
-            ) ??
-        codes.first;
+    final decision = processDevicePairingCodes(values);
+    if (decision == null) return;
+    final code = decision.code;
 
     _handledDetection = true;
     if (code.kind == DevicePairingCodeKind.matter) {
@@ -149,7 +152,7 @@ class _DevicePairingScannerScreenState
     );
     HapticFeedback.lightImpact();
     setState(() {
-      _guidance = guidanceForDevicePairingCode(code.kind);
+      _guidance = decision.guidance;
     });
   }
 
@@ -209,7 +212,7 @@ class _DevicePairingScannerScreenState
                       ),
                       SizedBox(height: compact ? 14 : 24),
                       Text(
-                        'Scan the code on your bulb',
+                        'Scan any device QR code',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white,
@@ -220,7 +223,8 @@ class _DevicePairingScannerScreenState
                       if (!compactGuidance) ...[
                         SizedBox(height: compact ? 4 : 8),
                         Text(
-                          'Rhythm recognizes Matter, HomeKit, and Philips Hue codes.',
+                          'Rhythm will identify the code and continue when it '
+                          'can.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.72),
@@ -264,7 +268,7 @@ class _DevicePairingScannerScreenState
         ),
         const Expanded(
           child: Text(
-            'Add Bulb',
+            'Add Device',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: Colors.white,

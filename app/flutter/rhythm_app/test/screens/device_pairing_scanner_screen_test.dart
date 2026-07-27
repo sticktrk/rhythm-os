@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/backend/backend.dart';
+import 'package:rhythm_app/screens/hubs/device_pairing_code_entry_screen.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
 
@@ -44,7 +45,7 @@ void main() {
 
     await tester.pumpWidget(buildScanner());
 
-    expect(find.text('Add Bulb'), findsOneWidget);
+    expect(find.text('Add Device'), findsOneWidget);
     expect(find.byTooltip('Back to Add & Review'), findsOneWidget);
     expect(find.text('Enter a Code'), findsOneWidget);
   });
@@ -55,7 +56,7 @@ void main() {
 
     await tester.pumpWidget(buildScanner());
 
-    expect(find.text('Scan the code on your bulb'), findsOneWidget);
+    expect(find.text('Scan any device QR code'), findsOneWidget);
     expect(find.text('Enter a Code'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
@@ -81,13 +82,13 @@ void main() {
       await tester.pump();
       detect(const ['https://www.philips-hue.com/connectproduct']);
       await tester.pump();
-      expect(find.text('Pair this bulb in the Hue app'), findsOneWidget);
+      expect(find.text('Pair this device in the Hue app'), findsOneWidget);
 
       await tester.tap(find.text('Scan Another Code'));
       await tester.pump();
       detect(const ['https://example.com/not-a-pairing-code']);
       await tester.pump();
-      expect(find.text('Unknown QR code'), findsOneWidget);
+      expect(find.text('Code not recognized'), findsOneWidget);
     },
   );
 
@@ -128,6 +129,7 @@ void main() {
 
     expect(result?.action, DevicePairingScannerAction.matter);
     expect(result?.payload, 'MT:Y.K908OC16750648G00');
+    expect(result?.inputMethod, 'camera');
     final event = analyticsBackend.events.singleWhere(
       (event) => event.name == 'device_pairing_code_detected',
     );
@@ -139,5 +141,63 @@ void main() {
       event.properties.values,
       isNot(contains('MT:Y.K908OC16750648G00')),
     );
+  });
+
+  testWidgets('manual entry identifies codes through the shared processor',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await Navigator.of(context)
+                    .push<DevicePairingScannerResult>(
+                  MaterialPageRoute(
+                    builder: (_) => const DevicePairingCodeEntryScreen(),
+                  ),
+                );
+              },
+              child: const Text('Enter manually'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Enter manually'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter a Code'), findsOneWidget);
+    expect(find.text('Enter any setup code'), findsOneWidget);
+    expect(find.text('Identify & Continue'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      'X-HM://0023ISYWY8H2B',
+    );
+    tester.testTextInput.hide();
+    await tester.ensureVisible(find.text('Identify & Continue'));
+    await tester.pump();
+    await tester.tap(find.text('Identify & Continue'));
+    await tester.pump();
+    expect(find.text('HomeKit isn’t supported'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      '3497-011-2332',
+    );
+    await tester.ensureVisible(find.text('Identify & Continue'));
+    await tester.pump();
+    await tester.tap(find.text('Identify & Continue'));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.matter);
+    expect(result?.payload, '3497-011-2332');
+    expect(result?.inputMethod, 'manual_code');
   });
 }

@@ -3,6 +3,16 @@ import 'package:rhythm_app/services/cloud_home_join_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
+  test('local identity unavailable explains that LAN verification is required',
+      () {
+    const error = CloudHomeJoinBlockedException(
+      code: 'local_identity_unavailable',
+    );
+
+    expect(error.userMessage, contains('same local network'));
+    expect(error.userMessage, contains('before opening it'));
+  });
+
   group('CloudHomeJoinService', () {
     test('parses joined cloud Home using LAN endpoint and owner token', () {
       final entry = joinedHomeFromFunctionResponseForTesting(
@@ -64,6 +74,16 @@ void main() {
         CloudHomeJoinBlockedException(code: result.code).userMessage,
         contains('new Home'),
       );
+    });
+
+    test('missing device bindings permit a new canonical Home', () {
+      final result = cloudHomeJoinFailureResultForTesting({
+        'code': 'device_binding_missing',
+        'error': 'The Box cloud binding no longer exists',
+      });
+
+      expect(result.disposition, CloudHomeJoinDisposition.notAttempted);
+      expect(result.canCreateHome, isTrue);
     });
 
     test('only a join that was not attempted permits Home creation', () {

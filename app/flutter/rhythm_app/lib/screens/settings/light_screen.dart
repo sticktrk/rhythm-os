@@ -7,11 +7,14 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../widgets/header_close_button.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 import '../../widgets/time_simulator.dart';
 import 'light_profile_screen.dart';
 
-/// The "Light" tab — the *look* of each mode, presented as a stack of
+enum LightOverrideScope { room, bulb }
+
+/// The "Lighting" destination — the *look* of each mode, presented as a stack of
 /// collapsible **profile layers**.
 ///
 /// Each profile (Day, Sleep, …) is one "layer" card: collapsed it shows a live
@@ -22,15 +25,22 @@ class LightScreen extends StatefulWidget {
   const LightScreen({
     super.key,
     this.showBackButton = false,
+    this.onClose,
     this.roomId,
     this.roomName,
+    this.overrideScope = LightOverrideScope.room,
   });
 
-  /// When pushed as its own route (e.g. from Settings) the header shows a back
-  /// affordance; as an embedded tab body it doesn't.
+  /// When pushed as its own route the header shows a back affordance; as an
+  /// embedded tab body it doesn't.
   final bool showBackButton;
+
+  /// Returns an embedded top-level Lighting destination to Home.
+  final VoidCallback? onClose;
+
   final String? roomId;
   final String? roomName;
+  final LightOverrideScope overrideScope;
 
   bool get isRoomScoped => roomId != null;
 
@@ -72,12 +82,42 @@ class LightScreen extends StatefulWidget {
     );
   }
 
+  /// Pushes the Light editor scoped to one addressable bulb's overrides.
+  static Future<void> showForBulb(
+    BuildContext context, {
+    required String nodeId,
+    required String bulbName,
+  }) {
+    final overrides = context
+            .read<ServerSyncProvider>()
+            .nodeById(nodeId)
+            ?.profileSettings
+            ?.profileOverrides ??
+        const <String, RhythmLightProfileNodeOverride>{};
+    AnalyticsService().logRoomLightSettingsOpened(
+      hasOverrides: overrides.values.any((override) => !override.isEmpty),
+      overrideProfileCount:
+          overrides.values.where((override) => !override.isEmpty).length,
+      scope: 'bulb',
+    );
+    return Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LightScreen(
+          showBackButton: true,
+          roomId: nodeId,
+          roomName: bulbName,
+          overrideScope: LightOverrideScope.bulb,
+        ),
+      ),
+    );
+  }
+
   @override
   State<LightScreen> createState() => _LightScreenState();
 }
 
 /// Static description of a profile layer. The ordered list here is the single
-/// place new profiles are introduced on the Light tab.
+/// place new profiles are introduced on the Lighting destination.
 class _ProfileLayer {
   final String id;
   final String name;
@@ -113,6 +153,12 @@ class _LightScreenState extends State<LightScreen> {
   // Accordion: a single layer is expanded at a time. Defaults to the first.
   String? _expandedId = _kProfileLayers.first.id;
   bool _resettingRoom = false;
+
+  bool get _isBulbScoped => widget.overrideScope == LightOverrideScope.bulb;
+  String get _scopeName =>
+      widget.roomName ?? (_isBulbScoped ? 'This bulb' : 'This room');
+  String get _scopeNoun => _isBulbScoped ? 'Bulb' : 'Room';
+  String get _analyticsScope => _isBulbScoped ? 'bulb' : 'room';
 
   void _toggle(String id) {
     HapticFeedback.selectionClick();
@@ -170,6 +216,7 @@ class _LightScreenState extends State<LightScreen> {
                               embedded: true,
                               roomId: widget.roomId,
                               roomName: widget.roomName,
+                              overrideScope: _analyticsScope,
                             ),
                           ),
                         // The Time Simulator scrubs the Day curve, so it only
@@ -211,7 +258,7 @@ class _LightScreenState extends State<LightScreen> {
               ),
               const SizedBox(height: 2),
               Text(
-                'Light settings · Room override',
+                'Light settings · $_scopeNoun override',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.78),
@@ -223,7 +270,7 @@ class _LightScreenState extends State<LightScreen> {
             ],
           )
         : const Text(
-            'Light',
+            'Lighting',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: CelestialColors.textPrimary,
@@ -234,6 +281,18 @@ class _LightScreenState extends State<LightScreen> {
           );
 
     if (!widget.showBackButton) {
+      if (widget.onClose != null) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+          child: Row(
+            children: [
+              HeaderCloseButton(onTap: widget.onClose!),
+              Expanded(child: title),
+              const SizedBox(width: 40),
+            ],
+          ),
+        );
+      }
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         alignment: Alignment.center,
@@ -328,7 +387,7 @@ class _LightScreenState extends State<LightScreen> {
                   supported
                       ? hasOverrides
                           ? 'Custom light settings'
-                          : 'Following home settings'
+                          : 'Automatic lighting'
                       : 'Appliance update required',
                   style: const TextStyle(
                     color: CelestialColors.textPrimary,
@@ -340,9 +399,9 @@ class _LightScreenState extends State<LightScreen> {
                 Text(
                   supported
                       ? hasOverrides
-                          ? 'Only changed values differ from the rest of your home.'
-                          : 'Changes to home Day and Sleep profiles flow into this room.'
-                      : 'Room light overrides are not supported by this appliance.',
+                          ? 'Only changed values differ from automatic Day and Sleep lighting.'
+                          : 'Automatic Day and Sleep settings flow into this ${_isBulbScoped ? 'bulb' : 'room'}.'
+                      : 'Light overrides are not supported by this appliance.',
                   style: TextStyle(
                     color:
                         CelestialColors.textSecondary.withValues(alpha: 0.78),
@@ -376,7 +435,7 @@ class _LightScreenState extends State<LightScreen> {
                       ),
                     )
                   : const Text(
-                      'Use home',
+                      'Use auto',
                       style: TextStyle(fontWeight: FontWeight.w600),
                     ),
             ),
@@ -392,13 +451,12 @@ class _LightScreenState extends State<LightScreen> {
       builder: (dialogContext) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
         title: const Text(
-          'Use home light settings?',
+          'Use automatic light settings?',
           style: TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          '${widget.roomName ?? 'This room'} will follow the home Day and '
-          'Sleep settings again. Room scenes, motion activation, and power '
-          'state stay unchanged.',
+          '$_scopeName will follow automatic Day and Sleep lighting again. '
+          'Other settings and power state stay unchanged.',
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -408,14 +466,14 @@ class _LightScreenState extends State<LightScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Use home settings'),
+            child: const Text('Use automatic settings'),
           ),
         ],
       ),
     );
     if (confirmed != true || !mounted) return;
 
-    final journeyId = 'room-light-settings-${_uuid.v4()}';
+    final journeyId = '$_analyticsScope-light-settings-${_uuid.v4()}';
     setState(() => _resettingRoom = true);
     final succeeded =
         await context.read<ServerSyncProvider>().resetNodeLightProfileOverrides(
@@ -429,13 +487,14 @@ class _LightScreenState extends State<LightScreen> {
       profile: 'all',
       outcome: succeeded ? 'succeeded' : 'failed',
       failureStage: succeeded ? null : 'request',
+      scope: _analyticsScope,
     );
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           succeeded
-              ? '${widget.roomName ?? 'Room'} now follows home light settings.'
-              : 'Room light settings could not be reset.',
+              ? '$_scopeName now follows automatic light settings.'
+              : '$_scopeNoun light settings could not be reset.',
         ),
       ),
     );

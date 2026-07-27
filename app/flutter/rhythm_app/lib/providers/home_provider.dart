@@ -990,6 +990,7 @@ class HomeProvider extends ChangeNotifier {
     String? serverInstanceId,
     HomeLocation? location,
     String? timezone,
+    bool reuseExistingHome = true,
   }) async {
     final userId = currentUserId;
     if (userId == null) {
@@ -1000,13 +1001,15 @@ class HomeProvider extends ChangeNotifier {
 
     Home? home;
     try {
-      final existingHome = await _existingHomeForServerHubPairing(
-        host: host,
-        port: port,
-        token: token,
-        serverInstanceId: serverInstanceId,
-        hubName: hubName,
-      );
+      final existingHome = reuseExistingHome
+          ? await _existingHomeForServerHubPairing(
+              host: host,
+              port: port,
+              token: token,
+              serverInstanceId: serverInstanceId,
+              hubName: hubName,
+            )
+          : null;
       if (existingHome != null) {
         debugPrint(
           'HomeProvider: reusing Home ${existingHome.home.id} for '
@@ -1378,6 +1381,17 @@ Hub mergeCloudServerHubForLocalStorageForTesting({
         orElse: () => null,
       );
   if (existing == null) return cloudHub;
+
+  final existingIdentity = normalizeServerIdentity(existing.serverInstanceId);
+  final cloudIdentity = normalizeServerIdentity(cloudHub.serverInstanceId);
+  if (existingIdentity != null &&
+      cloudIdentity != null &&
+      existingIdentity != cloudIdentity) {
+    // Never combine a cloud tunnel/identity with local credentials belonging
+    // to different physical hardware, even when a stale row reused the same
+    // hub UUID.
+    return cloudHub;
+  }
 
   final existingToken = existing.token?.trim();
   final cloudRemote = cloudHub.remoteEndpoint;

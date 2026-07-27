@@ -257,24 +257,34 @@ class _TriageScreenState extends State<TriageScreen> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        // ── Add ─────────────────────────────────────────────────────────
+        // Adding new hardware is the primary job of this screen.
+        if (serverSync.canAddMatterDevice) ...[
+          _buildAddDeviceCard(),
+          const SizedBox(height: 30),
+        ],
+        // Third-party hubs bring in devices that are already paired elsewhere.
         RhythmServerHubManagementSection(
           showConfigured: false,
           showMatterAddOption: false,
+          addOptionsTitle: 'SYNC FROM A HUB',
+          addOptionsSubtitle:
+              'Bring in devices already paired with Home Assistant or '
+              'Philips Hue.',
+          resyncLabel: 'Sync Devices',
+          resyncBusyLabel: 'Syncing…',
+          resyncTrailingLabel: 'Pull in paired hardware',
           onResynced: () => _loadEntries(),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 30),
+        _sectionHeading(
+          'Create a Room',
+          subtitle: 'Create a Rhythm room for organizing your devices.',
+        ),
+        const SizedBox(height: 10),
         SettingsGroup(
           children: [
-            if (serverSync.canAddMatterDevice)
-              SettingsRow(
-                icon: Icons.lightbulb_outline_rounded,
-                iconColor: const Color(0xFF26A69A),
-                label: 'Add Bulb',
-                onTap: () => _addBulb(),
-              ),
             SettingsRow(
-              icon: Icons.meeting_room_outlined,
+              icon: Icons.add_home_outlined,
               iconColor: const Color(0xFF7C83FF),
               label: 'Add a Room',
               onTap: () => _addRoom(),
@@ -317,7 +327,156 @@ class _TriageScreenState extends State<TriageScreen> {
         ),
       );
 
-  Future<void> _addBulb() async {
+  Widget _sectionHeading(String title, {String? subtitle}) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title.toUpperCase(),
+              style: TextStyle(
+                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.2,
+              ),
+            ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.58),
+                  fontSize: 13,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+
+  Widget _buildAddDeviceCard() {
+    const accent = Color(0xFF26A69A);
+    const accentBright = Color(0xFF4DD0C8);
+    return Semantics(
+      key: const ValueKey('add-review-scan-device'),
+      button: true,
+      excludeSemantics: true,
+      label: 'Scan to Add Device',
+      hint: 'Scan any device QR code to identify and add new hardware',
+      onTap: _scanToAddDevice,
+      child: Material(
+        color: Colors.transparent,
+        child: Ink(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                accent.withValues(alpha: 0.30),
+                CelestialColors.accentBlue.withValues(alpha: 0.13),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: accentBright.withValues(alpha: 0.72),
+              width: 1.4,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: accent.withValues(alpha: 0.16),
+                blurRadius: 22,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: _scanToAddDevice,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 17, 16, 17),
+              child: Row(
+                children: [
+                  Container(
+                    width: 54,
+                    height: 54,
+                    decoration: BoxDecoration(
+                      color: accentBright,
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: accent.withValues(alpha: 0.36),
+                          blurRadius: 14,
+                        ),
+                      ],
+                    ),
+                    child: const Icon(
+                      Icons.qr_code_scanner_rounded,
+                      color: Color(0xFF092D2A),
+                      size: 28,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'NEW HARDWARE',
+                          style: TextStyle(
+                            color: accentBright,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        SizedBox(height: 3),
+                        Text(
+                          'Scan to Add Device',
+                          style: TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.25,
+                          ),
+                        ),
+                        SizedBox(height: 5),
+                        Text(
+                          'Scan any device QR code',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary,
+                            fontSize: 13,
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: accentBright.withValues(alpha: 0.16),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.arrow_forward_rounded,
+                      color: accentBright,
+                      size: 19,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _scanToAddDevice() async {
     await startMatterPairingFlow(
       context,
       analyticsSource: 'add_review',

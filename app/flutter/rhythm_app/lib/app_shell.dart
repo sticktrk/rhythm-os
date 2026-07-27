@@ -18,6 +18,7 @@ import 'screens/triage_screen.dart';
 import 'screens/server_disconnected_screen.dart';
 import 'screens/settings/automations_screen.dart';
 import 'screens/settings/dialogs/sign_in_modal.dart';
+import 'screens/settings/light_screen.dart';
 import 'screens/settings/settings_screen.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
@@ -41,9 +42,9 @@ import 'widgets/virtual_experience_banner.dart';
 
 /// Main app shell.
 ///
-/// Persistent 3-tab bottom navigation bar with an [IndexedStack] body.  Each
-/// tab owns its own [Navigator] so deeper pushes (e.g. Devices → Device Review)
-/// stay inside the body slot and the navbar remains visible.
+/// Persistent top-level destinations with an [IndexedStack] body. Each
+/// destination owns its own [Navigator] so deeper pushes stay inside its body
+/// slot.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -57,6 +58,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _rhythmAdaptiveTabs = [
     MainNavTab.home,
     MainNavTab.automations,
+    MainNavTab.lighting,
     MainNavTab.settings,
   ];
 
@@ -247,6 +249,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   String _screenNameFor(MainNavTab tab) => switch (tab) {
         MainNavTab.home => 'home',
         MainNavTab.automations => 'automations',
+        MainNavTab.lighting => 'light',
         MainNavTab.settings => 'settings',
       };
 
@@ -756,9 +759,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
-  /// Bottom-nav tab visibility — all three tabs are always rendered so the
-  /// navbar shape stays stable. Tabs whose dependencies aren't met get
-  /// disabled via [_computeDisabledTabs] instead of being hidden.
+  /// Top-level destination visibility. Destinations whose dependencies aren't
+  /// met get disabled via [_computeDisabledTabs] instead of being hidden.
   List<MainNavTab> _computeVisibleTabs({required bool serverSynced}) {
     return _activeTabs;
   }
@@ -796,6 +798,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     return switch (tab) {
       MainNavTab.home => _buildHomeTab(),
       MainNavTab.automations => _buildAutomationsTab(),
+      MainNavTab.lighting => LightScreen(onClose: _goHome),
       MainNavTab.settings => SettingsScreen(onClose: _goHome),
     };
   }
@@ -1211,9 +1214,10 @@ class _PreHomeAccountButton extends StatelessWidget {
 }
 
 /// Floating gear button pinned bottom-right that fans out the navigation
-/// destinations (Home · Presets · Settings). Replaces the bottom nav bar: the
-/// gear is always visible; tapping it reveals the destinations stacked above it
-/// with a staggered reveal, and a scrim dismisses on an outside tap.
+/// destinations (Home · Schedule · Lighting · Settings). Replaces the bottom
+/// nav bar: the gear is always visible; tapping it reveals the destinations
+/// stacked above it with a staggered reveal, and a scrim dismisses on an
+/// outside tap.
 class _NavFanButton extends StatefulWidget {
   const _NavFanButton({
     required this.currentTab,
@@ -1282,8 +1286,14 @@ class _NavFanButtonState extends State<_NavFanButton>
         MainNavTab.automations => (
             Icons.bolt_outlined,
             Icons.bolt,
-            'Presets',
+            'Schedule',
             Color(0xFFF2A93B),
+          ),
+        MainNavTab.lighting => (
+            Icons.light_mode_outlined,
+            Icons.light_mode_rounded,
+            'Lighting',
+            Color(0xFFFFB74D),
           ),
         MainNavTab.settings => (
             Icons.settings_outlined,

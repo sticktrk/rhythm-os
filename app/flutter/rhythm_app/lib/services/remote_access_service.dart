@@ -252,18 +252,20 @@ class RemoteAccessService {
           'Remote access bootstrap did not return tunnel metadata.');
     }
 
-    final api = _apiForEndpoint(serverHub.endpoint, serverHub.token);
-    late final RhythmRemoteAccessStatus status;
-    String? stableServerInstanceId;
-    final initialStatus = await api.putConfig(
+    final configured = await _putConfigThroughReachableEndpoint(
+      serverHub: serverHub,
+      bootstrapEndpoint: remoteEndpoint,
       hostname: hostname,
       connectorToken: connectorToken,
       tunnelId: tunnelId,
       tunnelName: tunnelName,
     );
+    final api = configured.api;
+    late final RhythmRemoteAccessStatus status;
+    String? stableServerInstanceId;
     status = await _waitForActivation(
       api: api,
-      initialStatus: initialStatus,
+      initialStatus: configured.status,
     );
 
     stableServerInstanceId =
@@ -927,6 +929,61 @@ class RemoteAccessService {
     return _apiFactory(
       baseUrl: endpoint.baseUrl,
       authToken: authToken,
+    );
+  }
+
+  Future<
+      ({
+        RhythmRemoteAccessApi api,
+        RhythmRemoteAccessStatus status,
+      })> _putConfigThroughReachableEndpoint({
+    required Hub serverHub,
+    required HubEndpoint bootstrapEndpoint,
+    required String hostname,
+    required String connectorToken,
+    required String tunnelId,
+    required String tunnelName,
+  }) async {
+    Object? lastError;
+    StackTrace? lastStackTrace;
+    final endpoints = <HubEndpoint>[];
+    for (final endpoint in <HubEndpoint?>[
+      serverHub.endpoint,
+      serverHub.remoteEndpoint,
+      bootstrapEndpoint,
+    ]) {
+      if (endpoint != null && !endpoints.contains(endpoint)) {
+        endpoints.add(endpoint);
+      }
+    }
+
+    for (final endpoint in endpoints) {
+      final api = _apiForEndpoint(endpoint, serverHub.token);
+      try {
+        final status = await api.putConfig(
+          hostname: hostname,
+          connectorToken: connectorToken,
+          tunnelId: tunnelId,
+          tunnelName: tunnelName,
+        );
+        return (api: api, status: status);
+      } catch (error, stackTrace) {
+        lastError = error;
+        lastStackTrace = stackTrace;
+        debugPrint(
+          'RemoteAccessService: remote access config unavailable via '
+          '${endpoint.baseUrl} for hub=${serverHub.id}: $error',
+        );
+      }
+    }
+
+    Error.throwWithStackTrace(
+      lastError ??
+          StateError(
+            'No endpoint is available to configure remote access for '
+            '${serverHub.id}.',
+          ),
+      lastStackTrace ?? StackTrace.current,
     );
   }
 

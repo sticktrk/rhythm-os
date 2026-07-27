@@ -5,6 +5,8 @@ import 'package:rhythm_app/services/cloud_home_join_service.dart';
 import 'package:rhythm_app/services/recent_servers_service.dart';
 import 'package:rhythm_app/widgets/connect_hub_screen.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmAuthStatus, RhythmCloudJoinProof;
 
 void main() {
   group('Rhythm mDNS discovery helpers', () {
@@ -262,6 +264,53 @@ void main() {
       expect(hub.id, 'server-local');
       expect(hub.token, 'local-owner-token');
       expect(hub.remoteEndpoint?.host, 'kitchen.devices.rhythm.lighting');
+    });
+
+    test('does not mix a cloud tunnel with a conflicting local Box identity',
+        () {
+      final localHome = Home.create(
+        id: 'anna-lake',
+        name: 'Anna Lake',
+        ownerId: 'user-1',
+      );
+      final cloudHome = localHome.copyWith();
+      final localHub = Hub.server(
+        id: 'shared-hub-id',
+        homeId: localHome.id,
+        name: 'Local Box',
+        host: '192.168.0.13',
+        token: 'other-house-token',
+        serverInstanceId: 'srv-other-house',
+      );
+      final cloudHub = Hub.server(
+        id: 'shared-hub-id',
+        homeId: cloudHome.id,
+        name: 'Anna Lake Box',
+        host: '192.168.5.10',
+        serverInstanceId: 'srv-anna-lake',
+        remoteEndpoint: const HubEndpoint(
+          host: 'anna-lake.rhythm.lighting',
+          port: 443,
+          useSsl: true,
+        ),
+      );
+
+      final homes = rhythmMergedHomeEntriesForTesting(
+        localHomes: [
+          AccountHomeServerHubs(home: localHome, serverHubs: [localHub]),
+        ],
+        cloudHomes: [
+          AccountHomeServerHubs(home: cloudHome, serverHubs: [cloudHub]),
+        ],
+      );
+
+      expect(homes, hasLength(1));
+      expect(homes.single.serverHubs, hasLength(1));
+      final hub = homes.single.serverHubs.single;
+      expect(hub.endpoint, cloudHub.endpoint);
+      expect(hub.remoteEndpoint, cloudHub.remoteEndpoint);
+      expect(hub.serverInstanceId, cloudHub.serverInstanceId);
+      expect(hub.token, isNull);
     });
 
     test('keeps same-named remote Box entries separate without shared identity',
@@ -809,6 +858,178 @@ void main() {
 
       expect(promotionCalls, 0);
       expect(enteredHomes, ['local-home']);
+    });
+
+    test('Home entry reconciles a provisional Box without an owner token', () {
+      final home = Home.create(
+        id: 'local-home',
+        name: 'Evington',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'local-hub',
+        homeId: home.id,
+        name: 'Rhythm Box',
+        host: '192.168.0.169',
+        serverInstanceId: 'endpoint:http://192.168.0.169:54448',
+      );
+
+      expect(
+        rhythmHomeEntryNeedsLocalIdentityReconciliationForTesting(
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ),
+        isTrue,
+      );
+    });
+
+    test('Home entry reconciles a durable Box whose owner token is missing',
+        () {
+      final home = Home.create(
+        id: 'local-home',
+        name: 'Evington',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'local-hub',
+        homeId: home.id,
+        name: 'Rhythm Box',
+        host: '192.168.0.169',
+        serverInstanceId: 'srv-evington',
+      );
+
+      expect(
+        rhythmHomeEntryNeedsLocalIdentityReconciliationForTesting(
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ),
+        isTrue,
+      );
+    });
+
+    test('Home entry skips reconciliation for a durable authenticated Box', () {
+      final home = Home.create(
+        id: 'canonical-home',
+        name: 'Evington',
+        ownerId: 'local-user',
+      );
+      final hub = Hub.server(
+        id: 'canonical-hub',
+        homeId: home.id,
+        name: 'Rhythm Box',
+        host: '192.168.0.169',
+        token: 'owner-token',
+        serverInstanceId: 'srv-evington',
+      );
+
+      expect(
+        rhythmHomeEntryNeedsLocalIdentityReconciliationForTesting(
+          AccountHomeServerHubs(home: home, serverHubs: [hub]),
+        ),
+        isFalse,
+      );
+    });
+
+    test('Box proof prevents a stale local Home from claiming another house',
+        () {
+      final staleHome = Home.create(
+        id: 'anna-lake',
+        name: 'Anna Lake',
+        ownerId: 'user-1',
+      );
+      final staleSnapshot = AccountHomeServerHubs(
+        home: staleHome,
+        serverHubs: [
+          Hub.server(
+            id: 'anna-hub',
+            homeId: staleHome.id,
+            name: 'Anna Lake Box',
+            host: '192.168.0.13',
+            serverInstanceId: 'srv-other-house',
+          ),
+        ],
+      );
+      const proof = RhythmCloudJoinProof(
+        proofVersion: 'activity-token-hmac-v1',
+        algorithm: 'hmac-sha256',
+        serverInstanceId: 'srv-other-house',
+        homeId: 'deleted-other-home',
+        hubId: 'deleted-other-hub',
+        issuedAtEpochMs: 1000,
+        expiresAtEpochMs: 121000,
+        nonce: '0123456789abcdef',
+        signature:
+            '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      );
+
+      expect(
+        rhythmCloudJoinProofTargetsHomeForTesting(proof, staleSnapshot),
+        isFalse,
+      );
+      expect(
+        rhythmShouldReuseExistingHomeForCloudProofForTesting(
+          existingHome: staleSnapshot,
+          proof: proof,
+        ),
+        isFalse,
+      );
+    });
+
+    test('fresh LAN claim wins before tokens saved for another house',
+        () async {
+      final calls = <String>[];
+      const status = RhythmAuthStatus(
+        requiresAuth: true,
+        ownerConfigured: true,
+        tokenCount: 1,
+        claimAvailable: true,
+      );
+
+      final token = await rhythmResolveDiscoveredAuthTokenForTesting(
+        status: status,
+        claimLanToken: () async {
+          calls.add('claim');
+          return 'fresh-house-token';
+        },
+        loadStoredToken: () async {
+          calls.add('stored');
+          return 'other-house-token';
+        },
+        requestBleToken: () async {
+          calls.add('ble');
+          return 'ble-token';
+        },
+      );
+
+      expect(token, 'fresh-house-token');
+      expect(calls, ['claim']);
+    });
+
+    test('falls back to BLE when a fresh LAN claim cannot be issued', () async {
+      final calls = <String>[];
+      const status = RhythmAuthStatus(
+        requiresAuth: true,
+        ownerConfigured: true,
+        tokenCount: 1,
+        claimAvailable: true,
+      );
+
+      final token = await rhythmResolveDiscoveredAuthTokenForTesting(
+        status: status,
+        claimLanToken: () async {
+          calls.add('claim');
+          return null;
+        },
+        loadStoredToken: () async {
+          calls.add('stored');
+          return 'other-house-token';
+        },
+        requestBleToken: () async {
+          calls.add('ble');
+          return 'ble-token';
+        },
+      );
+
+      expect(token, 'ble-token');
+      expect(calls, ['claim', 'ble']);
     });
 
     test('keeps known-different server identity separate at the same endpoint',

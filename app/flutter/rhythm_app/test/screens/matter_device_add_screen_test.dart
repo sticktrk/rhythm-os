@@ -79,7 +79,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), '34970112332');
       await tester.pump();
-      final transmitButton = find.text('Add Bulb');
+      final transmitButton = find.text('Add Device');
       await tester.ensureVisible(transmitButton);
 
       await tester.tap(transmitButton);
@@ -153,6 +153,53 @@ void main() {
       expect(
         completed.properties.values,
         isNot(contains('MT:Y.K908OC16750648G00')),
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets(
+      'manual codes enter the same pairing path with manual attribution',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    var pairRequestCount = 0;
+    try {
+      final api = _FakeRhythmMatterApi(
+        onPair: (receiveTimeout) async {
+          pairRequestCount += 1;
+          return const RhythmMatterPairingResponse(
+            httpStatus: 200,
+            status: 'failed',
+            error: 'test failure',
+          );
+        },
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MatterDeviceAddScreen(
+            endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+            addMethod: MatterAddMethod.automatic,
+            initialSetupPayload: '3497-011-2332',
+            initialInputMethod: 'manual_code',
+            analyticsSource: 'test_manual',
+            journeyId: 'matter-manual-test',
+            pairingApi: api,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+
+      expect(pairRequestCount, 1);
+      final attempted = analyticsBackend.events.singleWhere(
+        (event) => event.name == 'matter_pairing_attempted',
+      );
+      expect(attempted.properties['input_method'], 'manual_code');
+      expect(
+        attempted.properties.values,
+        isNot(contains('3497-011-2332')),
       );
     } finally {
       debugDefaultTargetPlatformOverride = null;

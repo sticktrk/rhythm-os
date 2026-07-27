@@ -11,7 +11,6 @@ import '../../providers/home_provider.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/settings_row.dart';
 import '../power_usage_screen.dart';
-import 'light_screen.dart';
 import 'sections/account_section.dart';
 import 'sections/lights_devices_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
@@ -84,20 +83,6 @@ class SettingsScreen extends StatelessWidget {
       children: [
         if (caps.hasAccounts) AccountSection(user: user),
         // SleepSection(), // TODO: Re-enable when sleep schedule is implemented
-
-        // "Your Light" — the *experience*: how the light looks and feels. Kept
-        // deliberately separate from the Hardware group below so it's never
-        // confused with the physical devices that produce it.
-        const SettingsSectionHeader(
-          title: 'Your Light',
-          icon: Icons.light_mode_rounded,
-          subtitle: 'How your light looks and feels through the day.',
-        ),
-        SettingsGroup(
-          children: [
-            _buildLightRow(context),
-          ],
-        ),
 
         // "Hardware" — the *physical devices* and their connections. The icon,
         // subtitle, and cool-tech accent make it unmistakable that these are
@@ -217,16 +202,6 @@ class SettingsScreen extends StatelessWidget {
       iconColor: const Color(0xFFFFB300),
       label: 'Devices',
       onTap: () => DevicesListScreen.show(context),
-    );
-  }
-
-  Widget _buildLightRow(BuildContext context) {
-    return SettingsRow(
-      icon: Icons.light_mode_rounded,
-      iconColor: const Color(0xFFFFB74D),
-      label: 'Light',
-      value: 'Day · Sleep',
-      onTap: () => LightScreen.show(context),
     );
   }
 

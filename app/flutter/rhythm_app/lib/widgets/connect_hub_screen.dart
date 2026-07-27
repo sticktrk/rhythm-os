@@ -21,7 +21,6 @@ import 'success_modal.dart';
 import 'hub_picker_screen.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
-        RhythmApiException,
         RhythmAuthStatus,
         RhythmAuthApi,
         RhythmCloudJoinProof,
@@ -141,6 +140,59 @@ Future<Hub?> rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting({
 }
 
 @visibleForTesting
+Future<String?> rhythmResolveDiscoveredAuthTokenForTesting({
+  required RhythmAuthStatus? status,
+  required Future<String?> Function() claimLanToken,
+  required Future<String?> Function() loadStoredToken,
+  required Future<String> Function() requestBleToken,
+}) async {
+  final shouldClaimToken = status?.claimAvailable == true;
+  if (status?.requiresAuth != true && !shouldClaimToken) return null;
+
+  if (shouldClaimToken) {
+    final lanToken = await claimLanToken();
+    if (lanToken != null && lanToken.trim().isNotEmpty) return lanToken;
+    return requestBleToken();
+  }
+
+  final storedToken = await loadStoredToken();
+  if (storedToken != null && storedToken.trim().isNotEmpty) {
+    return storedToken;
+  }
+  return requestBleToken();
+}
+
+@visibleForTesting
+bool rhythmHomeEntryNeedsLocalIdentityReconciliationForTesting(
+  AccountHomeServerHubs snapshot,
+) {
+  final hub = snapshot.preferredServerHub;
+  if (hub == null) return false;
+
+  final token = hub.token?.trim();
+  return serverIdentityKind(hub.serverInstanceId) !=
+          ServerIdentityKind.durable ||
+      token == null ||
+      token.isEmpty;
+}
+
+@visibleForTesting
+bool rhythmCloudJoinProofTargetsHomeForTesting(
+  RhythmCloudJoinProof proof,
+  AccountHomeServerHubs snapshot,
+) =>
+    proof.homeId == snapshot.home.id;
+
+@visibleForTesting
+bool rhythmShouldReuseExistingHomeForCloudProofForTesting({
+  required AccountHomeServerHubs? existingHome,
+  required RhythmCloudJoinProof? proof,
+}) =>
+    existingHome == null ||
+    proof == null ||
+    rhythmCloudJoinProofTargetsHomeForTesting(proof, existingHome);
+
+@visibleForTesting
 Set<String> rhythmHomeIdsRepresentedByForTesting({
   required AccountHomeServerHubs snapshot,
   required Iterable<AccountHomeServerHubs> localHomes,
@@ -219,7 +271,9 @@ AccountHomeServerHubs _mergeHomeEntry(
   for (final hub in incoming.serverHubs) {
     final normalized = hub.copyWith(homeId: homeId);
     final matchIndex = hubs.indexWhere(
-      (existing) => _serverHubsRepresentSameBox(existing, normalized),
+      (existing) =>
+          existing.id == normalized.id ||
+          _serverHubsRepresentSameBox(existing, normalized),
     );
     if (matchIndex == -1) {
       hubs.add(normalized);
@@ -243,11 +297,27 @@ Hub _mergeServerHubForHome({
   required Hub incoming,
   required String homeId,
 }) {
+  final baseIdentity = _cleanServerInstanceId(base.serverInstanceId);
+  final incomingIdentity = _cleanServerInstanceId(incoming.serverInstanceId);
   final baseToken = base.token?.trim();
   final incomingToken = incoming.token?.trim();
   final lastConnected =
       _latestNullableDate(base.lastConnected, incoming.lastConnected);
   final updatedAt = _latestDate(base.updatedAt, incoming.updatedAt);
+
+  // Keep the cloud binding whole when stale local data points the same hub ID
+  // at different physical hardware. Mixing the incoming tunnel with the local
+  // endpoint/token makes local and remote entry reach different Boxes.
+  if (baseIdentity != null &&
+      incomingIdentity != null &&
+      baseIdentity != incomingIdentity) {
+    return incoming.copyWith(
+      homeId: homeId,
+      lastConnected: lastConnected,
+      updatedAt: updatedAt,
+      enabled: base.enabled || incoming.enabled,
+    );
+  }
 
   return base.copyWith(
     homeId: homeId,
@@ -261,6 +331,10 @@ Hub _mergeServerHubForHome({
     lastConnected: lastConnected,
     updatedAt: updatedAt,
     enabled: base.enabled || incoming.enabled,
+    serverInstanceId: preferredServerIdentity(
+      existing: base.serverInstanceId,
+      candidate: incoming.serverInstanceId,
+    ),
   );
 }
 
@@ -428,6 +502,33 @@ bool _existingHomeNeedsCloudIdentityPromotion({
   return false;
 }
 
+bool _existingHomeRequiresCloudIdentityProof({
+  required DiscoveredHub server,
+  required Iterable<AccountHomeServerHubs> homes,
+  required String? authToken,
+  required String? serverInstanceId,
+}) {
+  if (serverIdentityKind(serverInstanceId) != ServerIdentityKind.durable) {
+    return false;
+  }
+
+  for (final home in homes) {
+    for (final hub in home.serverHubs) {
+      if (_serverHubMatchesDiscoveredServer(
+            hub,
+            server,
+            authToken: authToken,
+            serverInstanceId: serverInstanceId,
+          ) &&
+          serverIdentityKind(hub.serverInstanceId) ==
+              ServerIdentityKind.provisional) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 AccountHomeServerHubs? _homeEntryForDiscoveredServer({
   required DiscoveredHub server,
   required Iterable<AccountHomeServerHubs> homes,
@@ -575,6 +676,7 @@ const _mdnsProbeTimeout = Duration(milliseconds: 900);
 const _mdnsProbeSettleTimeout = Duration(seconds: 2);
 const _mdnsLifecycleOperationTimeout = Duration(seconds: 3);
 const _accountHomesLoadTimeout = Duration(seconds: 12);
+const _homeEntryIdentityProbeTimeout = Duration(milliseconds: 1500);
 const _recentServerProbeTimeout = Duration(seconds: 2);
 const _subnetProbeTimeout = Duration(milliseconds: 250);
 const _subnetScanBatchSize = 32;
@@ -1797,7 +1899,23 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       serverInstanceId: serverInstanceId,
     );
     final name = _displayNameForDiscoveredServer(discovered);
-    if (existingHome != null) {
+    final reuseExistingHome =
+        rhythmShouldReuseExistingHomeForCloudProofForTesting(
+      existingHome: existingHome,
+      proof: joinProof,
+    );
+    if (existingHome != null && reuseExistingHome) {
+      final requiresIdentityProof = _existingHomeRequiresCloudIdentityProof(
+        server: discovered,
+        homes: visibleHomes,
+        authToken: authToken,
+        serverInstanceId: serverInstanceId,
+      );
+      if (requiresIdentityProof && joinProof == null) {
+        throw const CloudHomeJoinBlockedException(
+          code: 'local_identity_unavailable',
+        );
+      }
       return rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
         existingHome: existingHome,
         shouldPromote: _existingHomeNeedsCloudIdentityPromotion(
@@ -1848,6 +1966,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       serverInstanceId: serverInstanceId,
       location: home.location,
       timezone: home.timezone,
+      // This flow already performed the proof-aware existing-Home search
+      // above. Repeating the provider's broader local lookup here can revive a
+      // contaminated row that the cloud-authoritative merge rejected.
+      reuseExistingHome: false,
     );
   }
 
@@ -1861,21 +1983,44 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     });
 
     final serverSync = context.read<ServerSyncProvider>();
-
-    final result = await context.read<HomeProvider>().enterHome(snapshot);
-    if (!mounted) return;
-
-    if (snapshot.hasServerHub && result == null) {
+    final homeProvider = context.read<HomeProvider>();
+    var enteredSnapshot = snapshot;
+    Hub? result;
+    try {
+      result =
+          await rhythmEnterExistingHomeWithCloudIdentityPromotionForTesting(
+        existingHome: snapshot,
+        shouldPromote: CloudHomeJoinService.instance.canJoin &&
+            rhythmHomeEntryNeedsLocalIdentityReconciliationForTesting(
+              snapshot,
+            ),
+        promote: () => _reconcileHomeEntryWithLocalDeviceProof(snapshot),
+        enterHome: (candidate) {
+          enteredSnapshot = candidate;
+          return homeProvider.enterHome(candidate);
+        },
+      );
+    } on CloudHomeJoinBlockedException catch (error) {
+      if (!mounted) return;
       setState(() {
         _enteringHomeId = null;
-        _homeActionError = 'Could not enter ${snapshot.home.name}';
+        _homeActionError = error.userMessage;
+      });
+      return;
+    }
+    if (!mounted) return;
+
+    if (enteredSnapshot.hasServerHub && result == null) {
+      setState(() {
+        _enteringHomeId = null;
+        _homeActionError = 'Could not enter ${enteredSnapshot.home.name}';
       });
       return;
     }
 
-    if (snapshot.hasServerHub) {
+    if (enteredSnapshot.hasServerHub) {
       unawaited(
-        serverSync.refreshForHomeEntry(homeName: snapshot.home.name),
+        serverSync.refreshForHomeEntry(homeName: enteredSnapshot.home.name),
       );
     }
 
@@ -1886,6 +2031,98 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
     if (mounted && widget.isModal) {
       Navigator.of(context).pop();
+    }
+  }
+
+  Future<CloudHomeJoinResult> _reconcileHomeEntryWithLocalDeviceProof(
+    AccountHomeServerHubs snapshot,
+  ) async {
+    final hub = snapshot.preferredServerHub;
+    if (hub == null || !CloudHomeJoinService.instance.canJoin) {
+      return const CloudHomeJoinResult.blocked(
+        code: 'local_identity_unavailable',
+      );
+    }
+
+    final discovered = DiscoveredHub(
+      host: hub.endpoint.host,
+      address: hub.endpoint.host,
+      port: hub.endpoint.port,
+      name: hub.name,
+      type: HubType.server,
+    );
+    final baseUrl = hub.endpoint.baseUrl;
+
+    try {
+      final status = await RhythmAuthApi(baseUrl: baseUrl)
+          .getStatus()
+          .timeout(_homeEntryIdentityProbeTimeout);
+      String? ownerToken;
+      if (status.claimAvailable) {
+        // A local appliance can issue an additional owner token even when an
+        // older token already exists. Prefer a fresh, physically authorized
+        // token here: ordinary LAN state reads can succeed without auth and
+        // therefore cannot prove that a cached token is still an owner token.
+        ownerToken = await _claimOwnerTokenViaLan(baseUrl);
+      }
+      ownerToken ??= await _storedServerTokenFor(discovered, baseUrl: baseUrl);
+      if (ownerToken == null || ownerToken.trim().isEmpty) {
+        return const CloudHomeJoinResult.blocked(
+          code: 'local_identity_unavailable',
+        );
+      }
+
+      final serverInstanceId = await _serverInstanceIdForDiscoveredHub(
+        discovered,
+        authToken: ownerToken,
+      );
+      if (serverIdentityKind(serverInstanceId) != ServerIdentityKind.durable) {
+        return const CloudHomeJoinResult.blocked(
+          code: 'local_identity_unavailable',
+        );
+      }
+
+      final joinProof = await _cloudJoinProofForDiscoveredHub(
+        discovered,
+        authToken: ownerToken,
+        serverInstanceId: serverInstanceId,
+      );
+      if (joinProof == null) {
+        return const CloudHomeJoinResult.blocked(
+          code: 'local_identity_unavailable',
+        );
+      }
+
+      final joined = await CloudHomeJoinService.instance.joinByLocalDeviceProof(
+        serverInstanceId: serverInstanceId,
+        joinProof: joinProof,
+        host: discovered.address,
+        port: discovered.port,
+        ownerToken: ownerToken,
+        hubName: _displayNameForDiscoveredServer(discovered),
+      );
+      if (joined.home != null && joined.home!.home.id != snapshot.home.id) {
+        debugPrint(
+          'ConnectHubScreen: reconciled duplicate Home '
+          '${snapshot.home.id} to canonical Home ${joined.home!.home.id} '
+          'using server_instance_id=$serverInstanceId',
+        );
+      }
+      return joined;
+    } on CloudHomeJoinBlockedException {
+      rethrow;
+    } on TimeoutException {
+      return const CloudHomeJoinResult.blocked(
+        code: 'local_identity_unavailable',
+      );
+    } catch (error) {
+      debugPrint(
+        'ConnectHubScreen: local Home identity reconciliation skipped for '
+        '${snapshot.home.id}: $error',
+      );
+      return const CloudHomeJoinResult.blocked(
+        code: 'local_identity_unavailable',
+      );
     }
   }
 
@@ -1974,21 +2211,12 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
   Future<String?> _resolveAuthTokenForDiscoveredHub(DiscoveredHub hub) async {
     final baseUrl = 'http://${hub.address}:${hub.port}';
     final status = await _serverAuthStatus(baseUrl, hub.address);
-    final shouldClaimToken = status?.claimAvailable == true;
-    if (status?.requiresAuth != true && !shouldClaimToken) return null;
-
-    final storedToken = await _storedServerTokenFor(hub, baseUrl: baseUrl);
-    if (storedToken != null) {
-      return storedToken;
-    }
-
-    if (shouldClaimToken) {
-      final lanToken = await _claimOwnerTokenViaLan(baseUrl);
-      if (lanToken != null) return lanToken;
-      return _requestOwnerTokenViaBle(hub);
-    }
-
-    return _requestOwnerTokenViaBle(hub);
+    return rhythmResolveDiscoveredAuthTokenForTesting(
+      status: status,
+      claimLanToken: () => _claimOwnerTokenViaLan(baseUrl),
+      loadStoredToken: () => _storedServerTokenFor(hub, baseUrl: baseUrl),
+      requestBleToken: () => _requestOwnerTokenViaBle(hub),
+    );
   }
 
   Future<String?> _claimOwnerTokenViaLan(String baseUrl) async {
@@ -2118,15 +2346,16 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
     for (final token in [...exactTokens, ...fallbackTokens]) {
       try {
-        await RhythmConfigApi(
-          baseUrl: '$baseUrl/',
+        final status = await RhythmAuthApi(
+          baseUrl: baseUrl,
           authToken: token,
-        ).getState().timeout(const Duration(seconds: 4));
-        return token;
-      } on RhythmApiException catch (error) {
-        if (error.statusCode != HttpStatus.unauthorized) {
-          debugPrint('Stored token probe failed for ${hub.address}: $error');
+        ).getStatus().timeout(const Duration(seconds: 4));
+        if (status.reportsAuthenticatedRole && status.hasAuthenticatedOwner) {
+          return token;
         }
+        debugPrint(
+          'Stored token rejected for ${hub.address}: owner role not verified',
+        );
       } catch (error) {
         debugPrint('Stored token probe failed for ${hub.address}: $error');
       }
@@ -2699,22 +2928,16 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     return homeProvider.homeServerHubSnapshots;
   }
 
-  List<AccountHomeServerHubs> _visibleCloudHomeEntries(
-    HomeProvider homeProvider,
-  ) {
-    final localIds = homeProvider.homes.map((home) => home.id).toSet();
+  List<AccountHomeServerHubs> _visibleCloudHomeEntries() {
     return _accountHomes
-        .where(
-          (snapshot) =>
-              snapshot.hasServerHub && !localIds.contains(snapshot.home.id),
-        )
+        .where((snapshot) => snapshot.hasServerHub)
         .toList(growable: false);
   }
 
   List<AccountHomeServerHubs> _visibleHomeEntries(HomeProvider homeProvider) {
     return _mergeHomeEntries(
       localHomes: _localHomeEntries(homeProvider),
-      cloudHomes: _visibleCloudHomeEntries(homeProvider),
+      cloudHomes: _visibleCloudHomeEntries(),
     );
   }
 

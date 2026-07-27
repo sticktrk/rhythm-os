@@ -8,10 +8,11 @@ import 'solar_orbit.dart' show CelestialColors;
 enum MainNavTab {
   home,
   automations,
+  lighting,
   settings,
 }
 
-/// Standard 3-destination bottom navigation bar.
+/// Standard top-level destination bar.
 ///
 /// Matches the celestial dark palette but otherwise behaves like a stock
 /// Material 3 [NavigationBar] — labels visible at all times, single accent
@@ -39,6 +40,7 @@ class MainBottomNav extends StatelessWidget {
     this.tabs = const [
       MainNavTab.home,
       MainNavTab.automations,
+      MainNavTab.lighting,
       MainNavTab.settings,
     ],
     this.disabledTabs = const {},
@@ -62,6 +64,12 @@ class MainBottomNav extends StatelessWidget {
           icon: const Icon(Icons.bolt_outlined),
           selectedIcon: const Icon(Icons.bolt),
           label: 'Presets',
+          enabled: enabled,
+        ),
+      MainNavTab.lighting => NavigationDestination(
+          icon: const Icon(Icons.light_mode_outlined),
+          selectedIcon: const Icon(Icons.light_mode_rounded),
+          label: 'Lighting',
           enabled: enabled,
         ),
       MainNavTab.settings => NavigationDestination(

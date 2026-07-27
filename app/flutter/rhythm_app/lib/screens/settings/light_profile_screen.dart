@@ -31,6 +31,7 @@ class LightProfileScreen extends StatefulWidget {
   final bool embedded;
   final String? roomId;
   final String? roomName;
+  final String overrideScope;
 
   const LightProfileScreen({
     super.key,
@@ -38,6 +39,7 @@ class LightProfileScreen extends StatefulWidget {
     this.embedded = false,
     this.roomId,
     this.roomName,
+    this.overrideScope = 'room',
   });
 
   bool get isRoomScoped => roomId != null;
@@ -48,6 +50,10 @@ class LightProfileScreen extends StatefulWidget {
 
 class _LightProfileScreenState extends State<LightProfileScreen> {
   static const _uuid = Uuid();
+  String get _scopeName =>
+      widget.roomName ??
+      (widget.overrideScope == 'bulb' ? 'This bulb' : 'This room');
+  String get _scopeNoun => widget.overrideScope == 'bulb' ? 'Bulb' : 'Room';
   static const List<String> _profileOrder = [
     'rhythm',
     'sleep',
@@ -778,7 +784,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   Future<void> _resetRoomProfileToHome() async {
     final globalConfig = _globalProfileConfigs[_selectedProfileId];
     if (globalConfig == null || widget.roomId == null) return;
-    final journeyId = 'room-light-settings-${_uuid.v4()}';
+    final journeyId = '${widget.overrideScope}-light-settings-${_uuid.v4()}';
     setState(() => _isSaving = true);
     final succeeded =
         await context.read<ServerSyncProvider>().setNodeLightProfileOverride(
@@ -803,12 +809,13 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       profile: _selectedProfileId,
       outcome: succeeded ? 'succeeded' : 'failed',
       failureStage: succeeded ? null : 'request',
+      scope: widget.overrideScope,
     );
     _showSaveFeedback(
       succeeded
-          ? '${widget.roomName ?? 'Room'} now follows home '
+          ? '$_scopeName now follows automatic '
               '${_profileTitle.toLowerCase()} settings.'
-          : 'Room light settings could not be reset.',
+          : '$_scopeNoun light settings could not be reset.',
       error: !succeeded,
     );
   }
@@ -866,12 +873,12 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     if (!_connected) return _buildDisconnected();
     if (widget.roomId != null &&
         !_serverSync.lightProfileOverridesSupportedForNode(widget.roomId!)) {
-      return _buildRoomOverridesUnsupported();
+      return _buildNodeOverridesUnsupported();
     }
     return _buildContent();
   }
 
-  Widget _buildRoomOverridesUnsupported() {
+  Widget _buildNodeOverridesUnsupported() {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 34, horizontal: 22),
       child: Column(
@@ -883,8 +890,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
             size: 28,
           ),
           const SizedBox(height: 12),
-          const Text(
-            'Update the Rhythm appliance to customize this room.',
+          Text(
+            'Update the Rhythm appliance to customize this '
+            '${widget.overrideScope == 'bulb' ? 'bulb' : 'room'}.',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: _Palette.textSecondary,
@@ -2688,7 +2696,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           const <String, dynamic>{},
     );
     final persistedOverride = profileOverride.isEmpty ? null : profileOverride;
-    final journeyId = 'room-light-settings-${_uuid.v4()}';
+    final journeyId = '${widget.overrideScope}-light-settings-${_uuid.v4()}';
     setState(() {
       _curveConfigDirty = false;
       _isSaving = true;
@@ -2713,9 +2721,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         outcome: 'failed',
         changedFieldCount: profileOverride.changedFields.length,
         failureStage: 'request',
+        scope: widget.overrideScope,
       );
       _showSaveFeedback(
-        '${widget.roomName ?? 'Room'} light settings could not be saved.',
+        '$_scopeName light settings could not be saved.',
         error: true,
       );
       return;
@@ -2731,11 +2740,12 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       profile: _selectedProfileId,
       outcome: 'succeeded',
       changedFieldCount: profileOverride.changedFields.length,
+      scope: widget.overrideScope,
     );
     _showSaveFeedback(
       persistedOverride == null
-          ? '${widget.roomName ?? 'Room'} now follows home ${_profileTitle.toLowerCase()} settings.'
-          : '${widget.roomName ?? 'Room'} ${_profileTitle.toLowerCase()} updated.',
+          ? '$_scopeName now follows automatic ${_profileTitle.toLowerCase()} settings.'
+          : '$_scopeName ${_profileTitle.toLowerCase()} updated.',
       error: false,
     );
   }
@@ -2753,7 +2763,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     return GestureDetector(
       onTap: _confirmResetToDefaults,
       child: Text(
-        widget.isRoomScoped ? 'Use Home Settings' : 'Reset to Defaults',
+        widget.isRoomScoped ? 'Use Automatic Settings' : 'Reset to Defaults',
         style: TextStyle(
           color: _Palette.textSecondary.withValues(alpha: 0.3),
           fontSize: 12,
@@ -2770,15 +2780,15 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         backgroundColor: _Palette.card,
         title: Text(
           widget.isRoomScoped
-              ? 'Use home $_profileTitle?'
+              ? 'Use automatic $_profileTitle?'
               : 'Reset $_profileTitle?',
           style: const TextStyle(color: _Palette.textPrimary),
         ),
         content: Text(
           widget.isRoomScoped
-              ? '${widget.roomName ?? 'This room'} will use the home '
-                  '${_profileTitle.toLowerCase()} again. Other room settings '
-                  'stay unchanged.'
+              ? '$_scopeName will use automatic '
+                  '${_profileTitle.toLowerCase()} lighting again. Other '
+                  'settings stay unchanged.'
               : 'This restores every setting in the '
                   '${_profileTitle.toLowerCase()} to its factory default. Any '
                   'customizations you have made will be lost.',
@@ -2795,7 +2805,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: Text(
-              widget.isRoomScoped ? 'Use home settings' : 'Reset',
+              widget.isRoomScoped ? 'Use automatic settings' : 'Reset',
               style: const TextStyle(color: Colors.redAccent),
             ),
           ),

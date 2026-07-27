@@ -44,12 +44,19 @@ class CloudHomeJoinBlockedException implements Exception {
 
   final String? code;
 
-  String get userMessage => code == 'identity_conflict'
-      ? 'This Box belongs to an existing Home, but its cloud identity could '
-          'not be reconciled safely. No new Home was created; try again or '
-          'contact support.'
-      : 'Could not verify this Box\'s existing Home. Try again; no new Home '
-          'was created.';
+  String get userMessage {
+    if (code == 'identity_conflict') {
+      return 'This Box belongs to an existing Home, but its cloud identity '
+          'could not be reconciled safely. No new Home was created and no '
+          'existing Home was activated; try again or contact support.';
+    }
+    if (code == 'local_identity_unavailable') {
+      return 'Connect to the same local network as this Box and try again so '
+          'Rhythm can verify its Home before opening it.';
+    }
+    return 'Could not verify this Box\'s existing Home. Try again; no new '
+        'Home was created and no existing Home was activated.';
+  }
 
   @override
   String toString() =>
@@ -97,7 +104,7 @@ class CloudHomeJoinService {
       );
 
       if (response.status < 200 || response.status >= 300) {
-        return blockedCloudHomeJoinResultForTesting(response.data);
+        return cloudHomeJoinFailureResultForTesting(response.data);
       }
 
       final home = joinedHomeFromFunctionResponseForTesting(
@@ -112,7 +119,7 @@ class CloudHomeJoinService {
           : CloudHomeJoinResult.joined(home);
     } on FunctionException catch (error) {
       debugPrint('Cloud Home join rejected: $error');
-      return blockedCloudHomeJoinResultForTesting(error.details);
+      return cloudHomeJoinFailureResultForTesting(error.details);
     } catch (error) {
       debugPrint('Cloud Home join failed safely: $error');
       return const CloudHomeJoinResult.blocked(code: 'unavailable');
@@ -121,10 +128,17 @@ class CloudHomeJoinService {
 }
 
 @visibleForTesting
-CloudHomeJoinResult blockedCloudHomeJoinResultForTesting(Object? data) {
+CloudHomeJoinResult cloudHomeJoinFailureResultForTesting(Object? data) {
   final code = data is Map ? _cleanOptional(data['code']?.toString()) : null;
+  if (code == 'device_binding_missing') {
+    return const CloudHomeJoinResult.notAttempted();
+  }
   return CloudHomeJoinResult.blocked(code: code);
 }
+
+@visibleForTesting
+CloudHomeJoinResult blockedCloudHomeJoinResultForTesting(Object? data) =>
+    cloudHomeJoinFailureResultForTesting(data);
 
 @visibleForTesting
 AccountHomeServerHubs? joinedHomeFromFunctionResponseForTesting(
