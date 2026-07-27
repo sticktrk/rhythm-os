@@ -1241,6 +1241,18 @@ void main() {
       isTrue,
     );
 
+    // A vertical swipe that starts over the switch belongs to scrolling, not
+    // power. It must not be treated as a tap merely because the pointer ended.
+    final initialPowerTrack = tester.getRect(_powerSwitch());
+    await tester.dragFrom(
+      initialPowerTrack.center,
+      const Offset(0, -48),
+    );
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(connection.api.nodePreferenceCalls, isEmpty);
+    expect(connection.api.nodeActionCalls, isEmpty);
+
     // Every point on the switch advances the state, including the active
     // thumb. Start by tapping the selected On position.
     await _tapPowerAt(tester, 0.95);

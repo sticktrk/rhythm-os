@@ -2494,8 +2494,8 @@ class _RoomPowerSwitch extends StatefulWidget {
 
 class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
   static const double _trackWidth = 86;
-  double? _lastDragX;
-  bool _dragging = false;
+  Offset? _dragStartPosition;
+  Offset? _dragPosition;
 
   String _labelFor(_PowerToggleState state) => switch (state) {
         _PowerToggleState.off => 'Off',
@@ -2616,168 +2616,162 @@ class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Listener(
-                onPointerDown: widget.enabled ? (_) => _dragging = false : null,
-                onPointerUp: widget.enabled
+              GestureDetector(
+                key: ValueKey(
+                  'room-card-power-switch-${widget.roomId}',
+                ),
+                behavior: HitTestBehavior.opaque,
+                // Let Flutter's gesture arena distinguish taps from a parent
+                // scroll before changing power. A raw pointer-up handler would
+                // also fire after a vertical swipe that began on the switch.
+                onTap: widget.enabled ? _cycle : null,
+                onHorizontalDragStart: widget.enabled
+                    ? (details) {
+                        _dragStartPosition = details.localPosition;
+                        _dragPosition = details.localPosition;
+                      }
+                    : null,
+                onHorizontalDragUpdate: widget.enabled
+                    ? (details) => _dragPosition = details.localPosition
+                    : null,
+                onHorizontalDragEnd: widget.enabled
                     ? (_) {
-                        if (!_dragging) {
-                          _cycle();
+                        final start = _dragStartPosition;
+                        final end = _dragPosition;
+                        _dragStartPosition = null;
+                        _dragPosition = null;
+                        if (start != null &&
+                            end != null &&
+                            (end.dx - start.dx).abs() >=
+                                (end.dy - start.dy).abs()) {
+                          _selectAt(end.dx);
                         }
                       }
                     : null,
-                onPointerCancel: widget.enabled
-                    ? (_) {
-                        _lastDragX = null;
-                        _dragging = false;
+                onHorizontalDragCancel: widget.enabled
+                    ? () {
+                        _dragStartPosition = null;
+                        _dragPosition = null;
                       }
                     : null,
-                child: GestureDetector(
+                child: AnimatedContainer(
                   key: ValueKey(
-                    'room-card-power-switch-${widget.roomId}',
+                    'room-card-power-track-${widget.roomId}',
                   ),
-                  behavior: HitTestBehavior.opaque,
-                  onTap: widget.enabled
-                      // Claim the tap gesture ahead of the card's settings
-                      // action. The raw pointer-up above cycles immediately,
-                      // without waiting for the card's double-tap timeout.
-                      ? () {}
-                      : null,
-                  onHorizontalDragStart: widget.enabled
-                      ? (details) {
-                          _dragging = true;
-                          _lastDragX = details.localPosition.dx;
-                        }
-                      : null,
-                  onHorizontalDragUpdate: widget.enabled
-                      ? (details) => _lastDragX = details.localPosition.dx
-                      : null,
-                  onHorizontalDragEnd: widget.enabled
-                      ? (_) {
-                          final dragX = _lastDragX;
-                          _lastDragX = null;
-                          _dragging = false;
-                          if (dragX != null) _selectAt(dragX);
-                        }
-                      : null,
-                  child: AnimatedContainer(
-                    key: ValueKey(
-                      'room-card-power-track-${widget.roomId}',
-                    ),
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOutCubic,
-                    width: _trackWidth,
-                    height: 40,
-                    padding: const EdgeInsets.all(5),
-                    decoration: BoxDecoration(
-                      color: trackTint,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: widget.state == _PowerToggleState.off
-                            ? const Color(0xFF56606C)
-                            : widget.cctColor.withValues(
-                                alpha: widget.state == _PowerToggleState.standby
-                                    ? 0.56
-                                    : 0.78,
-                              ),
-                        width: 1.4,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.30),
-                          blurRadius: 8,
-                          offset: const Offset(0, 3),
-                        ),
-                        if (widget.state != _PowerToggleState.off)
-                          BoxShadow(
-                            color: widget.cctColor.withValues(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  width: _trackWidth,
+                  height: 40,
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    color: trackTint,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: widget.state == _PowerToggleState.off
+                          ? const Color(0xFF56606C)
+                          : widget.cctColor.withValues(
                               alpha: widget.state == _PowerToggleState.standby
-                                  ? 0.20
-                                  : 0.32,
+                                  ? 0.56
+                                  : 0.78,
                             ),
-                            blurRadius: 18,
-                            spreadRadius: 2,
-                          ),
-                      ],
+                      width: 1.4,
                     ),
-                    child: Stack(
-                      children: [
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: _PowerPositionTick(
-                            key: ValueKey(
-                              'room-card-power-tick-${widget.roomId}-off',
-                            ),
-                            active: widget.state == _PowerToggleState.off,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.30),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                      if (widget.state != _PowerToggleState.off)
+                        BoxShadow(
+                          color: widget.cctColor.withValues(
+                            alpha: widget.state == _PowerToggleState.standby
+                                ? 0.20
+                                : 0.32,
                           ),
+                          blurRadius: 18,
+                          spreadRadius: 2,
                         ),
-                        if (widget.lowGlowEnabled)
-                          Align(
-                            child: _PowerPositionTick(
-                              key: ValueKey(
-                                'room-card-power-tick-${widget.roomId}-standby',
-                              ),
-                              active: widget.state == _PowerToggleState.standby,
-                            ),
-                          ),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: _PowerPositionTick(
-                            key: ValueKey(
-                              'room-card-power-tick-${widget.roomId}-on',
-                            ),
-                            active: widget.state == _PowerToggleState.on,
-                          ),
-                        ),
-                        AnimatedAlign(
+                    ],
+                  ),
+                  child: Stack(
+                    children: [
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: _PowerPositionTick(
                           key: ValueKey(
-                            'room-card-power-thumb-${widget.roomId}',
+                            'room-card-power-tick-${widget.roomId}-off',
                           ),
-                          duration: const Duration(milliseconds: 220),
-                          curve: Curves.easeOutCubic,
-                          alignment: _thumbAlignment,
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 220),
-                            width: 30,
-                            height: 30,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: thumbColor,
-                              border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.50),
-                                width: 1,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.40),
-                                  blurRadius: 7,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
+                          active: widget.state == _PowerToggleState.off,
+                        ),
+                      ),
+                      if (widget.lowGlowEnabled)
+                        Align(
+                          child: _PowerPositionTick(
+                            key: ValueKey(
+                              'room-card-power-tick-${widget.roomId}-standby',
                             ),
-                            child: Icon(
-                              switch (widget.state) {
-                                _PowerToggleState.off =>
-                                  Icons.power_settings_new_rounded,
-                                _PowerToggleState.standby =>
-                                  Icons.brightness_low_rounded,
-                                _PowerToggleState.on => Icons.check_rounded,
-                              },
-                              key: ValueKey(
-                                'room-card-power-toggle-icon-${widget.roomId}',
+                            active: widget.state == _PowerToggleState.standby,
+                          ),
+                        ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: _PowerPositionTick(
+                          key: ValueKey(
+                            'room-card-power-tick-${widget.roomId}-on',
+                          ),
+                          active: widget.state == _PowerToggleState.on,
+                        ),
+                      ),
+                      AnimatedAlign(
+                        key: ValueKey(
+                          'room-card-power-thumb-${widget.roomId}',
+                        ),
+                        duration: const Duration(milliseconds: 220),
+                        curve: Curves.easeOutCubic,
+                        alignment: _thumbAlignment,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          width: 30,
+                          height: 30,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: thumbColor,
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.50),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.40),
+                                blurRadius: 7,
+                                offset: const Offset(0, 3),
                               ),
-                              size: 17,
-                              color: Color.lerp(
-                                const Color(0xFF171C23),
-                                widget.cctColor,
-                                widget.state == _PowerToggleState.standby
-                                    ? 0.28
-                                    : 0.10,
-                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            switch (widget.state) {
+                              _PowerToggleState.off =>
+                                Icons.power_settings_new_rounded,
+                              _PowerToggleState.standby =>
+                                Icons.brightness_low_rounded,
+                              _PowerToggleState.on => Icons.check_rounded,
+                            },
+                            key: ValueKey(
+                              'room-card-power-toggle-icon-${widget.roomId}',
+                            ),
+                            size: 17,
+                            color: Color.lerp(
+                              const Color(0xFF171C23),
+                              widget.cctColor,
+                              widget.state == _PowerToggleState.standby
+                                  ? 0.28
+                                  : 0.10,
                             ),
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),
