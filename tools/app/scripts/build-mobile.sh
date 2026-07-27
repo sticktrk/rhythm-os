@@ -820,11 +820,18 @@ elif [ "$PLATFORM" = "macos" ]; then
     cd "$FLUTTER_APP"
 fi
 
-# Check for .env file with Supabase credentials
-DART_DEFINES=""
+# Build Flutter arguments as an array so paths containing spaces (including
+# isolated TestFlight dispatch worktrees) remain one argument.
+FLUTTER_BUILD_ARGS=()
+if [ -n "$RELEASE" ]; then
+    FLUTTER_BUILD_ARGS+=("$RELEASE")
+fi
 if [ -f "$FLUTTER_APP/.env" ]; then
-    DART_DEFINES="--dart-define-from-file=$FLUTTER_APP/.env"
+    FLUTTER_BUILD_ARGS+=("--dart-define-from-file=$FLUTTER_APP/.env")
     echo "Using Supabase config from .env"
+fi
+if [ -n "$BUILD_METADATA_ARGS" ]; then
+    FLUTTER_BUILD_ARGS+=("$BUILD_METADATA_ARGS")
 fi
 
 # Build/Run
@@ -832,9 +839,9 @@ echo ""
 if [ "$RUN_APP" = true ]; then
     echo "Building and running on $PLATFORM..."
     if [ "$PLATFORM" = "macos" ]; then
-        flutter run -d macos $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        flutter run -d macos "${FLUTTER_BUILD_ARGS[@]}"
     else
-        flutter run $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        flutter run "${FLUTTER_BUILD_ARGS[@]}"
     fi
 else
     echo "Building for $PLATFORM..."
@@ -845,7 +852,7 @@ else
         rm -rf "$FLUTTER_APP/build/ios/ipa" \
             "$FLUTTER_APP/build/ios/archive/Runner.xcarchive"
         set +e
-        flutter build ipa $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        flutter build ipa "${FLUTTER_BUILD_ARGS[@]}"
         FLUTTER_IPA_STATUS=$?
         set -e
 
@@ -924,9 +931,9 @@ else
             echo "  - Transporter app from Mac App Store"
         fi
     elif [ "$PLATFORM" = "ios" ]; then
-        flutter build ios $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        flutter build ios "${FLUTTER_BUILD_ARGS[@]}"
     elif [ "$PLATFORM" = "macos" ]; then
-        flutter build macos $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+        flutter build macos "${FLUTTER_BUILD_ARGS[@]}"
 
         # Create DMG if requested
         if [ "$BUILD_DMG" = true ]; then
@@ -1051,7 +1058,7 @@ else
                 exit 1
             fi
             echo "Building AAB for Google Play..."
-            flutter build appbundle $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+            flutter build appbundle "${FLUTTER_BUILD_ARGS[@]}"
             echo ""
             echo "AAB created at: build/app/outputs/bundle/release/"
 
@@ -1154,7 +1161,7 @@ else
                 echo "  - Web: Play Console → Testing → Internal testing → Create new release"
             fi
         else
-            flutter build apk $RELEASE $DART_DEFINES $BUILD_METADATA_ARGS
+            flutter build apk "${FLUTTER_BUILD_ARGS[@]}"
         fi
     fi
     echo ""
