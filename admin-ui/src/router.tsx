@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 
 import DashboardPage from './pages/dashboard/DashboardPage';
+import HomeDetailPage from './pages/dashboard/HomeDetailPage';
 import HubConsoleLayout from './pages/hub/HubConsoleLayout';
 
 const OverviewPage = lazy(() => import('./pages/hub/OverviewPage'));
@@ -31,6 +32,7 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<DashboardPage />} />
+      <Route path="/homes/:homeId" element={<HomeDetailPage />} />
       <Route path="/hubs/:hubId" element={<HubConsoleLayout />}>
         <Route index element={<Navigate to="overview" replace />} />
         <Route
