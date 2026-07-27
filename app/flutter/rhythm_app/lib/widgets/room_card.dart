@@ -2034,85 +2034,148 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
               widget.enabled ? (_) => setState(() => _pressed = false) : null,
           onTapCancel:
               widget.enabled ? () => setState(() => _pressed = false) : null,
-          child: AnimatedScale(
-            scale: _pressed ? 0.90 : 1.0,
-            duration: const Duration(milliseconds: 110),
-            curve: Curves.easeOut,
-            child: AnimatedContainer(
-              key: ValueKey(
-                'room-card-control-pill-${widget.roomId}-scenes',
-              ),
-              duration: const Duration(milliseconds: 280),
-              curve: Curves.easeOutCubic,
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color.lerp(
-                      const Color(0xFF24202D),
-                      primary,
-                      widget.active ? 0.58 : 0.34,
-                    )!,
-                    Color.lerp(
-                      const Color(0xFF121821),
-                      secondary,
-                      widget.active ? 0.42 : 0.22,
-                    )!,
-                  ],
-                ),
-                border: Border.all(
-                  color: Colors.white.withValues(
-                    alpha: widget.active ? 0.42 : 0.20,
-                  ),
-                  width: widget.active ? 1.5 : 1,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: primary.withValues(
-                      alpha: widget.active ? 0.34 : 0.18,
+          child: SizedBox(
+            width: 56,
+            height: 68,
+            child: Column(
+              children: [
+                AnimatedScale(
+                  scale: _pressed ? 0.90 : 1.0,
+                  duration: const Duration(milliseconds: 110),
+                  curve: Curves.easeOut,
+                  child: AnimatedContainer(
+                    key: ValueKey(
+                      'room-card-control-pill-${widget.roomId}-scenes',
                     ),
-                    blurRadius: widget.active ? 18 : 12,
-                    spreadRadius: widget.active ? 1 : 0,
-                  ),
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.30),
-                    blurRadius: 6,
-                    offset: const Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Positioned(
-                    top: 12,
-                    child: Icon(
-                      Icons.auto_awesome_rounded,
-                      size: 18,
-                      color: Colors.white.withValues(alpha: 0.95),
-                    ),
-                  ),
-                  Positioned(
-                    bottom: 10,
-                    child: Text(
-                      'Scenes',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.92),
-                        fontSize: 7.5,
-                        height: 1,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.1,
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeOutCubic,
+                    width: 56,
+                    height: 56,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color.lerp(
+                            primary,
+                            const Color(0xFF2A2133),
+                            widget.active ? 0.12 : 0.26,
+                          )!,
+                          Color.lerp(
+                            secondary,
+                            const Color(0xFF151A24),
+                            widget.active ? 0.12 : 0.26,
+                          )!,
+                        ],
                       ),
+                      border: Border.all(
+                        color: Colors.white.withValues(
+                          alpha: widget.active ? 0.62 : 0.34,
+                        ),
+                        width: widget.active ? 1.5 : 1,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: primary.withValues(
+                            alpha: widget.active ? 0.42 : 0.24,
+                          ),
+                          blurRadius: widget.active ? 18 : 12,
+                          spreadRadius: widget.active ? 1 : 0,
+                        ),
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.30),
+                          blurRadius: 6,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        const Positioned.fill(
+                          child: _RoomJewelDepthOverlay(),
+                        ),
+                        Icon(
+                          Icons.auto_awesome_rounded,
+                          size: 19,
+                          color: Colors.white.withValues(alpha: 0.96),
+                          shadows: [
+                            Shadow(
+                              color: Colors.black.withValues(alpha: 0.48),
+                              blurRadius: 6,
+                              offset: const Offset(0, 1),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(height: 2),
+                _RoomJewelLabel(
+                  key: ValueKey(
+                    'room-card-control-label-${widget.roomId}-scenes',
+                  ),
+                  label: 'Scenes',
+                  enabled: widget.enabled,
+                ),
+              ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoomJewelLabel extends StatelessWidget {
+  const _RoomJewelLabel({
+    super.key,
+    required this.label,
+    required this.enabled,
+  });
+
+  final String label;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      maxLines: 1,
+      style: TextStyle(
+        color: Colors.white.withValues(alpha: enabled ? 0.92 : 0.64),
+        fontSize: label.length > 6 ? 9 : 10,
+        height: 1,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -0.1,
+      ),
+    );
+  }
+}
+
+class _RoomJewelDepthOverlay extends StatelessWidget {
+  const _RoomJewelDepthOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          stops: const [0, 0.42, 1],
+          colors: [
+            Colors.white.withValues(alpha: 0.34),
+            Colors.transparent,
+            Colors.black.withValues(alpha: 0.20),
+          ],
+        ),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.14),
+          width: 2,
         ),
       ),
     );
@@ -2131,8 +2194,10 @@ class _RoomControlRow extends StatelessWidget {
   });
 
   static const double _jewelSize = 56;
+  static const double _jewelHeight = 68;
   static const double _powerWidth = 88;
-  static const double _rowHeight = 64;
+  static const double _powerHeight = 64;
+  static const double _rowHeight = 68;
 
   final Widget scenes;
   final Widget brightness;
@@ -2155,7 +2220,7 @@ class _RoomControlRow extends StatelessWidget {
         }) {
           return Positioned(
             left: center - (width / 2),
-            top: (_rowHeight - height) / 2,
+            top: 0,
             width: width,
             height: height,
             child: child,
@@ -2170,25 +2235,25 @@ class _RoomControlRow extends StatelessWidget {
                 child: scenes,
                 center: firstCenter,
                 width: _jewelSize,
-                height: _jewelSize,
+                height: _jewelHeight,
               ),
               place(
                 child: brightness,
                 center: firstCenter + centerStep,
                 width: _jewelSize,
-                height: _jewelSize,
+                height: _jewelHeight,
               ),
               place(
                 child: color,
                 center: firstCenter + (centerStep * 2),
                 width: _jewelSize,
-                height: _jewelSize,
+                height: _jewelHeight,
               ),
               place(
                 child: power,
                 center: lastCenter,
                 width: _powerWidth,
-                height: _rowHeight,
+                height: _powerHeight,
               ),
             ],
           ),
@@ -2234,6 +2299,42 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
 
   @override
   Widget build(BuildContext context) {
+    final jewelGradient = switch (widget.control) {
+      _RoomDetailControl.brightness => RadialGradient(
+          center: const Alignment(-0.28, -0.36),
+          radius: 0.95,
+          stops: const [0, 0.48, 1],
+          colors: [
+            Colors.white,
+            Color.lerp(
+              widget.primaryColor,
+              Colors.white,
+              widget.selected ? 0.62 : 0.50,
+            )!,
+            Color.lerp(
+              widget.primaryColor,
+              const Color(0xFFFFB63F),
+              widget.selected ? 0.40 : 0.28,
+            )!,
+          ],
+        ),
+      _RoomDetailControl.color => LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          stops: const [0, 0.46, 0.54, 1],
+          colors: [
+            widget.primaryColor,
+            Color.lerp(widget.primaryColor, Colors.white, 0.34)!,
+            Color.lerp(widget.secondaryColor, Colors.white, 0.24)!,
+            widget.secondaryColor,
+          ],
+        ),
+    };
+    final iconColor = switch (widget.control) {
+      _RoomDetailControl.brightness => const Color(0xFF5A3908),
+      _RoomDetailControl.color => Colors.white,
+    };
+
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 160),
       opacity: widget.enabled ? 1.0 : 0.42,
@@ -2260,83 +2361,102 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
                 widget.enabled ? (_) => setState(() => _pressed = false) : null,
             onTapCancel:
                 widget.enabled ? () => setState(() => _pressed = false) : null,
-            child: AnimatedScale(
-              scale: _pressed ? 0.90 : 1.0,
-              duration: const Duration(milliseconds: 110),
-              curve: Curves.easeOut,
-              child: AnimatedContainer(
-                key: ValueKey(
-                  'room-card-control-pill-${widget.roomId}-${widget.control.name}',
-                ),
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
-                width: 56,
-                height: 56,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color.lerp(
-                        const Color(0xFF252A31),
-                        widget.primaryColor,
-                        widget.selected ? 0.56 : 0.28,
-                      )!,
-                      Color.lerp(
-                        const Color(0xFF12161C),
-                        widget.secondaryColor,
-                        widget.selected ? 0.42 : 0.20,
-                      )!,
-                    ],
-                  ),
-                  border: Border.all(
-                    color: widget.primaryColor.withValues(
-                      alpha: widget.selected ? 0.72 : 0.30,
-                    ),
-                    width: widget.selected ? 1.5 : 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: widget.primaryColor.withValues(
-                        alpha: widget.selected ? 0.30 : 0.12,
+            child: SizedBox(
+              width: 56,
+              height: 68,
+              child: Column(
+                children: [
+                  AnimatedScale(
+                    scale: _pressed ? 0.90 : 1.0,
+                    duration: const Duration(milliseconds: 110),
+                    curve: Curves.easeOut,
+                    child: AnimatedContainer(
+                      key: ValueKey(
+                        'room-card-control-pill-${widget.roomId}-${widget.control.name}',
                       ),
-                      blurRadius: widget.selected ? 16 : 9,
-                      spreadRadius: widget.selected ? 1 : 0,
-                    ),
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.28),
-                      blurRadius: 5,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      widget.icon,
-                      size: 18,
-                      color: Colors.white.withValues(
-                        alpha: widget.enabled ? 0.95 : 0.68,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      widget.label,
-                      maxLines: 1,
-                      style: TextStyle(
-                        color: Colors.white.withValues(
-                          alpha: widget.enabled ? 0.92 : 0.64,
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: jewelGradient,
+                        border: Border.all(
+                          color: Colors.white.withValues(
+                            alpha: widget.selected ? 0.88 : 0.54,
+                          ),
+                          width: widget.selected ? 1.5 : 1,
                         ),
-                        fontSize: widget.label.length > 6 ? 6.8 : 7.8,
-                        height: 1,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.1,
+                        boxShadow: [
+                          BoxShadow(
+                            color: widget.primaryColor.withValues(
+                              alpha: widget.selected ? 0.30 : 0.12,
+                            ),
+                            blurRadius: widget.selected ? 16 : 9,
+                            spreadRadius: widget.selected ? 1 : 0,
+                          ),
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.28),
+                            blurRadius: 5,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          const Positioned.fill(
+                            child: _RoomJewelDepthOverlay(),
+                          ),
+                          if (widget.control == _RoomDetailControl.color)
+                            Container(
+                              width: 29,
+                              height: 29,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: const Color(0xFF202733).withValues(
+                                  alpha: 0.30,
+                                ),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.22),
+                                ),
+                              ),
+                            ),
+                          Icon(
+                            widget.icon,
+                            size:
+                                widget.control == _RoomDetailControl.brightness
+                                    ? 22
+                                    : 19,
+                            color: iconColor.withValues(
+                              alpha: widget.enabled ? 0.92 : 0.62,
+                            ),
+                            shadows: [
+                              Shadow(
+                                color: Colors.black.withValues(
+                                  alpha: widget.control ==
+                                          _RoomDetailControl.brightness
+                                      ? 0.18
+                                      : 0.48,
+                                ),
+                                blurRadius: 5,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 2),
+                  _RoomJewelLabel(
+                    key: ValueKey(
+                      'room-card-control-label-${widget.roomId}-${widget.control.name}',
+                    ),
+                    label: widget.label,
+                    enabled: widget.enabled,
+                  ),
+                ],
               ),
             ),
           ),
@@ -2348,8 +2468,8 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
 
 enum _PowerToggleState { off, standby, on }
 
-/// Direct-select room power switch. Low-glow-enabled rooms expose Off, Low
-/// glow, and On; other rooms expose the familiar binary Off/On positions.
+/// Tap-cycle room power switch with exact drag selection. Low-glow-enabled
+/// rooms expose Off, Low glow, and On; other rooms expose binary Off/On.
 class _RoomPowerSwitch extends StatefulWidget {
   final String roomId;
   final _PowerToggleState state;
@@ -2476,7 +2596,7 @@ class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
       label: 'Room power',
       value: stateLabel,
       hint: widget.lowGlowEnabled
-          ? 'Choose Off, Low glow, or On'
+          ? 'Tap to cycle; swipe to choose Off, Low glow, or On'
           : widget.state == _PowerToggleState.on
               ? 'Turn completely off'
               : 'Turn on and reset to the curve',
@@ -2487,7 +2607,7 @@ class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
       onTap: widget.enabled ? _cycle : null,
       child: Tooltip(
         message: widget.lowGlowEnabled
-            ? 'Power · $stateLabel · Off / Low glow / On'
+            ? 'Power · $stateLabel · Tap to cycle'
             : 'Power · $stateLabel',
         child: SizedBox(
           key: ValueKey('room-card-power-toggle-${widget.roomId}'),
@@ -2499,9 +2619,9 @@ class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
               Listener(
                 onPointerDown: widget.enabled ? (_) => _dragging = false : null,
                 onPointerUp: widget.enabled
-                    ? (details) {
+                    ? (_) {
                         if (!_dragging) {
-                          _selectAt(details.localPosition.dx);
+                          _cycle();
                         }
                       }
                     : null,
@@ -2518,7 +2638,7 @@ class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
                   behavior: HitTestBehavior.opaque,
                   onTap: widget.enabled
                       // Claim the tap gesture ahead of the card's settings
-                      // action. The raw pointer-up above selects immediately,
+                      // action. The raw pointer-up above cycles immediately,
                       // without waiting for the card's double-tap timeout.
                       ? () {}
                       : null,
