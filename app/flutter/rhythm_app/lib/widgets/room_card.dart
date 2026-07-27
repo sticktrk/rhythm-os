@@ -23,10 +23,12 @@ import 'solar_orbit.dart'; // For CelestialColors
 /// Light mode for a room card.
 enum RoomMode { mood, standby, on, off }
 
+enum _RoomDetailControl { brightness, color }
+
 const double _roomHeaderActionHitSize = 28;
 
-/// Hue-style room card with a CCT-tinted background, compact Power/Scenes
-/// jewels, rhythm controls, and brightness/CCT sliders.
+/// Hue-style room card with a CCT-tinted background, four compact control
+/// jewels, rhythm controls, and on-demand brightness/CCT sliders.
 class RoomCard extends StatefulWidget {
   final String roomId;
   final CurveConfigDto globalConfig;
@@ -50,6 +52,9 @@ class _RoomCardState extends State<RoomCard> {
   int? _sliderBrightness;
   int _lastResetGen = 0;
   int? _sliderKelvin;
+  _RoomDetailControl? _expandedControl;
+  RoomMode? _lastRenderedMode;
+  bool _lastMoodSelectionActive = false;
   bool _localActionPending = false;
   Timer? _localActionFeedbackTimer;
   static const int _minKelvin = 2000;
@@ -92,6 +97,8 @@ class _RoomCardState extends State<RoomCard> {
   /// Handle three-state mode transitions. Driven by the segmented toggle:
   /// each segment is a tap target, plus horizontal drag for fluency.
   void _onModeChanged(RoomMode newMode) {
+    _closeExpandedControl();
+
     // The very first time someone reaches for Mood, introduce the concept
     // before acting on it — then drop them straight into the picker.
     if (newMode == RoomMode.mood &&
@@ -102,25 +109,31 @@ class _RoomCardState extends State<RoomCard> {
     _applyModeChange(newMode);
   }
 
-  /// The Scenes jewel is both a mode switch and the doorway into the picker.
-  /// Entering Scenes should not require a second tap just to choose something.
+  /// The Scenes jewel opens the picker without changing the room. An inactive
+  /// room starts on Color at its current CCT; Mood becomes active only after
+  /// the user chooses a color or scene.
   void _onScenesJewelPressed() {
+    final roomProvider = context.read<RoomProvider>();
+    final serverSync = context.read<ServerSyncProvider>();
+    final alreadyInMood =
+        roomProvider.getDisplayRoomState(widget.roomId) == RoomModeState.mood;
+    if (!alreadyInMood) {
+      _closeExpandedControl();
+    } else if (serverSync.moodSceneIdForRoom(widget.roomId) != null ||
+        roomProvider.getMoodColor(widget.roomId) != null) {
+      setState(() => _expandedControl = _RoomDetailControl.brightness);
+    }
+
     if (!FirstRunExplainer.hasSeen(_moodExplainerId)) {
       _introduceMood();
       return;
     }
 
-    final alreadyInMood =
-        context.read<RoomProvider>().getDisplayRoomState(widget.roomId) ==
-            RoomModeState.mood;
-    _applyModeChange(RoomMode.mood);
-    if (!alreadyInMood && mounted) {
-      _showMoodScenePicker();
-    }
+    _showMoodScenePicker(previewCurrentCt: !alreadyInMood);
   }
 
-  /// Show the one-time Mood explainer, then switch the room to Mood and open
-  /// the scene/color picker so the user can act on what they just learned.
+  /// Show the one-time Mood explainer, then open the non-mutating picker so the
+  /// user can choose whether to activate a color or scene.
   Future<void> _introduceMood() async {
     HapticFeedback.lightImpact();
     await FirstRunExplainer.maybeShow(
@@ -154,9 +167,10 @@ class _RoomCardState extends State<RoomCard> {
       ],
     );
     if (!mounted) return;
-    _applyModeChange(RoomMode.mood);
-    if (!mounted) return;
-    _showMoodScenePicker();
+    final alreadyInMood =
+        context.read<RoomProvider>().getDisplayRoomState(widget.roomId) ==
+            RoomModeState.mood;
+    _showMoodScenePicker(previewCurrentCt: !alreadyInMood);
   }
 
   Future<void> _applyModeChange(RoomMode newMode) {
@@ -227,6 +241,7 @@ class _RoomCardState extends State<RoomCard> {
     setState(() {
       _sliderBrightness = null;
       _sliderKelvin = null;
+      _expandedControl = null;
     });
     AnalyticsService().logRoomModeChanged(
       roomId: widget.roomId,
@@ -236,27 +251,58 @@ class _RoomCardState extends State<RoomCard> {
     return push;
   }
 
-  void _showMoodScenePicker() {
+  void _toggleExpandedControl(
+    _RoomDetailControl control, {
+    required RoomMode mode,
+  }) {
+    HapticFeedback.selectionClick();
+    final expanded = _expandedControl != control;
+    setState(() {
+      _expandedControl = expanded ? control : null;
+    });
+    AnalyticsService().logRoomCardDetailToggled(
+      control: control.name,
+      roomMode: mode.name,
+      expanded: expanded,
+    );
+  }
+
+  void _closeExpandedControl() {
+    if (_expandedControl == null) return;
+    setState(() => _expandedControl = null);
+  }
+
+  void _showMoodScenePicker({bool previewCurrentCt = false}) {
     final sync = context.read<ServerSyncProvider>();
     final roomProvider = context.read<RoomProvider>();
 
+    final currentKelvin = roomProvider.getKelvin(widget.roomId) ?? 3000;
+    final currentCtColor = ColorUtils.cctToColor(currentKelvin);
     final existingColor = roomProvider.getMoodColor(widget.roomId) ??
         roomProvider.getRoomColor(widget.roomId);
-    final initialColor = existingColor != null
-        ? Color.fromARGB(
-            255, existingColor.$1, existingColor.$2, existingColor.$3)
-        : null;
-    final activeSceneId = sync.moodSceneIdForRoom(widget.roomId);
+    final initialColor = previewCurrentCt
+        ? currentCtColor
+        : existingColor != null
+            ? Color.fromARGB(
+                255, existingColor.$1, existingColor.$2, existingColor.$3)
+            : currentCtColor;
+    final activeSceneId =
+        previewCurrentCt ? null : sync.moodSceneIdForRoom(widget.roomId);
     final activeScene =
         activeSceneId == null ? null : sync.sceneById(activeSceneId);
     final roomSource =
         roomProvider.getNode(widget.roomId)?.source ?? RoomSourceDto.unknown;
     final showHueTab = sync.roomHasHueBinding(widget.roomId);
-    final initialTab = activeSceneId == null
+    final initialTab = previewCurrentCt || activeSceneId == null
         ? MoodTab.color
         : showHueTab && activeScene?.isImportedHueScene == true
             ? MoodTab.hue
             : MoodTab.scenes;
+    final initialBrightness = previewCurrentCt
+        ? roomProvider.getBrightness(widget.roomId) ?? 50
+        : roomProvider.getMoodBrightness(widget.roomId) ??
+            roomProvider.getBrightness(widget.roomId) ??
+            50;
 
     AnalyticsService().logMoodPickerOpened(
       roomSource: roomSource.name,
@@ -269,6 +315,7 @@ class _RoomCardState extends State<RoomCard> {
       initialTab: initialTab,
       initialColor: initialColor,
       initialSceneId: activeSceneId,
+      initialBrightness: initialBrightness,
       initialScenes: sync.scenesForRoom(widget.roomId),
       scenesLoader: () => sync.fetchScenes(roomId: widget.roomId),
       showHueTab: showHueTab,
@@ -278,25 +325,31 @@ class _RoomCardState extends State<RoomCard> {
           tab: tab.name,
         );
       },
-      onColorChanged: (color) {
+      onBrightnessChanged: (brightness) {
+        if (roomProvider.getDisplayRoomState(widget.roomId) !=
+            RoomModeState.mood) {
+          return;
+        }
+        setState(() => _sliderBrightness = brightness);
+        _onSceneBrightnessSliderEnd();
+      },
+      onColorChanged: (color, brightness) {
         final r = (color.r * 255).round();
         final g = (color.g * 255).round();
         final b = (color.b * 255).round();
-        final moodBrightness = (roomProvider.getMoodBrightness(widget.roomId) ??
-                roomProvider.getBrightness(widget.roomId) ??
-                1)
-            .clamp(1, 100)
-            .toInt();
-        sync.dispatchNodeColor(
+        final dispatched = sync.dispatchNodeColor(
           widget.roomId,
           r,
           g,
           b,
           scope: 'mood',
-          brightness: moodBrightness,
+          brightness: brightness,
         );
+        if (dispatched) {
+          _activateMoodPresentation(brightness);
+        }
       },
-      onSceneSelected: (scene) async {
+      onSceneSelected: (scene, brightness) async {
         final applied = await sync.applyMoodScene(
           widget.roomId,
           scene.id,
@@ -314,9 +367,27 @@ class _RoomCardState extends State<RoomCard> {
           sceneCategory: sceneCategory,
           success: applied,
         );
+        if (applied && mounted) {
+          _activateMoodPresentation(brightness);
+          _onSceneBrightnessSliderEnd();
+        }
         return applied;
       },
     );
+  }
+
+  void _activateMoodPresentation(int brightness) {
+    if (!mounted) return;
+    setState(() {
+      _sliderBrightness = brightness;
+      _expandedControl = _RoomDetailControl.brightness;
+    });
+    final roomProvider = context.read<RoomProvider>();
+    roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+    roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+    roomProvider.setMoodEnabledLocal(widget.roomId, true);
+    roomProvider.setMoodBrightnessLocal(widget.roomId, brightness);
+    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.mood);
   }
 
   void _onBrightnessSliderEnd() {
@@ -344,6 +415,7 @@ class _RoomCardState extends State<RoomCard> {
 
     roomProvider.setRoomLightsOnLocal(widget.roomId, true);
     roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+    _lastRenderedMode = RoomMode.on;
     roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
     AnalyticsService().logRoomModeChanged(
       roomId: widget.roomId,
@@ -352,19 +424,14 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
-  void _onSceneBrightnessSliderEnd(Color currentColor) {
+  void _onSceneBrightnessSliderEnd() {
     if (_sliderBrightness == null) return;
-    final r = (currentColor.r * 255).round().clamp(0, 255);
-    final g = (currentColor.g * 255).round().clamp(0, 255);
-    final b = (currentColor.b * 255).round().clamp(0, 255);
-    context.read<ServerSyncProvider>().dispatchNodeColor(
-          widget.roomId,
-          r,
-          g,
-          b,
-          scope: 'mood',
-          brightness: _sliderBrightness!,
-        );
+    context
+        .read<RoomProvider>()
+        .setMoodBrightnessLocal(widget.roomId, _sliderBrightness!);
+    context
+        .read<ServerSyncProvider>()
+        .dispatchNodeBrightness(widget.roomId, _sliderBrightness!);
     AnalyticsService().logRoomBrightnessAdjusted(
       roomId: widget.roomId,
       brightness: _sliderBrightness!,
@@ -398,6 +465,7 @@ class _RoomCardState extends State<RoomCard> {
     setState(() {
       _sliderBrightness = null;
       _sliderKelvin = null;
+      _expandedControl = null;
     });
   }
 
@@ -412,6 +480,7 @@ class _RoomCardState extends State<RoomCard> {
     setState(() {
       _sliderBrightness = null;
       _sliderKelvin = null;
+      _expandedControl = null;
     });
   }
 
@@ -477,6 +546,151 @@ class _RoomCardState extends State<RoomCard> {
     final hour =
         now.hour + (now.minute / 60.0) + (room.timeOffsetMinutes / 60.0);
     return _CctSideRange.normalizeHour(hour);
+  }
+
+  Widget _buildBrightnessSlider({
+    required RoomMode mode,
+    required int displayBrightness,
+    required Color cctColor,
+    required Color activeTrackColor,
+    required Color inactiveTrackColor,
+    required Color thumbColor,
+    required Color overlayColor,
+    required bool enabled,
+  }) {
+    final isMoodBrightness = mode == RoomMode.mood;
+    return Semantics(
+      container: true,
+      label:
+          isMoodBrightness ? 'Scene brightness control' : 'Brightness control',
+      child: GestureDetector(
+        key: ValueKey(
+          'room-card-expanded-brightness-${widget.roomId}',
+        ),
+        behavior: HitTestBehavior.opaque,
+        onTap: () {},
+        onLongPress: () {},
+        child: SliderTheme(
+          data: SliderThemeData(
+            trackHeight: 24,
+            thumbShape: const _SunSliderThumbShape(
+              icon: Icons.wb_sunny_rounded,
+            ),
+            overlayShape: const RoundSliderOverlayShape(
+              overlayRadius: 36,
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: _SunSliderThumbShape.radius - 8,
+              vertical: 10,
+            ),
+            trackShape: const RoundedRectSliderTrackShape(),
+            activeTrackColor: activeTrackColor,
+            inactiveTrackColor: inactiveTrackColor,
+            thumbColor: thumbColor,
+            overlayColor: overlayColor,
+            disabledActiveTrackColor:
+                CelestialColors.orbitRing.withValues(alpha: 0.35),
+            disabledInactiveTrackColor:
+                CelestialColors.orbitRing.withValues(alpha: 0.18),
+            disabledThumbColor: isMoodBrightness
+                ? Color.lerp(Colors.white, cctColor, 0.25)
+                : CelestialColors.textSecondary.withValues(alpha: 0.55),
+          ),
+          child: Slider(
+            key: ValueKey(
+              isMoodBrightness
+                  ? 'room-card-scene-brightness-slider-${widget.roomId}'
+                  : 'room-card-brightness-slider-${widget.roomId}',
+            ),
+            value: displayBrightness.toDouble().clamp(1, 100),
+            min: 1,
+            max: 100,
+            onChanged: enabled
+                ? (value) {
+                    if (!isMoodBrightness) {
+                      _activateLowGlowRoomForSlider();
+                    }
+                    setState(() {
+                      _sliderBrightness = value.round();
+                    });
+                  }
+                : null,
+            onChangeEnd: enabled
+                ? (_) {
+                    if (isMoodBrightness) {
+                      _onSceneBrightnessSliderEnd();
+                    } else {
+                      _onBrightnessSliderEnd();
+                    }
+                  }
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildColorTemperatureSlider({
+    required int kelvin,
+    required _CctSideRange range,
+    required Color cctColor,
+    required Color overlayColor,
+    required bool enabled,
+  }) {
+    return Semantics(
+      container: true,
+      label: 'Color temperature control',
+      child: GestureDetector(
+        key: ValueKey(
+          'room-card-expanded-color-${widget.roomId}',
+        ),
+        behavior: HitTestBehavior.opaque,
+        onTap: () {},
+        onLongPress: () {},
+        child: SliderTheme(
+          data: SliderThemeData(
+            trackHeight: 24,
+            thumbShape: const _SunSliderThumbShape(
+              icon: Icons.contrast_rounded,
+            ),
+            overlayShape: const RoundSliderOverlayShape(
+              overlayRadius: 36,
+            ),
+            padding: const EdgeInsets.symmetric(
+              horizontal: _SunSliderThumbShape.radius - 8,
+              vertical: 10,
+            ),
+            trackShape: _CCTGradientTrackShape(
+              minKelvin: range.minKelvin,
+              maxKelvin: range.maxKelvin,
+            ),
+            thumbColor: Colors.white,
+            overlayColor: overlayColor,
+            disabledActiveTrackColor: cctColor.withValues(alpha: 0.30),
+            disabledInactiveTrackColor: Colors.black.withValues(alpha: 0.15),
+            disabledThumbColor:
+                CelestialColors.textSecondary.withValues(alpha: 0.55),
+          ),
+          child: Slider(
+            key: ValueKey(
+              'room-card-cct-slider-${widget.roomId}',
+            ),
+            value: range.clampKelvin(_sliderKelvin ?? kelvin).toDouble(),
+            min: range.minKelvin.toDouble(),
+            max: range.maxKelvin.toDouble(),
+            onChanged: enabled
+                ? (value) {
+                    _activateLowGlowRoomForSlider();
+                    setState(() {
+                      _sliderKelvin = value.round();
+                    });
+                  }
+                : null,
+            onChangeEnd: enabled ? (_) => _onKelvinSliderEnd() : null,
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -567,6 +781,7 @@ class _RoomCardState extends State<RoomCard> {
           _lastResetGen = resetGen;
           _sliderBrightness = null;
           _sliderKelvin = null;
+          _expandedControl = null;
         }
 
         final mode = switch (roomState) {
@@ -578,6 +793,29 @@ class _RoomCardState extends State<RoomCard> {
           RoomModeState.active =>
             RoomMode.on,
         };
+
+        // Explicit mode actions clear this state before updating the provider.
+        // This guard handles authoritative/external mode changes. The one
+        // intentional Low glow -> On slider transition updates
+        // [_lastRenderedMode] before changing provider state so the active
+        // slider stays under the user's finger.
+        final enteringMood =
+            mode == RoomMode.mood && _lastRenderedMode != RoomMode.mood;
+        final hasActiveMoodSelection =
+            mode == RoomMode.mood && (moodSceneId != null || moodColor != null);
+        final moodSelectionBecameActive =
+            hasActiveMoodSelection && !_lastMoodSelectionActive;
+        if (_lastRenderedMode != null && _lastRenderedMode != mode) {
+          _sliderBrightness = null;
+          _sliderKelvin = null;
+          _expandedControl = enteringMood && hasActiveMoodSelection
+              ? _RoomDetailControl.brightness
+              : null;
+        } else if (enteringMood && moodSelectionBecameActive) {
+          _expandedControl = _RoomDetailControl.brightness;
+        }
+        _lastRenderedMode = mode;
+        _lastMoodSelectionActive = hasActiveMoodSelection;
 
         // Mood has its own profile brightness. Do not reuse the active-mode
         // room brightness when the room is in Mood.
@@ -627,14 +865,11 @@ class _RoomCardState extends State<RoomCard> {
 
         final showActivitySpinner =
             _localActionPending || isTransitioning || isDispatchPending;
-        final VoidCallback? motionIndicatorTap =
-            motionTimer?.remainingSecs != null
-                ? null
-                : !motionActivationSupported
-                    ? () => _showMotionActivationUnavailable(room.name)
-                    : motionActivationEnabled
-                        ? () => _setMotionActivationEnabled(false)
-                        : null;
+        final VoidCallback? motionIndicatorTap = !motionActivationSupported
+            ? () => _showMotionActivationUnavailable(room.name)
+            : motionActivationEnabled
+                ? () => _setMotionActivationEnabled(false)
+                : null;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
@@ -685,12 +920,21 @@ class _RoomCardState extends State<RoomCard> {
             (room.brightnessOffset != 0 || room.timeOffsetMinutes != 0);
         final resetAvailable = offCurve || mode == RoomMode.mood;
 
-        final adaptiveSlidersVisible =
+        final adaptiveControlsAvailable =
             mode == RoomMode.on || mode == RoomMode.standby;
+        final controlInteractionEnabled = hubConnected && !isTransitioning;
+        final brightnessControlAvailable = mode != RoomMode.off;
+        final colorControlAvailable = adaptiveControlsAvailable;
+        if ((_expandedControl == _RoomDetailControl.brightness &&
+                !brightnessControlAvailable) ||
+            (_expandedControl == _RoomDetailControl.color &&
+                !colorControlAvailable)) {
+          _expandedControl = null;
+        }
         final brightnessSliderActive =
-            !isTransitioning && adaptiveSlidersVisible;
-        final cctSliderActive = !isTransitioning && adaptiveSlidersVisible;
-        final sceneSliderActive = !isTransitioning && mode == RoomMode.mood;
+            controlInteractionEnabled && brightnessControlAvailable;
+        final cctSliderActive =
+            controlInteractionEnabled && colorControlAvailable;
         final cctRange = _CctSideRange.fromCurveData(
           widget.curveData,
           effectiveHour: _effectiveCurveHour(room),
@@ -858,15 +1102,6 @@ class _RoomCardState extends State<RoomCard> {
                                         ),
                                       ),
                                     ),
-                                    if (mode == RoomMode.standby) ...[
-                                      const SizedBox(width: 8),
-                                      _LowGlowHardOffAction(
-                                        roomId: widget.roomId,
-                                        enabled: !isTransitioning,
-                                        onPressed: () =>
-                                            _onModeChanged(RoomMode.off),
-                                      ),
-                                    ],
                                     const SizedBox(width: 8),
                                     SizedBox(
                                       key: ValueKey(
@@ -1023,335 +1258,127 @@ class _RoomCardState extends State<RoomCard> {
                               ),
                             ),
                           ),
-                        // Power and Scenes mirror each other across the active
-                        // sliders so the primary choices anchor both edges.
+                        // Four stable choices stay visible while the two
+                        // adjustment details expand only when requested.
                         Padding(
                           padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  _RoomPowerControl(
-                                    roomId: widget.roomId,
+                              _RoomControlRow(
+                                key: ValueKey(
+                                  'room-card-jewel-row-${widget.roomId}',
+                                ),
+                                scenes: _RoomScenesJewel(
+                                  roomId: widget.roomId,
+                                  active: mode == RoomMode.mood,
+                                  palette: moodPalette,
+                                  enabled: controlInteractionEnabled,
+                                  onPressed: _onScenesJewelPressed,
+                                ),
+                                brightness: _RoomDetailJewel(
+                                  roomId: widget.roomId,
+                                  control: _RoomDetailControl.brightness,
+                                  label: 'Brightness',
+                                  icon: Icons.wb_sunny_rounded,
+                                  selected: _expandedControl ==
+                                      _RoomDetailControl.brightness,
+                                  enabled: controlInteractionEnabled &&
+                                      brightnessControlAvailable,
+                                  primaryColor: cctColor,
+                                  secondaryColor: Color.lerp(
+                                    const Color(0xFF12161C),
+                                    cctColor,
+                                    0.28,
+                                  )!,
+                                  semanticsValue: '$displayBrightness percent',
+                                  semanticsHint: !brightnessControlAvailable
+                                      ? 'Turn the room on or choose Scenes to adjust brightness'
+                                      : _expandedControl ==
+                                              _RoomDetailControl.brightness
+                                          ? 'Hide brightness control'
+                                          : 'Show brightness control',
+                                  onPressed: () => _toggleExpandedControl(
+                                    _RoomDetailControl.brightness,
                                     mode: mode,
-                                    standbyEnabled: standbyEnabled,
-                                    onModeChanged: _onModeChanged,
-                                    onReset: _resetToOn,
-                                    cctColor: cctColor,
-                                    brightness: displayBrightness,
-                                    enabled: !isTransitioning,
                                   ),
-                                  if (adaptiveSlidersVisible) ...[
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Column(
-                                        key: ValueKey(
-                                          'room-card-slider-stack-${widget.roomId}',
-                                        ),
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          GestureDetector(
-                                            behavior: HitTestBehavior.opaque,
-                                            onTap: () {},
-                                            onLongPress: () {},
-                                            child: SliderTheme(
-                                              data: SliderThemeData(
-                                                trackHeight: 24,
-                                                thumbShape:
-                                                    const _SunSliderThumbShape(
-                                                  icon: Icons.wb_sunny_rounded,
-                                                ),
-                                                overlayShape:
-                                                    const RoundSliderOverlayShape(
-                                                  overlayRadius: 36,
-                                                ),
-                                                padding:
-                                                    const EdgeInsets.fromLTRB(
-                                                  _SunSliderThumbShape.radius -
-                                                      8,
-                                                  10,
-                                                  _SunSliderThumbShape.radius -
-                                                      8,
-                                                  4,
-                                                ),
-                                                trackShape:
-                                                    const RoundedRectSliderTrackShape(),
-                                                activeTrackColor:
-                                                    sliderActiveTrackColor,
-                                                inactiveTrackColor:
-                                                    sliderInactiveTrackColor,
-                                                thumbColor: sliderThumbColor,
-                                                overlayColor:
-                                                    sliderOverlayColor,
-                                                disabledActiveTrackColor:
-                                                    CelestialColors.orbitRing
-                                                        .withValues(
-                                                            alpha: 0.35),
-                                                disabledInactiveTrackColor:
-                                                    CelestialColors.orbitRing
-                                                        .withValues(
-                                                            alpha: 0.18),
-                                                disabledThumbColor:
-                                                    CelestialColors
-                                                        .textSecondary
-                                                        .withValues(
-                                                            alpha: 0.55),
-                                              ),
-                                              child: Slider(
-                                                key: ValueKey(
-                                                  'room-card-brightness-slider-${widget.roomId}',
-                                                ),
-                                                value: displayBrightness
-                                                    .toDouble()
-                                                    .clamp(1, 100),
-                                                min: 1,
-                                                max: 100,
-                                                onChanged:
-                                                    brightnessSliderActive
-                                                        ? (value) {
-                                                            _activateLowGlowRoomForSlider();
-                                                            setState(() {
-                                                              _sliderBrightness =
-                                                                  value.round();
-                                                            });
-                                                          }
-                                                        : null,
-                                                onChangeEnd: brightnessSliderActive
-                                                    ? (_) =>
-                                                        _onBrightnessSliderEnd()
-                                                    : null,
-                                              ),
-                                            ),
-                                          ),
-                                          GestureDetector(
-                                            behavior: HitTestBehavior.opaque,
-                                            onTap: () {},
-                                            onLongPress: () {},
-                                            child: SliderTheme(
-                                              data: SliderThemeData(
-                                                trackHeight: 24,
-                                                thumbShape:
-                                                    const _SunSliderThumbShape(
-                                                  icon: Icons.contrast_rounded,
-                                                ),
-                                                overlayShape:
-                                                    const RoundSliderOverlayShape(
-                                                  overlayRadius: 36,
-                                                ),
-                                                padding:
-                                                    const EdgeInsets.fromLTRB(
-                                                  _SunSliderThumbShape.radius -
-                                                      8,
-                                                  4,
-                                                  _SunSliderThumbShape.radius -
-                                                      8,
-                                                  10,
-                                                ),
-                                                trackShape:
-                                                    _CCTGradientTrackShape(
-                                                  minKelvin: cctRange.minKelvin,
-                                                  maxKelvin: cctRange.maxKelvin,
-                                                ),
-                                                activeTrackColor:
-                                                    sliderActiveTrackColor,
-                                                inactiveTrackColor:
-                                                    sliderInactiveTrackColor,
-                                                thumbColor: sliderThumbColor,
-                                                overlayColor:
-                                                    sliderOverlayColor,
-                                                disabledActiveTrackColor:
-                                                    cctColor.withValues(
-                                                        alpha: 0.30),
-                                                disabledInactiveTrackColor:
-                                                    Colors.black.withValues(
-                                                        alpha: 0.15),
-                                                disabledThumbColor:
-                                                    CelestialColors
-                                                        .textSecondary
-                                                        .withValues(
-                                                            alpha: 0.55),
-                                              ),
-                                              child: Slider(
-                                                key: ValueKey(
-                                                  'room-card-cct-slider-${widget.roomId}',
-                                                ),
-                                                value: cctRange
-                                                    .clampKelvin(
-                                                      _sliderKelvin ?? kelvin,
-                                                    )
-                                                    .toDouble(),
-                                                min: cctRange.minKelvin
-                                                    .toDouble(),
-                                                max: cctRange.maxKelvin
-                                                    .toDouble(),
-                                                onChanged: cctSliderActive
-                                                    ? (value) {
-                                                        _activateLowGlowRoomForSlider();
-                                                        setState(() {
-                                                          _sliderKelvin =
-                                                              value.round();
-                                                        });
-                                                      }
-                                                    : null,
-                                                onChangeEnd: cctSliderActive
-                                                    ? (_) =>
-                                                        _onKelvinSliderEnd()
-                                                    : null,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ] else if (mode == RoomMode.mood) ...[
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: GestureDetector(
-                                        behavior: HitTestBehavior.opaque,
-                                        onTap: () {},
-                                        onLongPress: () {},
-                                        child: Row(
-                                          key: ValueKey(
-                                            'room-card-scene-slider-row-${widget.roomId}',
-                                          ),
-                                          children: [
-                                            GestureDetector(
-                                              key: ValueKey(
-                                                'room-card-scene-picker-${widget.roomId}',
-                                              ),
-                                              behavior: HitTestBehavior.opaque,
-                                              onTap: sceneSliderActive
-                                                  ? _showMoodScenePicker
-                                                  : null,
-                                              child: AnimatedContainer(
-                                                duration: const Duration(
-                                                  milliseconds: 220,
-                                                ),
-                                                width: 32,
-                                                height: 32,
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(14),
-                                                  color: Colors.white
-                                                      .withValues(alpha: 0.07),
-                                                  border: Border.all(
-                                                    color: Colors.white
-                                                        .withValues(
-                                                            alpha: 0.12),
-                                                  ),
-                                                  boxShadow: [
-                                                    BoxShadow(
-                                                      color: Colors.black
-                                                          .withValues(
-                                                              alpha: 0.35),
-                                                      blurRadius: 4,
-                                                      offset:
-                                                          const Offset(0, 2),
-                                                    ),
-                                                  ],
-                                                ),
-                                                child: Center(
-                                                  child: MoodPaletteBadge(
-                                                    key: ValueKey(
-                                                      'room-card-scene-palette-${widget.roomId}',
-                                                    ),
-                                                    colors: moodPalette.isEmpty
-                                                        ? [cctColor]
-                                                        : moodPalette,
-                                                    size: 20,
-                                                    glow: false,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                            Expanded(
-                                              child: SliderTheme(
-                                                data: SliderThemeData(
-                                                  trackHeight: 24,
-                                                  thumbShape:
-                                                      const _SunSliderThumbShape(
-                                                    icon:
-                                                        Icons.wb_sunny_rounded,
-                                                  ),
-                                                  overlayShape:
-                                                      const RoundSliderOverlayShape(
-                                                    overlayRadius: 36,
-                                                  ),
-                                                  padding: const EdgeInsets
-                                                      .symmetric(
-                                                    horizontal:
-                                                        _SunSliderThumbShape
-                                                                .radius -
-                                                            8,
-                                                    vertical: 10,
-                                                  ),
-                                                  trackShape:
-                                                      const RoundedRectSliderTrackShape(),
-                                                  activeTrackColor:
-                                                      sliderActiveTrackColor,
-                                                  inactiveTrackColor:
-                                                      sliderInactiveTrackColor,
-                                                  thumbColor: sliderThumbColor,
-                                                  overlayColor:
-                                                      sliderOverlayColor,
-                                                  disabledActiveTrackColor:
-                                                      cctColor.withValues(
-                                                          alpha: 0.30),
-                                                  disabledInactiveTrackColor:
-                                                      Colors.black.withValues(
-                                                          alpha: 0.15),
-                                                  disabledThumbColor:
-                                                      Color.lerp(
-                                                    Colors.white,
-                                                    cctColor,
-                                                    0.25,
-                                                  ),
-                                                ),
-                                                child: Slider(
-                                                  key: ValueKey(
-                                                    'room-card-scene-brightness-slider-${widget.roomId}',
-                                                  ),
-                                                  value: displayBrightness
-                                                      .toDouble()
-                                                      .clamp(1, 100),
-                                                  min: 1,
-                                                  max: 100,
-                                                  onChanged: sceneSliderActive
-                                                      ? (value) {
-                                                          setState(() {
-                                                            _sliderBrightness =
-                                                                value.round();
-                                                          });
-                                                        }
-                                                      : null,
-                                                  onChangeEnd: sceneSliderActive
-                                                      ? (_) =>
-                                                          _onSceneBrightnessSliderEnd(
-                                                            cctColor,
-                                                          )
-                                                      : null,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                  if (!adaptiveSlidersVisible &&
-                                      mode != RoomMode.mood)
-                                    const Spacer(),
-                                  const SizedBox(width: 8),
-                                  _RoomScenesJewel(
-                                    roomId: widget.roomId,
-                                    active: mode == RoomMode.mood,
-                                    palette: moodPalette,
-                                    enabled: !isTransitioning,
-                                    onPressed: _onScenesJewelPressed,
+                                ),
+                                color: _RoomDetailJewel(
+                                  roomId: widget.roomId,
+                                  control: _RoomDetailControl.color,
+                                  label: 'Color',
+                                  icon: Icons.contrast_rounded,
+                                  selected: _expandedControl ==
+                                      _RoomDetailControl.color,
+                                  enabled: controlInteractionEnabled &&
+                                      colorControlAvailable,
+                                  primaryColor: ColorUtils.cctToColor(
+                                    cctRange.minKelvin,
                                   ),
-                                ],
+                                  secondaryColor: ColorUtils.cctToColor(
+                                    cctRange.maxKelvin,
+                                  ),
+                                  semanticsValue:
+                                      '${cctRange.clampKelvin(_sliderKelvin ?? kelvin)} kelvin',
+                                  semanticsHint: mode == RoomMode.mood
+                                      ? 'Color temperature is unavailable while Scenes is active'
+                                      : !colorControlAvailable
+                                          ? 'Turn the room on to adjust color temperature'
+                                          : _expandedControl ==
+                                                  _RoomDetailControl.color
+                                              ? 'Hide color temperature control'
+                                              : 'Show color temperature control',
+                                  onPressed: () => _toggleExpandedControl(
+                                    _RoomDetailControl.color,
+                                    mode: mode,
+                                  ),
+                                ),
+                                power: _RoomPowerControl(
+                                  roomId: widget.roomId,
+                                  mode: mode,
+                                  standbyEnabled: standbyEnabled,
+                                  onModeChanged: _onModeChanged,
+                                  onReset: _resetToOn,
+                                  cctColor: cctColor,
+                                  enabled: controlInteractionEnabled,
+                                ),
+                              ),
+                              AnimatedSize(
+                                key: ValueKey(
+                                  'room-card-expanded-control-${widget.roomId}',
+                                ),
+                                duration: const Duration(milliseconds: 220),
+                                curve: Curves.easeOutCubic,
+                                alignment: Alignment.topCenter,
+                                child: _expandedControl == null
+                                    ? const SizedBox.shrink()
+                                    : Padding(
+                                        padding: const EdgeInsets.only(top: 8),
+                                        child: switch (_expandedControl!) {
+                                          _RoomDetailControl.brightness =>
+                                            _buildBrightnessSlider(
+                                              mode: mode,
+                                              displayBrightness:
+                                                  displayBrightness,
+                                              cctColor: cctColor,
+                                              activeTrackColor:
+                                                  sliderActiveTrackColor,
+                                              inactiveTrackColor:
+                                                  sliderInactiveTrackColor,
+                                              thumbColor: sliderThumbColor,
+                                              overlayColor: sliderOverlayColor,
+                                              enabled: brightnessSliderActive,
+                                            ),
+                                          _RoomDetailControl.color =>
+                                            _buildColorTemperatureSlider(
+                                              kelvin: kelvin,
+                                              range: cctRange,
+                                              cctColor: cctColor,
+                                              overlayColor: sliderOverlayColor,
+                                              enabled: cctSliderActive,
+                                            ),
+                                        },
+                                      ),
                               ),
                             ],
                           ),
@@ -2037,7 +2064,6 @@ class _RoomPowerControl extends StatelessWidget {
   /// curve (same as the "Reset to curve" action), rather than a plain On.
   final VoidCallback onReset;
   final Color cctColor;
-  final int brightness;
   final bool enabled;
 
   const _RoomPowerControl({
@@ -2047,7 +2073,6 @@ class _RoomPowerControl extends StatelessWidget {
     required this.onModeChanged,
     required this.onReset,
     required this.cctColor,
-    required this.brightness,
     this.enabled = true,
   });
 
@@ -2064,12 +2089,13 @@ class _RoomPowerControl extends StatelessWidget {
       duration: const Duration(milliseconds: 160),
       opacity: enabled ? 1.0 : 0.58,
       child: SizedBox(
-        width: 56,
-        child: _RoomPowerTogglePill(
+        width: 88,
+        child: _RoomPowerSwitch(
           key: ValueKey('room-card-control-pill-$roomId-off'),
           roomId: roomId,
           state: powerState,
-          standbyAvailable: standbyEnabled,
+          lowGlowEnabled:
+              standbyEnabled || powerState == _PowerToggleState.standby,
           onChanged: (nextState) {
             switch (nextState) {
               case _PowerToggleState.on:
@@ -2082,7 +2108,6 @@ class _RoomPowerControl extends StatelessWidget {
           },
           enabled: enabled,
           cctColor: cctColor,
-          brightness: brightness,
         ),
       ),
     );
@@ -2144,80 +2169,427 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
               widget.enabled ? (_) => setState(() => _pressed = false) : null,
           onTapCancel:
               widget.enabled ? () => setState(() => _pressed = false) : null,
-          child: AnimatedScale(
-            scale: _pressed ? 0.90 : 1.0,
-            duration: const Duration(milliseconds: 110),
-            curve: Curves.easeOut,
-            child: AnimatedContainer(
-              key: ValueKey(
-                'room-card-control-pill-${widget.roomId}-scenes',
+          child: SizedBox(
+            width: 56,
+            height: 68,
+            child: Column(
+              children: [
+                AnimatedScale(
+                  scale: _pressed ? 0.90 : 1.0,
+                  duration: const Duration(milliseconds: 110),
+                  curve: Curves.easeOut,
+                  child: AnimatedContainer(
+                    key: ValueKey(
+                      'room-card-control-pill-${widget.roomId}-scenes',
+                    ),
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeOutCubic,
+                    width: 56,
+                    height: 56,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color.lerp(
+                            primary,
+                            const Color(0xFF2A2133),
+                            widget.active ? 0.12 : 0.26,
+                          )!,
+                          Color.lerp(
+                            secondary,
+                            const Color(0xFF151A24),
+                            widget.active ? 0.12 : 0.26,
+                          )!,
+                        ],
+                      ),
+                      border: Border.all(
+                        color: Colors.white.withValues(
+                          alpha: widget.active ? 0.62 : 0.34,
+                        ),
+                        width: widget.active ? 1.5 : 1,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: primary.withValues(
+                            alpha: widget.active ? 0.42 : 0.24,
+                          ),
+                          blurRadius: widget.active ? 18 : 12,
+                          spreadRadius: widget.active ? 1 : 0,
+                        ),
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.30),
+                          blurRadius: 6,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        const Positioned.fill(
+                          child: _RoomJewelDepthOverlay(),
+                        ),
+                        Icon(
+                          Icons.auto_awesome_rounded,
+                          size: 19,
+                          color: Colors.white.withValues(alpha: 0.96),
+                          shadows: [
+                            Shadow(
+                              color: Colors.black.withValues(alpha: 0.48),
+                              blurRadius: 6,
+                              offset: const Offset(0, 1),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                _RoomJewelLabel(
+                  key: ValueKey(
+                    'room-card-control-label-${widget.roomId}-scenes',
+                  ),
+                  label: 'Scenes',
+                  enabled: widget.enabled,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoomJewelLabel extends StatelessWidget {
+  const _RoomJewelLabel({
+    super.key,
+    required this.label,
+    required this.enabled,
+  });
+
+  final String label;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      maxLines: 1,
+      style: TextStyle(
+        color: Colors.white.withValues(alpha: enabled ? 0.92 : 0.64),
+        fontSize: label.length > 6 ? 9 : 10,
+        height: 1,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -0.1,
+      ),
+    );
+  }
+}
+
+class _RoomJewelDepthOverlay extends StatelessWidget {
+  const _RoomJewelDepthOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          stops: const [0, 0.42, 1],
+          colors: [
+            Colors.white.withValues(alpha: 0.34),
+            Colors.transparent,
+            Colors.black.withValues(alpha: 0.20),
+          ],
+        ),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.14),
+          width: 2,
+        ),
+      ),
+    );
+  }
+}
+
+/// Keeps four control centers evenly spaced while allowing Power to carry a
+/// larger visual and hit surface than the circular jewels.
+class _RoomControlRow extends StatelessWidget {
+  const _RoomControlRow({
+    super.key,
+    required this.scenes,
+    required this.brightness,
+    required this.color,
+    required this.power,
+  });
+
+  static const double _jewelSize = 56;
+  static const double _jewelHeight = 68;
+  static const double _powerWidth = 88;
+  static const double _powerHeight = 64;
+  static const double _rowHeight = 68;
+
+  final Widget scenes;
+  final Widget brightness;
+  final Widget color;
+  final Widget power;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final firstCenter = _jewelSize / 2;
+        final lastCenter = constraints.maxWidth - (_powerWidth / 2);
+        final centerStep = (lastCenter - firstCenter) / 3;
+
+        Widget place({
+          required Widget child,
+          required double center,
+          required double width,
+          required double height,
+        }) {
+          return Positioned(
+            left: center - (width / 2),
+            top: 0,
+            width: width,
+            height: height,
+            child: child,
+          );
+        }
+
+        return SizedBox(
+          height: _rowHeight,
+          child: Stack(
+            children: [
+              place(
+                child: scenes,
+                center: firstCenter,
+                width: _jewelSize,
+                height: _jewelHeight,
               ),
-              duration: const Duration(milliseconds: 280),
-              curve: Curves.easeOutCubic,
+              place(
+                child: brightness,
+                center: firstCenter + centerStep,
+                width: _jewelSize,
+                height: _jewelHeight,
+              ),
+              place(
+                child: color,
+                center: firstCenter + (centerStep * 2),
+                width: _jewelSize,
+                height: _jewelHeight,
+              ),
+              place(
+                child: power,
+                center: lastCenter,
+                width: _powerWidth,
+                height: _powerHeight,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RoomDetailJewel extends StatefulWidget {
+  const _RoomDetailJewel({
+    required this.roomId,
+    required this.control,
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.enabled,
+    required this.primaryColor,
+    required this.secondaryColor,
+    required this.semanticsValue,
+    required this.semanticsHint,
+    required this.onPressed,
+  });
+
+  final String roomId;
+  final _RoomDetailControl control;
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final bool enabled;
+  final Color primaryColor;
+  final Color secondaryColor;
+  final String semanticsValue;
+  final String semanticsHint;
+  final VoidCallback onPressed;
+
+  @override
+  State<_RoomDetailJewel> createState() => _RoomDetailJewelState();
+}
+
+class _RoomDetailJewelState extends State<_RoomDetailJewel> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final jewelGradient = switch (widget.control) {
+      _RoomDetailControl.brightness => RadialGradient(
+          center: const Alignment(-0.28, -0.36),
+          radius: 0.95,
+          stops: const [0, 0.48, 1],
+          colors: [
+            Colors.white,
+            Color.lerp(
+              widget.primaryColor,
+              Colors.white,
+              widget.selected ? 0.62 : 0.50,
+            )!,
+            Color.lerp(
+              widget.primaryColor,
+              const Color(0xFFFFB63F),
+              widget.selected ? 0.40 : 0.28,
+            )!,
+          ],
+        ),
+      _RoomDetailControl.color => LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          stops: const [0, 0.46, 0.54, 1],
+          colors: [
+            widget.primaryColor,
+            Color.lerp(widget.primaryColor, Colors.white, 0.34)!,
+            Color.lerp(widget.secondaryColor, Colors.white, 0.24)!,
+            widget.secondaryColor,
+          ],
+        ),
+    };
+    final iconColor = switch (widget.control) {
+      _RoomDetailControl.brightness => const Color(0xFF5A3908),
+      _RoomDetailControl.color => Colors.white,
+    };
+
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 160),
+      opacity: widget.enabled ? 1.0 : 0.42,
+      child: Semantics(
+        excludeSemantics: true,
+        button: true,
+        enabled: widget.enabled,
+        selected: widget.selected,
+        label: widget.label,
+        value: widget.semanticsValue,
+        hint: widget.semanticsHint,
+        onTap: widget.enabled ? widget.onPressed : null,
+        child: Tooltip(
+          message: '${widget.label} · ${widget.semanticsValue}',
+          child: GestureDetector(
+            key: ValueKey(
+              'room-card-segment-${widget.roomId}-${widget.control.name}',
+            ),
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.enabled ? widget.onPressed : null,
+            onTapDown:
+                widget.enabled ? (_) => setState(() => _pressed = true) : null,
+            onTapUp:
+                widget.enabled ? (_) => setState(() => _pressed = false) : null,
+            onTapCancel:
+                widget.enabled ? () => setState(() => _pressed = false) : null,
+            child: SizedBox(
               width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color.lerp(
-                      const Color(0xFF24202D),
-                      primary,
-                      widget.active ? 0.58 : 0.34,
-                    )!,
-                    Color.lerp(
-                      const Color(0xFF121821),
-                      secondary,
-                      widget.active ? 0.42 : 0.22,
-                    )!,
-                  ],
-                ),
-                border: Border.all(
-                  color: Colors.white.withValues(
-                    alpha: widget.active ? 0.42 : 0.20,
-                  ),
-                  width: widget.active ? 1.5 : 1,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: primary.withValues(
-                      alpha: widget.active ? 0.34 : 0.18,
-                    ),
-                    blurRadius: widget.active ? 18 : 12,
-                    spreadRadius: widget.active ? 1 : 0,
-                  ),
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.30),
-                    blurRadius: 6,
-                    offset: const Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: Stack(
-                alignment: Alignment.center,
+              height: 68,
+              child: Column(
                 children: [
-                  Positioned(
-                    top: 12,
-                    child: Icon(
-                      Icons.auto_awesome_rounded,
-                      size: 18,
-                      color: Colors.white.withValues(alpha: 0.95),
-                    ),
-                  ),
-                  Positioned(
-                    bottom: 10,
-                    child: Text(
-                      'Scenes',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.92),
-                        fontSize: 7.5,
-                        height: 1,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.1,
+                  AnimatedScale(
+                    scale: _pressed ? 0.90 : 1.0,
+                    duration: const Duration(milliseconds: 110),
+                    curve: Curves.easeOut,
+                    child: AnimatedContainer(
+                      key: ValueKey(
+                        'room-card-control-pill-${widget.roomId}-${widget.control.name}',
+                      ),
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: jewelGradient,
+                        border: Border.all(
+                          color: Colors.white.withValues(
+                            alpha: widget.selected ? 0.88 : 0.54,
+                          ),
+                          width: widget.selected ? 1.5 : 1,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: widget.primaryColor.withValues(
+                              alpha: widget.selected ? 0.30 : 0.12,
+                            ),
+                            blurRadius: widget.selected ? 16 : 9,
+                            spreadRadius: widget.selected ? 1 : 0,
+                          ),
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.28),
+                            blurRadius: 5,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          const Positioned.fill(
+                            child: _RoomJewelDepthOverlay(),
+                          ),
+                          if (widget.control == _RoomDetailControl.color)
+                            Container(
+                              width: 29,
+                              height: 29,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: const Color(0xFF202733).withValues(
+                                  alpha: 0.30,
+                                ),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.22),
+                                ),
+                              ),
+                            ),
+                          Icon(
+                            widget.icon,
+                            size:
+                                widget.control == _RoomDetailControl.brightness
+                                    ? 22
+                                    : 19,
+                            color: iconColor.withValues(
+                              alpha: widget.enabled ? 0.92 : 0.62,
+                            ),
+                            shadows: [
+                              Shadow(
+                                color: Colors.black.withValues(
+                                  alpha: widget.control ==
+                                          _RoomDetailControl.brightness
+                                      ? 0.18
+                                      : 0.48,
+                                ),
+                                blurRadius: 5,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
+                  ),
+                  const SizedBox(height: 2),
+                  _RoomJewelLabel(
+                    key: ValueKey(
+                      'room-card-control-label-${widget.roomId}-${widget.control.name}',
+                    ),
+                    label: widget.label,
+                    enabled: widget.enabled,
                   ),
                 ],
               ),
@@ -2229,215 +2601,331 @@ class _RoomScenesJewelState extends State<_RoomScenesJewel> {
   }
 }
 
-enum _PowerToggleState { on, standby, off }
+enum _PowerToggleState { off, standby, on }
 
-/// Power toggle used by every room card. Ordinary rooms alternate between On
-/// and hard Off. Low-glow-enabled rooms alternate between On and the existing
-/// Standby state; full Off is a separate explicit action while Low glow is
-/// active.
-class _RoomPowerTogglePill extends StatefulWidget {
+/// Tap-cycle room power switch with exact drag selection. Low-glow-enabled
+/// rooms expose Off, Low glow, and On; other rooms expose binary Off/On.
+class _RoomPowerSwitch extends StatefulWidget {
   final String roomId;
   final _PowerToggleState state;
-  final bool standbyAvailable;
+  final bool lowGlowEnabled;
   final ValueChanged<_PowerToggleState> onChanged;
   final bool enabled;
   final Color cctColor;
-  final int brightness;
 
-  const _RoomPowerTogglePill({
+  const _RoomPowerSwitch({
     super.key,
     required this.roomId,
     required this.state,
-    required this.standbyAvailable,
+    required this.lowGlowEnabled,
     required this.onChanged,
     required this.enabled,
     required this.cctColor,
-    required this.brightness,
   });
 
   @override
-  State<_RoomPowerTogglePill> createState() => _RoomPowerTogglePillState();
+  State<_RoomPowerSwitch> createState() => _RoomPowerSwitchState();
 }
 
-class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
-  bool _pressed = false;
+class _RoomPowerSwitchState extends State<_RoomPowerSwitch> {
+  static const double _trackWidth = 86;
+  Offset? _dragStartPosition;
+  Offset? _dragPosition;
+
+  String _labelFor(_PowerToggleState state) => switch (state) {
+        _PowerToggleState.off => 'Off',
+        _PowerToggleState.standby => 'Low glow',
+        _PowerToggleState.on => 'On',
+      };
+
+  Alignment get _thumbAlignment => switch (widget.state) {
+        _PowerToggleState.off => Alignment.centerLeft,
+        _PowerToggleState.standby => Alignment.center,
+        _PowerToggleState.on => Alignment.centerRight,
+      };
+
+  List<_PowerToggleState> get _positions => widget.lowGlowEnabled
+      ? const [
+          _PowerToggleState.off,
+          _PowerToggleState.standby,
+          _PowerToggleState.on,
+        ]
+      : const [_PowerToggleState.off, _PowerToggleState.on];
+
+  void _select(_PowerToggleState state) {
+    if (!widget.enabled || state == widget.state) return;
+    widget.onChanged(state);
+  }
+
+  void _selectAt(double x) {
+    final clampedX = x.clamp(0.0, _trackWidth);
+    final positions = _positions;
+    final index = ((clampedX / _trackWidth) * positions.length).floor().clamp(
+          0,
+          positions.length - 1,
+        );
+    _select(positions[index]);
+  }
+
+  void _increase() {
+    final positions = _positions;
+    final current = positions.indexOf(widget.state);
+    if (current >= 0 && current < positions.length - 1) {
+      _select(positions[current + 1]);
+    }
+  }
+
+  void _decrease() {
+    final positions = _positions;
+    final current = positions.indexOf(widget.state);
+    if (current > 0) {
+      _select(positions[current - 1]);
+    }
+  }
+
+  void _cycle() {
+    final positions = _positions;
+    final current = positions.indexOf(widget.state);
+    _select(positions[(current + 1) % positions.length]);
+  }
 
   @override
   Widget build(BuildContext context) {
     final activeColor = Color.lerp(widget.cctColor, Colors.white, 0.30)!;
     const inactiveColor = Color(0xFF727B87);
-    final standbyColor = Color.lerp(widget.cctColor, Colors.white, 0.18)!;
-    final deepColor =
-        Color.lerp(const Color(0xFF12161C), widget.cctColor, 0.22)!;
-    final brightnessT = widget.brightness.clamp(1, 100) / 100.0;
-    final lowGlowTint =
-        (0.20 + math.sqrt(brightnessT) * 0.30).clamp(0.20, 0.50).toDouble();
-    final standbyDeepColor =
-        Color.lerp(const Color(0xFF141210), widget.cctColor, lowGlowTint)!;
-    final standbyHighlightColor =
-        Color.lerp(standbyDeepColor, widget.cctColor, 0.22)!;
-    final isOn = widget.state == _PowerToggleState.on;
-    final isStandby = widget.state == _PowerToggleState.standby;
-    final isOff = widget.state == _PowerToggleState.off;
-    final stateColor = isOn
-        ? activeColor
-        : isStandby
-            ? standbyColor
-            : inactiveColor;
-    final stateLabel = switch (widget.state) {
-      _PowerToggleState.on => 'On',
-      _PowerToggleState.standby => 'Low glow',
-      _PowerToggleState.off => 'Off',
+    final lowGlowColor = Color.lerp(widget.cctColor, Colors.white, 0.16)!;
+    final stateColor = switch (widget.state) {
+      _PowerToggleState.off => inactiveColor,
+      _PowerToggleState.standby => lowGlowColor,
+      _PowerToggleState.on => activeColor,
     };
-    final nextState = switch (widget.state) {
-      _PowerToggleState.on => widget.standbyAvailable
-          ? _PowerToggleState.standby
-          : _PowerToggleState.off,
-      _PowerToggleState.standby => _PowerToggleState.on,
-      _PowerToggleState.off => _PowerToggleState.on,
+    final stateLabel = _labelFor(widget.state);
+    final positions = _positions;
+    final currentIndex = positions.indexOf(widget.state);
+    final increasedValue =
+        currentIndex >= 0 && currentIndex < positions.length - 1
+            ? _labelFor(positions[currentIndex + 1])
+            : null;
+    final decreasedValue =
+        currentIndex > 0 ? _labelFor(positions[currentIndex - 1]) : null;
+    final trackTint = switch (widget.state) {
+      _PowerToggleState.off => const Color(0xFF242A33),
+      _PowerToggleState.standby =>
+        Color.lerp(const Color(0xFF242A33), widget.cctColor, 0.38)!,
+      _PowerToggleState.on =>
+        Color.lerp(const Color(0xFF242A33), widget.cctColor, 0.68)!,
     };
-    final actionHint = switch (nextState) {
-      _PowerToggleState.on => 'Turn on and reset to the curve',
-      _PowerToggleState.standby => 'Use low glow',
-      _PowerToggleState.off => 'Turn completely off',
+    final thumbColor = switch (widget.state) {
+      _PowerToggleState.off => const Color(0xFF8B949F),
+      _PowerToggleState.standby =>
+        Color.lerp(widget.cctColor, Colors.white, 0.42)!,
+      _PowerToggleState.on => Colors.white,
     };
 
     return Semantics(
+      container: true,
       excludeSemantics: true,
-      button: true,
       enabled: widget.enabled,
+      toggled:
+          widget.lowGlowEnabled ? null : widget.state == _PowerToggleState.on,
       label: 'Room power',
       value: stateLabel,
-      hint: actionHint,
-      onTap: widget.enabled ? () => widget.onChanged(nextState) : null,
+      hint: widget.lowGlowEnabled
+          ? 'Tap to cycle; swipe to choose Off, Low glow, or On'
+          : widget.state == _PowerToggleState.on
+              ? 'Turn completely off'
+              : 'Turn on and reset to the curve',
+      increasedValue: increasedValue,
+      decreasedValue: decreasedValue,
+      onIncrease: widget.enabled && increasedValue != null ? _increase : null,
+      onDecrease: widget.enabled && decreasedValue != null ? _decrease : null,
+      onTap: widget.enabled ? _cycle : null,
       child: Tooltip(
-        message: '$stateLabel · $actionHint',
-        child: GestureDetector(
+        message: widget.lowGlowEnabled
+            ? 'Power · $stateLabel · Tap to cycle'
+            : 'Power · $stateLabel',
+        child: SizedBox(
           key: ValueKey('room-card-power-toggle-${widget.roomId}'),
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.enabled ? () => widget.onChanged(nextState) : null,
-          onTapDown:
-              widget.enabled ? (_) => setState(() => _pressed = true) : null,
-          onTapUp:
-              widget.enabled ? (_) => setState(() => _pressed = false) : null,
-          onTapCancel:
-              widget.enabled ? () => setState(() => _pressed = false) : null,
-          child: AnimatedScale(
-            scale: _pressed ? 0.90 : 1.0,
-            duration: const Duration(milliseconds: 110),
-            curve: Curves.easeOut,
-            child: AnimatedContainer(
-              key: ValueKey(
-                'room-card-power-toggle-surface-${widget.roomId}',
-              ),
-              duration: const Duration(milliseconds: 280),
-              curve: Curves.easeOutCubic,
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: isOn
-                      ? <Color>[
-                          Color.lerp(deepColor, widget.cctColor, 0.22)!,
-                          deepColor,
-                        ]
-                      : isStandby
-                          ? <Color>[
-                              standbyHighlightColor,
-                              standbyDeepColor,
-                            ]
-                          : const <Color>[
-                              Color(0xFF222832),
-                              Color(0xFF151A21),
-                            ],
+          width: 88,
+          height: 64,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              GestureDetector(
+                key: ValueKey(
+                  'room-card-power-switch-${widget.roomId}',
                 ),
-                border: Border.all(
-                  color: isOn
-                      ? widget.cctColor.withValues(alpha: 0.58)
-                      : isStandby
-                          ? widget.cctColor.withValues(alpha: 0.54)
-                          : const Color(0xFF353D48),
-                  width: isOff ? 1 : 1.5,
-                ),
-                boxShadow: !isOff && widget.enabled
-                    ? [
+                behavior: HitTestBehavior.opaque,
+                // Let Flutter's gesture arena distinguish taps from a parent
+                // scroll before changing power. A raw pointer-up handler would
+                // also fire after a vertical swipe that began on the switch.
+                onTap: widget.enabled ? _cycle : null,
+                onHorizontalDragStart: widget.enabled
+                    ? (details) {
+                        _dragStartPosition = details.localPosition;
+                        _dragPosition = details.localPosition;
+                      }
+                    : null,
+                onHorizontalDragUpdate: widget.enabled
+                    ? (details) => _dragPosition = details.localPosition
+                    : null,
+                onHorizontalDragEnd: widget.enabled
+                    ? (_) {
+                        final start = _dragStartPosition;
+                        final end = _dragPosition;
+                        _dragStartPosition = null;
+                        _dragPosition = null;
+                        if (start != null &&
+                            end != null &&
+                            (end.dx - start.dx).abs() >=
+                                (end.dy - start.dy).abs()) {
+                          _selectAt(end.dx);
+                        }
+                      }
+                    : null,
+                onHorizontalDragCancel: widget.enabled
+                    ? () {
+                        _dragStartPosition = null;
+                        _dragPosition = null;
+                      }
+                    : null,
+                child: AnimatedContainer(
+                  key: ValueKey(
+                    'room-card-power-track-${widget.roomId}',
+                  ),
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  width: _trackWidth,
+                  height: 40,
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    color: trackTint,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: widget.state == _PowerToggleState.off
+                          ? const Color(0xFF56606C)
+                          : widget.cctColor.withValues(
+                              alpha: widget.state == _PowerToggleState.standby
+                                  ? 0.56
+                                  : 0.78,
+                            ),
+                      width: 1.4,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.30),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                      if (widget.state != _PowerToggleState.off)
                         BoxShadow(
                           color: widget.cctColor.withValues(
-                            alpha: isStandby ? 0.20 : 0.24,
+                            alpha: widget.state == _PowerToggleState.standby
+                                ? 0.20
+                                : 0.32,
                           ),
-                          blurRadius: 16,
-                          spreadRadius: 1,
+                          blurRadius: 18,
+                          spreadRadius: 2,
                         ),
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.32),
-                          blurRadius: 6,
-                          offset: const Offset(0, 3),
-                        ),
-                      ]
-                    : [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.24),
-                          blurRadius: 5,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-              ),
-              child: Center(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 280),
-                  width: 38,
-                  height: 38,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: isOn
-                        ? widget.cctColor.withValues(alpha: 0.12)
-                        : isStandby
-                            ? widget.cctColor.withValues(alpha: 0.10)
-                            : Colors.transparent,
-                    border: Border.all(
-                      color: isOn
-                          ? widget.cctColor.withValues(alpha: 0.18)
-                          : isStandby
-                              ? widget.cctColor.withValues(alpha: 0.20)
-                              : Colors.white.withValues(alpha: 0.04),
-                    ),
+                    ],
                   ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  child: Stack(
                     children: [
-                      Icon(
-                        isStandby
-                            ? Icons.brightness_low_rounded
-                            : Icons.power_settings_new_rounded,
-                        key: ValueKey(
-                          'room-card-power-toggle-icon-${widget.roomId}',
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: _PowerPositionTick(
+                          key: ValueKey(
+                            'room-card-power-tick-${widget.roomId}-off',
+                          ),
+                          active: widget.state == _PowerToggleState.off,
                         ),
-                        size: isStandby ? 17 : 18,
-                        color: stateColor,
                       ),
-                      const SizedBox(height: 1),
-                      Text(
-                        stateLabel,
-                        key: ValueKey(
-                          'room-card-power-toggle-label-${widget.roomId}',
+                      if (widget.lowGlowEnabled)
+                        Align(
+                          child: _PowerPositionTick(
+                            key: ValueKey(
+                              'room-card-power-tick-${widget.roomId}-standby',
+                            ),
+                            active: widget.state == _PowerToggleState.standby,
+                          ),
                         ),
-                        maxLines: 1,
-                        style: TextStyle(
-                          color: stateColor.withValues(alpha: 0.92),
-                          fontSize: stateLabel.length > 3 ? 7.5 : 8.5,
-                          height: 1,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: stateLabel.length > 3 ? -0.15 : 0.1,
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: _PowerPositionTick(
+                          key: ValueKey(
+                            'room-card-power-tick-${widget.roomId}-on',
+                          ),
+                          active: widget.state == _PowerToggleState.on,
+                        ),
+                      ),
+                      AnimatedAlign(
+                        key: ValueKey(
+                          'room-card-power-thumb-${widget.roomId}',
+                        ),
+                        duration: const Duration(milliseconds: 220),
+                        curve: Curves.easeOutCubic,
+                        alignment: _thumbAlignment,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          width: 30,
+                          height: 30,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: thumbColor,
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.50),
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.40),
+                                blurRadius: 7,
+                                offset: const Offset(0, 3),
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            switch (widget.state) {
+                              _PowerToggleState.off =>
+                                Icons.power_settings_new_rounded,
+                              _PowerToggleState.standby =>
+                                Icons.brightness_low_rounded,
+                              _PowerToggleState.on => Icons.check_rounded,
+                            },
+                            key: ValueKey(
+                              'room-card-power-toggle-icon-${widget.roomId}',
+                            ),
+                            size: 17,
+                            color: Color.lerp(
+                              const Color(0xFF171C23),
+                              widget.cctColor,
+                              widget.state == _PowerToggleState.standby
+                                  ? 0.28
+                                  : 0.10,
+                            ),
+                          ),
                         ),
                       ),
                     ],
                   ),
                 ),
               ),
-            ),
+              const SizedBox(height: 3),
+              Text(
+                stateLabel,
+                key: ValueKey(
+                  'room-card-power-toggle-label-${widget.roomId}',
+                ),
+                maxLines: 1,
+                style: TextStyle(
+                  color: stateColor.withValues(alpha: 0.94),
+                  fontSize: stateLabel.length > 3 ? 9.5 : 10.5,
+                  height: 1,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: stateLabel.length > 3 ? -0.1 : 0.15,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -2445,48 +2933,27 @@ class _RoomPowerTogglePillState extends State<_RoomPowerTogglePill> {
   }
 }
 
-class _LowGlowHardOffAction extends StatelessWidget {
-  final String roomId;
-  final bool enabled;
-  final VoidCallback onPressed;
-
-  const _LowGlowHardOffAction({
-    required this.roomId,
-    required this.enabled,
-    required this.onPressed,
+class _PowerPositionTick extends StatelessWidget {
+  const _PowerPositionTick({
+    super.key,
+    required this.active,
   });
+
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Semantics(
-        excludeSemantics: true,
-        button: true,
-        enabled: enabled,
-        label: 'Turn room off completely',
-        onTap: enabled ? onPressed : null,
-        child: SizedBox(
-          height: 30,
-          child: TextButton.icon(
-            key: ValueKey('room-card-hard-off-$roomId'),
-            onPressed: enabled ? onPressed : null,
-            icon: const Icon(Icons.power_settings_new_rounded, size: 13),
-            label: const Text('Full off'),
-            style: TextButton.styleFrom(
-              foregroundColor:
-                  CelestialColors.textSecondary.withValues(alpha: 0.82),
-              backgroundColor: Colors.white.withValues(alpha: 0.045),
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              textStyle: const TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.1,
-              ),
-              shape: const StadiumBorder(),
-            ),
+    return SizedBox(
+      width: 30,
+      height: 30,
+      child: Center(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 5,
+          height: 5,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.white.withValues(alpha: active ? 0.08 : 0.48),
           ),
         ),
       ),
@@ -2639,7 +3106,8 @@ class _MotionIndicatorState extends State<_MotionIndicator>
           : 'Motion timer for ${widget.roomName}',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        // Consume countdown taps so they do not open the room settings sheet.
+        // Consume taps when the indicator is not actionable so they do not
+        // open the room settings sheet.
         onTap: widget.onTap ?? () {},
         child: SizedBox(
           width: _roomHeaderActionHitSize,

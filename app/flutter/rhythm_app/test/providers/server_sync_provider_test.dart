@@ -169,6 +169,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         int? transitionMs,
         String? correlationId,
       })> applySceneCalls = [];
+  final List<({String nodeId, int brightness})> nodeBrightnessCalls = [];
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<({String nodeId, bool enabled, String requestId})>
       motionActivationCalls = [];
@@ -388,6 +389,14 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }) async {
     nodeCurveBrightnessCalls.add((nodeId: nodeId, brightness: brightness));
     return null;
+  }
+
+  @override
+  Future<void> nodeBrightness({
+    required String nodeId,
+    required int brightness,
+  }) async {
+    nodeBrightnessCalls.add((nodeId: nodeId, brightness: brightness));
   }
 
   @override
@@ -2760,6 +2769,16 @@ void main() {
       final call = api.nodeCurveBrightnessCalls.single;
       expect(call.nodeId, 'room-1');
       expect(call.brightness, 61);
+    });
+
+    test('dispatches direct brightness without editing the curve modifier', () {
+      final dispatched = provider.dispatchNodeBrightness('room-1', 37);
+
+      expect(dispatched, isTrue);
+      expect(api.nodeBrightnessCalls, [
+        (nodeId: 'room-1', brightness: 37),
+      ]);
+      expect(api.nodeCurveBrightnessCalls, isEmpty);
     });
 
     test('dispatches color temperature as a curve modifier', () {

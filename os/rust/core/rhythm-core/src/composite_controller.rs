@@ -1362,6 +1362,58 @@ impl CompositeController {
         }))
         .await
     }
+
+    async fn any_lights_on_with_scope(
+        &self,
+        room_id: &str,
+        periodic: bool,
+    ) -> LightControlResult<bool> {
+        let targets = self.controllers_for_room(room_id);
+        if targets.is_empty() {
+            let node_label = self.node_log_label(room_id);
+            return Err(LightControlError::RoomNotFound(format!(
+                "No controllers for node {}",
+                node_label
+            )));
+        }
+
+        let handles: Vec<_> = targets
+            .into_iter()
+            .map(|(key, dispatcher, target)| {
+                let controller = dispatcher.controller();
+                let query_timeout = dispatcher.policy().query_timeout;
+                let what = format!("Hub {} any_lights_on '{}'", key, target.label());
+                let label = target.label();
+                let handle = spawn_supervised(query_timeout, what, move || {
+                    if periodic {
+                        futures::executor::block_on(
+                            controller.any_lights_on_target_for_periodic(&target),
+                        )
+                    } else {
+                        futures::executor::block_on(controller.any_lights_on_target(&target))
+                    }
+                });
+                (key, label, handle)
+            })
+            .collect();
+
+        for (key, label, handle) in handles {
+            match await_supervised(handle).await {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        target: "composite",
+                        "any_lights_on '{}' via {}: {}",
+                        label,
+                        key,
+                        e
+                    );
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl Default for CompositeController {
@@ -1459,45 +1511,11 @@ impl LightController for CompositeController {
     }
 
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
-        let targets = self.controllers_for_room(room_id);
-        if targets.is_empty() {
-            let node_label = self.node_log_label(room_id);
-            return Err(LightControlError::RoomNotFound(format!(
-                "No controllers for node {}",
-                node_label
-            )));
-        }
+        self.any_lights_on_with_scope(room_id, false).await
+    }
 
-        let handles: Vec<_> = targets
-            .into_iter()
-            .map(|(key, dispatcher, target)| {
-                let controller = dispatcher.controller();
-                let query_timeout = dispatcher.policy().query_timeout;
-                let what = format!("Hub {} any_lights_on '{}'", key, target.label());
-                let label = target.label();
-                let handle = spawn_supervised(query_timeout, what, move || {
-                    futures::executor::block_on(controller.any_lights_on_target(&target))
-                });
-                (key, label, handle)
-            })
-            .collect();
-
-        for (key, label, handle) in handles {
-            match await_supervised(handle).await {
-                Ok(true) => return Ok(true),
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(
-                        target: "composite",
-                        "any_lights_on '{}' via {}: {}",
-                        label,
-                        key,
-                        e
-                    );
-                }
-            }
-        }
-        Ok(false)
+    async fn any_lights_on_for_periodic(&self, room_id: &str) -> LightControlResult<bool> {
+        self.any_lights_on_with_scope(room_id, true).await
     }
 
     fn name(&self) -> &str {
@@ -1594,6 +1612,8 @@ mod tests {
         turn_on_calls: Mutex<Vec<(String, LightingCommand)>>,
         turn_off_calls: Mutex<Vec<(String, Option<u32>)>>,
         lights_on: AtomicBool,
+        interactive_light_queries: AtomicUsize,
+        periodic_light_queries: AtomicUsize,
         rooms: Mutex<Vec<Room>>,
         accepted_receipt: Mutex<Option<HubCommandReceipt>>,
     }
@@ -1606,6 +1626,8 @@ mod tests {
                 turn_on_calls: Mutex::new(Vec::new()),
                 turn_off_calls: Mutex::new(Vec::new()),
                 lights_on: AtomicBool::new(false),
+                interactive_light_queries: AtomicUsize::new(0),
+                periodic_light_queries: AtomicUsize::new(0),
                 rooms: Mutex::new(Vec::new()),
                 accepted_receipt: Mutex::new(None),
             }
@@ -1703,6 +1725,19 @@ mod tests {
             &self,
             _target: &HubDispatchTarget,
         ) -> LightControlResult<bool> {
+            self.interactive_light_queries
+                .fetch_add(1, Ordering::Relaxed);
+            if self.should_fail.load(Ordering::Relaxed) {
+                return Err(LightControlError::CommandFailed("mock failure".into()));
+            }
+            Ok(self.lights_on.load(Ordering::Relaxed))
+        }
+
+        async fn any_lights_on_target_for_periodic(
+            &self,
+            _target: &HubDispatchTarget,
+        ) -> LightControlResult<bool> {
+            self.periodic_light_queries.fetch_add(1, Ordering::Relaxed);
             if self.should_fail.load(Ordering::Relaxed) {
                 return Err(LightControlError::CommandFailed("mock failure".into()));
             }
@@ -2613,6 +2648,29 @@ mod tests {
         ]));
 
         assert!(block_on(composite.any_lights_on("room1")).unwrap());
+    }
+
+    #[test]
+    fn periodic_light_check_uses_periodic_hub_query_contract() {
+        let controller = Arc::new(MockController::new("matter"));
+        controller.set_lights_on(true);
+        let composite = CompositeController::new();
+        composite.register_controller("matter", controller.clone());
+        composite.update_routing(route(&[(
+            "room",
+            "matter",
+            HubDispatchTarget::Devices {
+                native_ids: vec!["matter-device".to_string()],
+            },
+        )]));
+
+        assert!(block_on(composite.any_lights_on_for_periodic("room")).unwrap());
+        assert_eq!(controller.periodic_light_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            controller.interactive_light_queries.load(Ordering::Relaxed),
+            0,
+            "periodic checks must not fall back to the interactive hub query"
+        );
     }
 
     #[test]

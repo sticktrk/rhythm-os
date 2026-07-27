@@ -75,8 +75,8 @@ void main() {
           body: MoodSheet(
             initialTab: MoodTab.color,
             scenesLoader: () async => const [],
-            onColorChanged: (_) {},
-            onSceneSelected: (_) async => true,
+            onColorChanged: (_, __) {},
+            onSceneSelected: (_, __) async => true,
           ),
         ),
       ),
@@ -89,6 +89,88 @@ void main() {
     expect(find.text('Ember'), findsNothing);
     expect(find.text('Amber'), findsNothing);
     expect(find.text('Blue'), findsNothing);
+  });
+
+  testWidgets(
+      'brightness slider stays under the picker and joins color choices',
+      (tester) async {
+    int? committedBrightness;
+    int? selectedBrightness;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialBrightness: 64,
+            scenesLoader: () async => const [],
+            onBrightnessChanged: (brightness) {
+              committedBrightness = brightness;
+            },
+            onColorChanged: (_, brightness) {
+              selectedBrightness = brightness;
+            },
+            onSceneSelected: (_, __) async => true,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+
+    final sliderFinder = find.byKey(const Key('mood_brightness_slider'));
+    expect(sliderFinder, findsOneWidget);
+    expect(tester.widget<Slider>(sliderFinder).value, 64);
+    expect(
+      tester.getRect(sliderFinder).top,
+      greaterThan(
+        tester.getRect(find.byKey(const Key('mood_color_wheel'))).bottom,
+      ),
+    );
+
+    tester.widget<Slider>(sliderFinder).onChanged!(37);
+    await tester.pump();
+    tester.widget<Slider>(sliderFinder).onChangeEnd!(37);
+    await tester.pump();
+
+    expect(committedBrightness, 37);
+    expect(find.text('37%'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('mood_color_spectrum')));
+    await tester.pump();
+
+    expect(selectedBrightness, 37);
+  });
+
+  testWidgets('scene choices use the current picker brightness',
+      (tester) async {
+    final scene = _scene('evening-glow');
+    int? selectedBrightness;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MoodSheet(
+            initialTab: MoodTab.scenes,
+            initialBrightness: 64,
+            initialScenes: [scene],
+            scenesLoader: () async => [scene],
+            onColorChanged: (_, __) {},
+            onSceneSelected: (_, brightness) async {
+              selectedBrightness = brightness;
+              return true;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+
+    final sliderFinder = find.byKey(const Key('mood_brightness_slider'));
+    tester.widget<Slider>(sliderFinder).onChanged!(43);
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('mood_scene_evening-glow')));
+    await tester.pump();
+
+    expect(selectedBrightness, 43);
   });
 
   testWidgets('choosing a color clears the active scene selection',
@@ -104,8 +186,8 @@ void main() {
             initialSceneId: scene.id,
             initialScenes: [scene],
             scenesLoader: () async => [scene],
-            onColorChanged: (_) => colorChangeCount += 1,
-            onSceneSelected: (_) async => true,
+            onColorChanged: (_, __) => colorChangeCount += 1,
+            onSceneSelected: (_, __) async => true,
           ),
         ),
       ),
@@ -142,8 +224,8 @@ void main() {
               loaderCalls += 1;
               return [refreshed];
             },
-            onColorChanged: (_) {},
-            onSceneSelected: (_) async => true,
+            onColorChanged: (_, __) {},
+            onSceneSelected: (_, __) async => true,
           ),
         ),
       ),
@@ -178,8 +260,8 @@ void main() {
             scenesLoader: () async => [hue, ordinaryHue, saved, otherImported],
             showHueTab: true,
             onTabChanged: changedTabs.add,
-            onColorChanged: (_) {},
-            onSceneSelected: (_) async => true,
+            onColorChanged: (_, __) {},
+            onSceneSelected: (_, __) async => true,
           ),
         ),
       ),
@@ -210,6 +292,11 @@ void main() {
       findsNothing,
     );
 
+    await tester.drag(
+      find.byKey(const ValueKey(MoodTab.hue)),
+      const Offset(0, -120),
+    );
+    await tester.pump();
     tester
         .widget<InkWell>(find.byKey(const Key('mood_hue_more_toggle')))
         .onTap!();
@@ -234,8 +321,8 @@ void main() {
           body: MoodSheet(
             initialScenes: [_decodedPaletteScene('saved-palette')],
             scenesLoader: () async => [_decodedPaletteScene('saved-palette')],
-            onColorChanged: (_) {},
-            onSceneSelected: (_) async => true,
+            onColorChanged: (_, __) {},
+            onSceneSelected: (_, __) async => true,
           ),
         ),
       ),
@@ -260,8 +347,8 @@ void main() {
             initialSceneId: previous.id,
             initialScenes: [previous, rejected],
             scenesLoader: () async => [previous, rejected],
-            onColorChanged: (_) {},
-            onSceneSelected: (_) async => false,
+            onColorChanged: (_, __) {},
+            onSceneSelected: (_, __) async => false,
           ),
         ),
       ),

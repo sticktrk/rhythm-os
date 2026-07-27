@@ -52,6 +52,11 @@ void main() {
       completedCount: 2,
       outcome: 'partial',
     );
+    await analytics.logRoomCardDetailToggled(
+      control: 'color',
+      roomMode: 'on',
+      expanded: true,
+    );
     await analytics.logRoomLightSettingsOpened(
       hasOverrides: true,
       overrideProfileCount: 1,
@@ -76,6 +81,7 @@ void main() {
         'matter_pairing_completed',
         'mood_scene_apply_completed',
         'global_room_action_completed',
+        'room_card_detail_toggled',
         'room_light_settings_opened',
         'room_light_settings_save_completed',
         'room_light_settings_reset_completed',
@@ -94,11 +100,19 @@ void main() {
       containsPair('completed_count', 2),
     );
     expect(
-      backend.events[5].properties,
-      containsPair('changed_field_count', 2),
+      backend.events[4].properties,
+      {
+        'control': 'color',
+        'room_mode': 'on',
+        'expanded': 1,
+      },
     );
     expect(
       backend.events[6].properties,
+      containsPair('changed_field_count', 2),
+    );
+    expect(
+      backend.events[7].properties,
       containsPair('failure_stage', 'request'),
     );
 
