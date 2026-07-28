@@ -238,6 +238,9 @@ lane :app_release_submit_ios do |options|
     skip_binary_upload: true,
     skip_screenshots: true,
     force: true,
+    # API-key auth cannot inspect in-app purchases during Fastlane precheck;
+    # App Store Connect still validates them as part of the submission.
+    precheck_include_in_app_purchases: false,
     release_notes: plan["release_notes"],
     app_review_information: app_review_information(plan),
     submission_information: {
@@ -264,7 +267,7 @@ lane :app_release_submit_android do |options|
       track_promote_to: "production",
       version_code: candidate[:version_code],
       track_promote_release_status: rollout < 1 ? "inProgress" : "completed",
-      rollout: rollout,
+      rollout: rollout.to_s,
       metadata_path: metadata_path,
       skip_upload_apk: true,
       skip_upload_aab: true,
