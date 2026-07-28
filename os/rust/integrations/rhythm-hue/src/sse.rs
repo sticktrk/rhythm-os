@@ -210,16 +210,22 @@ impl ChunkedDecoder {
 }
 
 /// Drain complete SSE lines from the buffer, passing each to `process_sse_line`.
+///
+/// Returns `true` when at least one complete data frame was observed.
+/// Heartbeat comments are transport activity but do not count as data frames.
 pub fn drain_sse_lines(
     buf: &mut Vec<u8>,
     event_tx: &SyncSender<HueSseEvent>,
     state: &mut SseParseState,
-) {
+) -> bool {
+    let mut saw_data_frame = false;
     while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
         let line = String::from_utf8_lossy(&buf[..pos]).to_string();
         buf.drain(..=pos);
+        saw_data_frame |= line.trim().starts_with("data: ");
         process_sse_line(&line, event_tx, state);
     }
+    saw_data_frame
 }
 
 /// Process a single SSE line.

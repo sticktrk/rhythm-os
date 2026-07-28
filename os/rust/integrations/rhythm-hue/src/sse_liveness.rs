@@ -64,9 +64,23 @@ impl HueSseLiveness {
         }
     }
 
-    /// Any raw event-stream bytes prove that this bridge's subscription is
+    /// Any raw event-stream bytes prove that this bridge's transport is
     /// delivering traffic. One chunk may contain updates for multiple writes.
+    ///
+    /// Raw traffic satisfies pending writes, but it does not re-arm
+    /// write-triggered recovery after a timeout. Hue heartbeat comments can
+    /// arrive on an otherwise unreliable event subscription, so only a data
+    /// frame is strong enough evidence to leave suppression.
     pub(crate) fn observe_sse_activity(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pending.clear();
+            state.last_sse_activity_epoch_ms = epoch_ms_now();
+        }
+    }
+
+    /// A complete SSE data frame proves that the replacement subscription is
+    /// delivering integration events, so write-triggered recovery may resume.
+    pub(crate) fn observe_sse_data_activity(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.pending.clear();
             state.write_expectations_suppressed_until_activity = false;
@@ -190,7 +204,7 @@ mod tests {
         let liveness = HueSseLiveness::default();
         liveness.reset_for_connected_stream();
         liveness.begin_expected_activity();
-        liveness.observe_sse_activity();
+        liveness.observe_sse_data_activity();
         liveness.note_reconnect("expected_activity_timeout");
 
         let snapshot = liveness.snapshot();
@@ -207,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_suppresses_repeat_expectations_until_stream_activity() {
+    fn timeout_suppresses_repeat_expectations_until_data_activity() {
         let liveness = HueSseLiveness::default();
         assert!(liveness.begin_expected_activity().is_some());
 
@@ -225,8 +239,20 @@ mod tests {
         liveness.observe_sse_activity();
 
         assert!(
+            liveness.begin_expected_activity().is_none(),
+            "heartbeat or comment traffic must not re-arm write-based liveness"
+        );
+        assert!(
+            liveness
+                .snapshot()
+                .write_expectations_suppressed_until_activity
+        );
+
+        liveness.observe_sse_data_activity();
+
+        assert!(
             liveness.begin_expected_activity().is_some(),
-            "real stream activity must re-arm write-based liveness detection"
+            "a complete data frame must re-arm write-based liveness detection"
         );
         assert!(
             !liveness

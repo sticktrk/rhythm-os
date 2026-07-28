@@ -120,7 +120,9 @@ where
                 sse_liveness.observe_sse_activity();
                 chunks_since_alive = chunks_since_alive.saturating_add(1);
                 line_buf.extend_from_slice(chunk.as_ref());
-                drain_sse_lines(&mut line_buf, tx, parse_state);
+                if drain_sse_lines(&mut line_buf, tx, parse_state) {
+                    sse_liveness.observe_sse_data_activity();
+                }
                 if line_buf.len() > MAX_SSE_LINE_BYTES {
                     warn!(
                         target: "sse",
@@ -443,22 +445,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_stream_waits_for_activity_before_rearming_timeout() {
+    async fn replacement_stream_waits_for_data_before_rearming_timeout() {
         let sse_liveness = HueSseLiveness::default();
         sse_liveness.begin_expected_activity();
         sse_liveness.note_reconnect("expected_activity_timeout");
         sse_liveness.reset_for_connected_stream();
         assert!(sse_liveness.begin_expected_activity().is_none());
 
-        let mut quiet_replacement =
-            futures::stream::pending::<Result<&'static [u8], &'static str>>();
+        let heartbeat = Ok::<_, &'static str>(b": hi\n".as_slice());
+        let mut heartbeat_replacement =
+            futures::stream::iter([heartbeat]).chain(futures::stream::pending());
         let (tx, _rx) = sync_channel::<HueSseEvent>(4);
         let shutdown = AtomicBool::new(false);
         let mut parse_state = SseParseState::new();
         let outcome = tokio::time::timeout(
             Duration::from_millis(40),
             consume_sse_stream(
-                &mut quiet_replacement,
+                &mut heartbeat_replacement,
                 &tx,
                 &shutdown,
                 &mut parse_state,
@@ -470,13 +473,40 @@ mod tests {
         .await;
         assert!(
             outcome.is_err(),
-            "a quiet replacement stream must not enter a reconnect loop"
+            "heartbeat traffic on a replacement stream must not enter a reconnect loop"
+        );
+        assert!(
+            sse_liveness.begin_expected_activity().is_none(),
+            "heartbeat comments must not re-arm write-triggered recovery"
         );
 
-        sse_liveness.observe_sse_activity();
+        let data = Ok::<_, &'static str>(
+            b"data: [{\"data\":[{\"type\":\"grouped_light\"}]}]\n".as_slice(),
+        );
+        let mut data_replacement = futures::stream::iter([data]).chain(futures::stream::pending());
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(40),
+            consume_sse_stream(
+                &mut data_replacement,
+                &tx,
+                &shutdown,
+                &mut parse_state,
+                &sse_liveness,
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            ),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "a healthy replacement data stream must remain connected"
+        );
         assert!(sse_liveness.begin_expected_activity().is_some());
+
+        let mut quiet_after_data =
+            futures::stream::pending::<Result<&'static [u8], &'static str>>();
         let outcome = consume_sse_stream(
-            &mut quiet_replacement,
+            &mut quiet_after_data,
             &tx,
             &shutdown,
             &mut parse_state,
