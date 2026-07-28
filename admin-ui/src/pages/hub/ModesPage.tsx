@@ -22,7 +22,7 @@ import {
   getTransitions,
   setActiveMode,
   setLightRuntime,
-  setMode,
+  setModeConfigs,
   setTransitions,
   triggerTransition
 } from '../../device/modes';
@@ -144,7 +144,7 @@ export default function ModesPage() {
   async function saveConfigs() {
     if (!configsDraft) return;
     await mutate.run(async () => {
-      await setMode(client, { ...mode, configs: configsDraft });
+      await setModeConfigs(client, configsDraft);
       setConfigsDraft(null);
       await modeQuery.refresh();
     });
