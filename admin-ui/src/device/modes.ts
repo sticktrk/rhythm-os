@@ -8,6 +8,20 @@ export function setMode(client: DeviceClient, body: Record<string, unknown>) {
   return client.put('api/mode', { body });
 }
 
+/** Build the write payload for mode-config edits from the editable state only.
+    GET /api/mode also contains read-only observability data such as
+    `last_change`, which must never be echoed into a PUT. */
+export function modeConfigWriteBody(configs: Record<string, unknown>[]) {
+  return { configs };
+}
+
+export function setModeConfigs(
+  client: DeviceClient,
+  configs: Record<string, unknown>[]
+) {
+  return client.put('api/mode', { body: modeConfigWriteBody(configs) });
+}
+
 export function setActiveMode(client: DeviceClient, active: string) {
   return client.put('api/mode', { body: { active } });
 }
