@@ -158,9 +158,11 @@ export function HomeDirectoryView({
 }
 
 function HomeDirectoryRow({ item }: { item: HomeDirectoryItem }) {
-  const { home, email } = item;
+  const { home, hubs, email } = item;
+  const destination =
+    hubs.length === 1 ? `/hubs/${hubs[0].id}/overview` : `/homes/${home.id}`;
   return (
-    <Link className="homeDirectoryRow" to={`/homes/${home.id}`}>
+    <Link className="homeDirectoryRow" to={destination}>
       <div className="homeDirectoryIcon" aria-hidden="true">
         <Home size={20} />
       </div>
