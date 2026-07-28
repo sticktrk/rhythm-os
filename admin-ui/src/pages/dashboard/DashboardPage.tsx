@@ -302,6 +302,14 @@ function HomeProbeSummary({
   const authRequired = results.filter(
     (result) => result.status === 'auth_required'
   ).length;
+  const versions = [
+    ...new Set(
+      results
+        .filter((result) => result.status === 'online')
+        .map((result) => result.serverVersion)
+        .filter((version): version is string => Boolean(version))
+    )
+  ];
 
   if (hubs.length === 0) {
     return <span className="homeDirectoryStatus unknown">No hubs</span>;
@@ -316,7 +324,7 @@ function HomeProbeSummary({
     return (
       <span className="homeDirectoryStatus online">
         <Wifi size={13} />
-        {hubs.length === 1 ? 'Online' : `${online}/${hubs.length} online`}
+        {onlineStatusLabel(hubs.length, online, versions)}
       </span>
     );
   }
@@ -333,7 +341,21 @@ function HomeProbeSummary({
   return (
     <span className="homeDirectoryStatus offline">
       <AlertTriangle size={13} />
-      {online > 0 ? `${online}/${hubs.length} online` : 'Offline'}
+      {online > 0
+        ? onlineStatusLabel(hubs.length, online, versions)
+        : 'Offline'}
     </span>
   );
+}
+
+function onlineStatusLabel(
+  hubCount: number,
+  onlineCount: number,
+  versions: string[]
+): string {
+  const status =
+    hubCount === 1 ? 'Online' : `${onlineCount}/${hubCount} online`;
+  if (versions.length === 1) return `${status} · v${versions[0]}`;
+  if (versions.length > 1) return `${status} · ${versions.length} versions`;
+  return status;
 }
