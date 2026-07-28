@@ -7,6 +7,7 @@ import type {
 
 export type HomeDirectoryItem = {
   home: SupportHome;
+  hubs: SupportHub[];
   email: string | null;
   searchText: string;
 };
@@ -43,6 +44,7 @@ export function flattenHomes(
       ];
       return {
         home: entry.home,
+        hubs: entry.hubs,
         email,
         searchText: searchable.filter(Boolean).join(' ').toLowerCase()
       };

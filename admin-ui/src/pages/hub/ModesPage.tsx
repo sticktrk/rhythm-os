@@ -26,7 +26,9 @@ import {
   setTransitions,
   triggerTransition
 } from '../../device/modes';
+import { getTopologyNodes } from '../../device/topology';
 import {
+  asArray,
   asBoolean,
   asNumber,
   asRecord,
@@ -46,6 +48,15 @@ const PROFILE_KEYS = [
   ['warning_profile_id', 'Warning']
 ] as const;
 
+const ROOM_PRESET_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'active', label: 'On' },
+  { value: 'standby', label: 'Dim' },
+  { value: 'hard_off', label: 'Off' }
+];
+
+type TopologyRoom = { id: string; name: string };
+
 export default function ModesPage() {
   const client = useDeviceClient();
   const confirm = useConfirm();
@@ -59,6 +70,9 @@ export default function ModesPage() {
   );
   const profilesQuery = usePolling(
     useCallback(() => getProfiles(client), [client])
+  );
+  const topologyQuery = usePolling(
+    useCallback(() => getTopologyNodes(client), [client])
   );
 
   const mutate = useDeviceCall(
@@ -90,6 +104,7 @@ export default function ModesPage() {
   >(undefined);
 
   const profileOptions = profileOptionsFromPayload(profilesQuery.data);
+  const rooms = roomsFromTopology(topologyQuery.data);
 
   function patchConfig(index: number, key: string, value: string) {
     const base = configsDraft ?? serverConfigs;
@@ -97,6 +112,32 @@ export default function ModesPage() {
       base.map((config, i) =>
         i === index ? { ...config, [key]: value || null } : config
       )
+    );
+  }
+
+  function patchRoomDefault(
+    configIndex: number,
+    roomId: string,
+    state: string
+  ) {
+    const base = configsDraft ?? serverConfigs;
+    setConfigsDraft(
+      base.map((config, index) => {
+        if (index !== configIndex) return config;
+        const withoutRoom = asRecordArray(config.room_defaults).filter(
+          (entry) => asString(entry.room_id) !== roomId
+        );
+        if (!state) {
+          const { room_defaults: _roomDefaults, ...withoutDefaults } = config;
+          return withoutRoom.length > 0
+            ? { ...withoutDefaults, room_defaults: withoutRoom }
+            : withoutDefaults;
+        }
+        return {
+          ...config,
+          room_defaults: [...withoutRoom, { room_id: roomId, state }]
+        };
+      })
     );
   }
 
@@ -183,6 +224,7 @@ export default function ModesPage() {
               void modeQuery.refresh();
               void transitionsQuery.refresh();
               void runtimeQuery.refresh();
+              void topologyQuery.refresh();
             }}
           >
             <RefreshCw size={15} />
@@ -254,10 +296,10 @@ export default function ModesPage() {
       </div>
 
       <SectionCard
-        title="Mode configs"
-        subtitle="Profiles used by each mode"
+        title="Mode configs & presets"
+        subtitle="Profiles and room actions applied when each mode engages"
         busy={modeQuery.refreshing || mutate.busy}
-        error={profilesQuery.error}
+        error={profilesQuery.error ?? topologyQuery.error}
         rawPayload={modeQuery.data ?? undefined}
         actions={
           configsDraft ? (
@@ -297,6 +339,31 @@ export default function ModesPage() {
                     </div>
                   </div>
                 ))}
+                <div className="p5RoomPresetHeader">
+                  <h5 className="p5SubHeading">Room &amp; bulb presets</h5>
+                  <p>Default action for lights in each room when this mode engages.</p>
+                </div>
+                {rooms.length === 0 && !topologyQuery.loading ? (
+                  <p className="cardNote">
+                    No rooms returned by topology. Check Raw JSON.
+                  </p>
+                ) : (
+                  <div className="p5RoomPresetList">
+                    {rooms.map((room) => (
+                      <div className="p5RoomPreset" key={room.id}>
+                        <span>{room.name}</span>
+                        <SegmentedControl
+                          value={roomDefaultState(config, room.id)}
+                          disabled={mutate.busy}
+                          onChange={(value) =>
+                            patchRoomDefault(index, room.id, value)
+                          }
+                          options={ROOM_PRESET_OPTIONS}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -643,4 +710,45 @@ function profileOptionsFromPayload(
       return { value: id, label: name ? `${name} (${id})` : id };
     })
     .filter((option): option is { value: string; label: string } => option !== null);
+}
+
+function roomsFromTopology(payload: unknown): TopologyRoom[] {
+  const records = Array.isArray(payload)
+    ? asRecordArray(payload)
+    : (() => {
+        const record = asRecord(payload);
+        return asArray(record.rooms).length > 0
+          ? asRecordArray(record.rooms)
+          : asRecordArray(record.nodes);
+      })();
+  return records
+    .filter((record) => {
+      const kind = asString(record.kind) ?? asString(record.type);
+      return kind === 'room' || kind === 'area' || kind === 'zone';
+    })
+    .map((record) => {
+      const id =
+        asString(record.id) ??
+        asString(record.room_id) ??
+        asString(record.node_id);
+      if (!id) return null;
+      return {
+        id,
+        name: asString(record.name) ?? asString(record.label) ?? id
+      };
+    })
+    .filter((room): room is TopologyRoom => room !== null);
+}
+
+function roomDefaultState(config: Record<string, unknown>, roomId: string): string {
+  const state = asString(
+    asRecordArray(config.room_defaults).find(
+      (entry) => asString(entry.room_id) === roomId
+    )?.state
+  );
+  if (state === 'idle' || state === 'soft_off') return 'standby';
+  if (state === 'mood') return 'hard_off';
+  return state === 'active' || state === 'standby' || state === 'hard_off'
+    ? state
+    : '';
 }

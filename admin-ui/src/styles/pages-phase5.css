@@ -164,6 +164,46 @@
   padding: 12px;
 }
 
+.p5RoomPresetHeader p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.p5RoomPresetList {
+  display: grid;
+  gap: 7px;
+}
+
+.p5RoomPreset {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.p5RoomPreset .segmented {
+  flex: 0 1 auto;
+}
+
+.p5RoomPreset .segmentedOption {
+  min-width: 0;
+  padding: 6px 7px;
+  font-size: 11px;
+}
+
+@media (max-width: 560px) {
+  .p5RoomPreset {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .p5TransitionList {
   display: grid;
   gap: 6px;
