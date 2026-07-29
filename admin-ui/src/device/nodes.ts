@@ -111,9 +111,29 @@ export function setNodePreferences(
 export function setNodeProfileOverrides(
   client: DeviceClient,
   nodeId: string,
-  profileOverrides: Record<string, unknown>
+  profileOverrides: Record<string, unknown> | null,
+  options: {
+    replace?: boolean;
+    correlationId?: string;
+    resourcePrecondition?: {
+      path: string;
+      query?: Record<string, string>;
+      bodySha256: string;
+    };
+  } = {}
 ) {
-  return client.put('api/nodes/profile-overrides', {
-    body: { node_id: nodeId, profile_overrides: profileOverrides }
+  return client.putReceipt('api/nodes/profile-overrides', {
+    body: {
+      node_id: nodeId,
+      profile_overrides: profileOverrides,
+      ...(options.replace ? { replace: true } : {}),
+      ...(options.correlationId
+        ? { correlation_id: options.correlationId }
+        : {})
+    },
+    ...(options.correlationId ? { requestId: options.correlationId } : {}),
+    ...(options.resourcePrecondition
+      ? { resourcePrecondition: options.resourcePrecondition }
+      : {})
   });
 }

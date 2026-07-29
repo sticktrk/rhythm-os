@@ -1,5 +1,8 @@
 import { runDeviceAdminProxy } from '../api';
-import type { DeviceAdminMethod } from '../types';
+import type {
+  DeviceAdminMethod,
+  DeviceAdminProxyResponse
+} from '../types';
 
 export class DeviceHttpError extends Error {
   readonly statusCode: number;
@@ -62,6 +65,12 @@ export type DeviceRequestOptions = {
   query?: Record<string, string>;
   body?: unknown;
   timeoutSeconds?: number;
+  requestId?: string;
+  resourcePrecondition?: {
+    path: string;
+    query?: Record<string, string>;
+    bodySha256: string;
+  };
 };
 
 export class DeviceClient {
@@ -75,6 +84,15 @@ export class DeviceClient {
     path: string,
     options: DeviceRequestOptions = {}
   ): Promise<T> {
+    const response = await this.requestReceipt(method, path, options);
+    return response.body as T;
+  }
+
+  async requestReceipt(
+    method: DeviceAdminMethod,
+    path: string,
+    options: DeviceRequestOptions = {}
+  ): Promise<DeviceAdminProxyResponse> {
     const response = await runDeviceAdminProxy(this.accessToken, this.hubId, {
       method,
       path,
@@ -82,7 +100,11 @@ export class DeviceClient {
         ? { query: options.query }
         : {}),
       ...(options.body === undefined ? {} : { body: options.body }),
-      timeoutSeconds: options.timeoutSeconds ?? 15
+      timeoutSeconds: options.timeoutSeconds ?? 15,
+      ...(options.requestId ? { requestId: options.requestId } : {}),
+      ...(options.resourcePrecondition
+        ? { resourcePrecondition: options.resourcePrecondition }
+        : {})
     });
     if (response.statusCode >= 400) {
       throw new DeviceHttpError(
@@ -91,11 +113,15 @@ export class DeviceClient {
         response.route
       );
     }
-    return response.body as T;
+    return response;
   }
 
   get<T = unknown>(path: string, options?: DeviceRequestOptions) {
     return this.request<T>('GET', path, options);
+  }
+
+  getReceipt(path: string, options?: DeviceRequestOptions) {
+    return this.requestReceipt('GET', path, options);
   }
 
   post<T = unknown>(path: string, options?: DeviceRequestOptions) {
@@ -104,6 +130,10 @@ export class DeviceClient {
 
   put<T = unknown>(path: string, options?: DeviceRequestOptions) {
     return this.request<T>('PUT', path, options);
+  }
+
+  putReceipt(path: string, options?: DeviceRequestOptions) {
+    return this.requestReceipt('PUT', path, options);
   }
 
   delete<T = unknown>(path: string, options?: DeviceRequestOptions) {
