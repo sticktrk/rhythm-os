@@ -7,13 +7,27 @@ import '../../widgets/solar_orbit.dart';
 import 'device_pairing_scanner_screen.dart';
 
 class DevicePairingCodeEntryScreen extends StatefulWidget {
-  const DevicePairingCodeEntryScreen({super.key});
+  const DevicePairingCodeEntryScreen({
+    super.key,
+    this.hueBridgeSerialSearchAvailable = false,
+    this.hueBridgeOnly = false,
+  });
 
-  static Future<DevicePairingScannerResult?> show(BuildContext context) {
+  final bool hueBridgeSerialSearchAvailable;
+  final bool hueBridgeOnly;
+
+  static Future<DevicePairingScannerResult?> show(
+    BuildContext context, {
+    bool hueBridgeSerialSearchAvailable = false,
+    bool hueBridgeOnly = false,
+  }) {
     AnalyticsService().logScreenView('device_pairing_code_entry');
     return Navigator.of(context).push<DevicePairingScannerResult>(
       MaterialPageRoute(
-        builder: (_) => const DevicePairingCodeEntryScreen(),
+        builder: (_) => DevicePairingCodeEntryScreen(
+          hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+          hueBridgeOnly: hueBridgeOnly,
+        ),
       ),
     );
   }
@@ -30,6 +44,7 @@ class _DevicePairingCodeEntryScreenState
 
   final _controller = TextEditingController();
   DevicePairingGuidance? _guidance;
+  DevicePairingCodeDecision? _pendingDecision;
 
   bool get _hasInput => _controller.text.trim().isNotEmpty;
 
@@ -48,7 +63,10 @@ class _DevicePairingCodeEntryScreenState
   }
 
   void _handleChanged() {
-    setState(() => _guidance = null);
+    setState(() {
+      _guidance = null;
+      _pendingDecision = null;
+    });
   }
 
   Future<void> _pasteCode() async {
@@ -62,22 +80,30 @@ class _DevicePairingCodeEntryScreenState
   }
 
   void _identifyCode() {
-    final decision = processDevicePairingCodes([_controller.text]);
+    final decision = processDevicePairingCodes(
+      [_controller.text],
+      hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
+      hueBridgeOnly: widget.hueBridgeOnly,
+    );
     if (decision == null) return;
 
     final kind = _pairingCodeAnalyticsKind(decision.code.kind);
-    if (decision.canContinue) {
+    if (decision.requiresChoice) {
       AnalyticsService().logDevicePairingCodeDetected(
-        codeKind: kind,
-        outcome: 'continued_to_pairing',
+        codeKind: decision.choices.length > 1 ? 'multiple' : kind,
+        outcome:
+            decision.choices.length > 1 ? 'choice_shown' : 'confirmation_shown',
       );
-      HapticFeedback.mediumImpact();
-      Navigator.of(context).pop(
-        DevicePairingScannerResult.matter(
-          decision.code.payload,
-          inputMethod: 'manual_code',
-        ),
-      );
+      HapticFeedback.lightImpact();
+      setState(() {
+        _guidance = null;
+        _pendingDecision = decision;
+      });
+      return;
+    }
+
+    if (decision.canContinue) {
+      _continueWithCode(decision.code);
       return;
     }
 
@@ -86,7 +112,31 @@ class _DevicePairingCodeEntryScreenState
       outcome: 'guidance_shown',
     );
     HapticFeedback.lightImpact();
-    setState(() => _guidance = decision.guidance);
+    setState(() {
+      _pendingDecision = null;
+      _guidance = decision.guidance;
+    });
+  }
+
+  void _continueWithCode(DevicePairingCode code) {
+    AnalyticsService().logDevicePairingCodeDetected(
+      codeKind: _pairingCodeAnalyticsKind(code.kind),
+      outcome: 'continued_to_pairing',
+    );
+    HapticFeedback.mediumImpact();
+    Navigator.of(context).pop(
+      switch (code.kind) {
+        DevicePairingCodeKind.matter => DevicePairingScannerResult.matter(
+            code.payload,
+            inputMethod: 'manual_code',
+          ),
+        DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
+            normalizeHueBridgeSerial(code.payload)!,
+            inputMethod: 'manual_code',
+          ),
+        _ => throw StateError('Unsupported pairing-code continuation'),
+      },
+    );
   }
 
   @override
@@ -96,7 +146,9 @@ class _DevicePairingCodeEntryScreenState
       appBar: AppBar(
         backgroundColor: CelestialColors.backgroundDark,
         foregroundColor: CelestialColors.textPrimary,
-        title: const Text('Enter a Code'),
+        title: Text(
+          widget.hueBridgeOnly ? 'Enter Bulb Serial' : 'Enter a Code',
+        ),
         elevation: 0,
       ),
       body: SafeArea(
@@ -128,8 +180,10 @@ class _DevicePairingCodeEntryScreenState
                 ),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Enter any setup code',
+              Text(
+                widget.hueBridgeOnly
+                    ? 'Enter Hue bulb serial'
+                    : 'Enter any setup code',
                 style: TextStyle(
                   color: CelestialColors.textPrimary,
                   fontSize: 26,
@@ -140,8 +194,11 @@ class _DevicePairingCodeEntryScreenState
               ),
               const SizedBox(height: 8),
               Text(
-                'Type or paste the code printed on your device. Rhythm will '
-                'identify what it is and continue when it can.',
+                widget.hueBridgeOnly
+                    ? 'Type or paste the six-character serial printed on the '
+                        'Hue bulb. Your connected Hue Bridge will search for it.'
+                    : 'Type or paste the code printed on your device. Rhythm '
+                        'will identify what it is and continue when it can.',
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.82),
                   fontSize: 15,
@@ -166,9 +223,11 @@ class _DevicePairingCodeEntryScreenState
                       padding: const EdgeInsets.fromLTRB(16, 14, 10, 8),
                       child: Row(
                         children: [
-                          const Expanded(
+                          Expanded(
                             child: Text(
-                              'DEVICE SETUP CODE',
+                              widget.hueBridgeOnly
+                                  ? 'HUE BULB SERIAL'
+                                  : 'DEVICE SETUP CODE',
                               style: TextStyle(
                                 color: _accentBright,
                                 fontSize: 11,
@@ -209,7 +268,9 @@ class _DevicePairingCodeEntryScreenState
                           letterSpacing: 0.5,
                         ),
                         decoration: InputDecoration(
-                          hintText: 'Enter the code exactly as shown',
+                          hintText: widget.hueBridgeOnly
+                              ? 'E277DA'
+                              : 'Enter the code exactly as shown',
                           hintStyle: TextStyle(
                             color: CelestialColors.textSecondary
                                 .withValues(alpha: 0.42),
@@ -234,7 +295,13 @@ class _DevicePairingCodeEntryScreenState
                   fontSize: 12,
                 ),
               ),
-              if (_guidance case final guidance?) ...[
+              if (_pendingDecision case final decision?) ...[
+                const SizedBox(height: 18),
+                _CodeChoiceCard(
+                  decision: decision,
+                  onSelected: _continueWithCode,
+                ),
+              ] else if (_guidance case final guidance?) ...[
                 const SizedBox(height: 18),
                 _CodeGuidanceCard(guidance: guidance),
               ],
@@ -255,8 +322,10 @@ class _DevicePairingCodeEntryScreenState
                     ),
                   ),
                   icon: const Icon(Icons.search_rounded),
-                  label: const Text(
-                    'Identify & Continue',
+                  label: Text(
+                    widget.hueBridgeOnly
+                        ? 'Search with Hue Bridge'
+                        : 'Identify & Continue',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
@@ -267,6 +336,76 @@ class _DevicePairingCodeEntryScreenState
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CodeChoiceCard extends StatelessWidget {
+  const _CodeChoiceCard({
+    required this.decision,
+    required this.onSelected,
+  });
+
+  final DevicePairingCodeDecision decision;
+  final ValueChanged<DevicePairingCode> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('manual-device-pairing-code-choice'),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color:
+            _DevicePairingCodeEntryScreenState._accent.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: _DevicePairingCodeEntryScreenState._accentBright
+              .withValues(alpha: 0.32),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Choose how to add this light',
+            style: const TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Choose the connection Rhythm should use.',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.88),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 12),
+          for (final code in decision.choices) ...[
+            FilledButton.icon(
+              key: ValueKey(
+                code.kind == DevicePairingCodeKind.hue
+                    ? 'confirm-manual-hue-bridge-serial'
+                    : 'confirm-manual-matter-code',
+              ),
+              onPressed: () => onSelected(code),
+              icon: Icon(
+                code.kind == DevicePairingCodeKind.hue
+                    ? Icons.hub_rounded
+                    : Icons.hub_rounded,
+              ),
+              label: Text(
+                code.kind == DevicePairingCodeKind.hue
+                    ? 'Search with Hue Bridge'
+                    : 'Pair with Matter',
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

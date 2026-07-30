@@ -800,7 +800,8 @@ class DemoServerApi extends RhythmServerApi {
   }) async {
     ensureSeeded();
     final node = _topologyNodes[nodeId];
-    if (node == null || targetIds.any((id) => !_topologyNodes.containsKey(id))) {
+    if (node == null ||
+        targetIds.any((id) => !_topologyNodes.containsKey(id))) {
       return false;
     }
 
@@ -1126,7 +1127,9 @@ class DemoServerApi extends RhythmServerApi {
 
   RoomSourceDto _sourceForHubTypes(List<String> hubTypes) {
     if (hubTypes.contains('matter')) return RoomSourceDto.matter;
-    if (hubTypes.contains('hue')) return RoomSourceDto.hue;
+    if (hubTypes.contains('hue') || hubTypes.contains('hue_ble')) {
+      return RoomSourceDto.hue;
+    }
     if (hubTypes.contains('homeassistant') ||
         hubTypes.contains('home_assistant')) {
       return RoomSourceDto.homeAssistant;

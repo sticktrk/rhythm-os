@@ -1210,6 +1210,8 @@ mod tests {
             stage: crate::pairing::PairingStage::Requested,
             message: "Pairing request received".to_string(),
             device: None,
+            devices: Vec::new(),
+            warnings: Vec::new(),
             error: None,
         };
         assert_eq!(server_event_name(&pairing), "pairing_progress");

@@ -271,6 +271,7 @@ class _HubConnectionBannerState extends State<HubConnectionBanner>
 
   static String _hubLabel(String type) => switch (type) {
         'hue' => 'Hue',
+        'hue_ble' => 'Hue Bluetooth',
         'homeassistant' || 'home_assistant' => 'Home Assistant',
         'matter' => 'Matter',
         _ => type,
@@ -406,13 +407,14 @@ class _HubChip extends StatelessWidget {
 
   static String _hubLabel(String type) => switch (type) {
         'hue' => 'Hue',
+        'hue_ble' => 'Hue BLE',
         'homeassistant' || 'home_assistant' => 'HA',
         'matter' => 'Matter',
         _ => type,
       };
 
   static IconData _hubIcon(String type) => switch (type) {
-        'hue' => Icons.lightbulb_outline,
+        'hue' || 'hue_ble' => Icons.lightbulb_outline,
         'homeassistant' || 'home_assistant' => Icons.home_outlined,
         'matter' => Icons.memory_outlined,
         _ => Icons.hub_outlined,

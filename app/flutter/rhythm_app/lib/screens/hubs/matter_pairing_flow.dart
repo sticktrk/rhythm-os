@@ -17,6 +17,7 @@ Future<void> startMatterPairingFlow(
   BuildContext context, {
   MatterAddMethod? preferredMethod,
   String analyticsSource = 'unknown',
+  DevicePairingScannerResult? initialIntakeResult,
 }) async {
   final homeProvider = context.read<HomeProvider>();
   final syncProvider = context.read<ServerSyncProvider>();
@@ -38,11 +39,15 @@ Future<void> startMatterPairingFlow(
   if (!context.mounted) return;
 
   MatterDevicePairingResult? pairingResult;
+  var pendingIntakeResult = initialIntakeResult;
   while (pairingResult == null) {
     if (!context.mounted) return;
 
     DevicePairingScannerResult? intakeResult;
-    if (supportsDevicePairingCamera) {
+    if (pendingIntakeResult != null) {
+      intakeResult = pendingIntakeResult;
+      pendingIntakeResult = null;
+    } else if (supportsDevicePairingCamera) {
       final scanResult = await DevicePairingScannerScreen.show(context);
       if (!context.mounted || scanResult == null) return;
       intakeResult = scanResult.action == DevicePairingScannerAction.enterCode
@@ -53,6 +58,10 @@ Future<void> startMatterPairingFlow(
     } else {
       intakeResult = await DevicePairingCodeEntryScreen.show(context);
       if (!context.mounted || intakeResult == null) return;
+    }
+
+    if (intakeResult.action != DevicePairingScannerAction.matter) {
+      continue;
     }
 
     pairingResult = await MatterDeviceAddScreen.show(

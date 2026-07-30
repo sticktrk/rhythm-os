@@ -13,6 +13,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
+import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
 import 'first_run_explainer.dart';
 import 'mood_sheet.dart';
@@ -276,7 +277,7 @@ class _RoomCardState extends State<RoomCard> {
     final roomProvider = context.read<RoomProvider>();
 
     final currentKelvin = roomProvider.getKelvin(widget.roomId) ?? 3000;
-    final currentCtColor = ColorUtils.cctToColor(currentKelvin);
+    final currentCtColor = AppColorTemperature.toColor(currentKelvin);
     final existingColor = roomProvider.getMoodColor(widget.roomId) ??
         roomProvider.getRoomColor(widget.roomId);
     final initialColor = previewCurrentCt
@@ -745,6 +746,26 @@ class _RoomCardState extends State<RoomCard> {
         // Scene currently bound as this room's mood (null = custom color mood).
         final moodSceneId = context.select<ServerSyncProvider, String?>(
             (p) => p.moodSceneIdForRoom(widget.roomId));
+        final hardwareCctRange = context
+            .select<ServerSyncProvider, ({int minKelvin, int maxKelvin})?>(
+                (provider) {
+          final range =
+              provider.colorTemperatureCapabilitiesForNode(widget.roomId);
+          return range == null
+              ? null
+              : (
+                  minKelvin: range.minKelvin,
+                  maxKelvin: range.maxKelvin,
+                );
+        });
+        final colorTemperatureSupported =
+            context.select<ServerSyncProvider, bool?>((provider) {
+          final capabilities =
+              provider.nodeById(widget.roomId)?.lightCapabilities;
+          if (capabilities == null) return null;
+          final range = capabilities.colorTemperature;
+          return range != null && range.maxKelvin > range.minKelvin;
+        });
 
         // External reset bumps the generation counter — drop local overrides
         if (resetGen != _lastResetGen) {
@@ -805,11 +826,11 @@ class _RoomCardState extends State<RoomCard> {
         final displayColor =
             mode == RoomMode.mood ? moodColor ?? serverColor : serverColor;
         final cctColor = _sliderKelvin != null
-            ? ColorUtils.cctToColor(_sliderKelvin!)
+            ? AppColorTemperature.toColor(_sliderKelvin!)
             : displayColor != null
                 ? Color.fromARGB(
                     255, displayColor.$1, displayColor.$2, displayColor.$3)
-                : ColorUtils.cctToColor(kelvin);
+                : AppColorTemperature.toColor(kelvin);
 
         // The room's mood palette: a scene's colors when scene-backed,
         // otherwise the single custom mood color. Drives the mood glow and the
@@ -894,7 +915,8 @@ class _RoomCardState extends State<RoomCard> {
             mode == RoomMode.on || mode == RoomMode.standby;
         final controlInteractionEnabled = hubConnected && !isTransitioning;
         final brightnessControlAvailable = mode != RoomMode.off;
-        final colorControlAvailable = adaptiveControlsAvailable;
+        final colorControlAvailable =
+            adaptiveControlsAvailable && colorTemperatureSupported != false;
         if ((_expandedControl == _RoomDetailControl.brightness &&
                 !brightnessControlAvailable) ||
             (_expandedControl == _RoomDetailControl.color &&
@@ -908,8 +930,8 @@ class _RoomCardState extends State<RoomCard> {
         final cctRange = _CctSideRange.fromCurveData(
           widget.curveData,
           effectiveHour: _effectiveCurveHour(room),
-          fallbackMin: _minKelvin,
-          fallbackMax: _maxKelvin,
+          fallbackMin: hardwareCctRange?.minKelvin ?? _minKelvin,
+          fallbackMax: hardwareCctRange?.maxKelvin ?? _maxKelvin,
         );
         final rhythmGlowActive = mode == RoomMode.on && room.rhythmEnabled;
         final glowColor = showActivitySpinner
@@ -1264,22 +1286,27 @@ class _RoomCardState extends State<RoomCard> {
                                       _RoomDetailControl.color,
                                   enabled: controlInteractionEnabled &&
                                       colorControlAvailable,
-                                  primaryColor: ColorUtils.cctToColor(
+                                  primaryColor: AppColorTemperature.toColor(
                                     cctRange.minKelvin,
                                   ),
-                                  secondaryColor: ColorUtils.cctToColor(
+                                  secondaryColor: AppColorTemperature.toColor(
                                     cctRange.maxKelvin,
                                   ),
                                   semanticsValue:
                                       '${cctRange.clampKelvin(_sliderKelvin ?? kelvin)} kelvin',
                                   semanticsHint: mode == RoomMode.mood
                                       ? 'Color temperature is unavailable while Scenes is active'
-                                      : !colorControlAvailable
-                                          ? 'Turn the room on to adjust color temperature'
-                                          : _expandedControl ==
-                                                  _RoomDetailControl.color
-                                              ? 'Hide color temperature control'
-                                              : 'Show color temperature control',
+                                      : colorTemperatureSupported == false
+                                          ? room.kind ==
+                                                  RoomNodeKind.lightDevice
+                                              ? 'This light supports brightness only'
+                                              : 'Color temperature is unavailable because not every light supports it'
+                                          : !colorControlAvailable
+                                              ? 'Turn the room on to adjust color temperature'
+                                              : _expandedControl ==
+                                                      _RoomDetailControl.color
+                                                  ? 'Hide color temperature control'
+                                                  : 'Show color temperature control',
                                   onPressed: () => _toggleExpandedControl(
                                     _RoomDetailControl.color,
                                     mode: mode,
@@ -1890,7 +1917,7 @@ class _CCTGradientTrackShape extends SliderTrackShape
     final rrect = RRect.fromRectAndRadius(trackRect, radius);
     final colors = [
       for (var i = 0; i <= _gradientSteps; i++)
-        ColorUtils.curveColorForCCT(
+        AppColorTemperature.curveColor(
           (minKelvin + (maxKelvin - minKelvin) * (i / _gradientSteps)).round(),
         ),
     ];

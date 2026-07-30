@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:rhythm_core/rhythm_core.dart';
+
+import '../utils/app_color_temperature.dart';
 import 'solar_orbit.dart';
 
 /// Displays the current light output values (brightness and color temperature).
@@ -46,7 +47,7 @@ class LightOutputDisplay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cctColor = ColorUtils.cctToColor(kelvin);
+    final cctColor = AppColorTemperature.toColor(kelvin);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -63,7 +64,8 @@ class LightOutputDisplay extends StatelessWidget {
           // Time display (if provided)
           if (selectedHour != null) ...[
             Text(
-              _formatTime(selectedHour!, use12Hour: !MediaQuery.alwaysUse24HourFormatOf(context)),
+              _formatTime(selectedHour!,
+                  use12Hour: !MediaQuery.alwaysUse24HourFormatOf(context)),
               style: const TextStyle(
                 color: CelestialColors.textSecondary,
                 fontSize: 14,
@@ -170,9 +172,8 @@ class LightOutputCompact extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasDirectColor = directColor != null;
-    final dotColor = hasDirectColor
-        ? directColor!
-        : ColorUtils.cctToColor(kelvin);
+    final dotColor =
+        hasDirectColor ? directColor! : AppColorTemperature.toColor(kelvin);
 
     return Row(
       mainAxisSize: MainAxisSize.min,

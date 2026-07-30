@@ -13,6 +13,9 @@ name = "rhythm-linux-appliance"
 rhythm-server = { path = "../rhythm-server" }
 rhythm-os = { path = "../../core/rhythm-os" }
 rhythm-os-runtime-modules = { path = "../../../../runtime/rust/rhythm-os-runtime-modules" }
+rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["bluez"] }
+rhythm-ha = { path = "../../integrations/rhythm-ha" }
+rhythm-matter = { path = "../../integrations/rhythm-matter" }
 
 tokio = { workspace = true }
 axum = { workspace = true }

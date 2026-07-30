@@ -13,6 +13,7 @@ import '../../models/plan_tier.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../utils/app_color_temperature.dart';
 import '../../widgets/auto_slider_setting_row.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/pro_lock.dart';
@@ -50,6 +51,7 @@ class LightProfileScreen extends StatefulWidget {
 
 class _LightProfileScreenState extends State<LightProfileScreen> {
   static const _uuid = Uuid();
+
   String get _scopeName =>
       widget.roomName ??
       (widget.overrideScope == 'bulb' ? 'This bulb' : 'This room');
@@ -172,6 +174,21 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   bool get _hasLocalDraft => _curveConfigDirty || _isSaving;
+
+  sdk.RhythmLightCapabilities? get _nodeLightCapabilities {
+    final nodeId = widget.roomId;
+    if (nodeId == null) return null;
+    return _serverSync.nodeById(nodeId)?.lightCapabilities;
+  }
+
+  AppColorTemperatureRange? get _colorTemperatureEditorRange =>
+      AppColorTemperatureRange.forEditor(
+        nodeScoped: widget.roomId != null,
+        capabilities: _nodeLightCapabilities,
+      );
+
+  bool get _colorTemperatureExplicitlyUnsupported =>
+      _colorTemperatureEditorRange == null;
 
   String _currentServerConfigSignature() {
     final buffer = StringBuffer()
@@ -1069,8 +1086,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         const SizedBox(height: 24),
       ] else ...[
         _buildBrightnessRangeCard(),
-        const SizedBox(height: 14),
-        _buildColorTempRangeCard(),
+        if (!_colorTemperatureExplicitlyUnsupported) ...[
+          const SizedBox(height: 14),
+          _buildColorTempRangeCard(),
+        ],
         const SizedBox(height: 24),
       ],
       // Advanced (timing fine-tune) is hidden for now behind a feature flag
@@ -1211,7 +1230,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     const amber = _Palette.amber;
     final isCustom = _sleepCustomColor;
     final swatch = _sleepSelectedColor;
-    final wakeCctColor = ColorUtils.curveColorForCCT(_wakeMinColorTemp);
+    final wakeCctColor = AppColorTemperature.curveColor(_wakeMinColorTemp);
     final dotColor = isCustom ? swatch : wakeCctColor;
 
     // Small swatch dot used in place of the value chip's text label.
@@ -1987,136 +2006,164 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   // ---------------------------------------------------------------------------
 
   Widget _buildColorTempRangeCard() {
-    final warmColor = ColorUtils.curveColorForCCT(_minColorTemp.round());
-    final coolColor = ColorUtils.curveColorForCCT(_maxColorTemp.round());
+    final editorRange = _colorTemperatureEditorRange!;
+    final hardMin = editorRange.minKelvin.toDouble();
+    final hardMax = editorRange.maxKelvin.toDouble();
+    final minValue = _minColorTemp.clamp(hardMin, hardMax).toDouble();
+    final maxValue = _maxColorTemp.clamp(hardMin, hardMax).toDouble();
+    final warmColor = AppColorTemperature.curveColor(minValue.round());
+    final coolColor = AppColorTemperature.curveColor(maxValue.round());
+    final span = hardMax - hardMin;
+    final divisions = (span / 100).round().clamp(1, 190);
+    final minThumbMax = math
+        .min(4000, hardMax - _DualRangeBar.minSeparation)
+        .clamp(hardMin, hardMax)
+        .toDouble();
+    final maxThumbMin = math
+        .max(2000, hardMin + _DualRangeBar.minSeparation)
+        .clamp(hardMin, hardMax)
+        .toDouble();
+    final hardwareRange = _nodeLightCapabilities?.colorTemperature;
+    final tooltipSuffix = hardwareRange == null
+        ? ''
+        : ' $_scopeName supports ${hardwareRange.minKelvin}–'
+            '${hardwareRange.maxKelvin}K.';
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
-      decoration: BoxDecoration(
-        color: _Palette.card,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: warmColor.withValues(alpha: 0.2)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    colors: [
-                      warmColor.withValues(alpha: 0.18),
-                      coolColor.withValues(alpha: 0.18),
+    return Semantics(
+      container: true,
+      label: 'Supported color temperature range',
+      value: '${hardMin.round()} to ${hardMax.round()} kelvin',
+      child: AnimatedContainer(
+        key: ValueKey(
+          'light-profile-cct-range-${hardMin.round()}-${hardMax.round()}',
+        ),
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: warmColor.withValues(alpha: 0.2)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      colors: [
+                        warmColor.withValues(alpha: 0.18),
+                        coolColor.withValues(alpha: 0.18),
+                      ],
+                    ),
+                  ),
+                  child: Icon(Icons.thermostat_rounded,
+                      color: warmColor, size: 18),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Row(
+                    children: [
+                      const Flexible(
+                        child: Text(
+                          'Sun Hue',
+                          style: TextStyle(
+                            color: _Palette.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: -0.1,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      InfoTooltip(
+                        accentColor: warmColor,
+                        message:
+                            'The warmest and coolest white your lights reach '
+                            'through the day — warm at dawn and dusk, cool '
+                            'around midday.$tooltipSuffix',
+                      ),
                     ],
                   ),
                 ),
-                child:
-                    Icon(Icons.thermostat_rounded, color: warmColor, size: 18),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Row(
-                  children: [
-                    const Flexible(
-                      child: Text(
-                        'Sun Hue',
-                        style: TextStyle(
-                          color: _Palette.textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.1,
-                        ),
-                      ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: warmColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: warmColor.withValues(alpha: 0.2)),
+                  ),
+                  child: Text(
+                    '${minValue.round()}K',
+                    style: TextStyle(
+                      color: warmColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
                     ),
-                    const SizedBox(width: 4),
-                    InfoTooltip(
-                      accentColor: warmColor,
-                      message:
-                          'The warmest and coolest white your lights reach '
-                          'through the day — warm at dawn and dusk, cool around '
-                          'midday.',
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  child: Text(
+                    '–',
+                    style: TextStyle(
+                      color: _Palette.textSecondary.withValues(alpha: 0.3),
+                      fontSize: 13,
                     ),
-                  ],
-                ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: warmColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: warmColor.withValues(alpha: 0.2)),
-                ),
-                child: Text(
-                  '${_minColorTemp.round()}K',
-                  style: TextStyle(
-                    color: warmColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 5),
-                child: Text(
-                  '–',
-                  style: TextStyle(
-                    color: _Palette.textSecondary.withValues(alpha: 0.3),
-                    fontSize: 13,
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: coolColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: coolColor.withValues(alpha: 0.2)),
+                  ),
+                  child: Text(
+                    '${maxValue.round()}K',
+                    style: TextStyle(
+                      color: coolColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
                   ),
                 ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: coolColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: coolColor.withValues(alpha: 0.2)),
-                ),
-                child: Text(
-                  '${_maxColorTemp.round()}K',
-                  style: TextStyle(
-                    color: coolColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
-            child: _DualRangeBar(
-              minValue: _minColorTemp,
-              maxValue: _maxColorTemp,
-              hardMin: 1500,
-              hardMax: 6500,
-              minThumbMax: 4000,
-              maxThumbMin: 2000,
-              tint: warmColor,
-              minThumbColor: warmColor,
-              maxThumbColor: coolColor,
-              gradient: LinearGradient(
-                colors: List.generate(12, (i) {
-                  final k = 1500 + (i / 11) * 5000;
-                  return ColorUtils.curveColorForCCT(k.round());
-                }),
-              ),
-              divisions: 50,
-              onMinChanged: (v) => _onCurveChanged(() => _minColorTemp = v),
-              onMaxChanged: (v) => _onCurveChanged(() => _maxColorTemp = v),
+              ],
             ),
-          ),
-        ],
+            Padding(
+              padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
+              child: _DualRangeBar(
+                minValue: minValue,
+                maxValue: maxValue,
+                hardMin: hardMin,
+                hardMax: hardMax,
+                minThumbMax: minThumbMax,
+                maxThumbMin: maxThumbMin,
+                tint: warmColor,
+                minThumbColor: warmColor,
+                maxThumbColor: coolColor,
+                gradient: LinearGradient(
+                  colors: List.generate(12, (i) {
+                    final k = hardMin + (i / 11) * span;
+                    return AppColorTemperature.curveColor(k.round());
+                  }),
+                ),
+                divisions: divisions,
+                onMinChanged: (v) => _onCurveChanged(() => _minColorTemp = v),
+                onMaxChanged: (v) => _onCurveChanged(() => _maxColorTemp = v),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

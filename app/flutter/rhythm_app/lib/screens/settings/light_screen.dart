@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../utils/app_color_temperature.dart';
 import '../../widgets/header_close_button.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 import '../../widgets/time_simulator.dart';
@@ -541,9 +541,9 @@ _LayerPreview _previewFor(RhythmCurveConfig? config) {
   final minK = config.minColorTemp;
   final maxK = config.maxColorTemp;
   final gradient = [
-    ColorUtils.cctToColor(minK),
-    ColorUtils.cctToColor((minK + maxK) ~/ 2),
-    ColorUtils.cctToColor(maxK),
+    AppColorTemperature.toColor(minK),
+    AppColorTemperature.toColor((minK + maxK) ~/ 2),
+    AppColorTemperature.toColor(maxK),
   ];
   final summary = minK == maxK ? '$minK K' : '$minK–$maxK K';
   return _LayerPreview(gradient, summary);

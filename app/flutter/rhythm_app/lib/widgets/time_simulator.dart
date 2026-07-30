@@ -12,6 +12,7 @@ import '../models/plan_tier.dart';
 import '../providers/server_sync_provider.dart';
 import '../providers/subscription_provider.dart';
 import '../services/analytics_service.dart';
+import '../utils/app_color_temperature.dart';
 import 'pro_lock.dart';
 
 // Local palette — mirrors the Light profile surfaces.
@@ -321,7 +322,7 @@ class _TimeSimulatorState extends State<TimeSimulator>
     final fixedColor = _fixedColor;
     if (fixedColor != null) return fixedColor;
     final kelvin = _kelvinAtHour(hour);
-    if (kelvin > 0) return ColorUtils.curveColorForCCT(kelvin);
+    if (kelvin > 0) return AppColorTemperature.curveColor(kelvin);
     return _amber;
   }
 
@@ -1162,7 +1163,7 @@ class _TimeGradientPainter extends CustomPainter {
         brightness = (5 + t * 95).toInt();
       }
 
-      final color = fixedColor ?? ColorUtils.curveColorForCCT(kelvin);
+      final color = fixedColor ?? AppColorTemperature.curveColor(kelvin);
       final opacity = 0.08 + (brightness / 100) * 0.92;
       colors.add(color.withValues(alpha: opacity));
 
@@ -1215,7 +1216,7 @@ class _TimeGradientPainter extends CustomPainter {
             final t = 1 - ((selectedHour - 12).abs() / 12);
             kelvin = (2000 + t * 3500).toInt();
           }
-          return ColorUtils.curveColorForCCT(kelvin);
+          return AppColorTemperature.curveColor(kelvin);
         })();
 
     final glowIntensity = isDragging ? 0.25 : 0.15 + glowPhase * 0.06;
@@ -1509,7 +1510,7 @@ class _BrightnessCurvePainter extends CustomPainter {
     if (data.kelvin.isEmpty) return accent;
     final kelvin = _interpolateCurve(data.hours, data.kelvin, hour).round();
     if (kelvin <= 0) return accent;
-    return ColorUtils.curveColorForCCT(kelvin);
+    return AppColorTemperature.curveColor(kelvin);
   }
 
   void _drawGrid(Canvas canvas, Rect plot, double width) {

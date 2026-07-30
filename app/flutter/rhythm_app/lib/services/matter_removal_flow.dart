@@ -23,14 +23,15 @@ const String matterRemovalNoResponseError =
 /// re-prompts, so the flow only ends in [MatterRemovalOutcome.removed] or a
 /// user-chosen [MatterRemovalOutcome.cancelled].
 Future<MatterRemovalOutcome> runMatterRemovalFlow({
-  required Future<Map<String, dynamic>?> Function({required bool force})
-      unpair,
+  required Future<Map<String, dynamic>?> Function({required bool force}) unpair,
   required Future<bool> Function(String error) confirmForceRemove,
+  void Function(Map<String, dynamic> result)? onComplete,
 }) async {
   var force = false;
   while (true) {
     final result = await unpair(force: force);
     if ((result?['status'] as String?) == 'complete') {
+      onComplete?.call(result!);
       return MatterRemovalOutcome.removed;
     }
 

@@ -779,6 +779,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   RhythmHubCapabilities? get matterCapabilities => hubCapabilities('matter');
 
+  RhythmHubCapabilities? get hueBleCapabilities => hubCapabilities('hue_ble');
+  RhythmHubCapabilities? get hueBridgeCapabilities => hubCapabilities('hue');
+
   /// Whether the server advertises explicit Matter add methods.
   bool get hasExplicitMatterCapabilities => matterCapabilities != null;
 
@@ -809,6 +812,37 @@ class ServerSyncProvider extends ChangeNotifier {
       matterCapabilities?.supportsRoomlessDevices ??
       !hasExplicitHubCapabilities;
 
+  /// Whether this appliance can pair a Philips Hue bulb directly over BLE.
+  ///
+  /// Unlike legacy Matter behavior, this is only offered when a server
+  /// explicitly advertises the vendor-specific onboarding method.
+  bool get canAddHueBleDevice =>
+      hueBleCapabilities?.supportsDeviceOnboardingMethod(
+        RhythmDeviceOnboardingMethod.hueBleNearbyScan,
+      ) ??
+      false;
+
+  /// Whether a connected Hue Bridge can search for a Zigbee bulb by the
+  /// six-character serial printed on its label.
+  bool get canAddHueBridgeDeviceBySerial =>
+      connectedHubTypes.contains('hue') &&
+      (hueBridgeCapabilities?.supportsDeviceOnboardingMethod(
+            RhythmDeviceOnboardingMethod.hueBridgeSerialSearch,
+          ) ??
+          false);
+
+  bool get canUnpairHueBleDevices =>
+      hueBleCapabilities?.supportsUnpairing ?? false;
+
+  bool get canUnpairHueBridgeDevices =>
+      hueBridgeCapabilities?.supportsUnpairing ?? false;
+
+  bool get supportsHueBleRoomlessDevices =>
+      hueBleCapabilities?.supportsRoomlessDevices ?? false;
+
+  bool get canScanToAddDevice =>
+      canAddMatterDevice || canAddHueBridgeDeviceBySerial || canAddHueBleDevice;
+
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>
       _lastHubInfos.isEmpty ||
@@ -828,18 +862,18 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether a room's hub is currently connected on the server.
   bool isRoomHubConnected(RoomSourceDto source) {
-    final hubType = switch (source) {
-      RoomSourceDto.matter => 'matter',
-      RoomSourceDto.hue => 'hue',
-      RoomSourceDto.homeAssistant => 'homeassistant',
-      RoomSourceDto.bridge => 'bridge',
-      _ => null,
+    final hubTypes = switch (source) {
+      RoomSourceDto.matter => const {'matter'},
+      RoomSourceDto.hue => const {'hue', 'hue_ble'},
+      RoomSourceDto.homeAssistant => const {'homeassistant', 'home_assistant'},
+      RoomSourceDto.bridge => const {'bridge'},
+      _ => const <String>{},
     };
     // If we don't know the hub type, or have no hub info yet, assume connected.
-    if (hubType == null || _lastHubInfos.isEmpty) return true;
-    // If this hub type isn't even configured, assume connected (local-only).
-    if (!configuredHubTypes.contains(hubType)) return true;
-    return connectedHubTypes.contains(hubType);
+    if (hubTypes.isEmpty || _lastHubInfos.isEmpty) return true;
+    // If none of these hub types is configured, assume connected (local-only).
+    if (!configuredHubTypes.any(hubTypes.contains)) return true;
+    return connectedHubTypes.any(hubTypes.contains);
   }
 
   /// Whether the server needs a location (has a Hue hub and runs as HA addon).
@@ -859,6 +893,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   RhythmRoom? nodeById(String nodeId) =>
       _helloNodes.where((node) => node.id == nodeId).firstOrNull;
+
+  /// Hardware-safe color-temperature envelope advertised for this node.
+  ///
+  /// Room nodes carry the server-computed intersection across their member
+  /// lights. A null result means the server did not prove a compatible range,
+  /// so callers must retain their legacy conservative bounds.
+  RhythmColorTemperatureCapabilities? colorTemperatureCapabilitiesForNode(
+    String nodeId,
+  ) =>
+      nodeById(nodeId)?.lightCapabilities?.colorTemperature;
 
   bool standbyEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.standbyEnabled ?? false;
@@ -1003,6 +1047,7 @@ class ServerSyncProvider extends ChangeNotifier {
       hubTypes: previous.hubTypes,
       manufacturer: previous.manufacturer,
       model: previous.model,
+      lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: profileSettings,
@@ -1067,6 +1112,7 @@ class ServerSyncProvider extends ChangeNotifier {
       hubTypes: previous.hubTypes,
       manufacturer: previous.manufacturer,
       model: previous.model,
+      lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: updatedSettings,
@@ -1229,6 +1275,7 @@ class ServerSyncProvider extends ChangeNotifier {
       hubTypes: previous.hubTypes,
       manufacturer: previous.manufacturer,
       model: previous.model,
+      lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: previous.profileSettings,
@@ -4430,6 +4477,7 @@ class ServerSyncProvider extends ChangeNotifier {
       hubTypes: state.hubTypes.isNotEmpty ? state.hubTypes : previous.hubTypes,
       manufacturer: state.manufacturer ?? previous.manufacturer,
       model: state.model ?? previous.model,
+      lightCapabilities: state.lightCapabilities ?? previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: state.profileSettings ?? previous.profileSettings,
@@ -4478,6 +4526,7 @@ class ServerSyncProvider extends ChangeNotifier {
       hubTypes: previous.hubTypes,
       manufacturer: previous.manufacturer,
       model: previous.model,
+      lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: previous.profileSettings,
@@ -4523,6 +4572,11 @@ class ServerSyncProvider extends ChangeNotifier {
         !_stringListsEqual(left.hubTypes, right.hubTypes) ||
         left.manufacturer != right.manufacturer ||
         left.model != right.model ||
+        (left.lightCapabilities == null) != (right.lightCapabilities == null) ||
+        left.lightCapabilities?.colorTemperature?.minKelvin !=
+            right.lightCapabilities?.colorTemperature?.minKelvin ||
+        left.lightCapabilities?.colorTemperature?.maxKelvin !=
+            right.lightCapabilities?.colorTemperature?.maxKelvin ||
         left.profileSettings?.toJson().toString() !=
             right.profileSettings?.toJson().toString() ||
         left.moodEnabled != right.moodEnabled ||
@@ -4602,6 +4656,7 @@ class ServerSyncProvider extends ChangeNotifier {
                 .toList(),
         manufacturer: state?.manufacturer,
         model: state?.model,
+        lightCapabilities: state?.lightCapabilities,
         deviceIds: devices
             .where((device) => device.type == RhythmDeviceType.light)
             .map((device) => device.id)
@@ -4695,7 +4750,7 @@ class ServerSyncProvider extends ChangeNotifier {
   RoomSourceDto? _sourceForHubType(String hubType) {
     return switch (hubType) {
       'matter' => RoomSourceDto.matter,
-      'hue' => RoomSourceDto.hue,
+      'hue' || 'hue_ble' => RoomSourceDto.hue,
       'homeassistant' || 'home_assistant' => RoomSourceDto.homeAssistant,
       'bridge' => RoomSourceDto.bridge,
       _ => null,

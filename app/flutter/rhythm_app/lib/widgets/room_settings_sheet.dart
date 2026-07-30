@@ -15,6 +15,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
 import '../screens/settings/light_screen.dart';
+import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
 import 'low_glow_switch.dart';
 import 'segmented_tab_bar.dart';
@@ -989,7 +990,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb> {
     final effectiveBrightness = widget.brightness ?? 0;
     final effectiveKelvin = widget.kelvin ?? 3000;
     final liveColor =
-        widget.directColor ?? ColorUtils.cctToColor(effectiveKelvin);
+        widget.directColor ?? AppColorTemperature.toColor(effectiveKelvin);
     final orbColor =
         widget.lightsOn ? liveColor : CelestialColors.textSecondary;
     final glowAlpha =

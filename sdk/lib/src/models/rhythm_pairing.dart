@@ -77,6 +77,8 @@ class RhythmPairingProgress {
   final RhythmPairingStage stage;
   final String message;
   final RhythmPairedDevice? device;
+  final List<RhythmPairedDevice> devices;
+  final List<String> warnings;
   final String? error;
 
   const RhythmPairingProgress({
@@ -86,27 +88,55 @@ class RhythmPairingProgress {
     required this.message,
     this.sessionId,
     this.device,
+    this.devices = const [],
+    this.warnings = const [],
     this.error,
   });
 
   factory RhythmPairingProgress.fromJson(Map<String, dynamic> json) {
     final deviceJson = json['device'];
+    final device = deviceJson is Map<String, dynamic>
+        ? RhythmPairedDevice.fromJson(deviceJson)
+        : deviceJson is Map
+            ? RhythmPairedDevice.fromJson(deviceJson.cast<String, dynamic>())
+            : null;
+    final devicesJson = json['devices'];
+    final devices = <RhythmPairedDevice>[];
+    if (devicesJson is List) {
+      for (final value in devicesJson) {
+        if (value is Map<String, dynamic>) {
+          devices.add(RhythmPairedDevice.fromJson(value));
+        } else if (value is Map) {
+          devices.add(
+            RhythmPairedDevice.fromJson(value.cast<String, dynamic>()),
+          );
+        }
+      }
+    }
+    final warningsJson = json['warnings'];
+    final warnings = warningsJson is List
+        ? warningsJson
+            .whereType<String>()
+            .map((warning) => warning.trim())
+            .where((warning) => warning.isNotEmpty)
+        : const Iterable<String>.empty();
     return RhythmPairingProgress(
       hubType: json['hub_type'] as String? ?? 'unknown',
       sessionId: json['session_id'] as String?,
       status: rhythmPairingStatusFromWire(json['status'] as String?),
       stage: rhythmPairingStageFromWire(json['stage'] as String?),
       message: json['message'] as String? ?? '',
-      device: deviceJson is Map<String, dynamic>
-          ? RhythmPairedDevice.fromJson(deviceJson)
-          : deviceJson is Map
-              ? RhythmPairedDevice.fromJson(
-                  deviceJson.cast<String, dynamic>(),
-                )
-              : null,
+      device: device,
+      devices: List.unmodifiable(devices),
+      warnings: List.unmodifiable(warnings),
       error: json['error'] as String?,
     );
   }
+
+  /// Every paired device carried by a terminal event, with the legacy
+  /// singular payload used as a fallback for older servers.
+  List<RhythmPairedDevice> get completedDevices =>
+      devices.isNotEmpty ? devices : [if (device != null) device!];
 
   bool get isTerminal =>
       stage == RhythmPairingStage.complete ||

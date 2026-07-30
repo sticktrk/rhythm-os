@@ -8,6 +8,7 @@ description = "Platform-agnostic Philips Hue integration for Rhythm OS"
 [features]
 default = []
 test-support = ["rhythm-core/test-support"]
+bluez = ["dep:bluer", "dep:dbus", "dep:uuid"]
 
 [[test]]
 name = "integration_flow"
@@ -32,3 +33,8 @@ reqwest = { workspace = true }
 reqwest-eventsource = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17.4", default-features = false, features = ["bluetoothd"], optional = true }
+dbus = { version = "0.9.10", features = ["vendored"], optional = true }
+uuid = { version = "1", optional = true }

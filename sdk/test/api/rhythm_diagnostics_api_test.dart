@@ -212,6 +212,30 @@ void main() {
       );
     });
 
+    test('factoryResetDetailed preserves a server safety-barrier error',
+        () async {
+      server = await _FakeDiagnosticsServer.start(
+        factoryResetStatusCode: HttpStatus.badRequest,
+        factoryResetBody: {
+          'error': 'Hue Bluetooth bulb is offline; keep it powered on nearby',
+        },
+      );
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      final result = await api.factoryResetDetailed(platformContext: 'rpiz');
+
+      expect(result.success, isFalse);
+      expect(result.httpStatus, HttpStatus.badRequest);
+      expect(
+        result.error,
+        'Hue Bluetooth bulb is offline; keep it powered on nearby',
+      );
+      expect(server!.requests, ['/api/factory-reset']);
+    });
+
     test('reboot returns false when device is unreachable', () async {
       final api = RhythmDiagnosticsApi(host: '192.0.2.1', port: 1);
 
@@ -227,6 +251,8 @@ class _FakeDiagnosticsServer {
     required this.debugBundleStatusCode,
     required this.debugBundleDelay,
     required this.supportsDirectUpload,
+    required this.factoryResetStatusCode,
+    required this.factoryResetBody,
   });
 
   final HttpServer _server;
@@ -237,6 +263,8 @@ class _FakeDiagnosticsServer {
   /// `upload_url` gets a JSON `{uploaded: true}` reply instead of bundle
   /// bytes. When false the body is ignored, like pre-upload firmware.
   final bool supportsDirectUpload;
+  final int factoryResetStatusCode;
+  final Map<String, dynamic> factoryResetBody;
   final List<String> requests = [];
   final List<Map<String, dynamic>> wifiBodies = [];
   final List<Map<String, dynamic>> debugBundleBodies = [];
@@ -247,6 +275,8 @@ class _FakeDiagnosticsServer {
     int debugBundleStatusCode = HttpStatus.ok,
     Duration debugBundleDelay = Duration.zero,
     bool supportsDirectUpload = false,
+    int factoryResetStatusCode = HttpStatus.ok,
+    Map<String, dynamic> factoryResetBody = const {'ok': true},
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final fake = _FakeDiagnosticsServer._(
@@ -254,6 +284,8 @@ class _FakeDiagnosticsServer {
       debugBundleStatusCode: debugBundleStatusCode,
       debugBundleDelay: debugBundleDelay,
       supportsDirectUpload: supportsDirectUpload,
+      factoryResetStatusCode: factoryResetStatusCode,
+      factoryResetBody: factoryResetBody,
     );
     server.listen(fake._handleRequest);
     return fake;
@@ -265,7 +297,8 @@ class _FakeDiagnosticsServer {
     requests.add(request.uri.path);
 
     if (request.method == 'POST' && request.uri.path == '/api/factory-reset') {
-      await _writeJson(request.response, {'ok': true});
+      request.response.statusCode = factoryResetStatusCode;
+      await _writeJson(request.response, factoryResetBody);
       return;
     }
 

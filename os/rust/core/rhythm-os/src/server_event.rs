@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, Rgb, RhythmMode, RoomModeState};
 
-use crate::api_types::{LightBreakerDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto};
+use crate::api_types::{
+    LightBreakerDto, LightCapabilitiesDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto,
+};
 use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
 use crate::state::MotionSnapshot;
 
@@ -129,6 +131,15 @@ pub enum ServerEvent {
         /// Device info, populated on completion when available.
         #[serde(skip_serializing_if = "Option::is_none")]
         device: Option<PairedDeviceInfo>,
+        /// Every device completed by a batch pairing request.
+        ///
+        /// `device` remains populated with the first device for compatibility
+        /// with clients that predate batch discovery.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        devices: Vec<PairedDeviceInfo>,
+        /// Non-fatal candidate failures from a partially successful batch.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
         /// Error text, populated on failure.
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -248,6 +259,8 @@ pub struct NodeStateEvent {
     /// Which hub types can address this node (e.g. ["hue"], ["hue", "matter"]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hub_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_capabilities: Option<LightCapabilitiesDto>,
     pub mode: RhythmMode,
     pub state: RoomModeState,
     pub rhythm_enabled: bool,
@@ -282,6 +295,7 @@ pub struct NodeStateEvent {
 #[derive(Clone, Debug)]
 pub(crate) struct NodeStateEventParams {
     pub hub_types: Vec<String>,
+    pub light_capabilities: Option<LightCapabilitiesDto>,
     pub mode: RhythmMode,
     pub state: RoomModeState,
     pub lights_on: bool,
@@ -302,6 +316,7 @@ impl NodeStateEvent {
     pub(crate) fn from_snapshot(snap: &NodeSnapshot, params: NodeStateEventParams) -> Self {
         let NodeStateEventParams {
             hub_types,
+            light_capabilities,
             mode,
             state,
             lights_on,
@@ -319,6 +334,7 @@ impl NodeStateEvent {
         Self {
             id: snap.id.clone(),
             hub_types,
+            light_capabilities,
             mode,
             state,
             rhythm_enabled: snap.rhythm_enabled,
@@ -567,6 +583,8 @@ mod tests {
             stage: PairingStage::Commissioning,
             message: "Commissioning Matter device".into(),
             device: None,
+            devices: Vec::new(),
+            warnings: Vec::new(),
             error: None,
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -575,6 +593,42 @@ mod tests {
         assert!(json.contains("\"session_id\":\"pair-1\""));
         assert!(json.contains("\"status\":\"commissioning\""));
         assert!(json.contains("\"stage\":\"commissioning\""));
+    }
+
+    #[test]
+    fn terminal_pairing_progress_serializes_every_batch_device() {
+        let first = PairedDeviceInfo {
+            device_id: "hue-ble-first".into(),
+            name: "First Hue light".into(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            manufacturer: Some("Signify Netherlands B.V.".into()),
+            model: Some("LCA013".into()),
+        };
+        let second = PairedDeviceInfo {
+            device_id: "hue-ble-second".into(),
+            name: "Second Hue light".into(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            manufacturer: Some("Signify Netherlands B.V.".into()),
+            model: Some("LCT015".into()),
+        };
+        let event = ServerEvent::PairingProgress {
+            hub_type: "hue_ble".into(),
+            session_id: Some("pair-batch".into()),
+            status: PairingStatus::Complete,
+            stage: PairingStage::Complete,
+            message: "Pairing complete".into(),
+            device: Some(first.clone()),
+            devices: vec![first, second],
+            warnings: vec!["One nearby bulb rejected pairing".into()],
+            error: None,
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+        let data = &value["data"];
+        assert_eq!(data["device"]["device_id"], "hue-ble-first");
+        assert_eq!(data["devices"].as_array().unwrap().len(), 2);
+        assert_eq!(data["devices"][1]["device_id"], "hue-ble-second");
+        assert_eq!(data["warnings"][0], "One nearby bulb rejected pairing");
     }
 
     #[test]

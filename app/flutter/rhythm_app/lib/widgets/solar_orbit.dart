@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
+import '../utils/app_color_temperature.dart';
+
 /// Celestial color palette for the solar orbit designer.
 class CelestialColors {
   static const backgroundDark = Color(0xFF0D1117);
@@ -542,7 +544,7 @@ class _SolarOrbitState extends State<SolarOrbit> with TickerProviderStateMixin {
     bool isAdjusting = false,
     required double maxSunSize,
   }) {
-    final sunColor = ColorUtils.curveColorForCCT(kelvin);
+    final sunColor = AppColorTemperature.curveColor(kelvin);
     final glow = _glowController.value;
     final glowOpacity = (0.3 + (brightness / 100) * 0.4) * glow;
 
@@ -700,7 +702,7 @@ class _OrbitalRingPainter extends CustomPainter {
       final kelvin = SolarUtils.interpolateValue(
           curveData!.hours, curveData!.kelvin, hour);
 
-      final color = ColorUtils.curveColorForCCT(kelvin.toInt());
+      final color = AppColorTemperature.curveColor(kelvin.toInt());
       // Opacity based on brightness
       final opacity = 0.3 + (brightness / 100) * 0.7;
 

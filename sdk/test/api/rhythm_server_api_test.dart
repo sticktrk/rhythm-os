@@ -2066,6 +2066,74 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // pairDevice
+  // ---------------------------------------------------------------------------
+  group('pairDevice', () {
+    test('passes Hue stale-bond recovery through generic pairing params',
+        () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/pair'),
+            statusCode: 200,
+            data: {
+              'status': 'complete',
+              'devices': const <Map<String, dynamic>>[],
+            },
+          ));
+
+      await api.pairDevice(
+        hubType: 'hue_ble',
+        params: const {'replace_stale_bonds': true},
+        sessionId: 'hue-stale-bond-recovery',
+      );
+
+      final data = verify(() => dio.post(
+            'api/devices/pair',
+            data: captureAny(named: 'data'),
+            options: any(named: 'options'),
+          )).captured.single as Map<String, dynamic>;
+      expect(data, {
+        'hub_type': 'hue_ble',
+        'session_id': 'hue-stale-bond-recovery',
+        'params': {
+          'replace_stale_bonds': true,
+          'session_id': 'hue-stale-bond-recovery',
+        },
+      });
+    });
+
+    test('preserves actionable plain-text pairing failures', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/pair'),
+            statusCode: 500,
+            data: 'Selected Hue Bluetooth bulb is no longer quarantined; '
+                'refresh the recovery list.',
+          ));
+
+      final result = await api.pairDevice(
+        hubType: 'hue_ble',
+        params: const {
+          'replace_stale_bonds': true,
+          'candidate_address': 'EA:84:C2:50:A8:65',
+        },
+      );
+
+      expect(result, {
+        'http_status': 500,
+        'error': 'Selected Hue Bluetooth bulb is no longer quarantined; '
+            'refresh the recovery list.',
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // unpairDevice
   // ---------------------------------------------------------------------------
   group('unpairDevice', () {
@@ -2132,7 +2200,40 @@ void main() {
           (captured[1] as Options).receiveTimeout, const Duration(seconds: 5));
     });
 
-    test('returns null on DioException', () async {
+    test('passes a normalized hub address for bridge endpoint removal',
+        () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {'status': 'complete', 'device_id': 'hue-light-7'},
+          ));
+
+      await api.unpairDevice(
+        hubType: 'hue',
+        deviceId: 'hue-light-7',
+        hubAddress: ' 192.0.2.10 ',
+      );
+
+      final data = verify(() => dio.post(
+            'api/devices/unpair',
+            data: captureAny(named: 'data'),
+            options: any(named: 'options'),
+          )).captured.single as Map<String, dynamic>;
+      expect(data, {
+        'hub_type': 'hue',
+        'params': {
+          'device_id': 'hue-light-7',
+          'hub_address': '192.0.2.10',
+          'force': false,
+        },
+      });
+    });
+
+    test('returns actionable timeout details on DioException', () async {
       when(() => dio.post(
             any(),
             data: any(named: 'data'),
@@ -2147,7 +2248,61 @@ void main() {
         deviceId: 'matter-100',
       );
 
-      expect(result, isNull);
+      expect(result, {
+        'error':
+            'Unpairing timed out. Keep the device powered on nearby and try again.',
+      });
+    });
+
+    test('preserves structured server error bodies', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 400,
+            data: {
+              'status': 'failed',
+              'error': 'Bulb release characteristic was unavailable',
+            },
+          ));
+
+      final result = await api.unpairDevice(
+        hubType: 'hue_ble',
+        deviceId: 'hue-ble-001788010f76565a',
+      );
+
+      expect(result, {
+        'status': 'failed',
+        'error': 'Bulb release characteristic was unavailable',
+        'http_status': 400,
+      });
+    });
+
+    test('preserves successful lifecycle completion details', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {
+              'status': 'complete',
+              'completion_scope': 'local_bond_retained',
+              'warning': 'The retained bond can be re-adopted.',
+            },
+          ));
+
+      final result = await api.unpairDevice(
+        hubType: 'hue_ble',
+        deviceId: 'hue-ble-001788010f76565a',
+        force: true,
+      );
+
+      expect(result?['completion_scope'], 'local_bond_retained');
+      expect(result?['warning'], 'The retained bond can be re-adopted.');
     });
   });
 }

@@ -10,7 +10,7 @@ use rhythm_core::{
     RoomProfileSettings, TimerSetting,
 };
 use serde::ser::SerializeStruct;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::canonical::triage::{TriageKind, TriageStatus};
@@ -476,6 +476,24 @@ impl TypedDeviceDto {
     }
 }
 
+/// Supported color-temperature envelope for a light-control node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightColorTemperatureCapabilitiesDto {
+    pub min_kelvin: u16,
+    pub max_kelvin: u16,
+}
+
+/// Extensible, normalized light-control capabilities for a node.
+///
+/// The whole object is omitted when the server cannot prove a safe capability
+/// surface. Room capabilities describe the intersection supported by every
+/// member light, not the union.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LightCapabilitiesDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_temperature: Option<LightColorTemperatureCapabilitiesDto>,
+}
+
 /// Public node state for any addressable topology/runtime node.
 ///
 /// This is the node-first contract used by `/api/state` and `/api/nodes/*`.
@@ -497,6 +515,8 @@ pub struct NodeStateDto {
     pub manufacturer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_capabilities: Option<LightCapabilitiesDto>,
     pub state: RoomModeState,
     pub rhythm_enabled: bool,
     pub disabled: bool,
@@ -746,6 +766,12 @@ mod tests {
             hub_types: vec!["hue".into()],
             manufacturer: None,
             model: None,
+            light_capabilities: Some(LightCapabilitiesDto {
+                color_temperature: Some(LightColorTemperatureCapabilitiesDto {
+                    min_kelvin: 2_000,
+                    max_kelvin: 6_500,
+                }),
+            }),
             state: rhythm_core::RoomModeState::Active,
             rhythm_enabled: true,
             disabled: false,
@@ -800,7 +826,37 @@ mod tests {
         assert_eq!(json["curve_modifier"]["brightness_offset"], -10.0);
         assert_eq!(json["curve_modifier"]["brightness"], 80);
         assert_eq!(json["curve_modifier"]["kelvin"], 4000);
+        assert_eq!(
+            json["light_capabilities"]["color_temperature"]["min_kelvin"],
+            2_000
+        );
+        assert_eq!(
+            json["light_capabilities"]["color_temperature"]["max_kelvin"],
+            6_500
+        );
         assert!(json.get("room_profile").is_none());
+    }
+
+    #[test]
+    fn node_state_omits_unknown_light_capabilities() {
+        let mut node = sample_node_state();
+        node.light_capabilities = None;
+
+        let json: Value = serde_json::to_value(node).unwrap();
+
+        assert!(json.get("light_capabilities").is_none());
+    }
+
+    #[test]
+    fn node_state_serializes_known_non_ct_capabilities_as_empty_object() {
+        let mut node = sample_node_state();
+        node.light_capabilities = Some(LightCapabilitiesDto {
+            color_temperature: None,
+        });
+
+        let json: Value = serde_json::to_value(node).unwrap();
+
+        assert_eq!(json["light_capabilities"], serde_json::json!({}));
     }
 
     // ---- RoomRhythmState ----

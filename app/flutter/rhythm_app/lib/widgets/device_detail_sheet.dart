@@ -277,6 +277,14 @@ Future<bool> showMotionTargetRoomsFlow(
 /// Tabs on the device (bulb) detail sheet — mirrors the room settings sheet.
 enum _DeviceTab { settings, network, info }
 
+enum _HueBleRemovalFailureChoice { cancel, retry, forget }
+
+typedef _DeviceEndpoint = ({
+  String hubType,
+  String hubAddress,
+  String nativeId,
+});
+
 class DeviceDetailSheet extends StatefulWidget {
   final RhythmDevice device;
   final String roomId;
@@ -311,7 +319,7 @@ class DeviceDetailSheet extends StatefulWidget {
 class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
-  bool _removing = false;
+  _DeviceEndpoint? _removingEndpoint;
   _DeviceTab _selectedTab = _DeviceTab.settings;
 
   @override
@@ -348,6 +356,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
     );
+    final canUnpairHueBle = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.canUnpairHueBleDevices,
+    );
+    final canUnpairHueBridge = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.canUnpairHueBridgeDevices,
+    );
     // Low glow and profile overrides are node-level settings. Only expose
     // them for bulbs that the server reports as independently addressable
     // light nodes.
@@ -364,141 +378,151 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           (sync) => sync.hasNodeLightProfileOverrides(device.id),
         );
 
-    return Padding(
-      padding: EdgeInsets.only(top: topPad + 100),
-      child: Container(
-        decoration: const BoxDecoration(
-          color: CelestialColors.backgroundCard,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          boxShadow: [
-            BoxShadow(
-              color: Color(0x40000000),
-              blurRadius: 20,
-              offset: Offset(0, -4),
-            ),
-          ],
-        ),
-        child: Column(
-          children: [
-            // Drag handle
-            Padding(
-              padding: const EdgeInsets.only(top: 12, bottom: 8),
-              child: Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: CelestialColors.orbitRing,
-                  borderRadius: BorderRadius.circular(2),
+    return PopScope(
+      canPop: _removingEndpoint == null,
+      child: Padding(
+        padding: EdgeInsets.only(top: topPad + 100),
+        child: Container(
+          decoration: const BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            boxShadow: [
+              BoxShadow(
+                color: Color(0x40000000),
+                blurRadius: 20,
+                offset: Offset(0, -4),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              // Drag handle
+              Padding(
+                padding: const EdgeInsets.only(top: 12, bottom: 8),
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: CelestialColors.orbitRing,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
-            ),
-            // Device icon + name
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-              child: Column(
-                children: [
-                  Container(
-                    width: 56,
-                    height: 56,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: iconColor.withValues(alpha: 0.15),
-                      border: Border.all(
-                        color: iconColor.withValues(alpha: 0.4),
-                        width: 2,
-                      ),
-                    ),
-                    child: Icon(icon, color: iconColor, size: 24),
-                  ),
-                  const SizedBox(height: 12),
-                  // The name is a plain title here; renaming lives on the
-                  // Device Info row (Info tab) with a pencil.
-                  _DeviceNameButton(
-                    label: deviceDisplayName,
-                    onTap: null,
-                  ),
-                  if (device.productInfo != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text(
-                        device.productInfo!,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: CelestialColors.textSecondary
-                              .withValues(alpha: 0.7),
-                          fontSize: 13,
+              // Device icon + name
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
+                child: Column(
+                  children: [
+                    Container(
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: iconColor.withValues(alpha: 0.15),
+                        border: Border.all(
+                          color: iconColor.withValues(alpha: 0.4),
+                          width: 2,
                         ),
                       ),
+                      child: Icon(icon, color: iconColor, size: 24),
                     ),
-                ],
-              ),
-            ),
-            // Tab selector
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: SegmentedTabBar<_DeviceTab>(
-                selected: _selectedTab,
-                onChanged: (tab) => setState(() => _selectedTab = tab),
-                tabs: const [
-                  SegmentedTab('Settings', _DeviceTab.settings),
-                  SegmentedTab('Network', _DeviceTab.network),
-                  SegmentedTab('Info', _DeviceTab.info),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            // Tab content — Expanded so the sheet keeps a stable height across
-            // tabs (short tabs fill/scroll instead of shrinking the card).
-            Expanded(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: switch (_selectedTab) {
-                  _DeviceTab.settings => _buildSettingsTab(
-                      context,
-                      device,
-                      isLightNode,
-                      lightSettingsSupported,
-                      hasLightOverrides,
+                    const SizedBox(height: 12),
+                    // The name is a plain title here; renaming lives on the
+                    // Device Info row (Info tab) with a pencil.
+                    _DeviceNameButton(
+                      label: deviceDisplayName,
+                      onTap: null,
                     ),
-                  _DeviceTab.network =>
-                    _buildNetworkTab(context, device, canUnpairMatter),
-                  _DeviceTab.info => _buildInfoTab(context, device),
-                },
+                    if (device.productInfo != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          device.productInfo!,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.7),
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            // Done button
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                20,
-                12,
-                20,
-                MediaQuery.of(context).padding.bottom + 16,
+              // Tab selector
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: SegmentedTabBar<_DeviceTab>(
+                  selected: _selectedTab,
+                  onChanged: (tab) => setState(() => _selectedTab = tab),
+                  tabs: const [
+                    SegmentedTab('Settings', _DeviceTab.settings),
+                    SegmentedTab('Network', _DeviceTab.network),
+                    SegmentedTab('Info', _DeviceTab.info),
+                  ],
+                ),
               ),
-              child: SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: CelestialColors.sunWarm,
-                    foregroundColor: CelestialColors.backgroundDark,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(25),
+              const SizedBox(height: 16),
+              // Tab content — Expanded so the sheet keeps a stable height across
+              // tabs (short tabs fill/scroll instead of shrinking the card).
+              Expanded(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 200),
+                  child: switch (_selectedTab) {
+                    _DeviceTab.settings => _buildSettingsTab(
+                        context,
+                        device,
+                        isLightNode,
+                        lightSettingsSupported,
+                        hasLightOverrides,
+                      ),
+                    _DeviceTab.network => _buildNetworkTab(
+                        context,
+                        device,
+                        canUnpairMatter,
+                        canUnpairHueBle,
+                        canUnpairHueBridge,
+                      ),
+                    _DeviceTab.info => _buildInfoTab(context, device),
+                  },
+                ),
+              ),
+              // Done button
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  20,
+                  12,
+                  20,
+                  MediaQuery.of(context).padding.bottom + 16,
+                ),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: ElevatedButton(
+                    onPressed: _removingEndpoint == null
+                        ? () => Navigator.of(context).pop()
+                        : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: CelestialColors.sunWarm,
+                      foregroundColor: CelestialColors.backgroundDark,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(25),
+                      ),
+                      elevation: 0,
                     ),
-                    elevation: 0,
-                  ),
-                  child: const Text(
-                    'DONE',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 2.0,
+                    child: const Text(
+                      'DONE',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 2.0,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -614,8 +638,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     BuildContext context,
     RhythmDevice device,
     bool canUnpairMatter,
+    bool canUnpairHueBle,
+    bool canUnpairHueBridge,
   ) {
     final isLight = device.type == RhythmDeviceType.light;
+    final removableEndpoints = _removableEndpoints.where((endpoint) {
+      return switch (endpoint.hubType) {
+        'matter' => canUnpairMatter,
+        'hue_ble' => canUnpairHueBle,
+        'hue' => canUnpairHueBridge,
+        _ => false,
+      };
+    }).toList(growable: false);
+    final hasMultipleConnections = _allEndpoints.length > 1;
     return ListView(
       key: const ValueKey('network'),
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
@@ -638,9 +673,13 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   .flashCanonicalDevice(device.id),
             ),
           ],
-          if (_matterNativeId != null && canUnpairMatter) ...[
+          for (final endpoint in removableEndpoints) ...[
             const SizedBox(height: 12),
-            _buildRemoveButton(context),
+            _buildRemoveButton(
+              context,
+              endpoint,
+              removesConnectionOnly: hasMultipleConnections,
+            ),
           ],
         ] else
           _tabHint('No connection info available.'),
@@ -987,20 +1026,120 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
-  /// The matter native ID from the canonical endpoints, or null if not a matter device.
-  String? get _matterNativeId {
+  List<Map<String, dynamic>> get _allEndpoints {
     final endpoints = _canonicalData?['endpoints'] as List<dynamic>? ?? [];
-    for (final ep in endpoints) {
-      final nativeId =
-          (ep as Map<String, dynamic>)['native_id'] as String? ?? '';
-      if (nativeId.startsWith('matter-')) return nativeId;
+    return [
+      for (final endpoint in endpoints)
+        if (endpoint is Map<String, dynamic>) endpoint,
+    ];
+  }
+
+  _DeviceEndpoint? _endpointForHub(String hubType) {
+    for (final endpoint in _allEndpoints) {
+      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
+      if (hubKey['hub_type']?.toString() != hubType) continue;
+      final hubAddress = hubKey['address']?.toString() ?? '';
+      final nativeId = endpoint['native_id']?.toString() ?? '';
+      if (nativeId.isNotEmpty) {
+        return (
+          hubType: hubType,
+          hubAddress: hubAddress,
+          nativeId: nativeId,
+        );
+      }
     }
     return null;
   }
 
-  Widget _buildRemoveButton(BuildContext context) {
+  /// The Matter native ID from the canonical endpoints, when present.
+  String? get _matterNativeId => _endpointForHub('matter')?.nativeId;
+
+  /// Endpoint connections the appliance can remove through their integration.
+  ///
+  /// Keep this as a list instead of picking a preferred transport: one
+  /// canonical device may intentionally contain Bridge, Matter, and BLE paths.
+  List<_DeviceEndpoint> get _removableEndpoints {
+    final removable = <_DeviceEndpoint>[];
+    for (final endpoint in _allEndpoints) {
+      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
+      final hubType = hubKey['hub_type']?.toString() ?? '';
+      final hubAddress = hubKey['address']?.toString() ?? '';
+      final nativeId = endpoint['native_id']?.toString() ?? '';
+      if ((hubType == 'matter' || hubType == 'hue_ble' || hubType == 'hue') &&
+          nativeId.isNotEmpty) {
+        removable.add((
+          hubType: hubType,
+          hubAddress: hubAddress,
+          nativeId: nativeId,
+        ));
+      }
+    }
+    return removable;
+  }
+
+  String _endpointLabel(_DeviceEndpoint endpoint) => switch (endpoint.hubType) {
+        'hue' => 'Hue Bridge',
+        'hue_ble' => 'Hue Bluetooth',
+        _ => 'Matter',
+      };
+
+  String _removeConfirmation(
+    _DeviceEndpoint endpoint, {
+    required bool removesConnectionOnly,
+  }) {
+    final name = _deviceDisplayName;
+    final connectionLabel = _endpointLabel(endpoint);
+    if (endpoint.hubType == 'hue') {
+      final otherConnectionNote = removesConnectionOnly
+          ? ' The device will remain in Rhythm through its other connection.'
+          : '';
+      return 'This will ask your Hue Bridge to remove "$name", then remove '
+          'the $connectionLabel connection from Rhythm.$otherConnectionNote'
+          '\n\nIf bridge removal does not return cleanly, Rhythm can check '
+          'whether the bulb is already absent before finishing cleanup.';
+    }
+    if (removesConnectionOnly) {
+      final handoffNote = endpoint.hubType == 'hue_ble'
+          ? '\n\nKeep the bulb powered on and nearby while Rhythm performs an '
+              'authenticated Bluetooth release. The bulb will become '
+              'discoverable and can be paired again without a factory reset.'
+          : '';
+      return 'This will remove the $connectionLabel connection from "$name". '
+          'The device will remain in Rhythm through its other '
+          'connection.$handoffNote';
+    }
+    if (endpoint.hubType == 'hue_ble') {
+      return 'This will ask "$name" to perform an authenticated Bluetooth '
+          'release, then remove it from Rhythm.\n\nKeep the bulb powered on '
+          'and nearby. After removal, it can be paired again without a '
+          'factory reset.';
+    }
+    return 'This will decommission "$name" and remove it from your system. '
+        'The device can be re-paired afterwards.\n\nIf the device is offline '
+        'this can take a minute, after which you can force-remove it.';
+  }
+
+  Widget _buildRemoveButton(
+    BuildContext context,
+    _DeviceEndpoint endpoint, {
+    required bool removesConnectionOnly,
+  }) {
+    final isRemoving = _removingEndpoint == endpoint;
+    final removalInProgress = _removingEndpoint != null;
+    final idleLabel = removesConnectionOnly
+        ? 'Remove ${_endpointLabel(endpoint)} Connection'
+        : 'Remove Device';
     return GestureDetector(
-      onTap: _removing ? null : () => _confirmRemoveDevice(context),
+      key: ValueKey(
+        'remove-device-endpoint-${endpoint.hubType}-${endpoint.nativeId}',
+      ),
+      onTap: removalInProgress
+          ? null
+          : () => _confirmRemoveDevice(
+                context,
+                endpoint,
+                removesConnectionOnly: removesConnectionOnly,
+              ),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
@@ -1012,7 +1151,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         ),
         child: Row(
           children: [
-            if (_removing)
+            if (isRemoving)
               SizedBox(
                 width: 18,
                 height: 18,
@@ -1030,7 +1169,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                _removing ? 'Removing...' : 'Remove Device',
+                isRemoving ? 'Removing...' : idleLabel,
                 style: TextStyle(
                   color: Colors.red.shade300,
                   fontSize: 15,
@@ -1043,17 +1182,27 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
-  Future<void> _confirmRemoveDevice(BuildContext context) async {
+  Future<void> _confirmRemoveDevice(
+    BuildContext context,
+    _DeviceEndpoint endpoint, {
+    required bool removesConnectionOnly,
+  }) async {
+    final actionLabel = removesConnectionOnly
+        ? 'Remove ${_endpointLabel(endpoint)} Connection'
+        : 'Remove Device';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Remove Device?',
-          style: TextStyle(color: CelestialColors.textPrimary),
+        title: Text(
+          '$actionLabel?',
+          style: const TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          'This will decommission "${widget.device.displayName}" and remove it from your system. The device can be re-paired afterwards.\n\nIf the device is offline this can take a minute, after which you can force-remove it.',
+          _removeConfirmation(
+            endpoint,
+            removesConnectionOnly: removesConnectionOnly,
+          ),
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -1070,70 +1219,245 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
 
     if (confirmed != true || !context.mounted) return;
-    await _removeDevice(context);
+    await _removeDevice(
+      context,
+      endpoint,
+      removesConnectionOnly: removesConnectionOnly,
+    );
   }
 
-  Future<void> _removeDevice(BuildContext context) async {
-    final nativeId = _matterNativeId;
-    if (nativeId == null) return;
-
+  Future<void> _removeDevice(
+    BuildContext context,
+    _DeviceEndpoint endpoint, {
+    required bool removesConnectionOnly,
+  }) async {
     final syncProvider = context.read<ServerSyncProvider>();
     final api = syncProvider.api;
 
-    final outcome = await runMatterRemovalFlow(
-      unpair: ({required bool force}) {
-        if (mounted) setState(() => _removing = true);
-        return api.unpairDevice(
-          hubType: 'matter',
-          deviceId: nativeId,
-          force: force,
-        );
-      },
-      confirmForceRemove: (error) async {
-        if (!context.mounted) return false;
-        setState(() => _removing = false);
-        // Offer force-remove if the device is unreachable.
-        final forceRemove = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            backgroundColor: CelestialColors.backgroundCard,
-            title: const Text(
-              'Removal Failed',
-              style: TextStyle(color: CelestialColors.textPrimary),
-            ),
-            content: Text(
-              '$error\n\nForce remove? This cleans up local state without contacting the device.',
-              style: const TextStyle(color: CelestialColors.textSecondary),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Cancel'),
+    var retryHueBleRelease = false;
+    Map<String, dynamic>? completionResult;
+    late MatterRemovalOutcome outcome;
+    do {
+      retryHueBleRelease = false;
+      outcome = await runMatterRemovalFlow(
+        unpair: ({required bool force}) {
+          if (mounted) setState(() => _removingEndpoint = endpoint);
+          return api.unpairDevice(
+            hubType: endpoint.hubType,
+            deviceId: endpoint.nativeId,
+            hubAddress:
+                endpoint.hubType == 'hue' && endpoint.hubAddress.isNotEmpty
+                    ? endpoint.hubAddress
+                    : null,
+            force: force,
+          );
+        },
+        confirmForceRemove: (error) async {
+          if (!context.mounted) return false;
+          setState(() => _removingEndpoint = null);
+
+          if (endpoint.hubType == 'hue_ble') {
+            final choice = await showDialog<_HueBleRemovalFailureChoice>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                backgroundColor: CelestialColors.backgroundCard,
+                title: const Text(
+                  'Couldn’t release the bulb',
+                  style: TextStyle(color: CelestialColors.textPrimary),
+                ),
+                content: Text(
+                  '$error\n\nKeep the bulb powered on and nearby. Try Again '
+                  'attempts the authenticated Bluetooth release again.\n\n'
+                  'Forget Anyway lets Rhythm retry the release, then remove '
+                  'only its local device record if release is still '
+                  'unavailable. If this Rhythm Box retains the Bluetooth '
+                  'bond, Rhythm can explicitly re-adopt it later. Moving the '
+                  'bulb to another controller may require a factory reset if '
+                  'the old key cannot be released.',
+                  style: const TextStyle(color: CelestialColors.textSecondary),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx)
+                        .pop(_HueBleRemovalFailureChoice.cancel),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx)
+                        .pop(_HueBleRemovalFailureChoice.retry),
+                    child: const Text('Try Again'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx)
+                        .pop(_HueBleRemovalFailureChoice.forget),
+                    child: Text(
+                      'Forget Anyway',
+                      style: TextStyle(color: Colors.red.shade300),
+                    ),
+                  ),
+                ],
               ),
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: Text('Force Remove',
-                    style: TextStyle(color: Colors.red.shade300)),
+            );
+            if (choice == _HueBleRemovalFailureChoice.retry) {
+              retryHueBleRelease = true;
+              return false;
+            }
+            return choice == _HueBleRemovalFailureChoice.forget &&
+                context.mounted;
+          }
+
+          // A Hue Bridge "force" request is intentionally only an
+          // absence-confirmation fallback: the server must not remove local
+          // state while the bridge still owns the bulb, because the next sync
+          // would recreate the endpoint.
+          final isHueBridge = endpoint.hubType == 'hue';
+          final forceRemovalExplanation = isHueBridge
+              ? 'Check the Hue Bridge and finish removal? Rhythm will clean '
+                  'up its connection only after the bridge confirms the bulb '
+                  'is absent. If the bridge still owns it, this fails safely.'
+              : 'Force remove? This cleans up local state without contacting '
+                  'the device.';
+          final forceRemove = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: CelestialColors.backgroundCard,
+              title: Text(
+                isHueBridge ? 'Removal Not Confirmed' : 'Removal Failed',
+                style: TextStyle(color: CelestialColors.textPrimary),
               ),
-            ],
-          ),
-        );
-        return forceRemove == true && context.mounted;
-      },
-    );
+              content: Text(
+                '$error\n\n$forceRemovalExplanation',
+                style: const TextStyle(color: CelestialColors.textSecondary),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: Text(
+                      isHueBridge ? 'Check and Finish Removal' : 'Force Remove',
+                      style: TextStyle(color: Colors.red.shade300)),
+                ),
+              ],
+            ),
+          );
+          return forceRemove == true && context.mounted;
+        },
+        onComplete: (result) => completionResult = result,
+      );
+    } while (retryHueBleRelease && context.mounted);
 
     if (!context.mounted) return;
 
     if (outcome == MatterRemovalOutcome.removed) {
+      final lifecycleWarning = completionResult?['warning']?.toString().trim();
       await syncProvider.connection.reconnect();
       if (!context.mounted) return;
-      Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Removed ${widget.device.displayName}')),
-      );
+      if (removesConnectionOnly) {
+        final remainingEndpoints = [
+          for (final candidate in _allEndpoints)
+            if (!_matchesEndpoint(candidate, endpoint)) candidate,
+        ];
+        setState(() {
+          _canonicalData = {
+            ...?_canonicalData,
+            'endpoints': remainingEndpoints,
+          };
+          _removingEndpoint = null;
+        });
+        await _refreshCanonicalDataPreservingCurrent();
+        if (!context.mounted) return;
+        if (lifecycleWarning?.isNotEmpty == true) {
+          await _showAcknowledgedRemovalWarning(
+            context,
+            title: 'Removed ${_endpointLabel(endpoint)} connection',
+            warning: lifecycleWarning!,
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Removed ${_endpointLabel(endpoint)} connection from '
+                '$_deviceDisplayName',
+              ),
+            ),
+          );
+        }
+      } else {
+        if (lifecycleWarning?.isNotEmpty == true) {
+          setState(() => _removingEndpoint = null);
+          await _showAcknowledgedRemovalWarning(
+            context,
+            title: 'Removed from Rhythm',
+            warning: lifecycleWarning!,
+          );
+          if (!context.mounted) return;
+          Navigator.of(context).pop();
+          return;
+        }
+        final messenger = ScaffoldMessenger.of(context);
+        Navigator.of(context).pop();
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text('Removed ${widget.device.displayName}'),
+          ),
+        );
+      }
     } else {
-      setState(() => _removing = false);
+      setState(() => _removingEndpoint = null);
     }
+  }
+
+  Future<void> _showAcknowledgedRemovalWarning(
+    BuildContext context, {
+    required String title,
+    required String warning,
+  }) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          backgroundColor: CelestialColors.backgroundCard,
+          title: Text(
+            title,
+            style: const TextStyle(color: CelestialColors.textPrimary),
+          ),
+          content: Text(
+            warning,
+            style: const TextStyle(color: CelestialColors.textSecondary),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  bool _matchesEndpoint(
+    Map<String, dynamic> candidate,
+    _DeviceEndpoint endpoint,
+  ) {
+    final hubKey = candidate['hub_key'] as Map<String, dynamic>? ?? const {};
+    return hubKey['hub_type']?.toString() == endpoint.hubType &&
+        (hubKey['address']?.toString() ?? '') == endpoint.hubAddress &&
+        candidate['native_id']?.toString() == endpoint.nativeId;
+  }
+
+  Future<void> _refreshCanonicalDataPreservingCurrent() async {
+    final data = await context
+        .read<ServerSyncProvider>()
+        .api
+        .getCanonicalDevice(widget.device.id);
+    if (!mounted || data == null) return;
+    setState(() => _canonicalData = data);
   }
 
   Future<void> _showMoveDialog(BuildContext context) async {
@@ -1164,8 +1488,14 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       RhythmDeviceType.motion ||
       RhythmDeviceType.contact =>
         true,
-      RhythmDeviceType.light =>
-        _matterNativeId != null && syncProvider.supportsMatterRoomlessDevices,
+      RhythmDeviceType.light => _removableEndpoints.any(
+          (endpoint) => switch (endpoint.hubType) {
+            'matter' => syncProvider.supportsMatterRoomlessDevices,
+            'hue_ble' => syncProvider.supportsHueBleRoomlessDevices,
+            'hue' => false,
+            _ => false,
+          },
+        ),
     };
   }
 
@@ -1581,6 +1911,7 @@ class _ConnectionRow extends StatelessWidget {
     final address = hubKey['address'] as String? ?? '';
     final displayHub = switch (hubType) {
       'hue' => 'Hue Bridge',
+      'hue_ble' => 'Hue Bluetooth',
       'ha' || 'homeassistant' || 'home_assistant' => 'Home Assistant',
       'matter' => 'Matter',
       _ => hubType,
@@ -1592,7 +1923,7 @@ class _ConnectionRow extends StatelessWidget {
         children: [
           Icon(
             switch (hubType) {
-              'hue' => Icons.lightbulb,
+              'hue' || 'hue_ble' => Icons.lightbulb,
               'matter' => Icons.memory_outlined,
               _ => Icons.home,
             },

@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{debug, info, warn};
@@ -56,6 +57,30 @@ fn try_acquire_hub_sync_guard(
         state: state.clone(),
         hub_key: hub_key.clone(),
     }))
+}
+
+fn acquire_hub_sync_guard_with_timeout(
+    state: &SharedState,
+    hub_key: &HubKey,
+    timeout: Duration,
+) -> Result<HubSyncGuard> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(guard) = try_acquire_hub_sync_guard(state, hub_key)? {
+            return Ok(guard);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "Timed out waiting for the existing {} sync to finish",
+                hub_key
+            );
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100)),
+        );
+    }
 }
 
 /// Discover rooms and devices from the hub and sync into engine + registry.
@@ -147,7 +172,29 @@ pub fn sync_from_hub_for_key(
         debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
         return Ok(SyncReport::default());
     };
+    sync_from_hub_for_key_acquired(state, hub_key, discover_devices)
+}
 
+/// Run a fresh sync after waiting for any same-hub sync to finish.
+///
+/// Lifecycle operations that have already changed upstream state (such as a
+/// Hue Bridge join/removal) use this instead of treating a busy sync as a
+/// successful no-op.
+pub fn sync_from_hub_for_key_wait(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+    timeout: Duration,
+) -> Result<SyncReport> {
+    let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
+    sync_from_hub_for_key_acquired(state, hub_key, discover_devices)
+}
+
+fn sync_from_hub_for_key_acquired(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+) -> Result<SyncReport> {
     let discovery = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hubs
@@ -1063,6 +1110,63 @@ mod tests {
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0].device_type, DeviceType::Button);
         assert_eq!(devices[1].device_type, DeviceType::Motion);
+    }
+
+    #[test]
+    fn required_sync_waits_for_and_then_owns_the_exact_hub_slot() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-wait");
+        assert!(state.lock().unwrap().begin_hub_sync(&hub_key));
+
+        let releasing_state = state.clone();
+        let releasing_key = hub_key.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            releasing_state
+                .lock()
+                .unwrap()
+                .finish_hub_sync(&releasing_key);
+        });
+
+        let guard = acquire_hub_sync_guard_with_timeout(&state, &hub_key, Duration::from_secs(1))
+            .expect("required sync should wait for the active sync");
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .hub_sync_in_progress
+                .contains(&hub_key),
+            "the required sync should own the same hub slot before it starts discovery"
+        );
+
+        drop(guard);
+        release.join().unwrap();
+        assert!(!state
+            .lock()
+            .unwrap()
+            .hub_sync_in_progress
+            .contains(&hub_key));
+    }
+
+    #[test]
+    fn required_sync_times_out_instead_of_reporting_busy_noop_as_success() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-busy");
+        assert!(state.lock().unwrap().begin_hub_sync(&hub_key));
+
+        let started = Instant::now();
+        let error = match acquire_hub_sync_guard_with_timeout(
+            &state,
+            &hub_key,
+            Duration::from_millis(20),
+        ) {
+            Ok(_) => panic!("required sync must not turn a busy slot into an empty success"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("Timed out waiting"));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        state.lock().unwrap().finish_hub_sync(&hub_key);
     }
 
     #[test]

@@ -1,0 +1,1176 @@
+//! Linux BlueZ transport for direct Hue BLE bulbs.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use bluer::agent::{Agent, ReqError};
+use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
+use bluer::gatt::WriteOp;
+use bluer::{
+    Adapter, AdapterEvent, Address, Device, DiscoveryFilter, DiscoveryTransport, ErrorKind, Session,
+};
+use futures::StreamExt;
+use tokio::runtime::Runtime;
+use uuid::Uuid;
+
+use super::protocol;
+use super::transport::HueBleTransport;
+use super::types::{
+    HueBleCapabilities, HueBleColor, HueBleCommand, HueBleDevice, HueBlePairingOutcome,
+    HueBlePairingRequest, HueBleState,
+};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const PAIR_TIMEOUT: Duration = Duration::from_secs(35);
+const PASSIVE_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const BOND_REMOVAL_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy)]
+struct PairCandidate {
+    address: Address,
+    paired: bool,
+    rssi: i16,
+}
+
+/// Serializes BlueZ work on a dedicated runtime. BlueZ retains bonded device
+/// objects and ACL connections independently of the short-lived D-Bus proxies.
+pub struct BluezHueBleTransport {
+    runtime: Mutex<Runtime>,
+    quiescing: AtomicBool,
+}
+
+impl BluezHueBleTransport {
+    pub fn new() -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("hue-ble")
+            .enable_all()
+            .build()
+            .context("building Hue BLE runtime")?;
+        Ok(Self {
+            runtime: Mutex::new(runtime),
+            quiescing: AtomicBool::new(false),
+        })
+    }
+
+    fn block_on<T>(&self, future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE runtime lock poisoned"))?;
+        if self.quiescing.load(Ordering::Acquire) {
+            anyhow::bail!("Hue BLE transport is quiesced for appliance shutdown");
+        }
+        runtime.block_on(future)
+    }
+
+    fn try_block_on<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<Option<T>> {
+        if self.quiescing.load(Ordering::Acquire) {
+            anyhow::bail!("Hue BLE transport is quiesced for appliance shutdown");
+        }
+        let Ok(runtime) = self.runtime.try_lock() else {
+            return Ok(None);
+        };
+        if self.quiescing.load(Ordering::Acquire) {
+            anyhow::bail!("Hue BLE transport is quiesced for appliance shutdown");
+        }
+        runtime.block_on(future).map(Some)
+    }
+
+    fn ensure_persistent_bond_storage() -> Result<()> {
+        if std::env::var("RHYTHM_PLATFORM_TYPE").as_deref() != Ok("appliance") {
+            return Ok(());
+        }
+        let mounts = std::fs::read_to_string("/proc/mounts")
+            .context("checking persistent Bluetooth bond storage")?;
+        let mounted = mounts
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some("/var/lib/bluetooth"));
+        if !mounted || !std::path::Path::new("/data/bluetooth").is_dir() {
+            anyhow::bail!(
+                "Persistent Bluetooth bond storage is not mounted; restart the appliance before pairing Hue bulbs"
+            );
+        }
+        Ok(())
+    }
+
+    async fn session_adapter() -> Result<(Session, Adapter)> {
+        let session = Session::new().await.context("opening BlueZ session")?;
+        let adapter = session
+            .default_adapter()
+            .await
+            .context("finding Bluetooth adapter")?;
+        adapter
+            .set_powered(true)
+            .await
+            .context("powering Bluetooth adapter")?;
+        Ok((session, adapter))
+    }
+
+    async fn discover_candidates(
+        adapter: &Adapter,
+        request: &HueBlePairingRequest,
+    ) -> Result<Vec<PairCandidate>> {
+        let hue_service = uuid(protocol::HUE_DISCOVERY_SERVICE_UUID);
+        adapter
+            .set_discovery_filter(DiscoveryFilter {
+                uuids: HashSet::from([hue_service]),
+                transport: DiscoveryTransport::Le,
+                duplicate_data: true,
+                ..Default::default()
+            })
+            .await
+            .context("setting Hue BLE discovery filter")?;
+
+        let events = adapter
+            .discover_devices_with_changes()
+            .await
+            .context("starting Hue BLE discovery")?;
+        tokio::pin!(events);
+
+        let overall_deadline =
+            tokio::time::Instant::now() + Duration::from_secs(request.scan_timeout_secs);
+        let mut candidates: HashMap<Address, (bool, i16)> = HashMap::new();
+
+        loop {
+            let remaining = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let event = match tokio::time::timeout(remaining, events.next()).await {
+                Ok(Some(event)) => event,
+                Ok(None) | Err(_) => break,
+            };
+            let AdapterEvent::DeviceAdded(address) = event else {
+                continue;
+            };
+            if request
+                .candidate_address
+                .as_deref()
+                .is_some_and(|wanted| !address.to_string().eq_ignore_ascii_case(wanted))
+            {
+                continue;
+            }
+            let device = adapter.device(address)?;
+            let advertised = device.uuids().await.ok().flatten().unwrap_or_default();
+            if !advertised.contains(&hue_service) {
+                continue;
+            }
+            let Some(rssi) = device.rssi().await.ok().flatten() else {
+                // BlueZ also yields cached, out-of-range objects. Only a live
+                // advertisement is eligible for association with the label
+                // the user just scanned.
+                continue;
+            };
+            let paired = match device.is_paired().await {
+                Ok(paired) => paired,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "pair",
+                        "Skipping Hue candidate {address}: BlueZ pairing state is unknown: {error}"
+                    );
+                    continue;
+                }
+            };
+            if !Self::pair_candidate_is_eligible(request, &address.to_string(), paired) {
+                continue;
+            }
+            candidates.insert(address, (paired, rssi));
+
+            if request.candidate_address.is_some() {
+                break;
+            }
+        }
+        drop(events);
+
+        if candidates.is_empty() {
+            anyhow::bail!(
+                "No eligible Hue Bluetooth bulb found. Factory-reset the bulb, keep it powered on nearby, and try again"
+            );
+        }
+
+        let mut candidates = candidates
+            .into_iter()
+            .map(|(address, (paired, rssi))| PairCandidate {
+                address,
+                paired,
+                rssi,
+            })
+            .collect::<Vec<_>>();
+        // Pair the closest bulbs first. The ordering is otherwise stable so a
+        // partial adapter failure has predictable recovery on the next scan.
+        candidates.sort_by(|left, right| {
+            right
+                .rssi
+                .cmp(&left.rssi)
+                .then_with(|| left.address.to_string().cmp(&right.address.to_string()))
+        });
+        Ok(candidates)
+    }
+
+    fn pair_candidate_is_eligible(
+        request: &HueBlePairingRequest,
+        address: &str,
+        paired: bool,
+    ) -> bool {
+        let matches = |candidate: &String| address.eq_ignore_ascii_case(candidate);
+
+        // An actively tracked bulb is never a new pairing candidate, even if
+        // an inconsistent caller also places it on the re-association list.
+        if request.known_addresses.iter().any(matches) {
+            return false;
+        }
+        if !paired {
+            return true;
+        }
+        if request.explicit_reassociation_addresses.iter().any(matches) {
+            return true;
+        }
+        request.allow_paired_orphan_adoption
+            && !request.blocked_paired_addresses.iter().any(matches)
+    }
+
+    fn stale_bond_replacement_is_allowed(
+        request: &HueBlePairingRequest,
+        stale_address: &str,
+    ) -> bool {
+        request
+            .explicit_reassociation_addresses
+            .iter()
+            .any(|address| address.eq_ignore_ascii_case(stale_address))
+            && !request
+                .known_addresses
+                .iter()
+                .any(|address| address.eq_ignore_ascii_case(stale_address))
+    }
+
+    async fn connect(device: &Device) -> Result<()> {
+        if !device.is_connected().await.unwrap_or(false) {
+            tokio::time::timeout(CONNECT_TIMEOUT, device.connect())
+                .await
+                .context("timed out connecting to Hue bulb")?
+                .context("connecting to Hue bulb")?;
+        }
+        tokio::time::timeout(CONNECT_TIMEOUT, device.services())
+            .await
+            .context("timed out resolving Hue GATT services")?
+            .context("resolving Hue GATT services")?;
+        Ok(())
+    }
+
+    async fn characteristics(device: &Device) -> Result<HashMap<Uuid, Characteristic>> {
+        let mut result = HashMap::new();
+        for service in device.services().await? {
+            for characteristic in service.characteristics().await? {
+                result.insert(characteristic.uuid().await?, characteristic);
+            }
+        }
+        Ok(result)
+    }
+
+    async fn read_optional(
+        characteristics: &HashMap<Uuid, Characteristic>,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(characteristic) = characteristics.get(&uuid(id)) else {
+            return Ok(None);
+        };
+        Ok(Some(characteristic.read().await.with_context(|| {
+            format!("reading Hue characteristic {id}")
+        })?))
+    }
+
+    async fn write(
+        characteristics: &HashMap<Uuid, Characteristic>,
+        id: &str,
+        payload: &[u8],
+    ) -> Result<()> {
+        let characteristic = characteristics
+            .get(&uuid(id))
+            .ok_or_else(|| anyhow::anyhow!("Hue bulb is missing characteristic {id}"))?;
+        characteristic
+            .write_ext(
+                payload,
+                &CharacteristicWriteRequest {
+                    op_type: WriteOp::Request,
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("writing Hue characteristic {id}"))
+    }
+
+    fn validate_light_characteristic_ids(characteristic_ids: &HashSet<Uuid>) -> Result<()> {
+        if !characteristic_ids.contains(&uuid(protocol::POWER_UUID)) {
+            anyhow::bail!(
+                "Paired Hue device is not a controllable bulb (missing light power control)"
+            );
+        }
+        Ok(())
+    }
+
+    async fn inspect_paired_device(device: &Device) -> Result<HueBleDevice> {
+        Self::connect(device).await?;
+        let characteristics = Self::characteristics(device).await?;
+        Self::validate_light_characteristic_ids(&characteristics.keys().copied().collect())?;
+        let eui64_raw = Self::read_optional(&characteristics, protocol::EUI64_UUID)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Paired device does not expose a Hue EUI-64"))?;
+        let eui64 = protocol::decode_eui64(&eui64_raw)?;
+
+        let read_text = |id: &'static str| {
+            let characteristics = characteristics.clone();
+            async move {
+                Self::read_optional(&characteristics, id)
+                    .await?
+                    .map(|bytes| protocol::decode_utf8(&bytes))
+                    .transpose()
+            }
+        };
+        let manufacturer = read_text(protocol::MANUFACTURER_NAME_UUID)
+            .await?
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Signify Netherlands B.V.".to_string());
+        let model = read_text(protocol::MODEL_NUMBER_UUID)
+            .await?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Hue bulb did not report a model number"))?;
+        let firmware = read_text(protocol::FIRMWARE_REVISION_UUID)
+            .await?
+            .unwrap_or_default();
+        let name = read_text(protocol::DEVICE_NAME_UUID)
+            .await?
+            .filter(|value| !value.is_empty())
+            .or(device.name().await?)
+            .unwrap_or_else(|| "Hue lamp".to_string());
+
+        let color_temperature =
+            characteristics.contains_key(&uuid(protocol::COLOR_TEMPERATURE_UUID));
+        let xy_color = characteristics.contains_key(&uuid(protocol::XY_COLOR_UUID));
+        let combined_control = characteristics.contains_key(&uuid(protocol::COMBINED_CONTROL_UUID));
+        let mut capabilities = HueBleCapabilities::from_gatt(
+            &manufacturer,
+            &model,
+            characteristics.contains_key(&uuid(protocol::BRIGHTNESS_UUID)),
+            color_temperature,
+            xy_color,
+            combined_control,
+        );
+        if color_temperature {
+            match Self::read_optional(&characteristics, protocol::LIGHT_CAPABILITIES_UUID).await {
+                Ok(Some(raw)) => match protocol::decode_color_temperature_range(&raw) {
+                    Ok(Some((minimum, maximum))) => {
+                        capabilities.min_mired = Some(minimum);
+                        capabilities.max_mired = Some(maximum);
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::debug!(
+                        target: "pair",
+                        "Ignoring malformed Hue CT capability range for {model}: {error:#}"
+                    ),
+                },
+                Ok(None) => {}
+                Err(error) => tracing::debug!(
+                    target: "pair",
+                    "Could not read Hue CT capability range for {model}; using model fallback: {error:#}"
+                ),
+            }
+        }
+        let state = Self::read_state_from_characteristics(&characteristics)
+            .await
+            .ok();
+
+        Ok(HueBleDevice {
+            id: HueBleDevice::stable_id(&eui64),
+            address: device.address().to_string(),
+            address_type: device.address_type().await?.to_string(),
+            eui64,
+            name,
+            manufacturer,
+            model,
+            firmware,
+            capabilities,
+            paired_at_epoch_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_state: state,
+        })
+    }
+
+    fn pairing_agent(selected: HashSet<Address>) -> Agent {
+        let selected = Arc::new(selected);
+        let confirmation_addresses = selected.clone();
+        let authorization_addresses = selected.clone();
+        let service_addresses = selected;
+        Agent {
+            request_confirmation: Some(Box::new(move |request| {
+                let confirmation_addresses = confirmation_addresses.clone();
+                Box::pin(async move {
+                    if confirmation_addresses.contains(&request.device) {
+                        Ok(())
+                    } else {
+                        Err(ReqError::Rejected)
+                    }
+                })
+            })),
+            request_authorization: Some(Box::new(move |request| {
+                let authorization_addresses = authorization_addresses.clone();
+                Box::pin(async move {
+                    if authorization_addresses.contains(&request.device) {
+                        Ok(())
+                    } else {
+                        Err(ReqError::Rejected)
+                    }
+                })
+            })),
+            authorize_service: Some(Box::new(move |request| {
+                let service_addresses = service_addresses.clone();
+                Box::pin(async move {
+                    if service_addresses.contains(&request.device) {
+                        Ok(())
+                    } else {
+                        Err(ReqError::Rejected)
+                    }
+                })
+            })),
+            ..Default::default()
+        }
+    }
+
+    async fn read_state_from_characteristics(
+        characteristics: &HashMap<Uuid, Characteristic>,
+    ) -> Result<HueBleState> {
+        let power = Self::read_optional(characteristics, protocol::POWER_UUID).await?;
+        let brightness = Self::read_optional(characteristics, protocol::BRIGHTNESS_UUID).await?;
+        let color_temperature =
+            Self::read_optional(characteristics, protocol::COLOR_TEMPERATURE_UUID).await?;
+        let xy = Self::read_optional(characteristics, protocol::XY_COLOR_UUID).await?;
+        protocol::state_from_values(
+            power.as_deref(),
+            brightness.as_deref(),
+            color_temperature.as_deref(),
+            xy.as_deref(),
+        )
+    }
+
+    async fn apply_to_characteristics(
+        characteristics: &HashMap<Uuid, Characteristic>,
+        command: &HueBleCommand,
+    ) -> Result<()> {
+        if characteristics.contains_key(&uuid(protocol::COMBINED_CONTROL_UUID)) {
+            let payload = protocol::encode_combined(command)?;
+            return Self::write(characteristics, protocol::COMBINED_CONTROL_UUID, &payload).await;
+        }
+
+        if command.on == Some(false) {
+            return Self::write(
+                characteristics,
+                protocol::POWER_UUID,
+                &protocol::encode_power(false),
+            )
+            .await;
+        }
+        if let Some(color) = command.color {
+            match color {
+                HueBleColor::ColorTemperature { mired } => {
+                    Self::write(
+                        characteristics,
+                        protocol::COLOR_TEMPERATURE_UUID,
+                        &protocol::encode_color_temperature(mired),
+                    )
+                    .await?;
+                }
+                HueBleColor::Xy { x, y } => {
+                    Self::write(
+                        characteristics,
+                        protocol::XY_COLOR_UUID,
+                        &protocol::encode_xy(x, y),
+                    )
+                    .await?;
+                }
+            }
+        }
+        if let Some(brightness) = command.brightness {
+            Self::write(
+                characteristics,
+                protocol::BRIGHTNESS_UUID,
+                &protocol::encode_brightness(brightness),
+            )
+            .await?;
+        }
+        if let Some(on) = command.on {
+            Self::write(
+                characteristics,
+                protocol::POWER_UUID,
+                &protocol::encode_power(on),
+            )
+            .await?;
+        }
+        if command.effect.is_some() || command.effect_speed.is_some() {
+            anyhow::bail!("This Hue bulb does not expose combined effect control");
+        }
+        Ok(())
+    }
+
+    fn ensure_handoff_is_fresh(handoff_valid_until: Option<Instant>) -> Result<()> {
+        if handoff_valid_until.is_some_and(|deadline| Instant::now() >= deadline) {
+            anyhow::bail!(
+                "Hue Bluetooth replacement-pairing window expired before the local key deletion boundary; the bond was retained so removal can be retried safely"
+            );
+        }
+        Ok(())
+    }
+
+    async fn remove_exact_local_bond(
+        adapter: &Adapter,
+        address: Address,
+        handoff_valid_until: Option<Instant>,
+    ) -> Result<()> {
+        if !adapter.device_addresses().await?.contains(&address) {
+            return Ok(());
+        }
+        let device = adapter
+            .device(address)
+            .with_context(|| format!("opening Hue bulb {address} before local bond removal"))?;
+        if device.is_connected().await.unwrap_or(false) {
+            let _ = device.disconnect().await;
+        }
+        // Adapter/session lookup and disconnect can consume the rest of Hue's
+        // short handoff window. Re-check at the last non-destructive line.
+        Self::ensure_handoff_is_fresh(handoff_valid_until)?;
+        match adapter.remove_device(address).await {
+            Ok(()) => {}
+            Err(error) if matches!(error.kind, ErrorKind::NotFound | ErrorKind::DoesNotExist) => {
+                // Verify below: this is harmless only when the exact local
+                // object and key are actually gone.
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("removing Hue bulb {address} bond from BlueZ"));
+            }
+        }
+        let deadline = tokio::time::Instant::now() + BOND_REMOVAL_TIMEOUT;
+        loop {
+            let address_present = adapter
+                .device_addresses()
+                .await
+                .with_context(|| format!("verifying Hue bulb {address} removal from BlueZ"))?
+                .contains(&address);
+            let paired =
+                if address_present {
+                    let device = adapter.device(address).with_context(|| {
+                        format!("opening Hue bulb {address} after local removal")
+                    })?;
+                    Some(device.is_paired().await.with_context(|| {
+                        format!("checking Hue bulb {address} bond after removal")
+                    })?)
+                } else {
+                    None
+                };
+            if local_bond_removal_complete(paired) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "BlueZ still reports Hue bulb {address} as paired after local removal"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn existing_device(adapter: &Adapter, record: &HueBleDevice) -> Result<Device> {
+        let address: Address = record
+            .address
+            .parse()
+            .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
+        adapter
+            .device(address)
+            .with_context(|| format!("opening bonded Hue BLE device {address}"))
+    }
+}
+
+impl HueBleTransport for BluezHueBleTransport {
+    fn is_available(&self) -> Result<bool> {
+        self.block_on(async {
+            let (_session, adapter) = Self::session_adapter().await?;
+            Ok(adapter.is_powered().await?)
+        })
+    }
+
+    fn quiesce(&self) -> Result<()> {
+        self.quiescing.store(true, Ordering::SeqCst);
+        let _runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE runtime lock poisoned during shutdown"))?;
+        Ok(())
+    }
+
+    fn pair_lights(
+        &self,
+        request: &HueBlePairingRequest,
+        record_bond_intent: &(dyn Fn(&str) -> Result<()> + Send + Sync),
+    ) -> Result<HueBlePairingOutcome> {
+        Self::ensure_persistent_bond_storage()?;
+        let request = request.clone();
+        self.block_on(async move {
+            let (session, adapter) = Self::session_adapter().await?;
+            for stale_address in &request.replace_stale_bond_addresses {
+                if !Self::stale_bond_replacement_is_allowed(&request, stale_address) {
+                    anyhow::bail!(
+                        "Refusing to replace non-quarantined Hue Bluetooth bond {stale_address}"
+                    );
+                }
+                // Persist the exact address before crossing the deletion
+                // boundary. A crash now leaves an explicit retry target, not
+                // an adoptable unknown orphan.
+                record_bond_intent(stale_address).with_context(|| {
+                    format!("journaling stale Hue bond {stale_address} before replacement")
+                })?;
+                let address: Address = stale_address.parse().with_context(|| {
+                    format!("invalid quarantined Hue BLE address {stale_address}")
+                })?;
+                Self::remove_exact_local_bond(&adapter, address, None)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "removing stale BlueZ bond for physically reset Hue bulb {stale_address}"
+                        )
+                    })?;
+            }
+            let candidates = Self::discover_candidates(&adapter, &request).await?;
+            let _agent = session
+                .register_agent(Self::pairing_agent(
+                    candidates
+                        .iter()
+                        .map(|candidate| candidate.address)
+                        .collect(),
+                ))
+                .await
+                .context("registering Hue pairing agent")?;
+
+            let mut paired = Vec::new();
+            let mut failures = Vec::new();
+            let mut retained_bond_addresses = Vec::new();
+            for candidate in candidates {
+                let address = candidate.address;
+                let device = match adapter.device(address) {
+                    Ok(device) => device,
+                    Err(error) => {
+                        failures.push(format!("{address}: opening device failed: {error}"));
+                        continue;
+                    }
+                };
+                let already_paired = if candidate.paired {
+                    true
+                } else {
+                    match device.is_paired().await {
+                        Ok(paired) => paired,
+                        Err(error) => {
+                            failures.push(format!(
+                                "{address}: could not verify BlueZ pairing state: {error}"
+                            ));
+                            continue;
+                        }
+                    }
+                };
+                if !already_paired {
+                    if let Err(error) = record_bond_intent(&address.to_string()) {
+                        failures.push(format!(
+                            "{address}: could not journal Hue bond intent before pairing: {error:#}"
+                        ));
+                        continue;
+                    }
+                    let pairing = match tokio::time::timeout(PAIR_TIMEOUT, device.pair()).await {
+                        Ok(pairing) => pairing,
+                        Err(error) => {
+                            // Pair may have completed just before the timeout.
+                            // Never one-sidedly delete a possible Hue bond;
+                            // persist this exact address for an explicit retry.
+                            retained_bond_addresses.push(address.to_string());
+                            failures.push(format!(
+                                "{address}: timed out bonding with Hue bulb: {error}"
+                            ));
+                            continue;
+                        }
+                    };
+                    match pairing {
+                        Ok(()) => {}
+                        Err(error) => {
+                            match device.is_paired().await {
+                                Ok(true) => {
+                                    // Recover a bond that completed while
+                                    // BlueZ reported the final Pair error.
+                                    tracing::debug!(
+                                        target: "pair",
+                                        "Hue bulb became paired despite Pair error: {error}"
+                                    );
+                                }
+                                Ok(false) => {
+                                    retained_bond_addresses.push(address.to_string());
+                                    failures
+                                        .push(format!("{address}: bonding failed: {error}"));
+                                    continue;
+                                }
+                                Err(state_error) => {
+                                    retained_bond_addresses.push(address.to_string());
+                                    failures.push(format!(
+                                        "{address}: bonding failed ({error}) and BlueZ pairing state could not be verified: {state_error}"
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                let record = match Self::inspect_paired_device(&device).await {
+                    Ok(record) => record,
+                    Err(error) => {
+                        let _ = device.disconnect().await;
+                        retained_bond_addresses.push(address.to_string());
+                        failures.push(format!(
+                            "{address}: validating paired Hue bulb failed: {error:#}"
+                        ));
+                        continue;
+                    }
+                };
+                if let Err(error) = device.set_trusted(true).await {
+                    let _ = device.disconnect().await;
+                    retained_bond_addresses.push(address.to_string());
+                    failures.push(format!(
+                        "{address}: trusting validated Hue bulb failed: {error}"
+                    ));
+                    continue;
+                }
+                // Free the controller connection slot before interviewing the
+                // next bulb in the batch. Normal control reconnects on demand.
+                let _ = device.disconnect().await;
+                paired.push(record);
+            }
+
+            for failure in &failures {
+                tracing::warn!(target: "pair", "Hue BLE batch pairing partial failure: {failure}");
+            }
+            retained_bond_addresses.sort();
+            retained_bond_addresses.dedup();
+            Ok(HueBlePairingOutcome {
+                devices: paired,
+                warnings: failures,
+                retained_bond_addresses,
+            })
+        })
+    }
+
+    fn apply_command(&self, record: &HueBleDevice, command: &HueBleCommand) -> Result<()> {
+        let record = record.clone();
+        let command = *command;
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let device = Self::existing_device(&adapter, &record).await?;
+            Self::connect(&device).await?;
+            let characteristics = Self::characteristics(&device).await?;
+            Self::apply_to_characteristics(&characteristics, &command).await
+        })
+    }
+
+    fn read_state(&self, record: &HueBleDevice) -> Result<HueBleState> {
+        let record = record.clone();
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let device = Self::existing_device(&adapter, &record).await?;
+            Self::connect(&device).await?;
+            let characteristics = Self::characteristics(&device).await?;
+            Self::read_state_from_characteristics(&characteristics).await
+        })
+    }
+
+    fn read_state_passive(&self, record: &HueBleDevice) -> Result<Option<HueBleState>> {
+        let record = record.clone();
+        Ok(self
+            .try_block_on(async move {
+                let (_session, adapter) = Self::session_adapter().await?;
+                let device = Self::existing_device(&adapter, &record).await?;
+                if !device.is_connected().await.unwrap_or(false) {
+                    return Ok(None);
+                }
+                let state = tokio::time::timeout(PASSIVE_READ_TIMEOUT, async {
+                    let characteristics = Self::characteristics(&device).await?;
+                    Self::read_state_from_characteristics(&characteristics).await
+                })
+                .await
+                .context("passive Hue state read timed out")??;
+                Ok(Some(state))
+            })?
+            .flatten())
+    }
+
+    fn has_local_bond(&self, record: &HueBleDevice) -> Result<bool> {
+        Self::ensure_persistent_bond_storage()?;
+        let record = record.clone();
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let address: Address = record
+                .address
+                .parse()
+                .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
+            if !adapter.device_addresses().await?.contains(&address) {
+                return Ok(false);
+            }
+            let device = adapter
+                .device(address)
+                .context("opening stored Hue bulb to inspect its bond")?;
+            device
+                .is_paired()
+                .await
+                .context("checking the stored Hue bulb bond")
+        })
+    }
+
+    fn local_hue_bond_addresses(&self) -> Result<Vec<String>> {
+        Self::ensure_persistent_bond_storage()?;
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let hue_service = uuid(protocol::HUE_DISCOVERY_SERVICE_UUID);
+            let mut bonded = Vec::new();
+            for address in adapter
+                .device_addresses()
+                .await
+                .context("listing BlueZ devices before Hue bond cleanup")?
+            {
+                let device = adapter
+                    .device(address)
+                    .with_context(|| format!("opening BlueZ device {address}"))?;
+                if !device
+                    .is_paired()
+                    .await
+                    .with_context(|| format!("checking whether {address} is paired"))?
+                {
+                    continue;
+                }
+                let services = device
+                    .uuids()
+                    .await
+                    .with_context(|| format!("reading cached services for {address}"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "paired BlueZ device {address} has no cached service UUIDs, so Rhythm cannot safely rule out an untracked Hue Bluetooth bond"
+                        )
+                    })?;
+                if services.contains(&hue_service) {
+                    bonded.push(address.to_string());
+                }
+            }
+            bonded.sort();
+            Ok(bonded)
+        })
+    }
+
+    fn inspect_local_bond(&self, address: &str) -> Result<HueBleDevice> {
+        Self::ensure_persistent_bond_storage()?;
+        let address: Address = address
+            .parse()
+            .with_context(|| format!("invalid bonded Hue BLE address {address}"))?;
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            if !adapter.device_addresses().await?.contains(&address) {
+                anyhow::bail!("BlueZ no longer has bonded device {address}");
+            }
+            let device = adapter
+                .device(address)
+                .with_context(|| format!("opening bonded Hue BLE device {address}"))?;
+            if !device
+                .is_paired()
+                .await
+                .with_context(|| format!("checking whether {address} is paired"))?
+            {
+                anyhow::bail!("BlueZ device {address} is no longer paired");
+            }
+            Self::inspect_paired_device(&device)
+                .await
+                .with_context(|| format!("reconstructing metadata for bonded Hue bulb {address}"))
+        })
+    }
+
+    fn validate_pairing_handoff(&self, record: &HueBleDevice) -> Result<()> {
+        Self::ensure_persistent_bond_storage()?;
+        let record = record.clone();
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let address: Address = record
+                .address
+                .parse()
+                .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
+            if !adapter.device_addresses().await?.contains(&address) {
+                anyhow::bail!("The Hue bulb's local BlueZ bond is already absent");
+            }
+            let device = adapter
+                .device(address)
+                .context("opening bonded Hue bulb for pairing-handoff validation")?;
+            if !device
+                .is_paired()
+                .await
+                .context("checking the Hue bulb bond before pairing-handoff validation")?
+            {
+                anyhow::bail!("The Hue bulb is no longer bonded to this Rhythm Box");
+            }
+            Self::connect(&device)
+                .await
+                .context("connecting to Hue bulb to validate pairing handoff")?;
+            let validation_result: Result<()> = async {
+                let characteristics = Self::characteristics(&device)
+                    .await
+                    .context("resolving Hue bulb pairing-handoff characteristic")?;
+                let characteristic = characteristics
+                    .get(&uuid(protocol::PAIRING_HANDOFF_UUID))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Hue bulb does not expose its pairing-handoff characteristic"
+                        )
+                    })?;
+                let flags = characteristic
+                    .flags()
+                    .await
+                    .context("reading Hue bulb pairing-handoff permissions")?;
+                if !flags.write && !flags.write_without_response {
+                    anyhow::bail!("Hue bulb pairing-handoff characteristic is not writable");
+                }
+                Ok(())
+            }
+            .await;
+            let disconnect_result: Result<()> = async {
+                if device
+                    .is_connected()
+                    .await
+                    .context("checking Hue bulb connection after handoff validation")?
+                {
+                    device
+                        .disconnect()
+                        .await
+                        .context("disconnecting Hue bulb after handoff validation")?;
+                }
+                Ok(())
+            }
+            .await;
+            validation_result?;
+            disconnect_result
+        })
+    }
+
+    fn prepare_pairing_handoff(&self, record: &HueBleDevice) -> Result<std::time::Instant> {
+        Self::ensure_persistent_bond_storage()?;
+        let record = record.clone();
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let address: Address = record
+                .address
+                .parse()
+                .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
+            if !adapter.device_addresses().await?.contains(&address) {
+                anyhow::bail!("The Hue bulb's local BlueZ bond is already absent");
+            }
+            let device = adapter
+                .device(address)
+                .context("opening bonded Hue bulb for pairing handoff")?;
+            if !device
+                .is_paired()
+                .await
+                .context("checking the Hue bulb bond before pairing handoff")?
+            {
+                anyhow::bail!("The Hue bulb is no longer bonded to this Rhythm Box");
+            }
+            Self::connect(&device)
+                .await
+                .context("connecting to Hue bulb before releasing its bond")?;
+            let handoff_result: Result<std::time::Instant> = async {
+                let characteristics = Self::characteristics(&device)
+                    .await
+                    .context("resolving Hue bulb pairing-handoff characteristic")?;
+                Self::write(&characteristics, protocol::PAIRING_HANDOFF_UUID, &[0x01])
+                    .await
+                    .context(
+                        "opening the Hue bulb pairing window before removing its BlueZ bond",
+                    )?;
+                Ok(std::time::Instant::now())
+            }
+            .await;
+            // Factory reset refreshes every bulb before deleting any keys.
+            // Release each ACL slot after the authenticated write so a large
+            // installation cannot exhaust the controller before later bulbs.
+            let disconnect_result: Result<()> = async {
+                if device
+                    .is_connected()
+                    .await
+                    .context("checking the Hue bulb connection after pairing handoff")?
+                {
+                    device
+                        .disconnect()
+                        .await
+                        .context("disconnecting the Hue bulb after pairing handoff")?;
+                }
+                Ok(())
+            }
+            .await;
+            let handoff_at = handoff_result?;
+            disconnect_result?;
+            Ok(handoff_at)
+        })
+    }
+
+    fn remove_local_bond(
+        &self,
+        record: &HueBleDevice,
+        handoff_valid_until: Option<Instant>,
+    ) -> Result<()> {
+        Self::ensure_persistent_bond_storage()?;
+        let record = record.clone();
+        self.block_on(async move {
+            let (_session, adapter) = Self::session_adapter().await?;
+            let address: Address = record
+                .address
+                .parse()
+                .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
+            Self::remove_exact_local_bond(&adapter, address, handoff_valid_until).await
+        })
+    }
+}
+
+fn uuid(value: &str) -> Uuid {
+    value.parse().expect("Hue BLE UUID constants are valid")
+}
+
+/// `None` means the BlueZ device object is absent. Property-read failures are
+/// intentionally propagated before reaching this helper.
+fn local_bond_removal_complete(paired: Option<bool>) -> bool {
+    matches!(paired, None | Some(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_validation_rejects_hue_accessories_without_light_power_control() {
+        let accessory_characteristics =
+            HashSet::from([uuid(protocol::EUI64_UUID), uuid(protocol::DEVICE_NAME_UUID)]);
+        assert!(BluezHueBleTransport::validate_light_characteristic_ids(
+            &accessory_characteristics
+        )
+        .is_err());
+
+        let bulb_characteristics = HashSet::from([
+            uuid(protocol::EUI64_UUID),
+            uuid(protocol::POWER_UUID),
+            uuid(protocol::BRIGHTNESS_UUID),
+        ]);
+        BluezHueBleTransport::validate_light_characteristic_ids(&bulb_characteristics).unwrap();
+    }
+
+    #[test]
+    fn exact_explicit_reassociation_can_adopt_a_paired_tombstone() {
+        let mut request = HueBlePairingRequest::from_value(&serde_json::json!({})).unwrap();
+        request.allow_paired_orphan_adoption = false;
+        request.blocked_paired_addresses = vec!["AA:BB:CC:DD:EE:FF".to_string()];
+        request.explicit_reassociation_addresses = vec!["aa:bb:cc:dd:ee:ff".to_string()];
+
+        assert!(BluezHueBleTransport::pair_candidate_is_eligible(
+            &request,
+            "AA:BB:CC:DD:EE:FF",
+            true,
+        ));
+    }
+
+    #[test]
+    fn unknown_paired_candidate_stays_blocked_when_orphan_adoption_is_disabled() {
+        let mut request = HueBlePairingRequest::from_value(&serde_json::json!({})).unwrap();
+        request.allow_paired_orphan_adoption = false;
+        request.explicit_reassociation_addresses = vec!["AA:BB:CC:DD:EE:FF".to_string()];
+
+        assert!(!BluezHueBleTransport::pair_candidate_is_eligible(
+            &request,
+            "11:22:33:44:55:66",
+            true,
+        ));
+    }
+
+    #[test]
+    fn active_known_address_is_never_reassociated() {
+        let mut request = HueBlePairingRequest::from_value(&serde_json::json!({})).unwrap();
+        request.known_addresses = vec!["AA:BB:CC:DD:EE:FF".to_string()];
+        request.explicit_reassociation_addresses = vec!["aa:bb:cc:dd:ee:ff".to_string()];
+
+        assert!(!BluezHueBleTransport::pair_candidate_is_eligible(
+            &request,
+            "AA:BB:CC:DD:EE:FF",
+            true,
+        ));
+        assert!(!BluezHueBleTransport::pair_candidate_is_eligible(
+            &request,
+            "AA:BB:CC:DD:EE:FF",
+            false,
+        ));
+    }
+
+    #[test]
+    fn stale_bond_replacement_targets_must_also_be_exact_reassociations() {
+        let mut request = HueBlePairingRequest::from_value(&serde_json::json!({
+            "replace_stale_bonds": true
+        }))
+        .unwrap();
+        request.explicit_reassociation_addresses = vec!["AA:BB:CC:DD:EE:FF".to_string()];
+        request.replace_stale_bond_addresses = request.explicit_reassociation_addresses.clone();
+
+        assert!(BluezHueBleTransport::stale_bond_replacement_is_allowed(
+            &request,
+            "aa:bb:cc:dd:ee:ff"
+        ));
+        assert!(!BluezHueBleTransport::stale_bond_replacement_is_allowed(
+            &request,
+            "11:22:33:44:55:66"
+        ));
+        request.known_addresses = vec!["aa:bb:cc:dd:ee:ff".to_string()];
+        assert!(!BluezHueBleTransport::stale_bond_replacement_is_allowed(
+            &request,
+            "AA:BB:CC:DD:EE:FF"
+        ));
+    }
+
+    #[test]
+    fn local_bond_removal_accepts_absent_or_unpaired_but_not_paired() {
+        assert!(local_bond_removal_complete(None));
+        assert!(local_bond_removal_complete(Some(false)));
+        assert!(!local_bond_removal_complete(Some(true)));
+    }
+
+    #[test]
+    fn exact_bond_removal_deadline_is_optional_but_fails_closed_when_expired() {
+        BluezHueBleTransport::ensure_handoff_is_fresh(None).unwrap();
+        BluezHueBleTransport::ensure_handoff_is_fresh(Some(
+            Instant::now() + Duration::from_secs(1),
+        ))
+        .unwrap();
+
+        let error = BluezHueBleTransport::ensure_handoff_is_fresh(Some(Instant::now()))
+            .expect_err("an expired Hue handoff must retain the exact BlueZ bond");
+        assert!(format!("{error:#}").contains("window expired"));
+    }
+
+    #[test]
+    fn quiesce_permanently_rejects_future_bluez_runtime_work() {
+        let transport = BluezHueBleTransport::new().unwrap();
+
+        transport.quiesce().unwrap();
+
+        let error = transport
+            .block_on(async { Ok(()) })
+            .expect_err("a quiesced live transport must never reopen BlueZ");
+        assert!(format!("{error:#}").contains("quiesced"));
+    }
+}

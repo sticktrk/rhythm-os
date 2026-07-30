@@ -448,7 +448,14 @@ pub struct FileStorage {
     write_lock: std::sync::Mutex<()>,
 }
 
-const INTEGRATION_SUBDIRS: &[&str] = &["matter"];
+/// Integration state that is portable only together with its secret runtime
+/// credentials and can therefore participate in full-secret backups.
+const BACKUP_INTEGRATION_SUBDIRS: &[&str] = &["matter"];
+/// Local integration state that must be removed by a full factory reset.
+///
+/// Hue BLE metadata is deliberately not portable: BlueZ link keys are bound
+/// to the appliance adapter and live outside the Rhythm backup payload.
+const FACTORY_RESET_INTEGRATION_SUBDIRS: &[&str] = &["matter", "hue_ble"];
 
 impl FileStorage {
     /// Create a new `FileStorage` rooted at `dir`.
@@ -583,8 +590,8 @@ impl FileStorage {
         Ok(())
     }
 
-    fn clear_integration_state_dirs(&self) -> Result<()> {
-        for dir in INTEGRATION_SUBDIRS {
+    fn clear_integration_state_dirs(&self, directories: &[&str]) -> Result<()> {
+        for dir in directories {
             let path = self.dir.join(dir);
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
@@ -723,7 +730,10 @@ fn validate_integration_backup_path(path: &str) -> Result<std::path::PathBuf> {
     let normalized = normalized_relative_path(relative)?;
     let mut components = std::path::Path::new(&normalized).components();
     match components.next() {
-        Some(std::path::Component::Normal(first)) if first == "matter" => {}
+        Some(std::path::Component::Normal(first))
+            if BACKUP_INTEGRATION_SUBDIRS
+                .iter()
+                .any(|supported| first == std::ffi::OsStr::new(supported)) => {}
         _ => anyhow::bail!("unsupported integration backup path: {}", path),
     }
     Ok(std::path::PathBuf::from(normalized))
@@ -1024,7 +1034,7 @@ impl Storage for FileStorage {
         }
 
         let mut files = Vec::new();
-        for dir in INTEGRATION_SUBDIRS {
+        for dir in BACKUP_INTEGRATION_SUBDIRS {
             self.collect_integration_backup_files(std::path::Path::new(dir), &mut files)?;
         }
         files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -1040,7 +1050,7 @@ impl Storage for FileStorage {
             .map(|file| validate_integration_backup_path(&file.path).map(|path| (path, file)))
             .collect::<Result<Vec<_>>>()?;
 
-        self.clear_integration_state_dirs()?;
+        self.clear_integration_state_dirs(BACKUP_INTEGRATION_SUBDIRS)?;
 
         for (relative_path, file) in files {
             let absolute_path = self.dir.join(relative_path);
@@ -1274,7 +1284,7 @@ impl Storage for FileStorage {
         self.clear_remote_access_config()?;
         self.clear_hub_registry_files()?;
 
-        self.clear_integration_state_dirs()?;
+        self.clear_integration_state_dirs(FACTORY_RESET_INTEGRATION_SUBDIRS)?;
 
         Ok(())
     }
@@ -3280,6 +3290,7 @@ mod tests {
             std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
             std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
+            std::fs::create_dir_all(path.join("hue_ble")).unwrap();
             std::fs::write(
                 path.join("matter").join("captures").join("device-1.json"),
                 "{}",
@@ -3292,6 +3303,7 @@ mod tests {
                 "{}",
             )
             .unwrap();
+            std::fs::write(path.join("hue_ble").join("devices.json"), "{}").unwrap();
 
             storage.clear_factory_reset_state().unwrap();
 
@@ -3320,6 +3332,10 @@ mod tests {
             assert!(
                 !path.join("matter").exists(),
                 "integration runtime state should be removed"
+            );
+            assert!(
+                !path.join("hue_ble").exists(),
+                "adapter-bound Hue BLE metadata should be removed"
             );
 
             cleanup(&path);
@@ -3350,6 +3366,8 @@ mod tests {
                 "capture",
             )
             .unwrap();
+            std::fs::create_dir_all(path.join("hue_ble")).unwrap();
+            std::fs::write(path.join("hue_ble").join("devices.json"), "local-only").unwrap();
 
             assert!(storage
                 .load_integration_backup_files(false)
@@ -3367,6 +3385,10 @@ mod tests {
                     ("matter/chip/devices.json", "devices", true),
                     ("matter/fabric-identity.json", "fabric", true),
                 ]
+            );
+            assert!(
+                files.iter().all(|file| !file.path.starts_with("hue_ble/")),
+                "Hue BLE metadata cannot be restored without adapter-bound BlueZ link keys"
             );
 
             cleanup(&path);

@@ -5,18 +5,24 @@ void main() {
   group('runMatterRemovalFlow', () {
     test('attempts a graceful unpair first and stops on success', () async {
       final forcedAttempts = <bool>[];
+      Map<String, dynamic>? completedResult;
 
       final outcome = await runMatterRemovalFlow(
         unpair: ({required bool force}) async {
           forcedAttempts.add(force);
-          return {'status': 'complete'};
+          return {
+            'status': 'complete',
+            'completion_scope': 'device_released',
+          };
         },
         confirmForceRemove: (_) async =>
             fail('graceful success must not prompt for force removal'),
+        onComplete: (result) => completedResult = result,
       );
 
       expect(outcome, MatterRemovalOutcome.removed);
       expect(forcedAttempts, [false]);
+      expect(completedResult?['completion_scope'], 'device_released');
     });
 
     test('never forces without user confirmation', () async {

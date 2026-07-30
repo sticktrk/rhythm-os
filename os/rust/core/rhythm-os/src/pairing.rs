@@ -1,8 +1,8 @@
 //! Device pairing types for direct-connection protocols.
 //!
-//! Hub-based integrations (Hue bridge, Home Assistant) discover pre-paired
-//! devices. Direct protocols (Matter, Zigbee) need an explicit pairing flow:
-//! commissioning for Matter, permit-join for Zigbee.
+//! Direct protocols use this for commissioning, while hub integrations may
+//! use it to initiate an upstream device search (for example Hue Bridge
+//! serial search).
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,8 @@ pub struct PairingRequest {
     /// Protocol-specific pairing parameters.
     ///
     /// Matter: `{ "setup_payload": "3497-011-2332", "network": "wifi", "rendezvous": "on_network" }`
-    /// Zigbee: `{ "duration_secs": 60 }`
+    /// Hue BLE: `{}` (nearby scan)
+    /// Hue Bridge: `{ "serial": "E277DA", "hub_address": "192.0.2.10" }`
     #[serde(default)]
     pub params: serde_json::Value,
 }
@@ -66,7 +67,7 @@ pub enum PairingStage {
 }
 
 /// Information about a successfully paired device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairedDeviceInfo {
     /// Hub-native device identifier.
     pub device_id: String,
@@ -92,9 +93,22 @@ pub struct PairingSession {
     /// Device info (populated on completion).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<PairedDeviceInfo>,
+    /// Every device completed by a batch pairing request.
+    ///
+    /// `device` remains the first entry for compatibility with clients that
+    /// predate batch discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<PairedDeviceInfo>,
     /// Error message (populated on failure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Non-fatal candidate failures from a partially successful batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Integration-specific structured result details used by auxiliary
+    /// pairing UI steps such as safe recovery-target selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 /// Emit a pairing progress event to SSE clients.
@@ -109,6 +123,36 @@ pub fn emit_pairing_progress(
     device: Option<PairedDeviceInfo>,
     error: Option<String>,
 ) {
+    emit_pairing_progress_with_devices(
+        state,
+        hub_type,
+        session_id,
+        status,
+        stage,
+        message,
+        device,
+        Vec::new(),
+        Vec::new(),
+        error,
+    );
+}
+
+/// Emit a pairing progress event whose terminal result contains a complete
+/// batch projection.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_pairing_progress_with_devices(
+    state: &crate::state::SharedState,
+    hub_type: &str,
+    session_id: Option<&str>,
+    status: PairingStatus,
+    stage: PairingStage,
+    message: impl Into<String>,
+    device: Option<PairedDeviceInfo>,
+    devices: Vec<PairedDeviceInfo>,
+    warnings: Vec<String>,
+    error: Option<String>,
+) {
+    let device = device.or_else(|| devices.first().cloned());
     crate::state::emit_server_event(
         state,
         crate::server_event::ServerEvent::PairingProgress {
@@ -118,6 +162,8 @@ pub fn emit_pairing_progress(
             stage,
             message: message.into(),
             device,
+            devices,
+            warnings,
             error,
         },
     );
@@ -135,8 +181,28 @@ pub struct UnpairingRequest {
     /// Protocol-specific parameters.
     ///
     /// Matter: `{ "device_id": "matter-100", "force": false }`
+    /// Hue Bridge: `{ "device_id": "v2-device-id", "hub_address": "192.0.2.10", "force": false }`
+    /// Hue Bluetooth: `{ "device_id": "hue-ble-001788010f76565a", "force": false }`
     #[serde(default)]
     pub params: serde_json::Value,
+}
+
+/// Result of an unpairing operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnpairingCompletionScope {
+    /// Peripheral trust was released before local credentials were removed.
+    DeviceReleased,
+    /// Rhythm removed its local bond only after an authenticated vendor
+    /// handoff. The peripheral's replacement-pairing window may be
+    /// time-limited, so this is intentionally weaker than DeviceReleased.
+    LocalBondRemoved,
+    /// Rhythm forgot the endpoint but intentionally retained its local bond.
+    LocalBondRetained,
+    /// Only Rhythm-side records were removed; peripheral trust is unknown.
+    LocalStateOnly,
+    /// No endpoint or bond metadata remained when removal was requested.
+    AlreadyAbsent,
 }
 
 /// Result of an unpairing operation.
@@ -144,6 +210,9 @@ pub struct UnpairingRequest {
 pub struct UnpairingResult {
     /// Which integration handled this unpairing.
     pub hub_type: String,
+    /// Exact hub instance whose endpoint was removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_address: Option<String>,
     /// Outcome status (Complete or Failed).
     pub status: PairingStatus,
     /// Device ID that was unpaired (populated on completion).
@@ -152,6 +221,12 @@ pub struct UnpairingResult {
     /// Error message (populated on failure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What a successful completion actually accomplished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_scope: Option<UnpairingCompletionScope>,
+    /// Nonfatal follow-up guidance for a partial/local-only completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +264,12 @@ pub struct PairingHistoryEntry {
     /// Paired device summary, e.g. "Leedarson Smart RGBTW Bulb (matter-106)".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// Every device completed by a batch pairing attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<String>,
+    /// Non-fatal candidate failures from a partially successful batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Persisted document shape (`pairing_history.json`), oldest entry first.
@@ -227,6 +308,11 @@ pub fn pairing_history_entry_for_pair(
     params: &serde_json::Value,
     session: &PairingSession,
 ) -> PairingHistoryEntry {
+    let completed_devices = if session.devices.is_empty() {
+        session.device.iter().collect::<Vec<_>>()
+    } else {
+        session.devices.iter().collect::<Vec<_>>()
+    };
     PairingHistoryEntry {
         at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         epoch_ms: crate::state::current_epoch_ms(),
@@ -245,6 +331,11 @@ pub fn pairing_history_entry_for_pair(
             .device
             .as_ref()
             .map(|device| format!("{} ({})", device.name, device.device_id)),
+        devices: completed_devices
+            .into_iter()
+            .map(|device| format!("{} ({})", device.name, device.device_id))
+            .collect(),
+        warnings: session.warnings.clone(),
     }
 }
 
@@ -270,6 +361,8 @@ pub fn pairing_history_entry_for_unpair(
         status: status_label(status),
         error: error.map(str::to_string),
         device: None,
+        devices: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
@@ -319,7 +412,10 @@ mod tests {
             hub_type: "matter".to_string(),
             status: PairingStatus::Failed,
             device: None,
+            devices: Vec::new(),
             error: Some("BLE timeout".to_string()),
+            warnings: Vec::new(),
+            details: None,
         };
         let entry = pairing_history_entry_for_pair("matter", &params, &session);
         assert_eq!(entry.kind, "pair");
@@ -332,6 +428,73 @@ mod tests {
             !json.contains("SECRET"),
             "setup payload must never reach the history: {json}"
         );
+    }
+
+    #[test]
+    fn batch_pairing_serializes_all_devices_and_legacy_first_device() {
+        let first = PairedDeviceInfo {
+            device_id: "hue-ble-1".to_string(),
+            name: "Hue 1".to_string(),
+            device_type: DeviceType::Light,
+            manufacturer: Some("Signify".to_string()),
+            model: Some("LCA013".to_string()),
+        };
+        let second = PairedDeviceInfo {
+            device_id: "hue-ble-2".to_string(),
+            name: "Hue 2".to_string(),
+            device_type: DeviceType::Light,
+            manufacturer: Some("Signify".to_string()),
+            model: Some("LWA003".to_string()),
+        };
+        let session = PairingSession {
+            hub_type: "hue_ble".to_string(),
+            status: PairingStatus::Complete,
+            device: Some(first.clone()),
+            devices: vec![first.clone(), second],
+            error: None,
+            warnings: vec!["One candidate was out of range".to_string()],
+            details: None,
+        };
+
+        let entry = pairing_history_entry_for_pair("hue_ble", &serde_json::json!({}), &session);
+        assert_eq!(entry.device.as_deref(), Some("Hue 1 (hue-ble-1)"));
+        assert_eq!(
+            entry.devices,
+            vec![
+                "Hue 1 (hue-ble-1)".to_string(),
+                "Hue 2 (hue-ble-2)".to_string()
+            ]
+        );
+        assert_eq!(entry.warnings, vec!["One candidate was out of range"]);
+
+        let json = serde_json::to_value(session).unwrap();
+        assert_eq!(json["device"]["device_id"], first.device_id);
+        assert_eq!(json["devices"].as_array().unwrap().len(), 2);
+        assert_eq!(json["warnings"][0], "One candidate was out of range");
+    }
+
+    #[test]
+    fn legacy_pairing_session_defaults_batch_devices_and_warnings() {
+        let session: PairingSession = serde_json::from_value(serde_json::json!({
+            "hub_type": "matter",
+            "status": "complete",
+            "device": {
+                "device_id": "matter-100",
+                "name": "Legacy bulb",
+                "device_type": "light"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            session
+                .device
+                .as_ref()
+                .map(|device| device.device_id.as_str()),
+            Some("matter-100")
+        );
+        assert!(session.devices.is_empty());
+        assert!(session.warnings.is_empty());
     }
 
     #[test]
@@ -351,6 +514,44 @@ mod tests {
     }
 
     #[test]
+    fn unpair_result_round_trips_exact_hub_address_and_defaults_legacy_payloads() {
+        let result = UnpairingResult {
+            hub_type: "hue".to_string(),
+            hub_address: Some("192.0.2.10".to_string()),
+            status: PairingStatus::Complete,
+            device_id: Some("hue-device-a".to_string()),
+            error: None,
+            completion_scope: Some(UnpairingCompletionScope::DeviceReleased),
+            warning: None,
+        };
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["hub_address"], "192.0.2.10");
+        assert_eq!(json["completion_scope"], "device_released");
+
+        let hue_ble_result = UnpairingResult {
+            hub_type: "hue_ble".to_string(),
+            hub_address: Some("local".to_string()),
+            status: PairingStatus::Complete,
+            device_id: Some("hue-ble-001788010f76565a".to_string()),
+            error: None,
+            completion_scope: Some(UnpairingCompletionScope::LocalBondRemoved),
+            warning: Some("The bulb's replacement-pairing window may be brief.".to_string()),
+        };
+        let hue_ble_json = serde_json::to_value(hue_ble_result).unwrap();
+        assert_eq!(hue_ble_json["completion_scope"], "local_bond_removed");
+
+        let legacy: UnpairingResult = serde_json::from_value(serde_json::json!({
+            "hub_type": "matter",
+            "status": "complete",
+            "device_id": "matter-100"
+        }))
+        .unwrap();
+        assert_eq!(legacy.hub_address, None);
+        assert_eq!(legacy.completion_scope, None);
+        assert_eq!(legacy.warning, None);
+    }
+
+    #[test]
     fn history_normalization_sorts_by_time_and_caps_length() {
         let entry = |epoch_ms: u64| PairingHistoryEntry {
             at: String::new(),
@@ -364,8 +565,12 @@ mod tests {
             status: "complete".to_string(),
             error: None,
             device: None,
+            devices: Vec::new(),
+            warnings: Vec::new(),
         };
-        let mut entries: Vec<_> = (0..(PAIRING_HISTORY_LIMIT as u64 + 10)).map(entry).collect();
+        let mut entries: Vec<_> = (0..(PAIRING_HISTORY_LIMIT as u64 + 10))
+            .map(entry)
+            .collect();
         entries.reverse();
         let history = PairingHistory {
             schema_version: PAIRING_HISTORY_SCHEMA_VERSION,

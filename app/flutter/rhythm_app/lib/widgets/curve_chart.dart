@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
+import '../utils/app_color_temperature.dart';
+
 /// Interactive chart showing brightness and color temperature curves.
 class CurveChart extends StatefulWidget {
   final CurveData? data;
@@ -619,7 +621,7 @@ class _CurveChartState extends State<CurveChart>
     const numSamples = 8;
     for (int i = 0; i <= numSamples; i++) {
       final idx = (i * (n - 1) / numSamples).round().clamp(0, n - 1);
-      final color = ColorUtils.curveColorForCCT(kelvinValues[idx]);
+      final color = AppColorTemperature.curveColor(kelvinValues[idx]);
       colors.add(color.withValues(alpha: opacity));
       stops.add(i / numSamples);
     }
@@ -658,6 +660,6 @@ class _CurveChartState extends State<CurveChart>
 
   /// Convert color temperature to RGB color using proper algorithm
   Color _cctToColor(int kelvin) {
-    return ColorUtils.curveColorForCCT(kelvin);
+    return AppColorTemperature.curveColor(kelvin);
   }
 }

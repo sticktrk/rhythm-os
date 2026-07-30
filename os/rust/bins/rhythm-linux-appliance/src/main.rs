@@ -7,6 +7,7 @@
 mod ble_provision;
 mod factory_reset;
 mod http_server;
+mod hub;
 mod time_sync;
 mod wifi;
 
@@ -19,7 +20,6 @@ use log::{info, warn};
 use rhythm_os::logging;
 use rhythm_os::state::{AppState, PlatformConfig, SharedState, WorkItem};
 use rhythm_os::storage::FileStorage;
-use rhythm_server::hub;
 
 const VERSION: &str = match option_env!("RHYTHM_BUILD_VERSION") {
     Some(version) => version,
@@ -341,12 +341,91 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
     };
 
     let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let pre_reset_data_dir = data_dir.clone();
+    let pre_reset_firmware_version = firmware_version.clone();
+    let pending_hue_quiescence = Arc::new(Mutex::new(None));
+    let pre_reset_hue_quiescence = pending_hue_quiescence.clone();
+    state.factory_reset_recovery_fn = Some(Arc::new(|| {
+        rhythm_server::self_update::schedule_factory_reset_restart();
+    }));
+    state.before_factory_reset_fn = Some(Arc::new(move |state| {
+        *pre_reset_hue_quiescence
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE factory-reset quiescence lock poisoned"))? = None;
+        let validated = rhythm_hue::ble::lifecycle::prepare_for_factory_reset(state)?;
+        if validated > 0 {
+            info!(
+                target: "sys",
+                "Validated {validated} Hue Bluetooth bulb transfer path(s) before factory reset"
+            );
+        }
+        factory_reset::prepare_appliance_factory_reset_state(
+            &pre_reset_data_dir,
+            &pre_reset_firmware_version,
+        )?;
+        let quiescence = rhythm_hue::ble::lifecycle::capture_factory_reset_quiescence(state)?;
+        *pre_reset_hue_quiescence
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE factory-reset quiescence lock poisoned"))? =
+            quiescence;
+        Ok(())
+    }));
     state.after_factory_reset_fn = Some(Arc::new(move |_| {
-        let data_dir = data_dir.clone();
-        let firmware_version = firmware_version.clone();
+        let quiescence = match pending_hue_quiescence.lock() {
+            Ok(mut pending) => pending.take(),
+            Err(_) => {
+                rhythm_server::self_update::schedule_factory_reset_restart();
+                anyhow::bail!(
+                    "Hue BLE factory-reset quiescence lock poisoned; scheduled a recovery reboot"
+                );
+            }
+        };
+        if let Some(quiescence) = quiescence {
+            if let Err(error) = quiescence.quiesce() {
+                warn!(
+                    target: "sys",
+                    "Live Hue Bluetooth work did not quiesce before final adapter cleanup: {error:#}; scheduling a recovery reboot"
+                );
+                rhythm_server::self_update::schedule_factory_reset_restart();
+                return Err(error).context("quiescing live Hue BLE work for factory reset");
+            }
+        }
+        let handoff = final_hue_handoff_or_schedule_recovery(
+            rhythm_hue::ble::lifecycle::complete_factory_reset_bond_release(&data_dir),
+            rhythm_server::self_update::schedule_factory_reset_restart,
+        )?;
+        if handoff.refreshed > 0 {
+            info!(
+                target: "sys",
+                "Refreshed {} Hue Bluetooth transfer window(s) before final adapter scrub",
+                handoff.refreshed
+            );
+        }
+        // Every unrelated fallible platform write completed in the pre-reset
+        // barrier. From here through key deletion, carry the vendor handoff
+        // deadline and never restart BlueZ after a possibly partial scrub.
+        if let Err(stop_error) =
+            factory_reset::stop_bluetoothd_for_factory_reset(handoff.valid_until)
+        {
+            warn!(
+                target: "sys",
+                "Could not stop bluetoothd inside the fresh Hue handoff window: {stop_error:#}; scheduling a recovery reboot"
+            );
+            rhythm_server::self_update::schedule_factory_reset_restart();
+            return Err(stop_error).context("stopping bluetoothd for factory reset");
+        }
+        if let Err(scrub_error) =
+            factory_reset::commit_hue_ble_factory_reset_state(&data_dir, handoff.valid_until)
+        {
+            warn!(
+                target: "sys",
+                "Final Hue Bluetooth key scrub did not commit cleanly: {scrub_error:#}; leaving the durable plan in place and scheduling a recovery reboot"
+            );
+            rhythm_server::self_update::schedule_factory_reset_restart();
+            return Err(scrub_error).context("committing Hue Bluetooth factory-reset state");
+        }
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
-
             if let Err(error) = wifi::clear_credentials() {
                 warn!(
                     target: "sys",
@@ -354,22 +433,29 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
                     error
                 );
             }
-
-            if let Err(error) =
-                factory_reset::scrub_appliance_factory_reset_state(&data_dir, &firmware_version)
-            {
-                warn!(
-                    target: "sys",
-                    "Failed to scrub appliance OTA/log state during factory reset: {:#}",
-                    error
-                );
-            }
-
             info!(target: "sys", "Rebooting appliance after factory reset...");
             rhythm_server::self_update::schedule_factory_reset_restart();
         });
+        Ok(())
     }));
     Ok(())
+}
+
+fn final_hue_handoff_or_schedule_recovery(
+    result: Result<rhythm_hue::ble::lifecycle::HueBleFactoryResetHandoffBatch>,
+    schedule_recovery: impl FnOnce(),
+) -> Result<rhythm_hue::ble::lifecycle::HueBleFactoryResetHandoffBatch> {
+    match result {
+        Ok(handoff) => Ok(handoff),
+        Err(error) => {
+            warn!(
+                target: "sys",
+                "Final Hue Bluetooth handoff refresh failed after shared reset: {error:#}; retaining every local key and scheduling a recovery reboot"
+            );
+            schedule_recovery();
+            Err(error).context("refreshing final Hue BLE factory-reset handoffs")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -872,8 +958,8 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 mod tests {
     use super::{
         apply_appliance_matter_attestation_defaults, boot_success_health, env_value_is_truthy,
-        extract_serial_suffix, install_factory_reset_hook, periodic_startup_action,
-        run_bootstate_script_action, save_commissioning_wifi_credentials,
+        extract_serial_suffix, final_hue_handoff_or_schedule_recovery, install_factory_reset_hook,
+        periodic_startup_action, run_bootstate_script_action, save_commissioning_wifi_credentials,
         spawn_appliance_background_workers_with, startup_wifi_restore_action, BootSuccessHealth,
         PeriodicStartupAction, StartupWifiRestoreAction,
         RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV,
@@ -888,7 +974,7 @@ mod tests {
     use rhythm_os::storage::{FileStorage, Storage};
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1147,8 +1233,25 @@ mod tests {
 
         install_factory_reset_hook(&state).unwrap();
 
+        assert!(state.lock().unwrap().before_factory_reset_fn.is_some());
         assert!(state.lock().unwrap().after_factory_reset_fn.is_some());
+        assert!(state.lock().unwrap().factory_reset_recovery_fn.is_some());
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn failed_final_hue_handoff_schedules_post_barrier_recovery() {
+        let recovery_scheduled = Arc::new(AtomicBool::new(false));
+        let recovery_scheduled_for_callback = recovery_scheduled.clone();
+
+        let error = final_hue_handoff_or_schedule_recovery(
+            Err(anyhow::anyhow!("injected final handoff failure")),
+            move || recovery_scheduled_for_callback.store(true, Ordering::SeqCst),
+        )
+        .expect_err("a failed final handoff must abort before BlueZ stop");
+
+        assert!(format!("{error:#}").contains("refreshing final Hue BLE"));
+        assert!(recovery_scheduled.load(Ordering::SeqCst));
     }
 
     #[test]
