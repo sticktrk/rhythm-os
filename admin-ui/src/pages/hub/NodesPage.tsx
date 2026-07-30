@@ -53,10 +53,10 @@ import {
   createLightSettingsJourneyId,
   directColorRgb,
   effectiveProfileConfig,
-  hasLightProfileOverrideCapability,
   inferredLocalProfileOverrides,
   isLightAddressableKind,
   isSleepProfile,
+  lightProfileOverrideSupport,
   lightSettingsProfilesFromState,
   profileConfigsEqual,
   profileOverrideMapsEqual,
@@ -66,6 +66,7 @@ import {
   withDirectColor,
   withSelectedProfileOverride,
   type JsonRecord,
+  type LightProfileOverrideSupport,
   type LightSettingsProfile
 } from './nodeLightSettings';
 import '../../styles/pages-phase4.css';
@@ -152,8 +153,8 @@ export default function NodesPage() {
     () => lightSettingsProfilesFromState(stateQuery.data),
     [stateQuery.data]
   );
-  const lightSettingsSupported = useMemo(
-    () => hasLightProfileOverrideCapability(stateQuery.data),
+  const lightSettingsSupport = useMemo(
+    () => lightProfileOverrideSupport(stateQuery.data),
     [stateQuery.data]
   );
   const selected =
@@ -243,7 +244,7 @@ export default function NodesPage() {
               }
               onWrite={nodesQuery.refresh}
               lightSettingsProfiles={lightSettingsProfiles}
-              lightSettingsSupported={lightSettingsSupported}
+              lightSettingsSupport={lightSettingsSupport}
               lightSettingsLoading={stateQuery.loading}
               lightSettingsError={stateQuery.error}
             />
@@ -261,7 +262,7 @@ function NodeDetail({
   parentProfileOverrides,
   onWrite,
   lightSettingsProfiles,
-  lightSettingsSupported,
+  lightSettingsSupport,
   lightSettingsLoading,
   lightSettingsError
 }: {
@@ -269,7 +270,7 @@ function NodeDetail({
   parentProfileOverrides: JsonRecord;
   onWrite: () => Promise<void>;
   lightSettingsProfiles: LightSettingsProfile[];
-  lightSettingsSupported: boolean;
+  lightSettingsSupport: LightProfileOverrideSupport;
   lightSettingsLoading: boolean;
   lightSettingsError: string | null;
 }) {
@@ -349,7 +350,7 @@ function NodeDetail({
           node={node}
           parentProfileOverrides={parentProfileOverrides}
           profiles={lightSettingsProfiles}
-          supported={lightSettingsSupported}
+          support={lightSettingsSupport}
           loading={lightSettingsLoading}
           loadError={lightSettingsError}
           onWrite={onWrite}
@@ -473,7 +474,7 @@ function NodeLightSettingsCard({
   node,
   parentProfileOverrides,
   profiles,
-  supported,
+  support,
   loading,
   loadError,
   onWrite
@@ -481,7 +482,7 @@ function NodeLightSettingsCard({
   node: NodeSummary;
   parentProfileOverrides: JsonRecord;
   profiles: LightSettingsProfile[];
-  supported: boolean;
+  support: LightProfileOverrideSupport;
   loading: boolean;
   loadError: string | null;
   onWrite: () => Promise<void>;
@@ -531,8 +532,11 @@ function NodeLightSettingsCard({
       {loadError ? <ErrorNotice message={loadError} /> : null}
       {loading ? (
         <EmptyState message="Loading profile settings…" />
-      ) : loadError && profiles.length === 0 ? null : !supported ? (
-        <EmptyState message="This appliance does not advertise per-room light settings. Update the appliance before editing." />
+      ) : loadError && profiles.length === 0 ? null : support ===
+        'unsupported' ? (
+        <EmptyState message="This appliance does not support per-room light settings. Update the appliance before editing." />
+      ) : support === 'unguarded' ? (
+        <EmptyState message="This appliance supports per-room light settings, but its current build cannot safely guard admin edits. Install an appliance build with guarded light-setting writes before editing." />
       ) : profiles.length === 0 ? (
         <EmptyState message="The appliance did not report Day or Sleep profiles." />
       ) : (
@@ -790,10 +794,13 @@ function ProfileLightSettingsEditor({
       const latestState = await client.get<JsonRecord>('api/state', {
         requestId
       });
-      if (!hasLightProfileOverrideCapability(latestState)) {
+      const latestSupport = lightProfileOverrideSupport(latestState);
+      if (latestSupport !== 'guarded') {
         setStale(true);
         throw new Error(
-          'The appliance no longer advertises per-room light settings; no write was sent.'
+          latestSupport === 'unguarded'
+            ? 'The appliance no longer advertises guarded light-setting writes; no write was sent.'
+            : 'The appliance no longer supports per-room light settings; no write was sent.'
         );
       }
       const latestProfile = lightSettingsProfilesFromState(latestState).find(

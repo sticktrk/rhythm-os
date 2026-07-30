@@ -6,6 +6,11 @@ export type LightSettingsProfile = {
   config: JsonRecord;
 };
 
+export type LightProfileOverrideSupport =
+  | 'unsupported'
+  | 'unguarded'
+  | 'guarded';
+
 export type RgbColor = { r: number; g: number; b: number };
 
 const PROFILE_OVERRIDE_FIELDS = [
@@ -53,16 +58,18 @@ export function profileOverridesForNode(
   return null;
 }
 
-export function hasLightProfileOverrideCapability(payload: unknown): boolean {
+export function lightProfileOverrideSupport(
+  payload: unknown
+): LightProfileOverrideSupport {
   const root = recordOf(payload);
   const capabilities = recordOf(root.capabilities);
   const features = new Set(
     arrayOf(capabilities.features).map((feature) => stringOf(feature))
   );
-  return (
-    features.has('room_light_profile_overrides') &&
-    features.has('guarded_room_light_profile_overrides')
-  );
+  if (!features.has('room_light_profile_overrides')) return 'unsupported';
+  return features.has('guarded_room_light_profile_overrides')
+    ? 'guarded'
+    : 'unguarded';
 }
 
 export function isLightAddressableKind(kind: string | undefined): boolean {

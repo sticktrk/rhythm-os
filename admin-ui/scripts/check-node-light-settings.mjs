@@ -28,9 +28,9 @@ const {
   changedOverrideFields,
   directColorRgb,
   effectiveProfileConfig,
-  hasLightProfileOverrideCapability,
   inferredLocalProfileOverrides,
   isLightAddressableKind,
+  lightProfileOverrideSupport,
   lightSettingsProfilesFromState,
   profileOverrideMapsEqual,
   profileOverridesForNode,
@@ -81,20 +81,31 @@ const state = {
 };
 
 assert.equal(
-  hasLightProfileOverrideCapability(state),
-  true,
-  'uses the advertised capability instead of a version guess',
+  lightProfileOverrideSupport(state),
+  'guarded',
+  'recognizes the complete guarded-write capability contract',
 );
 assert.equal(
-  hasLightProfileOverrideCapability({
+  lightProfileOverrideSupport({
     ...state,
     capabilities: {
       ...state.capabilities,
       features: ['room_light_profile_overrides'],
     },
   }),
-  false,
-  'keeps live writes read-only when the appliance lacks queued compare-and-set support',
+  'unguarded',
+  'distinguishes base profile support from queued compare-and-set support',
+);
+assert.equal(
+  lightProfileOverrideSupport({
+    ...state,
+    capabilities: {
+      ...state.capabilities,
+      features: [],
+    },
+  }),
+  'unsupported',
+  'distinguishes appliances without profile-override support',
 );
 assert.deepEqual(
   lightSettingsProfilesFromState(state).map(({ id, name }) => ({ id, name })),
@@ -271,8 +282,13 @@ assert.equal(profileOverridesForNode(nodesPayload, 'missing'), null);
 
 assert.match(
   pageSource,
-  /hasLightProfileOverrideCapability\(latestState\)/,
+  /lightProfileOverrideSupport\(latestState\)/,
   'rechecks the live capability immediately before a guarded write',
+);
+assert.match(
+  pageSource,
+  /supports per-room light settings, but its current build cannot safely guard admin edits/,
+  'explains unguarded appliances without falsely claiming profile settings are unsupported',
 );
 assert.match(
   pageSource,
