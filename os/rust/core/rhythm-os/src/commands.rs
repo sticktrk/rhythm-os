@@ -6528,8 +6528,12 @@ fn update_scene_brightness_for_target(
         entry.output.power = LightScenePower::On;
         entry.output.brightness = brightness;
         updated = true;
-    } else if let Some(default_output) = layer.default_output.clone() {
-        let mut output = default_output;
+    } else if let Some(mut output) = layer
+        .palette
+        .first()
+        .cloned()
+        .or_else(|| layer.default_output.clone())
+    {
         output.power = LightScenePower::On;
         output.brightness = brightness;
         layer.entries.push(LightSceneEntry {
@@ -17027,6 +17031,54 @@ mod tests {
                 .mood_scene_id
                 .as_deref(),
             Some("node-mood-scene-room1")
+        );
+    }
+
+    #[test]
+    fn mood_brightness_seeds_standalone_device_from_palette_scene() {
+        let (state, runtime, device_id) = setup_standalone_matter_light();
+        let palette_rgb = Rgb::new(255, 48, 112);
+        do_scene_upsert(&state, scene_with_palette("color-carnival", &[palette_rgb])).unwrap();
+        do_scene_apply(
+            &state,
+            "color-carnival",
+            SceneApplyRequest {
+                target_id: device_id.clone(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        do_set_node_brightness(&state, &device_id, 100, false).unwrap();
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.last().unwrap().0, device_id);
+        assert_eq!(calls.last().unwrap().1.brightness, 100);
+        assert_eq!(calls.last().unwrap().1.rgb, palette_rgb);
+
+        let s = state.lock().unwrap();
+        let public_scene = s.scenes.get("color-carnival").unwrap();
+        assert_eq!(
+            public_scene.light.as_ref().unwrap().palette[0].brightness,
+            66
+        );
+
+        let generated_scene = s.scenes.get(&node_mood_scene_id(&device_id)).unwrap();
+        let generated_entry = &generated_scene.light.as_ref().unwrap().entries[0];
+        assert_eq!(generated_entry.target.node_id(), device_id);
+        assert_eq!(generated_entry.output.brightness, 100);
+        assert_eq!(
+            generated_entry.output.color,
+            Some(LightSceneColor::Rgb { rgb: palette_rgb })
+        );
+        assert_eq!(
+            runtime
+                .engine_room_snapshot(&device_id)
+                .unwrap()
+                .profile_settings
+                .mood_scene_id,
+            Some(node_mood_scene_id(&device_id))
         );
     }
 
