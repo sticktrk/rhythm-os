@@ -262,7 +262,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
 
-      expect(find.text('Scan to Add Device'), findsOneWidget);
+      expect(find.text('Add a Device'), findsOneWidget);
       expect(find.text('NEW HARDWARE'), findsOneWidget);
       expect(find.text('Add Bulb'), findsNothing);
       expect(find.text('SYNC FROM A HUB'), findsOneWidget);
@@ -279,7 +279,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('No hardware'), findsNothing);
-      expect(find.text('Scan any device QR code'), findsOneWidget);
+      expect(find.text('Scan a code or find nearby bulbs'), findsOneWidget);
 
       final scanCardSize = tester.getSize(
         find.byKey(const ValueKey('add-review-scan-device')),
