@@ -42,7 +42,11 @@ const {
 const state = {
   capabilities: {
     api_schema_version: 2,
-    features: ['motion_activation_toggle', 'room_light_profile_overrides'],
+    features: [
+      'motion_activation_toggle',
+      'room_light_profile_overrides',
+      'guarded_room_light_profile_overrides',
+    ],
   },
   profiles: [
     {
@@ -80,6 +84,17 @@ assert.equal(
   hasLightProfileOverrideCapability(state),
   true,
   'uses the advertised capability instead of a version guess',
+);
+assert.equal(
+  hasLightProfileOverrideCapability({
+    ...state,
+    capabilities: {
+      ...state.capabilities,
+      features: ['room_light_profile_overrides'],
+    },
+  }),
+  false,
+  'keeps live writes read-only when the appliance lacks queued compare-and-set support',
 );
 assert.deepEqual(
   lightSettingsProfilesFromState(state).map(({ id, name }) => ({ id, name })),
@@ -258,6 +273,11 @@ assert.match(
   pageSource,
   /hasLightProfileOverrideCapability\(latestState\)/,
   'rechecks the live capability immediately before a guarded write',
+);
+assert.match(
+  pageSource,
+  /expectedProfileOverrides: baselineOverrides/,
+  'sends the reviewed effective override map for appliance-side queued compare-and-set',
 );
 assert.match(
   pageSource,

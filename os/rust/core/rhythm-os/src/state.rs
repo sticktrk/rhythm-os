@@ -474,6 +474,9 @@ pub struct AppState {
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
     /// Queued or running light-dispatch work count per topology node.
     pub pending_node_dispatches: HashMap<String, usize>,
+    /// Per-node guards that make preference compare-and-set checks atomic with
+    /// the corresponding runtime mutation across queued and legacy callers.
+    pub node_preference_write_locks: HashMap<String, Arc<Mutex<()>>>,
     /// Asynchronous controller dispatches keyed by local dispatch token.
     pub pending_integration_dispatches: HashMap<u64, PendingIntegrationDispatch>,
     /// `(hub key, controller stream id, command id)` to local dispatch token.
@@ -832,6 +835,7 @@ impl Default for AppState {
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
             pending_node_dispatches: HashMap::new(),
+            node_preference_write_locks: HashMap::new(),
             pending_integration_dispatches: HashMap::new(),
             pending_integration_commands: HashMap::new(),
             early_integration_outcomes: HashMap::new(),

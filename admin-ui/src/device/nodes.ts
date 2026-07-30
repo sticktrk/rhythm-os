@@ -115,6 +115,7 @@ export function setNodeProfileOverrides(
   options: {
     replace?: boolean;
     correlationId?: string;
+    expectedProfileOverrides?: Record<string, unknown>;
     resourcePrecondition?: {
       path: string;
       query?: Record<string, string>;
@@ -126,6 +127,9 @@ export function setNodeProfileOverrides(
     body: {
       node_id: nodeId,
       profile_overrides: profileOverrides,
+      ...(options.expectedProfileOverrides
+        ? { expected_profile_overrides: options.expectedProfileOverrides }
+        : {}),
       ...(options.replace ? { replace: true } : {}),
       ...(options.correlationId
         ? { correlation_id: options.correlationId }

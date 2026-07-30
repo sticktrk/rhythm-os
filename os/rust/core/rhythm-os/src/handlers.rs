@@ -837,6 +837,35 @@ fn parse_profile_overrides_patch_value(
     }
 }
 
+fn parse_expected_profile_overrides_value(
+    body: &serde_json::Map<String, Value>,
+    field_name: &str,
+) -> Result<Option<BTreeMap<String, LightProfileNodeOverride>>, String> {
+    let Some(value) = body.get("expected_profile_overrides") else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{field_name}.expected_profile_overrides must be an object"))?;
+    let mut overrides = BTreeMap::new();
+    for (profile_id, value) in object {
+        if profile_id.trim().is_empty() {
+            return Err(format!(
+                "{field_name}.expected_profile_overrides keys must be non-empty profile IDs"
+            ));
+        }
+        let profile_override: LightProfileNodeOverride = serde_json::from_value(value.clone())
+            .map_err(|e| {
+                format!(
+                    "Invalid {field_name}.expected_profile_overrides.{}: {}",
+                    profile_id, e
+                )
+            })?;
+        overrides.insert(profile_id.clone(), profile_override);
+    }
+    Ok(Some(overrides))
+}
+
 fn parse_profile_settings_patch(
     value: Option<&Value>,
     field_name: &str,
@@ -917,6 +946,7 @@ fn parse_profile_settings_patch(
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
         motion_activation_enabled,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
+        expected_effective_profile_overrides: None,
         replace_profile_overrides: body
             .get("replace_profile_overrides")
             .and_then(Value::as_bool)
@@ -2695,6 +2725,45 @@ pub fn handle_put_node_profile_overrides(
     body: &Value,
     persist: bool,
 ) -> ApiResponse {
+    handle_put_node_profile_overrides_with_precondition(state, body, persist, None, None)
+}
+
+pub fn handle_put_node_profile_overrides_with_precondition(
+    state: &SharedState,
+    body: &Value,
+    persist: bool,
+    expected_server_instance_id: Option<&str>,
+    expected_resource_sha256: Option<&str>,
+) -> ApiResponse {
+    let guarded = match (expected_server_instance_id, expected_resource_sha256) {
+        (Some(server_instance_id), Some(resource_sha256)) => {
+            let live_server_instance_id = match state.lock() {
+                Ok(locked) => locked.server_instance_id.clone(),
+                Err(_) => return ApiResponse::server_error("lock"),
+            };
+            if live_server_instance_id != server_instance_id {
+                return ApiResponse::conflict(
+                    "node profile override precondition failed: live server identity changed",
+                );
+            }
+            let live_resource_sha256 = match commands::nodes_state_resource_sha256(state) {
+                Ok(hash) => hash,
+                Err(error) => return ApiResponse::server_error(error),
+            };
+            if live_resource_sha256 != resource_sha256 {
+                return ApiResponse::conflict(
+                    "node profile override precondition failed: live nodes-state hash changed",
+                );
+            }
+            true
+        }
+        (None, None) => false,
+        _ => {
+            return ApiResponse::bad_request(
+                "Guarded node profile override writes require both expected server identity and resource hash",
+            )
+        }
+    };
     let items = match mutation_items(body) {
         Ok(items) => items,
         Err(e) => return ApiResponse::bad_request(&e),
@@ -2726,6 +2795,16 @@ pub fn handle_put_node_profile_overrides(
             .get("replace")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let expected_effective_profile_overrides =
+            match parse_expected_profile_overrides_value(body, "body") {
+                Ok(value) => value,
+                Err(e) => return ApiResponse::bad_request(&e),
+            };
+        if guarded && expected_effective_profile_overrides.is_none() {
+            return ApiResponse::bad_request(
+                "Guarded node profile override writes require expected_profile_overrides",
+            );
+        }
         updates.push(commands::QueuedNodePreferencesPatch {
             node_id: commands::resolve_node_id(state, raw_node_id),
             rhythm_enabled: None,
@@ -2734,6 +2813,7 @@ pub fn handle_put_node_profile_overrides(
             target_state: None,
             room_profile: Some(commands::RoomProfileSettingsPatch {
                 profile_overrides: Some(profile_overrides),
+                expected_effective_profile_overrides,
                 replace_profile_overrides,
                 ..Default::default()
             }),
@@ -5629,6 +5709,111 @@ mod tests {
         assert_eq!(payload["clear_profile_overrides"], false);
         assert_eq!(payload["replace_profile_overrides"], true);
         assert_eq!(payload["status"], "accepted");
+    }
+
+    #[test]
+    fn guarded_node_profile_override_accepts_the_live_nodes_hash_and_queues() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+        let resource_sha256 = commands::nodes_state_resource_sha256(&state).unwrap();
+
+        let response = handle_put_node_profile_overrides_with_precondition(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "replace": true,
+                "expected_profile_overrides": {},
+                "profile_overrides": {
+                    "rhythm": {"min_brightness": 8}
+                }
+            }),
+            false,
+            Some(&server_instance_id),
+            Some(&resource_sha256),
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodePreferences { .. }
+        ));
+    }
+
+    #[test]
+    fn queued_node_profile_override_rejects_changed_effective_overrides_at_worker_admission() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let queued = handle_put_node_profile_overrides(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "replace": true,
+                "expected_profile_overrides": {},
+                "profile_overrides": {
+                    "rhythm": {"min_brightness": 8}
+                }
+            }),
+            false,
+        );
+        assert_eq!(queued.status, 200);
+
+        let competing_patch = commands::RoomProfileSettingsPatch {
+            profile_overrides: Some(Some(BTreeMap::from([(
+                "rhythm".to_string(),
+                Some(LightProfileNodeOverride {
+                    min_brightness: Some(22),
+                    ..Default::default()
+                }),
+            )]))),
+            replace_profile_overrides: true,
+            ..Default::default()
+        };
+        commands::do_node_preferences_set(
+            &state,
+            "standalone-light",
+            None,
+            None,
+            None,
+            None,
+            Some(&competing_patch),
+            false,
+        )
+        .unwrap();
+
+        let result = match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            WorkItem::SetNodePreferences {
+                node_id,
+                rhythm_enabled,
+                disabled,
+                standby_enabled,
+                target_state,
+                room_profile,
+                persist_after,
+                ..
+            } => commands::do_node_preferences_set(
+                &state,
+                &node_id,
+                rhythm_enabled,
+                disabled,
+                standby_enabled,
+                target_state,
+                room_profile.as_ref(),
+                persist_after,
+            ),
+            _ => panic!("expected queued node-preferences work"),
+        };
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("node profile override precondition failed"));
+        let runtime = state.lock().unwrap().hub_runtime().unwrap();
+        let current = runtime.engine_node_snapshot("standalone-light").unwrap();
+        assert_eq!(
+            current.profile_settings.profile_overrides["rhythm"].min_brightness,
+            Some(22)
+        );
     }
 
     #[test]

@@ -836,6 +836,7 @@ function ProfileLightSettingsEditor({
       const proxy = await setNodeProfileOverrides(client, node.id, patch, {
         replace: true,
         correlationId: requestId,
+        expectedProfileOverrides: baselineOverrides,
         resourcePrecondition: {
           path: 'api/nodes/state',
           bodySha256: snapshot.bodySha256

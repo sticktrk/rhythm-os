@@ -887,6 +887,7 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
+    s.node_preference_write_locks.remove(node_id);
     s.pending_motion_clear.retain(|pending| pending != node_id);
     s.pending_motion_timeout_refresh
         .retain(|pending| pending != node_id);
@@ -1019,6 +1020,10 @@ pub struct RoomProfileSettingsPatch {
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
     pub motion_activation_enabled: Option<Option<bool>>,
     pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
+    /// Effective override map reviewed by the caller. The dispatch worker
+    /// rejects the queued mutation if this node changed before worker
+    /// admission, preventing two accepted writes from overwriting each other.
+    pub expected_effective_profile_overrides: Option<BTreeMap<String, LightProfileNodeOverride>>,
     /// Replace complete per-profile override entries instead of applying the
     /// legacy timer-only merge semantics.
     pub replace_profile_overrides: bool,
@@ -3185,6 +3190,14 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         nodes,
     };
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+}
+
+/// Hash the exact canonical JSON resource exposed by `GET /api/nodes/state`.
+pub fn nodes_state_resource_sha256(state: &SharedState) -> Result<String> {
+    let serialized = build_nodes_state(state)?;
+    let resource: Value = serde_json::from_str(&serialized)
+        .map_err(|e| anyhow::anyhow!("parse serialized nodes-state resource: {}", e))?;
+    Ok(canonical_json_sha256(&resource))
 }
 
 /// Build a lightweight rooms-state snapshot for polling.
@@ -8263,6 +8276,7 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
                 })
                 .collect(),
         )),
+        expected_effective_profile_overrides: None,
         replace_profile_overrides: true,
     }
 }
@@ -10695,6 +10709,17 @@ pub fn do_node_preferences_set(
     room_profile: Option<&RoomProfileSettingsPatch>,
     persist: bool,
 ) -> Result<String> {
+    let node_write_lock = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.node_preference_write_locks
+            .entry(node_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _node_write_guard = node_write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node preference write lock"))?;
+
     info!(
         target: "cmd",
         "node_preferences_set: {} rhythm={:?} disabled={:?} standby={:?} state={:?} profile_settings={}",
@@ -10719,6 +10744,19 @@ pub fn do_node_preferences_set(
     };
 
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    if let Some(expected) =
+        room_profile.and_then(|patch| patch.expected_effective_profile_overrides.as_ref())
+    {
+        let current = runtime
+            .engine_effective_node_snapshot(node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+        if current.profile_settings.profile_overrides != *expected {
+            return Err(anyhow::anyhow!(
+                "node profile override precondition failed: live effective overrides changed"
+            ));
+        }
+    }
 
     let snap = runtime
         .engine_node_snapshot(node_id)

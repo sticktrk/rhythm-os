@@ -56,8 +56,12 @@ export function profileOverridesForNode(
 export function hasLightProfileOverrideCapability(payload: unknown): boolean {
   const root = recordOf(payload);
   const capabilities = recordOf(root.capabilities);
-  return arrayOf(capabilities.features).some(
-    (feature) => stringOf(feature) === 'room_light_profile_overrides'
+  const features = new Set(
+    arrayOf(capabilities.features).map((feature) => stringOf(feature))
+  );
+  return (
+    features.has('room_light_profile_overrides') &&
+    features.has('guarded_room_light_profile_overrides')
   );
 }
 
