@@ -8,6 +8,10 @@ const sourceUrl = new URL(
   import.meta.url,
 );
 const source = await readFile(sourceUrl, 'utf8');
+const pageSource = await readFile(
+  new URL('../src/pages/hub/NodesPage.tsx', import.meta.url),
+  'utf8',
+);
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -249,5 +253,16 @@ assert.deepEqual(profileOverridesFromNode(nodesPayload.nodes[0]), {
   rhythm: { min_brightness: 8 },
 });
 assert.equal(profileOverridesForNode(nodesPayload, 'missing'), null);
+
+assert.match(
+  pageSource,
+  /hasLightProfileOverrideCapability\(latestState\)/,
+  'rechecks the live capability immediately before a guarded write',
+);
+assert.match(
+  pageSource,
+  /function adoptLatestCanonicalState\(\)[\s\S]*setBaselineBase\(nextBase\)[\s\S]*setBaselineOverrides\(nextOverrides\)[\s\S]*setBaselineParentOverrides\(nextParentOverrides\)/,
+  'lets a stale draft adopt the latest canonical base, target, and parent state',
+);
 
 console.log('Admin room/node light-settings contract checks passed.');

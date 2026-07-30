@@ -751,11 +751,20 @@ function ProfileLightSettingsEditor({
     setReceipt(null);
   }
 
-  function adoptBaseline() {
+  function adoptLatestCanonicalState() {
+    const nextBase = effectiveProfileConfig(profile.config, null);
+    const nextOverrides = effectiveProfileConfig(node.profileOverrides, null);
+    const nextParentOverrides = effectiveProfileConfig(
+      parentProfileOverrides,
+      null
+    );
+    setBaselineBase(nextBase);
+    setBaselineOverrides(nextOverrides);
+    setBaselineParentOverrides(nextParentOverrides);
     setDraft(
       effectiveProfileConfig(
-        baselineBase,
-        baselineOverrides[profile.id]
+        nextBase,
+        nextOverrides[profile.id]
       )
     );
     setWriteError(null);
@@ -781,6 +790,12 @@ function ProfileLightSettingsEditor({
       const latestState = await client.get<JsonRecord>('api/state', {
         requestId
       });
+      if (!hasLightProfileOverrideCapability(latestState)) {
+        setStale(true);
+        throw new Error(
+          'The appliance no longer advertises per-room light settings; no write was sent.'
+        );
+      }
       const latestProfile = lightSettingsProfilesFromState(latestState).find(
         (entry) => entry.id === profile.id
       );
@@ -1092,7 +1107,7 @@ function ProfileLightSettingsEditor({
           className="consoleButton small"
           type="button"
           disabled={!dirty || busy || pending}
-          onClick={adoptBaseline}
+          onClick={adoptLatestCanonicalState}
         >
           <Undo2 size={13} />
           <span>Discard draft</span>
