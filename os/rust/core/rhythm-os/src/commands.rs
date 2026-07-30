@@ -7456,6 +7456,9 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     if let Ok(mut s) = state.lock() {
         s.pending_mode_output_apply = false;
     }
+    if room_defaults_changed {
+        persist_rooms(state);
+    }
 }
 
 /// Apply the active mode's room defaults if a prior mode change deferred them
@@ -23214,6 +23217,80 @@ mod tests {
         let snap = runtime.engine_room_snapshot("r1").unwrap();
         assert!(!snap.soft_off);
         assert!(snap.hard_off);
+    }
+
+    #[test]
+    fn mode_change_persists_applied_room_defaults_for_restart() {
+        let mut living = make_snapshot("living", false, false);
+        living.hard_off = true;
+        let mut kitchen = make_snapshot("kitchen", false, true);
+        kitchen.standby_enabled = true;
+        let mut nook = make_snapshot("nook", false, false);
+        nook.hard_off = true;
+        let (state, runtime) = setup_state(vec![living, kitchen, nook]);
+        let storage = Arc::new(TestStorage::default());
+        let day_config = ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+            idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+            wake_profile_id: None,
+            warning_profile_id: None,
+            room_defaults: ["living", "kitchen", "nook"]
+                .into_iter()
+                .map(|room_id| rhythm_core::RoomModeDefault {
+                    room_id: room_id.into(),
+                    state: RoomModeState::Active,
+                })
+                .collect(),
+        };
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(storage.clone());
+            s.active_mode = RhythmMode::Sleep;
+            s.set_mode_configs(vec![
+                day_config.clone(),
+                ModeConfig::default_for_mode(RhythmMode::Sleep),
+            ]);
+        }
+        persist_rooms(&state);
+
+        do_set_active_mode(&state, RhythmMode::Day).unwrap();
+
+        for room_id in ["living", "kitchen", "nook"] {
+            let runtime_room = runtime.engine_room_snapshot(room_id).unwrap();
+            assert!(!runtime_room.soft_off);
+            assert!(!runtime_room.mood_active);
+            assert!(!runtime_room.hard_off);
+
+            let persisted_rooms = storage.load_rooms().unwrap();
+            let persisted_room = persisted_rooms.get(room_id).unwrap();
+            assert!(!persisted_room.soft_off);
+            assert!(!persisted_room.mood_active);
+            assert!(!persisted_room.hard_off);
+        }
+
+        let (restarted_state, restarted_runtime) = setup_state(vec![]);
+        {
+            let mut s = restarted_state.lock().unwrap();
+            s.storage = Some(storage);
+            s.active_mode = RhythmMode::Day;
+            s.set_mode_configs(vec![
+                day_config,
+                ModeConfig::default_for_mode(RhythmMode::Sleep),
+            ]);
+        }
+        for room_id in ["living", "kitchen", "nook"] {
+            add_topology_room(&restarted_state, room_id, &[]);
+        }
+
+        reconcile_runtime_from_state(&restarted_state).unwrap();
+
+        for room_id in ["living", "kitchen", "nook"] {
+            let restored_room = restarted_runtime.engine_room_snapshot(room_id).unwrap();
+            assert!(!restored_room.soft_off);
+            assert!(!restored_room.mood_active);
+            assert!(!restored_room.hard_off);
+        }
     }
 
     #[test]
