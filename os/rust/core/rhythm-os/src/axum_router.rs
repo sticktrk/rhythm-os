@@ -763,9 +763,27 @@ async fn put_node_motion_activation(
 
 async fn put_node_profile_overrides(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    run_blocking(move || handlers::handle_put_node_profile_overrides(&state, &body, true)).await
+    let expected_server_instance_id = headers
+        .get("x-expected-server-instance-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let expected_resource_sha256 = headers
+        .get("x-expected-resource-sha256")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    run_blocking(move || {
+        handlers::handle_put_node_profile_overrides_with_precondition(
+            &state,
+            &body,
+            true,
+            expected_server_instance_id.as_deref(),
+            expected_resource_sha256.as_deref(),
+        )
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1602,6 +1620,45 @@ mod tests {
                 .max_brightness,
             original_max_brightness
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_node_profile_override_route_rejects_a_stale_nodes_hash() {
+        let state = test_state_with_runtime(
+            Arc::new(ThreadRecordingRuntime {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                snapshots: vec![],
+                current_hour: 12.0,
+            }),
+            &[],
+        );
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+        let app = api_routes().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(HttpMethod::PUT)
+                    .uri("/api/nodes/profile-overrides")
+                    .header("content-type", "application/json")
+                    .header("x-expected-server-instance-id", server_instance_id)
+                    .header("x-expected-resource-sha256", "0".repeat(64))
+                    .body(Body::from(
+                        json!({
+                            "node_id": "room1",
+                            "replace": true,
+                            "expected_profile_overrides": {},
+                            "profile_overrides": {
+                                "rhythm": {"min_brightness": 8}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
