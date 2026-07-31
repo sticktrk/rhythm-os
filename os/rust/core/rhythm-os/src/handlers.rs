@@ -807,10 +807,12 @@ fn appliance_delete_unpair_request(
     // without publishing the full state DTO.
     supported_unpair_types.insert("matter");
     supported_unpair_types.insert("hue_ble");
+    supported_unpair_types.insert("aidot_ble");
     let direct_prefix = id
         .starts_with("matter-")
         .then_some("matter")
-        .or_else(|| id.starts_with("hue-ble-").then_some("hue_ble"));
+        .or_else(|| id.starts_with("hue-ble-").then_some("hue_ble"))
+        .or_else(|| id.starts_with("aidot-ble-").then_some("aidot_ble"));
     let canonical = s.canonical_registry.get(id).or_else(|| {
         direct_prefix.and_then(|hub_type| {
             let key = crate::canonical::identity::HubKey::new(
@@ -3069,7 +3071,7 @@ impl PairingAttemptGuard {
 }
 
 fn pairing_slot(platform_type: &str, hub_type: &str) -> (String, bool) {
-    if platform_type == "appliance" && matches!(hub_type, "matter" | "hue_ble") {
+    if platform_type == "appliance" && matches!(hub_type, "matter" | "hue_ble" | "aidot_ble") {
         ("appliance_bluetooth_adapter".to_string(), true)
     } else {
         (hub_type.to_string(), false)
@@ -3104,7 +3106,10 @@ fn try_acquire_unpairing_guard(
     state: &SharedState,
     hub_type: &str,
 ) -> Result<Option<PairingAttemptGuard>, ApiResponse> {
-    if hub_type != crate::hub::HubType::HUE_BLE {
+    if !matches!(
+        hub_type,
+        crate::hub::HubType::HUE_BLE | crate::hub::HubType::AIDOT_BLE
+    ) {
         return Ok(None);
     }
     try_acquire_pairing_guard(state, hub_type).map(Some)
@@ -3762,7 +3767,7 @@ mod tests {
     }
 
     #[test]
-    fn appliance_serializes_matter_and_hue_ble_pairing_on_the_shared_adapter() {
+    fn appliance_serializes_every_ble_pairing_on_the_shared_adapter() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let called = Arc::new(AtomicBool::new(false));
 
@@ -3778,20 +3783,22 @@ mod tests {
             }));
         }
 
-        let response = handle_pair_device(
-            &state,
-            &PairingRequest {
-                hub_type: "hue_ble".to_string(),
-                session_id: Some("hue-busy".to_string()),
-                params: json!({}),
-            },
-        );
+        for hub_type in ["matter", "hue_ble", "aidot_ble"] {
+            let response = handle_pair_device(
+                &state,
+                &PairingRequest {
+                    hub_type: hub_type.to_string(),
+                    session_id: Some(format!("{hub_type}-busy")),
+                    params: json!({}),
+                },
+            );
 
-        assert_eq!(response.status, 409);
-        assert_eq!(
-            response.body,
-            "Bluetooth pairing is already in progress on this appliance"
-        );
+            assert_eq!(response.status, 409);
+            assert_eq!(
+                response.body,
+                "Bluetooth pairing is already in progress on this appliance"
+            );
+        }
         assert!(!called.load(Ordering::SeqCst));
         assert!(state
             .lock()

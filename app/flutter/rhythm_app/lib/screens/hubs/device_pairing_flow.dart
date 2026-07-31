@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../widgets/device_detail_sheet.dart';
+import 'aidot_button_add_screen.dart';
 import 'device_pairing_code_entry_screen.dart';
 import 'device_pairing_scanner_screen.dart';
 import 'hue_ble_device_add_screen.dart';
@@ -63,11 +64,11 @@ List<HueBridgePairingTarget> connectedHueBridgePairingTargets({
   return targets;
 }
 
-/// Starts universal intake, direct nearby Hue BLE scan, or Hue Bridge search.
+/// Starts universal code intake, direct Hue BLE scan, or Hue Bridge search.
 ///
-/// Hue Bluetooth never enters the QR/manual-code flow. A six-character Hue
-/// serial is routed to Zigbee search only when a connected Hue Bridge
-/// advertises that capability.
+/// Hue Bluetooth never enters the QR/manual-code flow. Orein/AiDot buttons do:
+/// their strict QR identity is sent to the appliance only after capability
+/// gating and explicit pairing-mode confirmation.
 Future<void> startDevicePairingFlow(
   BuildContext context, {
   DevicePairingTarget target = DevicePairingTarget.any,
@@ -109,7 +110,8 @@ Future<void> startDevicePairingFlow(
 
   if (!hueBridgeOnly && syncProvider.canAddHueBleDevice) {
     final canUseSetupCode = syncProvider.canAddMatterDevice ||
-        syncProvider.canAddHueBridgeDeviceBySerial;
+        syncProvider.canAddHueBridgeDeviceBySerial ||
+        syncProvider.canAddAidotButton;
     if (!canUseSetupCode) {
       await _startHueBlePairing(
         context,
@@ -136,6 +138,7 @@ Future<void> startDevicePairingFlow(
     final intake = await _capturePairingCode(
       context,
       hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+      aidotButtonPairingAvailable: syncProvider.canAddAidotButton,
       hueBridgeOnly: hueBridgeOnly,
     );
     if (!context.mounted || intake == null) return;
@@ -187,6 +190,25 @@ Future<void> startDevicePairingFlow(
           intake: intake,
           analyticsSource: analyticsSource,
           hubAddress: hubAddress,
+        );
+        return;
+
+      case DevicePairingScannerAction.aidotButton:
+        if (hueBridgeOnly) continue;
+        if (!syncProvider.canAddAidotButton) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Update your Rhythm Box before adding this Orein/AiDot button.',
+              ),
+            ),
+          );
+          continue;
+        }
+        await _startAidotButtonPairing(
+          context,
+          intake: intake,
+          analyticsSource: analyticsSource,
         );
         return;
 
@@ -269,7 +291,7 @@ Future<DevicePairingTarget?> showUniversalDevicePairingIntakeChooser(
                   style: TextStyle(color: Colors.white),
                 ),
                 subtitle: Text(
-                  'Matter devices or a Hue Bridge bulb serial',
+                  'Matter, Orein/AiDot buttons, or a Hue Bridge bulb serial',
                   style: TextStyle(color: Colors.white.withValues(alpha: 0.62)),
                 ),
                 onTap: () =>
@@ -286,12 +308,14 @@ Future<DevicePairingTarget?> showUniversalDevicePairingIntakeChooser(
 Future<DevicePairingScannerResult?> _capturePairingCode(
   BuildContext context, {
   required bool hueBridgeSerialSearchAvailable,
+  required bool aidotButtonPairingAvailable,
   bool hueBridgeOnly = false,
 }) async {
   if (supportsDevicePairingCamera) {
     final scanned = await DevicePairingScannerScreen.show(
       context,
       hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+      aidotButtonPairingAvailable: aidotButtonPairingAvailable,
       hueBridgeOnly: hueBridgeOnly,
     );
     if (!context.mounted || scanned == null) return null;
@@ -299,6 +323,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
       return DevicePairingCodeEntryScreen.show(
         context,
         hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+        aidotButtonPairingAvailable: aidotButtonPairingAvailable,
         hueBridgeOnly: hueBridgeOnly,
       );
     }
@@ -307,7 +332,51 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
   return DevicePairingCodeEntryScreen.show(
     context,
     hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+    aidotButtonPairingAvailable: aidotButtonPairingAvailable,
     hueBridgeOnly: hueBridgeOnly,
+  );
+}
+
+Future<void> _startAidotButtonPairing(
+  BuildContext context, {
+  required DevicePairingScannerResult intake,
+  required String analyticsSource,
+}) async {
+  final setupPayload = intake.payload;
+  if (setupPayload == null) return;
+  final syncProvider = context.read<ServerSyncProvider>();
+  final result = await AidotButtonAddScreen.show(
+    context,
+    setupPayload: setupPayload,
+    analyticsSource: analyticsSource,
+    journeyId: 'aidot-button-pair-${const Uuid().v4()}',
+  );
+  if (!context.mounted || result == null) return;
+
+  await syncProvider.connection.reconnect();
+  if (!context.mounted) return;
+  final resolved = await _resolvePairedDevices(
+    context,
+    [result],
+    hubType: 'aidot_ble',
+  );
+  if (!context.mounted) return;
+  if (resolved.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.name} was added. It will appear in Devices after the next sync.',
+        ),
+      ),
+    );
+    return;
+  }
+  await _offerRoomAssignments(
+    context,
+    resolved,
+    allowNoRoom: syncProvider.supportsAidotRoomlessDevices,
+    sourceLabel: 'Orein/AiDot button',
+    expectedCount: 1,
   );
 }
 

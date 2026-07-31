@@ -715,6 +715,40 @@ class AnalyticsService {
     });
   }
 
+  /// Track an Orein/AiDot QR-bound pairing attempt without retaining QR data.
+  Future<void> logAidotButtonPairingAttempted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+  }) async {
+    await logEvent('aidot_button_pairing_attempted', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+    });
+  }
+
+  /// Track terminal button pairing without QR, Bluetooth, or device identity.
+  Future<void> logAidotButtonPairingCompleted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('aidot_button_pairing_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   // ===========================================================================
   // Device Review Events
   // ===========================================================================

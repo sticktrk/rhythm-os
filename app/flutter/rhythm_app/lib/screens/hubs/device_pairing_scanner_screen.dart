@@ -7,7 +7,7 @@ import '../../services/analytics_service.dart';
 import '../../services/device_pairing_code.dart';
 import '../../widgets/solar_orbit.dart';
 
-enum DevicePairingScannerAction { matter, hueBridge, enterCode }
+enum DevicePairingScannerAction { matter, hueBridge, aidotButton, enterCode }
 
 class DevicePairingScannerResult {
   const DevicePairingScannerResult._({
@@ -31,6 +31,15 @@ class DevicePairingScannerResult {
   }) : this._(
           action: DevicePairingScannerAction.hueBridge,
           payload: serial,
+          inputMethod: inputMethod,
+        );
+
+  const DevicePairingScannerResult.aidotButton(
+    String payload, {
+    String inputMethod = 'camera',
+  }) : this._(
+          action: DevicePairingScannerAction.aidotButton,
+          payload: payload,
           inputMethod: inputMethod,
         );
 
@@ -58,6 +67,7 @@ String _pairingCodeAnalyticsKind(DevicePairingCodeKind kind) => switch (kind) {
       DevicePairingCodeKind.matter => 'matter',
       DevicePairingCodeKind.homeKit => 'homekit',
       DevicePairingCodeKind.hue => 'hue',
+      DevicePairingCodeKind.aidotButton => 'aidot_button',
       DevicePairingCodeKind.unknown => 'unknown',
     };
 
@@ -66,12 +76,14 @@ class DevicePairingScannerScreen extends StatefulWidget {
     super.key,
     this.showEnterCodeAction = true,
     this.hueBridgeSerialSearchAvailable = false,
+    this.aidotButtonPairingAvailable = false,
     this.hueBridgeOnly = false,
     @visibleForTesting this.cameraBuilder,
   });
 
   final bool showEnterCodeAction;
   final bool hueBridgeSerialSearchAvailable;
+  final bool aidotButtonPairingAvailable;
   final bool hueBridgeOnly;
   final DevicePairingCameraBuilder? cameraBuilder;
 
@@ -79,6 +91,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
     BuildContext context, {
     bool showEnterCodeAction = true,
     bool hueBridgeSerialSearchAvailable = false,
+    bool aidotButtonPairingAvailable = false,
     bool hueBridgeOnly = false,
   }) {
     return Navigator.of(context).push<DevicePairingScannerResult>(
@@ -89,6 +102,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
           return DevicePairingScannerScreen(
             showEnterCodeAction: showEnterCodeAction,
             hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+            aidotButtonPairingAvailable: aidotButtonPairingAvailable,
             hueBridgeOnly: hueBridgeOnly,
           );
         },
@@ -150,6 +164,7 @@ class _DevicePairingScannerScreenState
     final decision = processDevicePairingCodes(
       values,
       hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
+      aidotButtonPairingAvailable: widget.aidotButtonPairingAvailable,
       hueBridgeOnly: widget.hueBridgeOnly,
     );
     if (decision == null) return;
@@ -201,6 +216,8 @@ class _DevicePairingScannerScreenState
         DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
             normalizeHueBridgeSerial(code.payload)!,
           ),
+        DevicePairingCodeKind.aidotButton =>
+          DevicePairingScannerResult.aidotButton(code.payload),
         _ => throw StateError('Unsupported pairing-code continuation'),
       },
     );

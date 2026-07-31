@@ -10,15 +10,18 @@ class DevicePairingCodeEntryScreen extends StatefulWidget {
   const DevicePairingCodeEntryScreen({
     super.key,
     this.hueBridgeSerialSearchAvailable = false,
+    this.aidotButtonPairingAvailable = false,
     this.hueBridgeOnly = false,
   });
 
   final bool hueBridgeSerialSearchAvailable;
+  final bool aidotButtonPairingAvailable;
   final bool hueBridgeOnly;
 
   static Future<DevicePairingScannerResult?> show(
     BuildContext context, {
     bool hueBridgeSerialSearchAvailable = false,
+    bool aidotButtonPairingAvailable = false,
     bool hueBridgeOnly = false,
   }) {
     AnalyticsService().logScreenView('device_pairing_code_entry');
@@ -26,6 +29,7 @@ class DevicePairingCodeEntryScreen extends StatefulWidget {
       MaterialPageRoute(
         builder: (_) => DevicePairingCodeEntryScreen(
           hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+          aidotButtonPairingAvailable: aidotButtonPairingAvailable,
           hueBridgeOnly: hueBridgeOnly,
         ),
       ),
@@ -83,6 +87,7 @@ class _DevicePairingCodeEntryScreenState
     final decision = processDevicePairingCodes(
       [_controller.text],
       hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
+      aidotButtonPairingAvailable: widget.aidotButtonPairingAvailable,
       hueBridgeOnly: widget.hueBridgeOnly,
     );
     if (decision == null) return;
@@ -132,6 +137,11 @@ class _DevicePairingCodeEntryScreenState
           ),
         DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
             normalizeHueBridgeSerial(code.payload)!,
+            inputMethod: 'manual_code',
+          ),
+        DevicePairingCodeKind.aidotButton =>
+          DevicePairingScannerResult.aidotButton(
+            code.payload,
             inputMethod: 'manual_code',
           ),
         _ => throw StateError('Unsupported pairing-code continuation'),
@@ -472,5 +482,6 @@ String _pairingCodeAnalyticsKind(DevicePairingCodeKind kind) => switch (kind) {
       DevicePairingCodeKind.matter => 'matter',
       DevicePairingCodeKind.homeKit => 'homekit',
       DevicePairingCodeKind.hue => 'hue',
+      DevicePairingCodeKind.aidotButton => 'aidot_button',
       DevicePairingCodeKind.unknown => 'unknown',
     };

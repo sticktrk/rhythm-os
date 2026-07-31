@@ -148,6 +148,49 @@ void main() {
     );
   });
 
+  testWidgets('returns a supported Orein/AiDot QR without logging its payload',
+      (tester) async {
+    const qr = 'B:1CD6BD2273F9%G\$S:L10599FAR002073\$M:A001462';
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push(
+                MaterialPageRoute<DevicePairingScannerResult>(
+                  builder: (_) => DevicePairingScannerScreen(
+                    aidotButtonPairingAvailable: true,
+                    cameraBuilder: (context, onDetect) {
+                      detect = onDetect;
+                      return const ColoredBox(color: Colors.black);
+                    },
+                  ),
+                ),
+              );
+            },
+            child: const Text('Open scanner'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+    detect(const [qr]);
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.aidotButton);
+    expect(result?.payload, qr);
+    final event = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'device_pairing_code_detected',
+    );
+    expect(event.properties, {
+      'code_kind': 'aidot_button',
+      'outcome': 'continued_to_pairing',
+    });
+    expect(event.properties.values, isNot(contains(qr)));
+  });
+
   testWidgets('returns a Hue serial only for connected bridge search', (
     tester,
   ) async {

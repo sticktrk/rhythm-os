@@ -453,9 +453,9 @@ pub struct FileStorage {
 const BACKUP_INTEGRATION_SUBDIRS: &[&str] = &["matter"];
 /// Local integration state that must be removed by a full factory reset.
 ///
-/// Hue BLE metadata is deliberately not portable: BlueZ link keys are bound
-/// to the appliance adapter and live outside the Rhythm backup payload.
-const FACTORY_RESET_INTEGRATION_SUBDIRS: &[&str] = &["matter", "hue_ble"];
+/// Appliance-local BLE metadata is deliberately not portable and is erased
+/// together with the other integration state during factory reset.
+const FACTORY_RESET_INTEGRATION_SUBDIRS: &[&str] = &["matter", "hue_ble", "aidot_ble"];
 
 impl FileStorage {
     /// Create a new `FileStorage` rooted at `dir`.
@@ -3291,6 +3291,7 @@ mod tests {
             std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
             std::fs::create_dir_all(path.join("hue_ble")).unwrap();
+            std::fs::create_dir_all(path.join("aidot_ble")).unwrap();
             std::fs::write(
                 path.join("matter").join("captures").join("device-1.json"),
                 "{}",
@@ -3304,6 +3305,7 @@ mod tests {
             )
             .unwrap();
             std::fs::write(path.join("hue_ble").join("devices.json"), "{}").unwrap();
+            std::fs::write(path.join("aidot_ble").join("devices.json"), "{}").unwrap();
 
             storage.clear_factory_reset_state().unwrap();
 
@@ -3336,6 +3338,10 @@ mod tests {
             assert!(
                 !path.join("hue_ble").exists(),
                 "adapter-bound Hue BLE metadata should be removed"
+            );
+            assert!(
+                !path.join("aidot_ble").exists(),
+                "appliance-local AiDot metadata should be removed"
             );
 
             cleanup(&path);

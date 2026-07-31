@@ -1429,6 +1429,7 @@ class _RoomBindingCard extends StatelessWidget {
       'ha' => 'Home Assistant',
       'hue' => 'Hue',
       'hue_ble' => 'Hue Bluetooth',
+      'aidot_ble' => 'Orein/AiDot Button',
       _ => hubType,
     };
     final hubInfo =

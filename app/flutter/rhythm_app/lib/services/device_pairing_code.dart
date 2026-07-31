@@ -1,6 +1,35 @@
 import 'matter_setup_payload.dart';
 
-enum DevicePairingCodeKind { matter, homeKit, hue, unknown }
+enum DevicePairingCodeKind { matter, homeKit, hue, aidotButton, unknown }
+
+class AidotButtonSetupCode {
+  const AidotButtonSetupCode({
+    required this.bleIdentity,
+    required this.serialMetadata,
+    required this.modelMetadata,
+  });
+
+  final String bleIdentity;
+  final String serialMetadata;
+  final String modelMetadata;
+
+  String get formattedBleIdentity => [
+        for (var offset = 0; offset < bleIdentity.length; offset += 2)
+          bleIdentity.substring(offset, offset + 2),
+      ].join(':');
+
+  static AidotButtonSetupCode? tryParse(String value) {
+    final match = RegExp(
+      r'^B:([0-9A-Fa-f]{12})%G\$S:([0-9A-Za-z_-]{1,64})\$M:([0-9A-Za-z_-]{1,64})$',
+    ).firstMatch(value);
+    if (match == null) return null;
+    return AidotButtonSetupCode(
+      bleIdentity: match.group(1)!.toUpperCase(),
+      serialMetadata: match.group(2)!,
+      modelMetadata: match.group(3)!,
+    );
+  }
+}
 
 class DevicePairingCode {
   const DevicePairingCode({
@@ -48,6 +77,7 @@ class DevicePairingCodeDecision {
 DevicePairingCodeDecision? processDevicePairingCodes(
   Iterable<String> values, {
   bool hueBridgeSerialSearchAvailable = false,
+  bool aidotButtonPairingAvailable = false,
   bool hueBridgeOnly = false,
 }) {
   final codes = values
@@ -58,6 +88,9 @@ DevicePairingCodeDecision? processDevicePairingCodes(
 
   final matterCodes = _distinctActionableCodes(
     codes.where((code) => code.kind == DevicePairingCodeKind.matter),
+  );
+  final aidotButtonCodes = _distinctActionableCodes(
+    codes.where((code) => code.kind == DevicePairingCodeKind.aidotButton),
   );
   final hueSerialCodes = _distinctActionableCodes(
     codes.where(
@@ -88,6 +121,18 @@ DevicePairingCodeDecision? processDevicePairingCodes(
             'on the Hue bulb, or enter that serial manually.',
       ),
       continuationAllowed: false,
+    );
+  }
+
+  if (aidotButtonCodes.isNotEmpty) {
+    final code = aidotButtonCodes.first;
+    return DevicePairingCodeDecision(
+      code: code,
+      guidance: guidanceForDevicePairingCode(
+        code.kind,
+        aidotButtonPairingAvailable: aidotButtonPairingAvailable,
+      ),
+      continuationAllowed: aidotButtonPairingAvailable,
     );
   }
 
@@ -128,12 +173,19 @@ DevicePairingCodeDecision? processDevicePairingCodes(
     guidance: guidanceForDevicePairingCode(
       code.kind,
       hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+      aidotButtonPairingAvailable: aidotButtonPairingAvailable,
     ),
   );
 }
 
 DevicePairingCode classifyDevicePairingCode(String value) {
   final normalized = value.trim();
+  if (AidotButtonSetupCode.tryParse(normalized) != null) {
+    return DevicePairingCode(
+      kind: DevicePairingCodeKind.aidotButton,
+      payload: normalized,
+    );
+  }
   if (isLikelyMatterSetupPayload(normalized)) {
     return DevicePairingCode(
       kind: DevicePairingCodeKind.matter,
@@ -165,6 +217,7 @@ DevicePairingCode classifyDevicePairingCode(String value) {
 DevicePairingGuidance guidanceForDevicePairingCode(
   DevicePairingCodeKind kind, {
   bool hueBridgeSerialSearchAvailable = false,
+  bool aidotButtonPairingAvailable = false,
 }) {
   return switch (kind) {
     DevicePairingCodeKind.homeKit => const DevicePairingGuidance(
@@ -184,6 +237,16 @@ DevicePairingGuidance guidanceForDevicePairingCode(
         message: 'A six-character Hue serial can add a Zigbee bulb through a '
             'connected Hue Bridge, but that path is not available right now. '
             'To pair directly, choose “Scan for nearby Hue Bluetooth bulbs.”',
+      ),
+    DevicePairingCodeKind.aidotButton when aidotButtonPairingAvailable =>
+      const DevicePairingGuidance(
+        title: 'Orein/AiDot button code',
+        message: 'This button code is ready to pair with your Rhythm Box.',
+      ),
+    DevicePairingCodeKind.aidotButton => const DevicePairingGuidance(
+        title: 'Rhythm Box update required',
+        message: 'Update your Rhythm Box before adding this Orein/AiDot '
+            'button.',
       ),
     DevicePairingCodeKind.unknown => const DevicePairingGuidance(
         title: 'Code not recognized',
@@ -232,6 +295,8 @@ bool _hasHuePrefix(String upper) {
 
 bool _canContinueWithDevicePairingCode(DevicePairingCode code) {
   return code.kind == DevicePairingCodeKind.matter ||
+      (code.kind == DevicePairingCodeKind.aidotButton &&
+          AidotButtonSetupCode.tryParse(code.payload) != null) ||
       (code.kind == DevicePairingCodeKind.hue &&
           normalizeHueBridgeSerial(code.payload) != null);
 }

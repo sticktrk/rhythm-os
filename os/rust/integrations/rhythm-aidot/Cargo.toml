@@ -1,0 +1,25 @@
+[package]
+name = "rhythm-aidot"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Orein/AiDot Bluetooth input integration for Rhythm OS"
+
+[features]
+default = []
+bluez = ["dep:bluer", "dep:dbus", "dep:uuid"]
+
+[dependencies]
+rhythm-core = { path = "../../core/rhythm-core" }
+rhythm-os = { path = "../../core/rhythm-os" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17.4", default-features = false, features = ["bluetoothd"], optional = true }
+dbus = { version = "0.9.10", features = ["vendored"], optional = true }
+uuid = { version = "1", optional = true }

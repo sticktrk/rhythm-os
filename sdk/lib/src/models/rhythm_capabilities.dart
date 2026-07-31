@@ -6,6 +6,7 @@ abstract final class RhythmDeviceOnboardingMethod {
   static const String matterBleWifiCommissioning =
       'matter_ble_wifi_commissioning';
   static const String hueBleNearbyScan = 'hue_ble_nearby_scan';
+  static const String aidotButtonQr = 'aidot_button_qr';
   static const String hueBridgeSerialSearch = 'hue_bridge_serial_search';
 }
 

@@ -385,6 +385,15 @@ void main() {
               'supports_unpairing': true,
               'supports_roomless_devices': true,
             },
+            {
+              'type': 'aidot_ble',
+              'configurable': false,
+              'device_onboarding_methods': [
+                RhythmDeviceOnboardingMethod.aidotButtonQr,
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
           ],
         },
         'power_schedules': [
@@ -405,6 +414,12 @@ void main() {
       expect(hello.capabilities!.supportsFeature('node_state'), isTrue);
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);
       expect(hello.capabilities!.hub('matter')?.supportsUnpairing, isTrue);
+      expect(
+        hello.capabilities!.hub('aidot_ble')?.supportsDeviceOnboardingMethod(
+              RhythmDeviceOnboardingMethod.aidotButtonQr,
+            ),
+        isTrue,
+      );
       expect(hello.powerSchedules.single['node_id'], 'room-1');
     });
 

@@ -3,6 +3,40 @@ import 'package:rhythm_app/services/device_pairing_code.dart';
 
 void main() {
   group('device pairing code classification', () {
+    const aidotQr = 'B:1CD6BD2273F9%G\$S:L10599FAR002073\$M:A001462';
+
+    test('strictly parses the Orein/AiDot button QR shape', () {
+      final setup = AidotButtonSetupCode.tryParse(aidotQr);
+      expect(setup?.bleIdentity, '1CD6BD2273F9');
+      expect(setup?.formattedBleIdentity, '1C:D6:BD:22:73:F9');
+      expect(setup?.serialMetadata, 'L10599FAR002073');
+      expect(setup?.modelMetadata, 'A001462');
+      expect(classifyDevicePairingCode(aidotQr).kind,
+          DevicePairingCodeKind.aidotButton);
+    });
+
+    test('rejects Orein/AiDot QR near misses', () {
+      for (final value in [
+        'B:1CD6BD2273F%G\$S:L10599FAR002073\$M:A001462',
+        'B:1CD6BD2273FG%G\$S:L10599FAR002073\$M:A001462',
+        'B:1CD6BD2273F9\$S:L10599FAR002073\$M:A001462',
+        'B:1CD6BD2273F9%G\$S:\$M:A001462',
+        'B:1CD6BD2273F9%G\$S:L10599FAR002073\$M:A001462\$M:EXTRA',
+      ]) {
+        expect(AidotButtonSetupCode.tryParse(value), isNull, reason: value);
+      }
+    });
+
+    test('AiDot code continues only when the appliance advertises support', () {
+      expect(processDevicePairingCodes([aidotQr])?.canContinue, isFalse);
+      final supported = processDevicePairingCodes(
+        [aidotQr],
+        aidotButtonPairingAvailable: true,
+      );
+      expect(supported?.canContinue, isTrue);
+      expect(supported?.code.payload, aidotQr);
+    });
+
     test('recognizes Matter before considering bulb brand', () {
       final result = classifyDevicePairingCode('  MT:Y.K908OC16750648G00  ');
 

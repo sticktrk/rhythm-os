@@ -181,6 +181,7 @@ pub struct HubType(pub String);
 impl HubType {
     pub const HUE: &'static str = "hue";
     pub const HUE_BLE: &'static str = "hue_ble";
+    pub const AIDOT_BLE: &'static str = "aidot_ble";
     pub const HA: &'static str = "ha";
     pub const MATTER: &'static str = "matter";
 
@@ -217,6 +218,8 @@ pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
     "matter_ble_wifi_commissioning";
 /// Scan for and bond every newly advertising factory-reset Hue BLE bulb.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN: &str = "hue_ble_nearby_scan";
+/// Bind one Orein/AiDot button by matching its QR identity to BLE service data.
+pub const DEVICE_ONBOARDING_METHOD_AIDOT_BUTTON_QR: &str = "aidot_button_qr";
 /// Ask an already connected Hue Bridge to find one Zigbee light by its
 /// six-character printed serial.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";

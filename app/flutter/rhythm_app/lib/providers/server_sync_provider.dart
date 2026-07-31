@@ -780,6 +780,8 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmHubCapabilities? get matterCapabilities => hubCapabilities('matter');
 
   RhythmHubCapabilities? get hueBleCapabilities => hubCapabilities('hue_ble');
+  RhythmHubCapabilities? get aidotBleCapabilities =>
+      hubCapabilities('aidot_ble');
   RhythmHubCapabilities? get hueBridgeCapabilities => hubCapabilities('hue');
 
   /// Whether the server advertises explicit Matter add methods.
@@ -822,6 +824,12 @@ class ServerSyncProvider extends ChangeNotifier {
       ) ??
       false;
 
+  bool get canAddAidotButton =>
+      aidotBleCapabilities?.supportsDeviceOnboardingMethod(
+        RhythmDeviceOnboardingMethod.aidotButtonQr,
+      ) ??
+      false;
+
   /// Whether a connected Hue Bridge can search for a Zigbee bulb by the
   /// six-character serial printed on its label.
   bool get canAddHueBridgeDeviceBySerial =>
@@ -834,14 +842,23 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get canUnpairHueBleDevices =>
       hueBleCapabilities?.supportsUnpairing ?? false;
 
+  bool get canUnpairAidotButtons =>
+      aidotBleCapabilities?.supportsUnpairing ?? false;
+
   bool get canUnpairHueBridgeDevices =>
       hueBridgeCapabilities?.supportsUnpairing ?? false;
 
   bool get supportsHueBleRoomlessDevices =>
       hueBleCapabilities?.supportsRoomlessDevices ?? false;
 
+  bool get supportsAidotRoomlessDevices =>
+      aidotBleCapabilities?.supportsRoomlessDevices ?? false;
+
   bool get canScanToAddDevice =>
-      canAddMatterDevice || canAddHueBridgeDeviceBySerial || canAddHueBleDevice;
+      canAddMatterDevice ||
+      canAddHueBridgeDeviceBySerial ||
+      canAddHueBleDevice ||
+      canAddAidotButton;
 
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>

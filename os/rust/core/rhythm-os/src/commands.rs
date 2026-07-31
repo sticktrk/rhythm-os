@@ -5104,10 +5104,14 @@ fn backup_hub_credentials_from_state(
     }
 }
 
-/// Hue BLE bonds are adapter-local BlueZ state, so a portable backup must not
-/// resurrect their credentials, endpoints, or device nodes without link keys.
+/// Appliance-local BLE associations cannot be restored safely on another
+/// adapter, so portable backups omit their credentials, endpoints, and nodes.
 /// A canonical device that also has another endpoint remains in the backup.
-fn strip_nonportable_hue_ble_nodes(
+fn is_nonportable_local_ble(hub_type: &str) -> bool {
+    matches!(hub_type, HubType::HUE_BLE | HubType::AIDOT_BLE)
+}
+
+fn strip_nonportable_local_ble_nodes(
     rooms: &mut rhythm_core::RoomManager,
     topology: &mut crate::topology::RoomTopologyStore,
     canonical_registry: &mut crate::canonical::registry::CanonicalRegistry,
@@ -5118,7 +5122,7 @@ fn strip_nonportable_hue_ble_nodes(
             device
                 .endpoints
                 .iter()
-                .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::HUE_BLE)
+                .filter(|endpoint| is_nonportable_local_ble(endpoint.hub_key.hub_type.as_str()))
                 .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
         })
         .collect::<Vec<_>>();
@@ -5136,7 +5140,7 @@ fn strip_nonportable_hue_ble_nodes(
 }
 
 fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallation) {
-    strip_nonportable_hue_ble_nodes(
+    strip_nonportable_local_ble_nodes(
         &mut installation.rooms,
         &mut installation.topology,
         &mut installation.canonical_registry,
@@ -5145,14 +5149,14 @@ fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallatio
         credential
             .hub_type
             .as_ref()
-            .is_none_or(|hub_type| hub_type.as_str() != HubType::HUE_BLE)
+            .is_none_or(|hub_type| !is_nonportable_local_ble(hub_type.as_str()))
     });
     installation
         .hub_registries
-        .retain(|registry| registry.hub_key.hub_type.as_str() != HubType::HUE_BLE);
+        .retain(|registry| !is_nonportable_local_ble(registry.hub_key.hub_type.as_str()));
     installation
         .integration_files
-        .retain(|file| !file.path.starts_with("hue_ble/"));
+        .retain(|file| !file.path.starts_with("hue_ble/") && !file.path.starts_with("aidot_ble/"));
 }
 
 pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
@@ -5321,7 +5325,11 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let mut topology = s.topology.clone();
         let mut canonical_registry = s.canonical_registry.clone();
-        strip_nonportable_hue_ble_nodes(&mut room_manager, &mut topology, &mut canonical_registry);
+        strip_nonportable_local_ble_nodes(
+            &mut room_manager,
+            &mut topology,
+            &mut canonical_registry,
+        );
         let configuration = backup_configuration_from_parts(&s, &room_manager);
         let mut hub_credentials: Vec<_> = s
             .hub_credentials
@@ -5330,7 +5338,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
                 creds
                     .hub_type
                     .as_ref()
-                    .is_none_or(|hub_type| hub_type.as_str() != HubType::HUE_BLE)
+                    .is_none_or(|hub_type| !is_nonportable_local_ble(hub_type.as_str()))
             })
             .map(|creds| backup_hub_credentials_from_state(creds, include_secrets))
             .collect();
@@ -5345,7 +5353,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         let hub_registries: Vec<_> = s
             .hubs
             .iter()
-            .filter(|(hub_key, _)| hub_key.hub_type.as_str() != HubType::HUE_BLE)
+            .filter(|(hub_key, _)| !is_nonportable_local_ble(hub_key.hub_type.as_str()))
             .filter_map(|(hub_key, hub)| {
                 hub.registry
                     .as_ref()
@@ -5356,7 +5364,9 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
             Some(storage) => storage.load_integration_backup_files(include_secrets)?,
             None => Vec::new(),
         };
-        integration_files.retain(|file| !file.path.starts_with("hue_ble/"));
+        integration_files.retain(|file| {
+            !file.path.starts_with("hue_ble/") && !file.path.starts_with("aidot_ble/")
+        });
 
         (
             configuration,
@@ -19719,7 +19729,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_excludes_adapter_bound_hue_ble_state() {
+    fn backup_excludes_appliance_local_ble_state() {
         let (state, _runtime) = setup_state(vec![]);
         let hub_key = HubKey::new(HubType::new(HubType::HUE_BLE), "local");
         let device_id = insert_canonical_device(
@@ -19761,6 +19771,39 @@ mod tests {
             .get_device_node(&device_id)
             .is_none());
         assert!(bundle.installation.rooms.get(&device_id).is_none());
+
+        let aidot_key = HubKey::new(HubType::new(HubType::AIDOT_BLE), "local");
+        let aidot_id = insert_canonical_device(
+            &state,
+            aidot_key.clone(),
+            "aidot-ble-1cd6bd2273f9",
+            "Orein/AiDot Button",
+            "",
+            "",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&aidot_id);
+            s.hub_credentials.insert(
+                aidot_key,
+                HubCredentials::new(
+                    HubType::AIDOT_BLE,
+                    "local",
+                    serde_json::json!({ "adapter": "default" }),
+                ),
+            );
+        }
+        let bundle = build_backup_bundle_dto(&state, true).unwrap();
+        assert!(bundle
+            .installation
+            .canonical_registry
+            .get(&aidot_id)
+            .is_none());
+        assert!(bundle
+            .installation
+            .topology
+            .get_device_node(&aidot_id)
+            .is_none());
     }
 
     #[test]

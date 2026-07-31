@@ -1863,6 +1863,38 @@ void main() {
       expect(provider.canAddMatterDevice, isFalse);
     });
 
+    test('exposes AiDot QR pairing only from explicit hub capabilities',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'aidot_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['aidot_button_qr'],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+          ],
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.canAddAidotButton, isTrue);
+      expect(provider.canUnpairAidotButtons, isTrue);
+      expect(provider.supportsAidotRoomlessDevices, isTrue);
+      expect(provider.canScanToAddDevice, isTrue);
+    });
+
     test('offers Hue serial intake only for an advertised connected bridge',
         () async {
       final provider = ServerSyncProvider(

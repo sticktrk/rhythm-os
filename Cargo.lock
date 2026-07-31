@@ -1828,6 +1828,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhythm-aidot"
+version = "0.6.548-beta"
+dependencies = [
+ "anyhow",
+ "bluer",
+ "dbus",
+ "futures",
+ "log",
+ "rhythm-core",
+ "rhythm-os",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "rhythm-chipd"
 version = "0.6.548-beta"
 dependencies = [
@@ -1933,6 +1950,7 @@ dependencies = [
  "dbus",
  "futures",
  "log",
+ "rhythm-aidot",
  "rhythm-ha",
  "rhythm-hue",
  "rhythm-matter",
