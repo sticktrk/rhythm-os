@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacement_stream_waits_for_data_before_rearming_timeout() {
+    async fn replacement_stream_activity_does_not_rearm_write_timeout() {
         let sse_liveness = HueSseLiveness::default();
         sse_liveness.begin_expected_activity();
         sse_liveness.note_reconnect("expected_activity_timeout");
@@ -501,21 +501,10 @@ mod tests {
             outcome.is_err(),
             "a healthy replacement data stream must remain connected"
         );
-        assert!(sse_liveness.begin_expected_activity().is_some());
-
-        let mut quiet_after_data =
-            futures::stream::pending::<Result<&'static [u8], &'static str>>();
-        let outcome = consume_sse_stream(
-            &mut quiet_after_data,
-            &tx,
-            &shutdown,
-            &mut parse_state,
-            &sse_liveness,
-            Duration::from_millis(5),
-            Duration::from_millis(20),
-        )
-        .await;
-        assert_eq!(outcome, StreamEnd::Reconnect("expected_activity_timeout"));
+        assert!(
+            sse_liveness.begin_expected_activity().is_none(),
+            "data activity must not re-arm an unreliable write-based probe"
+        );
     }
 
     #[tokio::test]
