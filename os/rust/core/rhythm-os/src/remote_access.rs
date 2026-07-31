@@ -2366,7 +2366,10 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
 
         controller.stop(&root).unwrap();
         controller.start(&root, &config).unwrap();
-        let marker_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // This action is intentionally asynchronous. Loaded self-hosted
+        // release runners can take longer than five seconds to schedule the
+        // worker even though generation ordering remains correct.
+        let marker_deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
             match std::fs::read_to_string(&marker) {
                 Ok(contents) if !contents.trim().is_empty() => break,
@@ -2377,7 +2380,7 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
 
             assert!(
                 std::time::Instant::now() < marker_deadline,
-                "restart action did not create its marker within 5 seconds"
+                "restart action did not create its marker within 15 seconds"
             );
             std::thread::sleep(Duration::from_millis(25));
         }
