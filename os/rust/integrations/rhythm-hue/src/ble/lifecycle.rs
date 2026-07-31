@@ -1543,10 +1543,8 @@ pub fn force_forget_offline(state: &SharedState, requested_id: &str) -> Result<U
             native_id
         );
         true
-    } else if had_unresolved_metadata {
-        true
     } else {
-        false
+        had_unresolved_metadata
     };
     if !had_durable_metadata {
         return Ok(UnpairingResult {
