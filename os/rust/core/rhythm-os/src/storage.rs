@@ -455,7 +455,14 @@ const BACKUP_INTEGRATION_SUBDIRS: &[&str] = &["matter"];
 ///
 /// Appliance-local BLE metadata is deliberately not portable and is erased
 /// together with the other integration state during factory reset.
-const FACTORY_RESET_INTEGRATION_SUBDIRS: &[&str] = &["matter", "hue_ble", "aidot_ble"];
+const FACTORY_RESET_INTEGRATION_SUBDIRS: &[&str] = &[
+    "matter",
+    "hue_ble",
+    "local_ble",
+    // Securely erase state written by prerelease builds of the superseded
+    // vendor-shaped implementation. It is reset-only and never migrated.
+    "aidot_ble",
+];
 
 impl FileStorage {
     /// Create a new `FileStorage` rooted at `dir`.
@@ -3291,6 +3298,7 @@ mod tests {
             std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
             std::fs::create_dir_all(path.join("hue_ble")).unwrap();
+            std::fs::create_dir_all(path.join("local_ble")).unwrap();
             std::fs::create_dir_all(path.join("aidot_ble")).unwrap();
             std::fs::write(
                 path.join("matter").join("captures").join("device-1.json"),
@@ -3305,6 +3313,7 @@ mod tests {
             )
             .unwrap();
             std::fs::write(path.join("hue_ble").join("devices.json"), "{}").unwrap();
+            std::fs::write(path.join("local_ble").join("devices.json"), "{}").unwrap();
             std::fs::write(path.join("aidot_ble").join("devices.json"), "{}").unwrap();
 
             storage.clear_factory_reset_state().unwrap();
@@ -3340,8 +3349,12 @@ mod tests {
                 "adapter-bound Hue BLE metadata should be removed"
             );
             assert!(
+                !path.join("local_ble").exists(),
+                "appliance-local BLE profile metadata should be removed"
+            );
+            assert!(
                 !path.join("aidot_ble").exists(),
-                "appliance-local AiDot metadata should be removed"
+                "prerelease vendor-shaped BLE metadata should be removed"
             );
 
             cleanup(&path);

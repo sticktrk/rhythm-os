@@ -10,27 +10,31 @@ class DevicePairingCodeEntryScreen extends StatefulWidget {
   const DevicePairingCodeEntryScreen({
     super.key,
     this.hueBridgeSerialSearchAvailable = false,
-    this.aidotButtonPairingAvailable = false,
+    this.supportedLocalBleProfileIds = const {},
     this.hueBridgeOnly = false,
+    this.journeyId,
   });
 
   final bool hueBridgeSerialSearchAvailable;
-  final bool aidotButtonPairingAvailable;
+  final Set<String> supportedLocalBleProfileIds;
   final bool hueBridgeOnly;
+  final String? journeyId;
 
   static Future<DevicePairingScannerResult?> show(
     BuildContext context, {
     bool hueBridgeSerialSearchAvailable = false,
-    bool aidotButtonPairingAvailable = false,
+    Set<String> supportedLocalBleProfileIds = const {},
     bool hueBridgeOnly = false,
+    String? journeyId,
   }) {
     AnalyticsService().logScreenView('device_pairing_code_entry');
     return Navigator.of(context).push<DevicePairingScannerResult>(
       MaterialPageRoute(
         builder: (_) => DevicePairingCodeEntryScreen(
           hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
-          aidotButtonPairingAvailable: aidotButtonPairingAvailable,
+          supportedLocalBleProfileIds: supportedLocalBleProfileIds,
           hueBridgeOnly: hueBridgeOnly,
+          journeyId: journeyId,
         ),
       ),
     );
@@ -87,7 +91,7 @@ class _DevicePairingCodeEntryScreenState
     final decision = processDevicePairingCodes(
       [_controller.text],
       hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
-      aidotButtonPairingAvailable: widget.aidotButtonPairingAvailable,
+      supportedLocalBleProfileIds: widget.supportedLocalBleProfileIds,
       hueBridgeOnly: widget.hueBridgeOnly,
     );
     if (decision == null) return;
@@ -98,6 +102,9 @@ class _DevicePairingCodeEntryScreenState
         codeKind: decision.choices.length > 1 ? 'multiple' : kind,
         outcome:
             decision.choices.length > 1 ? 'choice_shown' : 'confirmation_shown',
+        journeyId: widget.journeyId,
+        inputMethod: 'manual_code',
+        profileId: _localBleProfileId(decision),
       );
       HapticFeedback.lightImpact();
       setState(() {
@@ -115,6 +122,9 @@ class _DevicePairingCodeEntryScreenState
     AnalyticsService().logDevicePairingCodeDetected(
       codeKind: kind,
       outcome: 'guidance_shown',
+      journeyId: widget.journeyId,
+      inputMethod: 'manual_code',
+      profileId: decision.code.localBleSetup?.profileId,
     );
     HapticFeedback.lightImpact();
     setState(() {
@@ -127,6 +137,9 @@ class _DevicePairingCodeEntryScreenState
     AnalyticsService().logDevicePairingCodeDetected(
       codeKind: _pairingCodeAnalyticsKind(code.kind),
       outcome: 'continued_to_pairing',
+      journeyId: widget.journeyId,
+      inputMethod: 'manual_code',
+      profileId: code.localBleSetup?.profileId,
     );
     HapticFeedback.mediumImpact();
     Navigator.of(context).pop(
@@ -134,15 +147,17 @@ class _DevicePairingCodeEntryScreenState
         DevicePairingCodeKind.matter => DevicePairingScannerResult.matter(
             code.payload,
             inputMethod: 'manual_code',
+            journeyId: widget.journeyId,
           ),
         DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
             normalizeHueBridgeSerial(code.payload)!,
             inputMethod: 'manual_code',
+            journeyId: widget.journeyId,
           ),
-        DevicePairingCodeKind.aidotButton =>
-          DevicePairingScannerResult.aidotButton(
-            code.payload,
+        DevicePairingCodeKind.localBle => DevicePairingScannerResult.localBle(
+            code.localBleSetup!,
             inputMethod: 'manual_code',
+            journeyId: widget.journeyId,
           ),
         _ => throw StateError('Unsupported pairing-code continuation'),
       },
@@ -378,7 +393,7 @@ class _CodeChoiceCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Choose how to add this light',
+            'Choose how to add this device',
             style: const TextStyle(
               color: CelestialColors.textPrimary,
               fontSize: 15,
@@ -397,22 +412,21 @@ class _CodeChoiceCard extends StatelessWidget {
           const SizedBox(height: 12),
           for (final code in decision.choices) ...[
             FilledButton.icon(
-              key: ValueKey(
-                code.kind == DevicePairingCodeKind.hue
-                    ? 'confirm-manual-hue-bridge-serial'
-                    : 'confirm-manual-matter-code',
-              ),
+              key: ValueKey(switch (code.kind) {
+                DevicePairingCodeKind.hue => 'confirm-manual-hue-bridge-serial',
+                DevicePairingCodeKind.localBle => 'confirm-manual-local-ble',
+                _ => 'confirm-manual-matter-code',
+              }),
               onPressed: () => onSelected(code),
-              icon: Icon(
-                code.kind == DevicePairingCodeKind.hue
-                    ? Icons.hub_rounded
-                    : Icons.hub_rounded,
-              ),
-              label: Text(
-                code.kind == DevicePairingCodeKind.hue
-                    ? 'Search with Hue Bridge'
-                    : 'Pair with Matter',
-              ),
+              icon: Icon(switch (code.kind) {
+                DevicePairingCodeKind.localBle => Icons.bluetooth_rounded,
+                _ => Icons.hub_rounded,
+              }),
+              label: Text(switch (code.kind) {
+                DevicePairingCodeKind.hue => 'Search with Hue Bridge',
+                DevicePairingCodeKind.localBle => 'Pair with Bluetooth',
+                _ => 'Pair with Matter',
+              }),
             ),
           ],
         ],
@@ -478,10 +492,18 @@ class _CodeGuidanceCard extends StatelessWidget {
   }
 }
 
+String? _localBleProfileId(DevicePairingCodeDecision decision) {
+  for (final choice in decision.choices) {
+    final profileId = choice.localBleSetup?.profileId;
+    if (profileId != null) return profileId;
+  }
+  return decision.code.localBleSetup?.profileId;
+}
+
 String _pairingCodeAnalyticsKind(DevicePairingCodeKind kind) => switch (kind) {
       DevicePairingCodeKind.matter => 'matter',
       DevicePairingCodeKind.homeKit => 'homekit',
       DevicePairingCodeKind.hue => 'hue',
-      DevicePairingCodeKind.aidotButton => 'aidot_button',
+      DevicePairingCodeKind.localBle => 'local_ble',
       DevicePairingCodeKind.unknown => 'unknown',
     };

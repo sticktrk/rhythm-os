@@ -1,44 +1,106 @@
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDeviceProfileId;
+
 import 'matter_setup_payload.dart';
 
-enum DevicePairingCodeKind { matter, homeKit, hue, aidotButton, unknown }
+enum DevicePairingCodeKind { matter, homeKit, hue, localBle, unknown }
 
-class AidotButtonSetupCode {
-  const AidotButtonSetupCode({
-    required this.bleIdentity,
-    required this.serialMetadata,
-    required this.modelMetadata,
-  });
+/// A parsed, bounded setup request for a server-advertised local BLE profile.
+///
+/// Profile-specific QR grammar stays behind [parseLocalBleSetupCode]. Shared
+/// intake and pairing surfaces only carry the opaque, validated setup map.
+class LocalBleSetup {
+  LocalBleSetup({
+    required this.profileId,
+    required Map<String, String> setupFields,
+  }) : setupFields = Map.unmodifiable(Map<String, String>.from(setupFields));
 
-  final String bleIdentity;
-  final String serialMetadata;
-  final String modelMetadata;
+  final String profileId;
+  final Map<String, String> setupFields;
 
-  String get formattedBleIdentity => [
-        for (var offset = 0; offset < bleIdentity.length; offset += 2)
-          bleIdentity.substring(offset, offset + 2),
-      ].join(':');
+  Map<String, dynamic> get pairingParams => {
+        'profile_id': profileId,
+        'setup': setupFields,
+      };
 
-  static AidotButtonSetupCode? tryParse(String value) {
+  String get deduplicationKey {
+    final entries = setupFields.entries.toList(growable: false)
+      ..sort((left, right) => left.key.compareTo(right.key));
+    final buffer = StringBuffer('${profileId.length}:$profileId');
+    for (final entry in entries) {
+      buffer
+        ..write('|${entry.key.length}:')
+        ..write(entry.key)
+        ..write('${entry.value.length}:')
+        ..write(entry.value);
+    }
+    return buffer.toString();
+  }
+}
+
+abstract interface class _LocalBleSetupParser {
+  String get profileId;
+
+  LocalBleSetup? tryParse(String value);
+}
+
+/// Orein/AiDot OC02001 QR grammar and field translation.
+///
+/// Keeping this implementation private prevents its field names and payload
+/// shape from becoming part of the shared app pairing contract.
+final class _OreinOc02001SetupParser implements _LocalBleSetupParser {
+  const _OreinOc02001SetupParser();
+
+  @override
+  String get profileId => RhythmDeviceProfileId.oreinOc02001Button;
+
+  @override
+  LocalBleSetup? tryParse(String value) {
     final match = RegExp(
       r'^B:([0-9A-Fa-f]{12})%G\$S:([0-9A-Za-z_-]{1,64})\$M:([0-9A-Za-z_-]{1,64})$',
     ).firstMatch(value);
     if (match == null) return null;
-    return AidotButtonSetupCode(
-      bleIdentity: match.group(1)!.toUpperCase(),
-      serialMetadata: match.group(2)!,
-      modelMetadata: match.group(3)!,
+    return LocalBleSetup(
+      profileId: profileId,
+      setupFields: {
+        'ble_identity': match.group(1)!.toUpperCase(),
+        'serial_metadata': match.group(2)!,
+        'model_metadata': match.group(3)!,
+      },
     );
   }
+}
+
+const List<_LocalBleSetupParser> _localBleSetupParsers = [
+  _OreinOc02001SetupParser(),
+];
+
+/// Profile IDs for which this app build can parse local-BLE QR setup input.
+///
+/// Server-advertised profiles are intersected with this set before the app
+/// exposes QR intake, so a newer appliance cannot make an older app claim
+/// support for a grammar it does not understand.
+final Set<String> locallyRegisteredLocalBleProfileIds = Set.unmodifiable(
+  _localBleSetupParsers.map((parser) => parser.profileId),
+);
+
+LocalBleSetup? parseLocalBleSetupCode(String value) {
+  for (final parser in _localBleSetupParsers) {
+    final setup = parser.tryParse(value);
+    if (setup != null) return setup;
+  }
+  return null;
 }
 
 class DevicePairingCode {
   const DevicePairingCode({
     required this.kind,
     required this.payload,
+    this.localBleSetup,
   });
 
   final DevicePairingCodeKind kind;
   final String payload;
+  final LocalBleSetup? localBleSetup;
 }
 
 class DevicePairingGuidance {
@@ -77,7 +139,7 @@ class DevicePairingCodeDecision {
 DevicePairingCodeDecision? processDevicePairingCodes(
   Iterable<String> values, {
   bool hueBridgeSerialSearchAvailable = false,
-  bool aidotButtonPairingAvailable = false,
+  Set<String> supportedLocalBleProfileIds = const {},
   bool hueBridgeOnly = false,
 }) {
   final codes = values
@@ -89,9 +151,16 @@ DevicePairingCodeDecision? processDevicePairingCodes(
   final matterCodes = _distinctActionableCodes(
     codes.where((code) => code.kind == DevicePairingCodeKind.matter),
   );
-  final aidotButtonCodes = _distinctActionableCodes(
-    codes.where((code) => code.kind == DevicePairingCodeKind.aidotButton),
+  final localBleCodes = _distinctActionableCodes(
+    codes.where((code) => code.kind == DevicePairingCodeKind.localBle),
   );
+  final supportedLocalBleCodes = localBleCodes
+      .where(
+        (code) => supportedLocalBleProfileIds.contains(
+          code.localBleSetup?.profileId,
+        ),
+      )
+      .toList(growable: false);
   final hueSerialCodes = _distinctActionableCodes(
     codes.where(
       (code) =>
@@ -124,22 +193,13 @@ DevicePairingCodeDecision? processDevicePairingCodes(
     );
   }
 
-  if (aidotButtonCodes.isNotEmpty) {
-    final code = aidotButtonCodes.first;
-    return DevicePairingCodeDecision(
-      code: code,
-      guidance: guidanceForDevicePairingCode(
-        code.kind,
-        aidotButtonPairingAvailable: aidotButtonPairingAvailable,
-      ),
-      continuationAllowed: aidotButtonPairingAvailable,
-    );
-  }
-
-  if (matterCodes.isNotEmpty &&
-      hueSerialCodes.isNotEmpty &&
-      hueBridgeSerialSearchAvailable) {
-    final choices = [matterCodes.first, hueSerialCodes.first];
+  final choices = <DevicePairingCode>[
+    if (matterCodes.isNotEmpty) matterCodes.first,
+    if (hueSerialCodes.isNotEmpty && hueBridgeSerialSearchAvailable)
+      hueSerialCodes.first,
+    if (supportedLocalBleCodes.isNotEmpty) supportedLocalBleCodes.first,
+  ];
+  if (choices.length > 1) {
     return DevicePairingCodeDecision(
       code: choices.first,
       guidance: guidanceForDevicePairingCode(choices.first.kind),
@@ -147,11 +207,30 @@ DevicePairingCodeDecision? processDevicePairingCodes(
     );
   }
 
-  if (matterCodes.isNotEmpty) {
-    final code = matterCodes.first;
+  if (choices.length == 1) {
+    final code = choices.single;
     return DevicePairingCodeDecision(
       code: code,
-      guidance: guidanceForDevicePairingCode(code.kind),
+      guidance: guidanceForDevicePairingCode(
+        code.kind,
+        hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+        localBleProfileAvailable: code.localBleSetup != null,
+      ),
+    );
+  }
+
+  if (localBleCodes.isNotEmpty) {
+    final code = localBleCodes.first;
+    final profileId = code.localBleSetup?.profileId;
+    final profileAvailable =
+        profileId != null && supportedLocalBleProfileIds.contains(profileId);
+    return DevicePairingCodeDecision(
+      code: code,
+      guidance: guidanceForDevicePairingCode(
+        code.kind,
+        localBleProfileAvailable: profileAvailable,
+      ),
+      continuationAllowed: profileAvailable,
     );
   }
 
@@ -173,23 +252,27 @@ DevicePairingCodeDecision? processDevicePairingCodes(
     guidance: guidanceForDevicePairingCode(
       code.kind,
       hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
-      aidotButtonPairingAvailable: aidotButtonPairingAvailable,
+      localBleProfileAvailable: code.localBleSetup != null &&
+          supportedLocalBleProfileIds.contains(code.localBleSetup!.profileId),
     ),
   );
 }
 
 DevicePairingCode classifyDevicePairingCode(String value) {
   final normalized = value.trim();
-  if (AidotButtonSetupCode.tryParse(normalized) != null) {
-    return DevicePairingCode(
-      kind: DevicePairingCodeKind.aidotButton,
-      payload: normalized,
-    );
-  }
   if (isLikelyMatterSetupPayload(normalized)) {
     return DevicePairingCode(
       kind: DevicePairingCodeKind.matter,
       payload: normalized,
+    );
+  }
+
+  final localBleSetup = parseLocalBleSetupCode(normalized);
+  if (localBleSetup != null) {
+    return DevicePairingCode(
+      kind: DevicePairingCodeKind.localBle,
+      payload: localBleSetup.profileId,
+      localBleSetup: localBleSetup,
     );
   }
 
@@ -217,7 +300,7 @@ DevicePairingCode classifyDevicePairingCode(String value) {
 DevicePairingGuidance guidanceForDevicePairingCode(
   DevicePairingCodeKind kind, {
   bool hueBridgeSerialSearchAvailable = false,
-  bool aidotButtonPairingAvailable = false,
+  bool localBleProfileAvailable = false,
 }) {
   return switch (kind) {
     DevicePairingCodeKind.homeKit => const DevicePairingGuidance(
@@ -238,15 +321,14 @@ DevicePairingGuidance guidanceForDevicePairingCode(
             'connected Hue Bridge, but that path is not available right now. '
             'To pair directly, choose “Scan for nearby Hue Bluetooth bulbs.”',
       ),
-    DevicePairingCodeKind.aidotButton when aidotButtonPairingAvailable =>
+    DevicePairingCodeKind.localBle when localBleProfileAvailable =>
       const DevicePairingGuidance(
-        title: 'Orein/AiDot button code',
-        message: 'This button code is ready to pair with your Rhythm Box.',
+        title: 'Bluetooth device code',
+        message: 'This device code is ready to pair with your Rhythm Box.',
       ),
-    DevicePairingCodeKind.aidotButton => const DevicePairingGuidance(
+    DevicePairingCodeKind.localBle => const DevicePairingGuidance(
         title: 'Rhythm Box update required',
-        message: 'Update your Rhythm Box before adding this Orein/AiDot '
-            'button.',
+        message: 'Update your Rhythm Box before adding this Bluetooth device.',
       ),
     DevicePairingCodeKind.unknown => const DevicePairingGuidance(
         title: 'Code not recognized',
@@ -295,8 +377,8 @@ bool _hasHuePrefix(String upper) {
 
 bool _canContinueWithDevicePairingCode(DevicePairingCode code) {
   return code.kind == DevicePairingCodeKind.matter ||
-      (code.kind == DevicePairingCodeKind.aidotButton &&
-          AidotButtonSetupCode.tryParse(code.payload) != null) ||
+      (code.kind == DevicePairingCodeKind.localBle &&
+          code.localBleSetup != null) ||
       (code.kind == DevicePairingCodeKind.hue &&
           normalizeHueBridgeSerial(code.payload) != null);
 }
@@ -307,7 +389,11 @@ List<DevicePairingCode> _distinctActionableCodes(
   final seen = <String>{};
   return [
     for (final code in codes)
-      if (seen.add('${code.kind.name}:${code.payload}')) code,
+      if (seen.add(
+        code.localBleSetup?.deduplicationKey ??
+            '${code.kind.name}:${code.payload}',
+      ))
+        code,
   ];
 }
 

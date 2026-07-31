@@ -359,8 +359,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairHueBle = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairHueBleDevices,
     );
-    final canUnpairAidot = context.select<ServerSyncProvider, bool>(
-      (sync) => sync.canUnpairAidotButtons,
+    final canUnpairLocalBle = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.canUnpairLocalBleDevices,
     );
     final canUnpairHueBridge = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairHueBridgeDevices,
@@ -484,7 +484,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                         device,
                         canUnpairMatter,
                         canUnpairHueBle,
-                        canUnpairAidot,
+                        canUnpairLocalBle,
                         canUnpairHueBridge,
                       ),
                     _DeviceTab.info => _buildInfoTab(context, device),
@@ -643,7 +643,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     RhythmDevice device,
     bool canUnpairMatter,
     bool canUnpairHueBle,
-    bool canUnpairAidot,
+    bool canUnpairLocalBle,
     bool canUnpairHueBridge,
   ) {
     final isLight = device.type == RhythmDeviceType.light;
@@ -651,7 +651,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       return switch (endpoint.hubType) {
         'matter' => canUnpairMatter,
         'hue_ble' => canUnpairHueBle,
-        'aidot_ble' => canUnpairAidot,
+        'local_ble' => canUnpairLocalBle,
         'hue' => canUnpairHueBridge,
         _ => false,
       };
@@ -1073,7 +1073,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       final nativeId = endpoint['native_id']?.toString() ?? '';
       if ((hubType == 'matter' ||
               hubType == 'hue_ble' ||
-              hubType == 'aidot_ble' ||
+              hubType == 'local_ble' ||
               hubType == 'hue') &&
           nativeId.isNotEmpty) {
         removable.add((
@@ -1089,7 +1089,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   String _endpointLabel(_DeviceEndpoint endpoint) => switch (endpoint.hubType) {
         'hue' => 'Hue Bridge',
         'hue_ble' => 'Hue Bluetooth',
-        'aidot_ble' => 'Orein/AiDot Button',
+        'local_ble' => 'Local Bluetooth',
         _ => 'Matter',
       };
 
@@ -1124,9 +1124,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           'and nearby. After removal, it can be paired again without a '
           'factory reset.';
     }
-    if (endpoint.hubType == 'aidot_ble') {
-      return 'This will remove "$name" from Rhythm. Put the button back in '
-          'pairing mode and scan its QR code to add it again.';
+    if (endpoint.hubType == 'local_ble') {
+      return 'This will remove "$name" from Rhythm. Put the device back in '
+          'pairing mode and scan its setup code to add it again.';
     }
     return 'This will decommission "$name" and remove it from your system. '
         'The device can be re-paired afterwards.\n\nIf the device is offline '
@@ -1506,7 +1506,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           (endpoint) => switch (endpoint.hubType) {
             'matter' => syncProvider.supportsMatterRoomlessDevices,
             'hue_ble' => syncProvider.supportsHueBleRoomlessDevices,
-            'aidot_ble' => syncProvider.supportsAidotRoomlessDevices,
+            'local_ble' => syncProvider.supportsLocalBleRoomlessDevices,
             'hue' => false,
             _ => false,
           },
@@ -1927,7 +1927,7 @@ class _ConnectionRow extends StatelessWidget {
     final displayHub = switch (hubType) {
       'hue' => 'Hue Bridge',
       'hue_ble' => 'Hue Bluetooth',
-      'aidot_ble' => 'Orein/AiDot Button',
+      'local_ble' => 'Local Bluetooth',
       'ha' || 'homeassistant' || 'home_assistant' => 'Home Assistant',
       'matter' => 'Matter',
       _ => hubType,
@@ -1940,7 +1940,7 @@ class _ConnectionRow extends StatelessWidget {
           Icon(
             switch (hubType) {
               'hue' || 'hue_ble' => Icons.lightbulb,
-              'aidot_ble' => Icons.touch_app_rounded,
+              'local_ble' => Icons.bluetooth_rounded,
               'matter' => Icons.memory_outlined,
               _ => Icons.home,
             },

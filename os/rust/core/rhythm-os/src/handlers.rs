@@ -769,7 +769,13 @@ fn perform_unpair_device(
                         .get("hub_address")
                         .and_then(serde_json::Value::as_str)
                 })
-                .unwrap_or("local");
+                .unwrap_or_else(|| {
+                    if result.hub_type == crate::hub::HubType::LOCAL_BLE {
+                        "default"
+                    } else {
+                        "local"
+                    }
+                });
             let hub_key = crate::canonical::identity::HubKey::new(
                 crate::hub::HubType::new(&result.hub_type),
                 hub_address,
@@ -807,17 +813,22 @@ fn appliance_delete_unpair_request(
     // without publishing the full state DTO.
     supported_unpair_types.insert("matter");
     supported_unpair_types.insert("hue_ble");
-    supported_unpair_types.insert("aidot_ble");
+    supported_unpair_types.insert("local_ble");
     let direct_prefix = id
         .starts_with("matter-")
         .then_some("matter")
         .or_else(|| id.starts_with("hue-ble-").then_some("hue_ble"))
-        .or_else(|| id.starts_with("aidot-ble-").then_some("aidot_ble"));
+        .or_else(|| id.starts_with("local-ble-").then_some("local_ble"));
     let canonical = s.canonical_registry.get(id).or_else(|| {
         direct_prefix.and_then(|hub_type| {
+            let address = if hub_type == crate::hub::HubType::LOCAL_BLE {
+                "default"
+            } else {
+                "local"
+            };
             let key = crate::canonical::identity::HubKey::new(
                 crate::hub::HubType::new(hub_type),
-                "local",
+                address,
             );
             s.canonical_registry.find_by_native_id(&key, id)
         })
@@ -838,7 +849,12 @@ fn appliance_delete_unpair_request(
         }
     }
     let mut endpoints = if let Some(hub_type) = direct_prefix {
-        vec![(hub_type.to_string(), "local".to_string(), id.to_string())]
+        let address = if hub_type == crate::hub::HubType::LOCAL_BLE {
+            "default"
+        } else {
+            "local"
+        };
+        vec![(hub_type.to_string(), address.to_string(), id.to_string())]
     } else {
         canonical
             .map(|device| {
@@ -3049,7 +3065,9 @@ pub fn handle_get_version(version: &str) -> ApiResponse {
 
 struct PairingAttemptGuard {
     state: SharedState,
+    hub_type: String,
     pairing_slot: String,
+    resource_activity_fn: Option<crate::state::PairingResourceActivityFn>,
     release_on_drop: bool,
 }
 
@@ -3057,6 +3075,17 @@ impl Drop for PairingAttemptGuard {
     fn drop(&mut self) {
         if !self.release_on_drop {
             return;
+        }
+        if let Some(callback) = &self.resource_activity_fn {
+            if let Err(error) = callback(&self.hub_type, &self.pairing_slot, false) {
+                log::error!(
+                    target: "sys",
+                    "Could not release pairing resource {} for {}; keeping the slot reserved: {error:#}",
+                    self.pairing_slot,
+                    self.hub_type
+                );
+                return;
+            }
         }
         if let Ok(mut s) = self.state.lock() {
             s.finish_pairing(&self.pairing_slot);
@@ -3071,7 +3100,7 @@ impl PairingAttemptGuard {
 }
 
 fn pairing_slot(platform_type: &str, hub_type: &str) -> (String, bool) {
-    if platform_type == "appliance" && matches!(hub_type, "matter" | "hue_ble" | "aidot_ble") {
+    if platform_type == "appliance" && matches!(hub_type, "matter" | "hue_ble" | "local_ble") {
         ("appliance_bluetooth_adapter".to_string(), true)
     } else {
         (hub_type.to_string(), false)
@@ -3095,11 +3124,40 @@ fn try_acquire_pairing_guard(
         };
         return Err(ApiResponse::conflict(&message));
     }
-    Ok(PairingAttemptGuard {
+    let resource_activity_fn = s.pairing_resource_activity_fn.clone();
+    drop(s);
+    let mut guard = PairingAttemptGuard {
         state: state.clone(),
+        hub_type: hub_type.to_string(),
         pairing_slot,
+        resource_activity_fn,
         release_on_drop: true,
-    })
+    };
+    if let Some(callback) = &guard.resource_activity_fn {
+        if let Err(error) = callback(hub_type, &guard.pairing_slot, true) {
+            // The resource never acknowledged acquisition, so this request
+            // does not own a lease that can justify poisoning the logical
+            // pairing slot. A partially applied platform reservation still
+            // gets a best-effort rollback, but a rollback error must not turn
+            // an initialization failure into a permanent HTTP 409.
+            if let Err(rollback_error) = callback(hub_type, &guard.pairing_slot, false) {
+                log::error!(
+                    target: "sys",
+                    "Could not roll back unacknowledged pairing resource {} for {}: {rollback_error:#}",
+                    guard.pairing_slot,
+                    hub_type
+                );
+            }
+            if let Ok(mut state) = guard.state.lock() {
+                state.finish_pairing(&guard.pairing_slot);
+            }
+            guard.release_on_drop = false;
+            return Err(ApiResponse::server_error(format!(
+                "Could not reserve pairing resource for {hub_type}: {error:#}"
+            )));
+        }
+    }
+    Ok(guard)
 }
 
 fn try_acquire_unpairing_guard(
@@ -3108,7 +3166,7 @@ fn try_acquire_unpairing_guard(
 ) -> Result<Option<PairingAttemptGuard>, ApiResponse> {
     if !matches!(
         hub_type,
-        crate::hub::HubType::HUE_BLE | crate::hub::HubType::AIDOT_BLE
+        crate::hub::HubType::HUE_BLE | crate::hub::HubType::LOCAL_BLE
     ) {
         return Ok(None);
     }
@@ -3783,7 +3841,7 @@ mod tests {
             }));
         }
 
-        for hub_type in ["matter", "hue_ble", "aidot_ble"] {
+        for hub_type in ["matter", "hue_ble", "local_ble"] {
             let response = handle_pair_device(
                 &state,
                 &PairingRequest {
@@ -3805,6 +3863,200 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+    }
+
+    #[test]
+    fn appliance_pairing_guard_bridges_resource_activity_for_external_owner() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let activity = Arc::new(Mutex::new(Vec::<(String, String, bool)>::new()));
+        {
+            let activity_for_hook = activity.clone();
+            let activity_during_pair = activity.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.pairing_resource_activity_fn =
+                Some(Arc::new(move |hub_type, pairing_slot, active| {
+                    activity_for_hook.lock().unwrap().push((
+                        hub_type.to_string(),
+                        pairing_slot.to_string(),
+                        active,
+                    ));
+                    Ok(())
+                }));
+            state.start_pairing_fn = Some(Arc::new(move |_, _, _| {
+                assert_eq!(
+                    activity_during_pair.lock().unwrap().as_slice(),
+                    &[(
+                        "matter".to_string(),
+                        "appliance_bluetooth_adapter".to_string(),
+                        true,
+                    )]
+                );
+                Ok(PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    devices: Vec::new(),
+                    error: Some("test failure".to_string()),
+                    warnings: Vec::new(),
+                    details: None,
+                })
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: Some("resource-test".to_string()),
+                params: json!({"setup_payload": "redacted"}),
+            },
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            activity.lock().unwrap().as_slice(),
+            &[
+                (
+                    "matter".to_string(),
+                    "appliance_bluetooth_adapter".to_string(),
+                    true,
+                ),
+                (
+                    "matter".to_string(),
+                    "appliance_bluetooth_adapter".to_string(),
+                    false,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn pairing_resource_reservation_failure_rolls_back_slot() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let calls = calls.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.pairing_resource_activity_fn = Some(Arc::new(move |_, _, active| {
+                calls.lock().unwrap().push(active);
+                if active {
+                    anyhow::bail!("scanner did not stop")
+                }
+                Ok(())
+            }));
+            state.start_pairing_fn = Some(Arc::new(|_, _, _| {
+                panic!("integration must not start without the adapter reservation")
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: None,
+                params: json!({}),
+            },
+        );
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("scanner did not stop"));
+        assert_eq!(calls.lock().unwrap().as_slice(), &[true, false]);
+        assert!(state.lock().unwrap().pairing_in_progress.is_empty());
+    }
+
+    #[test]
+    fn pairing_resource_double_failure_still_releases_unacknowledged_slot() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let calls = calls.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.pairing_resource_activity_fn = Some(Arc::new(move |_, _, active| {
+                calls.lock().unwrap().push(active);
+                if active {
+                    anyhow::bail!("adapter runtime did not initialize")
+                } else {
+                    anyhow::bail!("adapter rollback also failed")
+                }
+            }));
+            state.start_pairing_fn = Some(Arc::new(|_, _, _| {
+                panic!("integration must not start without the adapter reservation")
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: None,
+                params: json!({}),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert_eq!(calls.lock().unwrap().as_slice(), &[true, false]);
+        assert!(state.lock().unwrap().pairing_in_progress.is_empty());
+    }
+
+    #[test]
+    fn pairing_resource_release_failure_keeps_slot_reserved() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.pairing_resource_activity_fn = Some(Arc::new(|_, _, active| {
+                if !active {
+                    anyhow::bail!("scanner did not resume")
+                }
+                Ok(())
+            }));
+            state.start_pairing_fn = Some(Arc::new(|_, _, _| {
+                Ok(PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    devices: Vec::new(),
+                    error: Some("test failure".to_string()),
+                    warnings: Vec::new(),
+                    details: None,
+                })
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: None,
+                params: json!({}),
+            },
+        );
+        assert_eq!(response.status, 200);
+        assert!(state
+            .lock()
+            .unwrap()
+            .pairing_in_progress
+            .contains("appliance_bluetooth_adapter"));
+    }
+
+    #[test]
+    fn appliance_direct_local_ble_delete_targets_vendor_neutral_hub() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().platform_type = "appliance";
+
+        let decision =
+            appliance_delete_unpair_request(&state, "local-ble-0123456789abcdef0123456789abcdef")
+                .unwrap();
+        let ApplianceDeleteUnpairDecision::Request(request) = decision else {
+            panic!("direct local BLE ID should resolve to an unpair request");
+        };
+        assert_eq!(request.hub_type, HubType::LOCAL_BLE);
+        assert_eq!(request.params["hub_address"], "default");
+        assert_eq!(
+            request.params["device_id"],
+            "local-ble-0123456789abcdef0123456789abcdef"
+        );
     }
 
     #[test]
@@ -6506,8 +6758,10 @@ mod tests {
                     hub_type: "hue".to_string(),
                     configurable: true,
                     device_onboarding_methods: Vec::new(),
+                    device_profiles: Vec::new(),
                     supports_unpairing: true,
                     supports_roomless_devices: true,
+                    blocks_room_readiness: true,
                 });
             state.start_unpairing_fn = Some(Arc::new(move |_, hub_type, params| {
                 calls
@@ -6556,8 +6810,10 @@ mod tests {
                     hub_type: "hue".to_string(),
                     configurable: true,
                     device_onboarding_methods: Vec::new(),
+                    device_profiles: Vec::new(),
                     supports_unpairing: true,
                     supports_roomless_devices: true,
+                    blocks_room_readiness: true,
                 });
             state
                 .canonical_registry
@@ -6592,8 +6848,10 @@ mod tests {
                     hub_type: "hue".to_string(),
                     configurable: true,
                     device_onboarding_methods: Vec::new(),
+                    device_profiles: Vec::new(),
                     supports_unpairing: true,
                     supports_roomless_devices: true,
+                    blocks_room_readiness: true,
                 });
             state
                 .canonical_registry

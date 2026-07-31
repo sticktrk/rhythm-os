@@ -148,8 +148,10 @@ impl ExternalLightHubIntegration for BluezHueBleIntegration {
             device_onboarding_methods: vec![
                 DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN.to_string()
             ],
+            device_profiles: Vec::new(),
             supports_unpairing: true,
             supports_roomless_devices: true,
+            blocks_room_readiness: true,
         }
     }
 

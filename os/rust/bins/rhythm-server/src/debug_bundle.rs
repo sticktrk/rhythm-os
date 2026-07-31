@@ -784,6 +784,9 @@ pub fn build_debug_bundle_with_app_log(
     let matter_controller_json =
         build_matter_controller_debug_json(&runtime, created_at, &mut diagnostics)
             .context("building Matter controller debug snapshot")?;
+    #[cfg(target_os = "linux")]
+    let shared_ble_runtime_json = build_shared_ble_runtime_json(created_at)
+        .context("building shared Bluetooth runtime snapshot")?;
     let host_flight_recorder_summary_json = if runtime.platform_context == "rpiz" {
         Some(
             rhythm_host_recorder::build_synthesis(Path::new(&runtime.data_dir)).unwrap_or_else(
@@ -869,6 +872,13 @@ pub fn build_debug_bundle_with_app_log(
         &mut generated_files,
         "matter_controller.json",
         matter_controller_json.as_bytes(),
+    )?;
+    #[cfg(target_os = "linux")]
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "shared_ble_runtime.json",
+        shared_ble_runtime_json.as_bytes(),
     )?;
     if let Some(summary) = &host_flight_recorder_summary_json {
         append_generated_file(
@@ -1628,6 +1638,24 @@ fn push_host_recorder_artifact(
         ),
         bytes_limit: Some(bytes_limit),
     });
+}
+
+#[cfg(target_os = "linux")]
+fn build_shared_ble_runtime_json(generated_at: DateTime<Utc>) -> Result<String> {
+    let runtime = rhythm_ble::bluez::diagnostics_if_initialized();
+    let status = if runtime.is_some() {
+        "initialized"
+    } else {
+        "not_initialized"
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "kind": "shared_ble_runtime",
+        "generated_at": generated_at.to_rfc3339(),
+        "status": status,
+        "runtime": runtime,
+    }))
+    .context("serializing shared Bluetooth runtime snapshot")
 }
 
 fn build_matter_controller_debug_json(
@@ -3357,6 +3385,33 @@ mod tests {
         files
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_ble_snapshot_preserves_the_runtime_initialization_state() {
+        let initialized_before = rhythm_ble::bluez::diagnostics_if_initialized().is_some();
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 34, 56)
+            .single()
+            .unwrap();
+
+        let snapshot: Value =
+            serde_json::from_str(&build_shared_ble_runtime_json(generated_at).unwrap()).unwrap();
+
+        assert_eq!(snapshot["kind"], "shared_ble_runtime");
+        assert_eq!(
+            snapshot["status"],
+            if initialized_before {
+                "initialized"
+            } else {
+                "not_initialized"
+            }
+        );
+        assert_eq!(
+            rhythm_ble::bluez::diagnostics_if_initialized().is_some(),
+            initialized_before
+        );
+    }
+
     #[test]
     fn file_name_and_log_dir_helpers_sanitize_dedup_and_honor_env() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -4132,6 +4187,8 @@ mod tests {
         assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("matter_controller.json"));
+        #[cfg(target_os = "linux")]
+        assert!(files.contains_key("shared_ble_runtime.json"));
         assert!(files.contains_key("host_flight_recorder_summary.json"));
         assert!(files.contains_key("bundle_diagnostics.json"));
         assert!(files.contains_key("manifest.json"));
@@ -4167,6 +4224,12 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value["archive_path"] == "matter_controller.json"));
+        #[cfg(target_os = "linux")]
+        assert!(manifest["generated_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["archive_path"] == "shared_ble_runtime.json"));
         assert!(manifest["generated_files"]
             .as_array()
             .unwrap()
@@ -4194,6 +4257,16 @@ mod tests {
         let diagnostics: Value =
             serde_json::from_slice(files.get("bundle_diagnostics.json").unwrap()).unwrap();
         assert_eq!(diagnostics["kind"], "debug_bundle_diagnostics");
+        #[cfg(target_os = "linux")]
+        {
+            let shared_ble_runtime: Value =
+                serde_json::from_slice(files.get("shared_ble_runtime.json").unwrap()).unwrap();
+            assert_eq!(shared_ble_runtime["kind"], "shared_ble_runtime");
+            assert!(matches!(
+                shared_ble_runtime["status"].as_str(),
+                Some("initialized" | "not_initialized")
+            ));
+        }
         let remote_access_status: Value =
             serde_json::from_slice(files.get("remote_access_status.json").unwrap()).unwrap();
         assert_eq!(

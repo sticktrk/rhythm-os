@@ -52,3 +52,6 @@ libc = "0.2"
 
 # mDNS (for discover endpoint)
 mdns-sd = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rhythm-ble = { path = "../../integrations/rhythm-ble", features = ["bluez"] }

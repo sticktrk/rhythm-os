@@ -386,13 +386,25 @@ void main() {
               'supports_roomless_devices': true,
             },
             {
-              'type': 'aidot_ble',
+              'type': 'local_ble',
               'configurable': false,
               'device_onboarding_methods': [
-                RhythmDeviceOnboardingMethod.aidotButtonQr,
+                RhythmDeviceOnboardingMethod.localBleQr,
+              ],
+              'device_profiles': [
+                {
+                  'id': RhythmDeviceProfileId.oreinOc02001Button,
+                  'device_type': 'button',
+                  'display_name': 'Button',
+                  'input_only': true,
+                  'onboarding_methods': [
+                    RhythmDeviceOnboardingMethod.localBleQr,
+                  ],
+                },
               ],
               'supports_unpairing': true,
               'supports_roomless_devices': true,
+              'blocks_room_readiness': false,
             },
           ],
         },
@@ -415,12 +427,162 @@ void main() {
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);
       expect(hello.capabilities!.hub('matter')?.supportsUnpairing, isTrue);
       expect(
-        hello.capabilities!.hub('aidot_ble')?.supportsDeviceOnboardingMethod(
-              RhythmDeviceOnboardingMethod.aidotButtonQr,
+        hello.capabilities!.hub('local_ble')?.supportsDeviceOnboardingMethod(
+              RhythmDeviceOnboardingMethod.localBleQr,
             ),
         isTrue,
       );
+      final localBle = hello.capabilities!.hub('local_ble')!;
+      expect(localBle.blocksRoomReadiness, isFalse);
+      expect(localBle.deviceProfiles, hasLength(1));
+      expect(
+        localBle.supportsDeviceProfile(
+          RhythmDeviceProfileId.oreinOc02001Button,
+        ),
+        isTrue,
+      );
+      expect(localBle.deviceProfiles.single.deviceType, 'button');
+      expect(localBle.deviceProfiles.single.inputOnly, isTrue);
+      expect(
+        localBle.deviceProfiles.single.supportsOnboardingMethod(
+          RhythmDeviceOnboardingMethod.localBleQr,
+        ),
+        isTrue,
+      );
       expect(hello.powerSchedules.single['node_id'], 'room-1');
+    });
+
+    test('tolerates absent or malformed local device profile metadata', () {
+      final hello = RhythmHello.fromJson({
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'legacy_local',
+              'configurable': false,
+              'device_profiles': 'not-a-list',
+            },
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'device_profiles': [
+                null,
+                'not-an-object',
+                {'device_type': 'button'},
+                {
+                  'id': 7,
+                  'device_type': 'button',
+                },
+                {
+                  'id': 'future.vendor.bad-device-type.v1',
+                  'device_type': 7,
+                },
+                {
+                  'id': 'future.vendor.bad-display-name.v1',
+                  'display_name': false,
+                },
+                {
+                  'id': 'future.vendor.bad-input-only.v1',
+                  'input_only': 'false',
+                },
+                {
+                  'id': 'future.vendor.bad-aliases.v1',
+                  'compatible_profile_ids': 'future.vendor.old.v1',
+                },
+                {
+                  'id': 'future.vendor.bad-onboarding.v1',
+                  'onboarding_methods': {
+                    'method': 'local_ble_nearby_scan',
+                  },
+                },
+                {'id': 'Future.vendor.bulb.v1'},
+                {'id': 'future.vendor.bulb.v01'},
+                {
+                  'id': 'future.vendor.bulb.v2',
+                  'compatible_profile_ids': [
+                    'future.vendor.bulb.v1',
+                    'future.vendor.bulb.v1',
+                    'future.vendor.bulb.v2',
+                    'future.vendor.bulb.v3',
+                    'other.vendor.bulb.v1',
+                    'future.vendor.bulb.v01',
+                    7,
+                  ],
+                  'device_type': 'light',
+                  'display_name': 'BLE Bulb',
+                  'input_only': false,
+                  'onboarding_methods': ['local_ble_nearby_scan'],
+                  'future_field': {'ignored': true},
+                },
+              ],
+            },
+            {
+              'type': 'matter',
+              'configurable': true,
+              'device_onboarding_methods': [
+                RhythmDeviceOnboardingMethod.matterOnNetworkSetupCode,
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+            {
+              'type': 'hue_ble',
+              'configurable': false,
+              'device_onboarding_methods': [
+                RhythmDeviceOnboardingMethod.hueBleNearbyScan,
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+          ],
+        },
+      });
+
+      final legacy = hello.capabilities!.hub('legacy_local')!;
+      expect(legacy.deviceProfiles, isEmpty);
+      expect(legacy.blocksRoomReadiness, isTrue);
+      expect(
+        RhythmDeviceProfile.fromJson({
+          'id': 'legacy.profile.v1',
+          'device_type': 'button',
+        }).onboardingMethods,
+        isEmpty,
+      );
+      expect(
+        RhythmDeviceProfile.fromJson({
+          'id': 'legacy.profile.v1',
+          'device_type': 'button',
+        }).compatibleProfileIds,
+        isEmpty,
+      );
+
+      final localBle = hello.capabilities!.hub('local_ble')!;
+      expect(localBle.deviceProfiles, hasLength(1));
+      expect(localBle.deviceProfiles.single.id, 'future.vendor.bulb.v2');
+      expect(
+        localBle.deviceProfiles.single.compatibleProfileIds,
+        ['future.vendor.bulb.v1'],
+      );
+      expect(localBle.supportsDeviceProfile('future.vendor.bulb.v1'), isTrue);
+      expect(localBle.supportsDeviceProfile('future.vendor.bulb.v3'), isFalse);
+      expect(localBle.deviceProfiles.single.deviceType, 'light');
+      expect(localBle.deviceProfiles.single.inputOnly, isFalse);
+      expect(
+        localBle.deviceProfiles.single.onboardingMethods,
+        ['local_ble_nearby_scan'],
+      );
+      expect(
+        localBle.deviceProfiles.single.supportsOnboardingMethod(
+          RhythmDeviceOnboardingMethod.localBleQr,
+        ),
+        isFalse,
+      );
+      expect(hello.capabilities!.hub('matter')?.canAddDevice, isTrue);
+      expect(
+        hello.capabilities!.hub('hue_ble')?.supportsDeviceOnboardingMethod(
+              RhythmDeviceOnboardingMethod.hueBleNearbyScan,
+            ),
+        isTrue,
+      );
     });
 
     test('parses input bindings from state snapshots', () {

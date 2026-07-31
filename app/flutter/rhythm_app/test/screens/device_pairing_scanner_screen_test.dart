@@ -4,6 +4,7 @@ import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_code_entry_screen.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/capturing_analytics_backend.dart';
 
@@ -141,6 +142,7 @@ void main() {
     expect(event.properties, {
       'code_kind': 'matter',
       'outcome': 'continued_to_pairing',
+      'input_method': 'camera',
     });
     expect(
       event.properties.values,
@@ -148,9 +150,9 @@ void main() {
     );
   });
 
-  testWidgets('returns a supported Orein/AiDot QR without logging its payload',
+  testWidgets('returns a supported local-BLE profile without logging QR data',
       (tester) async {
-    const qr = 'B:1CD6BD2273F9%G\$S:L10599FAR002073\$M:A001462';
+    const qr = 'B:0A0B0C0D0E0F%G\$S:SYNTHETIC000001\$M:TESTMODEL001';
     DevicePairingScannerResult? result;
     await tester.pumpWidget(
       MaterialApp(
@@ -160,7 +162,10 @@ void main() {
               result = await Navigator.of(context).push(
                 MaterialPageRoute<DevicePairingScannerResult>(
                   builder: (_) => DevicePairingScannerScreen(
-                    aidotButtonPairingAvailable: true,
+                    supportedLocalBleProfileIds: const {
+                      RhythmDeviceProfileId.oreinOc02001Button,
+                    },
+                    journeyId: 'journey-local-1',
                     cameraBuilder: (context, onDetect) {
                       detect = onDetect;
                       return const ColoredBox(color: Colors.black);
@@ -179,16 +184,110 @@ void main() {
     detect(const [qr]);
     await tester.pumpAndSettle();
 
-    expect(result?.action, DevicePairingScannerAction.aidotButton);
-    expect(result?.payload, qr);
+    expect(result?.action, DevicePairingScannerAction.localBle);
+    expect(
+      result?.localBleSetup?.profileId,
+      RhythmDeviceProfileId.oreinOc02001Button,
+    );
+    expect(result?.inputMethod, 'camera');
+    expect(result?.journeyId, 'journey-local-1');
     final event = analyticsBackend.events.singleWhere(
       (event) => event.name == 'device_pairing_code_detected',
     );
     expect(event.properties, {
-      'code_kind': 'aidot_button',
+      'code_kind': 'local_ble',
       'outcome': 'continued_to_pairing',
+      'journey_id': 'journey-local-1',
+      'input_method': 'camera',
+      'profile_id': RhythmDeviceProfileId.oreinOc02001Button,
     });
     expect(event.properties.values, isNot(contains(qr)));
+  });
+
+  testWidgets('asks when Matter and a supported local-BLE code share a frame',
+      (tester) async {
+    const qr = 'B:0A0B0C0D0E0F%G\$S:SYNTHETIC000001\$M:TESTMODEL001';
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push(
+                MaterialPageRoute<DevicePairingScannerResult>(
+                  builder: (_) => DevicePairingScannerScreen(
+                    supportedLocalBleProfileIds: const {
+                      RhythmDeviceProfileId.oreinOc02001Button,
+                    },
+                    journeyId: 'journey-multiple-1',
+                    cameraBuilder: (context, onDetect) {
+                      detect = onDetect;
+                      return const ColoredBox(color: Colors.black);
+                    },
+                  ),
+                ),
+              );
+            },
+            child: const Text('Open scanner'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+    detect(const [qr, 'MT:Y.K908OC16750648G00']);
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('choose-matter')), findsOneWidget);
+    expect(find.byKey(const ValueKey('choose-local-ble')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('choose-local-ble')));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.localBle);
+    expect(result?.journeyId, 'journey-multiple-1');
+    final detection = analyticsBackend.events.firstWhere(
+      (event) => event.name == 'device_pairing_code_detected',
+    );
+    expect(detection.properties['code_kind'], 'multiple');
+    expect(
+      detection.properties['profile_id'],
+      RhythmDeviceProfileId.oreinOc02001Button,
+    );
+    expect(detection.properties.values, isNot(contains(qr)));
+  });
+
+  testWidgets('unsupported local-BLE data does not detour a valid Matter scan',
+      (tester) async {
+    const qr = 'B:0A0B0C0D0E0F%G\$S:SYNTHETIC000001\$M:TESTMODEL001';
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push(
+                MaterialPageRoute<DevicePairingScannerResult>(
+                  builder: (_) => DevicePairingScannerScreen(
+                    cameraBuilder: (context, onDetect) {
+                      detect = onDetect;
+                      return const ColoredBox(color: Colors.black);
+                    },
+                  ),
+                ),
+              );
+            },
+            child: const Text('Open scanner'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+    detect(const [qr, 'MT:Y.K908OC16750648G00']);
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.matter);
+    expect(result?.payload, 'MT:Y.K908OC16750648G00');
   });
 
   testWidgets('returns a Hue serial only for connected bridge search', (
@@ -300,7 +399,7 @@ void main() {
       await tester.pump();
 
       expect(result, isNull);
-      expect(find.text('Choose how to add this light'), findsOneWidget);
+      expect(find.text('Choose how to add this device'), findsOneWidget);
       expect(find.text('Search with Hue Bridge'), findsOneWidget);
       expect(find.text('Pair with Matter'), findsOneWidget);
 
@@ -413,6 +512,61 @@ void main() {
     expect(result?.action, DevicePairingScannerAction.matter);
     expect(result?.payload, '3497-011-2332');
     expect(result?.inputMethod, 'manual_code');
+  });
+
+  testWidgets('manual local-BLE entry preserves journey and input method',
+      (tester) async {
+    const qr = 'B:0A0B0C0D0E0F%G\$S:SYNTHETIC000001\$M:TESTMODEL001';
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await Navigator.of(context).push(
+                  MaterialPageRoute<DevicePairingScannerResult>(
+                    builder: (_) => const DevicePairingCodeEntryScreen(
+                      supportedLocalBleProfileIds: {
+                        RhythmDeviceProfileId.oreinOc02001Button,
+                      },
+                      journeyId: 'journey-manual-local-1',
+                    ),
+                  ),
+                );
+              },
+              child: const Text('Enter manually'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Enter manually'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      qr,
+    );
+    tester.testTextInput.hide();
+    await tester.ensureVisible(find.text('Identify & Continue'));
+    await tester.pump();
+    await tester.tap(find.text('Identify & Continue'));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.localBle);
+    expect(result?.inputMethod, 'manual_code');
+    expect(result?.journeyId, 'journey-manual-local-1');
+    expect(
+      result?.localBleSetup?.profileId,
+      RhythmDeviceProfileId.oreinOc02001Button,
+    );
+    final event = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'device_pairing_code_detected',
+    );
+    expect(event.properties['input_method'], 'manual_code');
+    expect(event.properties['journey_id'], 'journey-manual-local-1');
+    expect(event.properties.values, isNot(contains(qr)));
   });
 
   testWidgets('manual entry routes a Hue serial through the bridge',

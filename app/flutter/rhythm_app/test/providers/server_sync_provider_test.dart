@@ -1863,7 +1863,7 @@ void main() {
       expect(provider.canAddMatterDevice, isFalse);
     });
 
-    test('exposes AiDot QR pairing only from explicit hub capabilities',
+    test('exposes local-BLE QR only for an explicitly advertised profile',
         () async {
       final provider = ServerSyncProvider(
         connection: connection,
@@ -1878,21 +1878,159 @@ void main() {
         'capabilities': {
           'hubs': [
             {
-              'type': 'aidot_ble',
+              'type': 'local_ble',
               'configurable': false,
-              'device_onboarding_methods': ['aidot_button_qr'],
+              'device_onboarding_methods': ['local_ble_qr'],
+              'device_profiles': [
+                {
+                  'id': RhythmDeviceProfileId.oreinOc02001Button,
+                  'device_type': 'button',
+                  'display_name': 'Button',
+                  'input_only': true,
+                  'onboarding_methods': ['local_ble_qr'],
+                },
+              ],
               'supports_unpairing': true,
               'supports_roomless_devices': true,
+              'blocks_room_readiness': false,
             },
           ],
         },
       }));
       await Future<void>.delayed(Duration.zero);
 
-      expect(provider.canAddAidotButton, isTrue);
-      expect(provider.canUnpairAidotButtons, isTrue);
-      expect(provider.supportsAidotRoomlessDevices, isTrue);
+      expect(
+        provider.canAddLocalBleProfile(
+          RhythmDeviceProfileId.oreinOc02001Button,
+        ),
+        isTrue,
+      );
+      expect(provider.canUnpairLocalBleDevices, isTrue);
+      expect(provider.supportsLocalBleRoomlessDevices, isTrue);
       expect(provider.canScanToAddDevice, isTrue);
+    });
+
+    test('routes a known parser alias to the advertised current BLE profile',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['local_ble_qr'],
+              'device_profiles': [
+                {
+                  'id': 'orein.oc02001.button.v2',
+                  'compatible_profile_ids': [
+                    RhythmDeviceProfileId.oreinOc02001Button,
+                  ],
+                  'device_type': 'button',
+                  'display_name': 'Button',
+                  'input_only': true,
+                  'onboarding_methods': ['local_ble_qr'],
+                },
+              ],
+            },
+          ],
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        provider.supportedLocalBleProfileIds,
+        {RhythmDeviceProfileId.oreinOc02001Button},
+      );
+      expect(
+        provider.canonicalLocalBleProfileId(
+          RhythmDeviceProfileId.oreinOc02001Button,
+        ),
+        'orein.oc02001.button.v2',
+      );
+      expect(
+          provider.canAddLocalBleProfile('orein.oc02001.button.v2'), isFalse);
+    });
+
+    test('requires the matching profile to advertise QR intake', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['local_ble_qr'],
+              'device_profiles': [
+                {
+                  'id': RhythmDeviceProfileId.oreinOc02001Button,
+                  'device_type': 'button',
+                  'display_name': 'Button',
+                  'input_only': true,
+                },
+              ],
+            },
+          ],
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.supportedLocalBleProfileIds, isEmpty);
+      expect(provider.canAddLocalBleDevice, isFalse);
+      expect(provider.canScanToAddDevice, isFalse);
+    });
+
+    test('does not expose a newer QR profile without a local parser', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['local_ble_qr'],
+              'device_profiles': [
+                {
+                  'id': 'future.vendor.bulb.v1',
+                  'device_type': 'light',
+                  'display_name': 'BLE Bulb',
+                  'input_only': false,
+                  'onboarding_methods': ['local_ble_qr'],
+                },
+              ],
+            },
+          ],
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.supportedLocalBleProfileIds, isEmpty);
+      expect(provider.canAddLocalBleDevice, isFalse);
+      expect(provider.canScanToAddDevice, isFalse);
     });
 
     test('offers Hue serial intake only for an advertised connected bridge',
@@ -3742,6 +3880,99 @@ void main() {
 
       expect(provider.hasPendingAutomaticHubStartup, isFalse);
       expect(provider.roomsReadyForDisplay, isTrue);
+    });
+
+    test('explicit input-only local BLE startup never gates rooms', () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      helloConnection.emitHello(RhythmHello.fromJson({
+        'hubs': [
+          {
+            'type': 'local_ble',
+            'address': 'default',
+            'connected': false,
+            'startup_retry': {'status': 'scheduled'},
+          },
+        ],
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'blocks_room_readiness': false,
+              'device_onboarding_methods': ['local_ble_qr'],
+              'device_profiles': [
+                {
+                  'id': RhythmDeviceProfileId.oreinOc02001Button,
+                  'device_type': 'button',
+                  'display_name': 'Button',
+                  'input_only': true,
+                  'onboarding_methods': ['local_ble_qr'],
+                },
+              ],
+            },
+          ],
+        },
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasPendingAutomaticHubStartup, isFalse);
+      expect(provider.roomsReadyForDisplay, isTrue);
+    });
+
+    test('local BLE lighting profiles can retain the room readiness gate',
+        () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      helloConnection.emitHello(RhythmHello.fromJson({
+        'hubs': [
+          {
+            'type': 'local_ble',
+            'address': 'default',
+            'connected': false,
+            'startup_retry': {'status': 'scheduled'},
+          },
+        ],
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'blocks_room_readiness': true,
+              'device_onboarding_methods': ['local_ble_nearby_scan'],
+              'device_profiles': [
+                {
+                  'id': 'future.vendor.bulb.v1',
+                  'device_type': 'light',
+                  'display_name': 'BLE Bulb',
+                  'input_only': false,
+                  'onboarding_methods': ['local_ble_nearby_scan'],
+                },
+              ],
+            },
+          ],
+        },
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasPendingAutomaticHubStartup, isTrue);
+      expect(provider.roomsReadyForDisplay, isFalse);
+      expect(provider.canAddLocalBleDevice, isFalse);
+      expect(provider.canScanToAddDevice, isFalse);
     });
 
     test('manual hub retry state allows rooms so recovery banner can render',

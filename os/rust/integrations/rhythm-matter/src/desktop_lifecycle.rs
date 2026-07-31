@@ -315,8 +315,10 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             hub_type: "matter".to_string(),
             configurable: true,
             device_onboarding_methods,
+            device_profiles: Vec::new(),
             supports_unpairing: true,
             supports_roomless_devices: true,
+            blocks_room_readiness: true,
         }
     }
 

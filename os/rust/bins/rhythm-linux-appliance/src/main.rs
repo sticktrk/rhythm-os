@@ -196,6 +196,14 @@ fn main() -> Result<()> {
             Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
+        s.pairing_resource_activity_fn = Some(Arc::new(|hub_type, slot, active| {
+            if hub_type == rhythm_os::hub::HubType::MATTER && slot == "appliance_bluetooth_adapter"
+            {
+                rhythm_ble::bluez::set_external_adapter_reserved(active)
+            } else {
+                Ok(())
+            }
+        }));
         s.run_device_test_fn = Some(callbacks.run_device_test_fn);
         s.save_device_test_report_fn = Some(callbacks.save_device_test_report_fn);
         s.hub_capabilities = callbacks.hub_capabilities.clone();
@@ -368,6 +376,15 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Hue BLE factory-reset quiescence lock poisoned"))? =
             quiescence;
+        if let Err(error) = rhythm_ble::bluez_lifecycle::quiesce_for_factory_reset(state) {
+            warn!(
+                target: "sys",
+                "Local Bluetooth observers did not quiesce cleanly before factory reset: {error:#}; scheduling a recovery reboot"
+            );
+            rhythm_server::self_update::schedule_factory_reset_restart();
+            return Err(error)
+                .context("quiescing local Bluetooth profile observers for factory reset");
+        }
         Ok(())
     }));
     state.after_factory_reset_fn = Some(Arc::new(move |_| {
@@ -401,6 +418,10 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
                 handoff.refreshed
             );
         }
+        final_shared_ble_quiesce_or_schedule_recovery(
+            rhythm_ble::bluez::quiesce_shared_runtime(),
+            rhythm_server::self_update::schedule_factory_reset_restart,
+        )?;
         // Every unrelated fallible platform write completed in the pre-reset
         // barrier. From here through key deletion, carry the vendor handoff
         // deadline and never restart BlueZ after a possibly partial scrub.
@@ -454,6 +475,23 @@ fn final_hue_handoff_or_schedule_recovery(
             );
             schedule_recovery();
             Err(error).context("refreshing final Hue BLE factory-reset handoffs")
+        }
+    }
+}
+
+fn final_shared_ble_quiesce_or_schedule_recovery(
+    result: Result<()>,
+    schedule_recovery: impl FnOnce(),
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            warn!(
+                target: "sys",
+                "Shared Bluetooth runtime did not quiesce after factory-reset state deletion: {error:#}; scheduling a recovery reboot"
+            );
+            schedule_recovery();
+            Err(error).context("quiescing the shared Bluetooth runtime for factory reset")
         }
     }
 }
@@ -958,7 +996,8 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 mod tests {
     use super::{
         apply_appliance_matter_attestation_defaults, boot_success_health, env_value_is_truthy,
-        extract_serial_suffix, final_hue_handoff_or_schedule_recovery, install_factory_reset_hook,
+        extract_serial_suffix, final_hue_handoff_or_schedule_recovery,
+        final_shared_ble_quiesce_or_schedule_recovery, install_factory_reset_hook,
         periodic_startup_action, run_bootstate_script_action, save_commissioning_wifi_credentials,
         spawn_appliance_background_workers_with, startup_wifi_restore_action, BootSuccessHealth,
         PeriodicStartupAction, StartupWifiRestoreAction,
@@ -1251,6 +1290,21 @@ mod tests {
         .expect_err("a failed final handoff must abort before BlueZ stop");
 
         assert!(format!("{error:#}").contains("refreshing final Hue BLE"));
+        assert!(recovery_scheduled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_shared_ble_quiesce_schedules_post_barrier_recovery() {
+        let recovery_scheduled = Arc::new(AtomicBool::new(false));
+        let recovery_scheduled_for_callback = recovery_scheduled.clone();
+
+        let error = final_shared_ble_quiesce_or_schedule_recovery(
+            Err(anyhow::anyhow!("injected shared runtime join failure")),
+            move || recovery_scheduled_for_callback.store(true, Ordering::SeqCst),
+        )
+        .expect_err("a failed shared runtime join must schedule appliance recovery");
+
+        assert!(format!("{error:#}").contains("quiescing the shared Bluetooth runtime"));
         assert!(recovery_scheduled.load(Ordering::SeqCst));
     }
 

@@ -21,6 +21,7 @@ pub struct PairingRequest {
     /// Matter: `{ "setup_payload": "3497-011-2332", "network": "wifi", "rendezvous": "on_network" }`
     /// Hue BLE: `{}` (nearby scan)
     /// Hue Bridge: `{ "serial": "E277DA", "hub_address": "192.0.2.10" }`
+    /// Local BLE profile: `{ "profile_id": "...", "setup": { ...bounded parsed fields... } }`
     #[serde(default)]
     pub params: serde_json::Value,
 }
@@ -236,6 +237,9 @@ pub struct UnpairingResult {
 /// Cap on persisted pairing-history entries. Pairing is user-driven and
 /// rare, so 200 entries covers months while keeping the file tiny.
 pub const PAIRING_HISTORY_LIMIT: usize = 200;
+// `profile_id` is optional and backward-compatible, so the document schema
+// stays at v1. Keeping the version stable also prevents a downgraded binary
+// from relabeling and rewriting an unknown future schema as one it owns.
 pub const PAIRING_HISTORY_SCHEMA_VERSION: u32 = 1;
 
 /// One pair/unpair attempt, persisted so a debug bundle can answer "what
@@ -249,6 +253,11 @@ pub struct PairingHistoryEntry {
     /// "pair" or "unpair".
     pub kind: String,
     pub hub_type: String,
+    /// Bounded protocol profile identifier (for example
+    /// `orein.oc02001.button.v1`). Raw setup or hardware identity values are
+    /// never persisted in pairing history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,6 +311,23 @@ fn param_str(params: &serde_json::Value, key: &str) -> Option<String> {
     params.get(key)?.as_str().map(str::to_string)
 }
 
+fn bounded_profile_id(params: &serde_json::Value) -> Option<String> {
+    let profile_id = params.get("profile_id")?.as_str()?;
+    crate::hub::is_valid_device_profile_id(profile_id).then(|| profile_id.to_string())
+}
+
+fn canonical_advertised_profile_id(
+    capabilities: &[crate::hub::HubIntegrationCapability],
+    hub_type: &str,
+    profile_id: &str,
+) -> Option<String> {
+    capabilities
+        .iter()
+        .filter(|capability| capability.hub_type == hub_type)
+        .flat_map(|capability| &capability.device_profiles)
+        .find_map(|profile| profile.canonical_id_for(profile_id).map(str::to_string))
+}
+
 /// Build a history entry for a pair attempt from its request params + session.
 pub fn pairing_history_entry_for_pair(
     hub_type: &str,
@@ -318,6 +344,7 @@ pub fn pairing_history_entry_for_pair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "pair".to_string(),
         hub_type: hub_type.to_string(),
+        profile_id: bounded_profile_id(params),
         device_id: session
             .device
             .as_ref()
@@ -352,6 +379,7 @@ pub fn pairing_history_entry_for_unpair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "unpair".to_string(),
         hub_type: hub_type.to_string(),
+        profile_id: bounded_profile_id(params),
         device_id: device_id
             .map(str::to_string)
             .or_else(|| param_str(params, "device_id")),
@@ -371,9 +399,16 @@ pub fn pairing_history_entry_for_unpair(
 /// Pairing events are rare and user-driven, so the read-modify-write cost is
 /// irrelevant; keeping the history out of `AppState` avoids another
 /// hydration path. IO runs outside the state lock.
-pub fn record_pairing_history(state: &crate::state::SharedState, entry: PairingHistoryEntry) {
+pub fn record_pairing_history(state: &crate::state::SharedState, mut entry: PairingHistoryEntry) {
     let storage = {
         let Ok(s) = state.lock() else { return };
+        // Request parameters are caller-controlled. Persist only an
+        // advertised profile contract, canonicalizing a declared compatible
+        // alias to the appliance's current decoder ID. A merely well-formed
+        // value could still be a deliberately lowercased hardware identity.
+        entry.profile_id = entry.profile_id.as_deref().and_then(|profile_id| {
+            canonical_advertised_profile_id(&s.hub_capabilities, &entry.hub_type, profile_id)
+        });
         s.storage.clone()
     };
     let Some(storage) = storage else { return };
@@ -389,6 +424,16 @@ pub fn record_pairing_history(state: &crate::state::SharedState, entry: PairingH
             return;
         }
     };
+    if history.schema_version > PAIRING_HISTORY_SCHEMA_VERSION {
+        log::warn!(
+            target: "pair",
+            "Pairing history uses a newer schema; preserving it without appending"
+        );
+        return;
+    }
+    if history.schema_version < PAIRING_HISTORY_SCHEMA_VERSION {
+        history.schema_version = PAIRING_HISTORY_SCHEMA_VERSION;
+    }
     history.entries.push(entry);
     let history = history.normalized();
     if let Err(e) = storage.save_pairing_history(&history) {
@@ -428,6 +473,84 @@ mod tests {
             !json.contains("SECRET"),
             "setup payload must never reach the history: {json}"
         );
+    }
+
+    #[test]
+    fn pair_entry_keeps_only_a_bounded_profile_identifier() {
+        let session = PairingSession {
+            hub_type: "local_ble".to_string(),
+            status: PairingStatus::Failed,
+            device: None,
+            devices: Vec::new(),
+            error: Some("identity mismatch".to_string()),
+            warnings: Vec::new(),
+            details: None,
+        };
+        let params = serde_json::json!({
+            "profile_id": "orein.oc02001.button.v1",
+            "setup": {"ble_identity": "0A0B0C0D0E0F", "serial_metadata": "secret"}
+        });
+        let entry = pairing_history_entry_for_pair("local_ble", &params, &session);
+        assert_eq!(entry.profile_id.as_deref(), Some("orein.oc02001.button.v1"));
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("0A0B0C0D0E0F"));
+        assert!(!json.contains("secret"));
+
+        let invalid = pairing_history_entry_for_pair(
+            "local_ble",
+            &serde_json::json!({"profile_id": "RAW IDENTITY/NOT SAFE"}),
+            &session,
+        );
+        assert_eq!(invalid.profile_id, None);
+        let lowercased_identity = pairing_history_entry_for_pair(
+            "local_ble",
+            &serde_json::json!({"profile_id": "0a0b0c0d0e0f"}),
+            &session,
+        );
+        assert_eq!(lowercased_identity.profile_id, None);
+    }
+
+    #[test]
+    fn only_an_advertised_profile_identifier_is_eligible_for_persistence() {
+        let capabilities = vec![crate::hub::HubIntegrationCapability {
+            hub_type: "local_ble".to_string(),
+            configurable: false,
+            device_onboarding_methods: vec!["local_ble_qr".to_string()],
+            device_profiles: vec![crate::hub::HubDeviceProfileCapability {
+                id: "orein.oc02001.button.v2".to_string(),
+                compatible_profile_ids: vec!["orein.oc02001.button.v1".to_string()],
+                device_type: "button".to_string(),
+                display_name: "Button".to_string(),
+                input_only: true,
+                onboarding_methods: vec!["local_ble_qr".to_string()],
+            }],
+            supports_unpairing: true,
+            supports_roomless_devices: true,
+            blocks_room_readiness: false,
+        }];
+
+        assert_eq!(
+            canonical_advertised_profile_id(&capabilities, "local_ble", "orein.oc02001.button.v2",)
+                .as_deref(),
+            Some("orein.oc02001.button.v2")
+        );
+        assert_eq!(
+            canonical_advertised_profile_id(&capabilities, "local_ble", "orein.oc02001.button.v1",)
+                .as_deref(),
+            Some("orein.oc02001.button.v2")
+        );
+        assert!(canonical_advertised_profile_id(
+            &capabilities,
+            "local_ble",
+            "identity.abcdef123456.device.v1",
+        )
+        .is_none());
+        assert!(canonical_advertised_profile_id(
+            &capabilities,
+            "matter",
+            "orein.oc02001.button.v1",
+        )
+        .is_none());
     }
 
     #[test]
@@ -558,6 +681,7 @@ mod tests {
             epoch_ms,
             kind: "pair".to_string(),
             hub_type: "matter".to_string(),
+            profile_id: None,
             device_id: None,
             force: None,
             rendezvous: None,
@@ -584,5 +708,34 @@ mod tests {
             PAIRING_HISTORY_LIMIT as u64 + 9,
             "newest entries must survive the cap"
         );
+    }
+
+    #[test]
+    fn existing_history_defaults_profile_id_without_a_schema_migration() {
+        let history: PairingHistory = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "entries": [{
+                "at": "2026-01-01T00:00:00.000Z",
+                "epoch_ms": 1,
+                "kind": "pair",
+                "hub_type": "matter",
+                "status": "complete"
+            }]
+        }))
+        .unwrap();
+        let history = history.normalized();
+        assert_eq!(history.schema_version, PAIRING_HISTORY_SCHEMA_VERSION);
+        assert_eq!(history.entries[0].profile_id, None);
+    }
+
+    #[test]
+    fn normalization_never_relabels_an_unknown_future_schema() {
+        let history = PairingHistory {
+            schema_version: 99,
+            entries: Vec::new(),
+        }
+        .normalized();
+
+        assert_eq!(history.schema_version, 99);
     }
 }

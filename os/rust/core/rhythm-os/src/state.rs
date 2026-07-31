@@ -31,6 +31,15 @@ use crate::storage::{
 };
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
+/// Platform hook for coordinating an exclusive pairing resource with work
+/// below the integration layer. The arguments are `(hub_type, slot, active)`.
+///
+/// The Linux appliance uses this to pause the shared local-BLE discovery
+/// broker only while an external central-role owner such as Matter/chipd owns
+/// the adapter. BLE drivers that consume the broker keep it active.
+pub type PairingResourceActivityFn =
+    Arc<dyn Fn(&str, &str, bool) -> anyhow::Result<()> + Send + Sync>;
+
 /// Ephemeral startup-bootstrap retry state for one configured hub.
 #[derive(Clone, Debug)]
 pub struct HubStartupRetryState {
@@ -444,8 +453,12 @@ pub struct AppState {
     /// API-facing capability metadata for integrations available on this platform.
     pub hub_capabilities: Vec<crate::hub::HubIntegrationCapability>,
     /// Pairing sessions currently running, keyed by their exclusive resource
-    /// slot (normally hub type; appliance Matter/Hue BLE share the adapter).
+    /// slot (normally hub type; appliance Matter, Hue BLE, and local BLE
+    /// clients share the adapter).
     pub pairing_in_progress: HashSet<String>,
+    /// Optional platform bridge for applying the resource reservation below
+    /// every integration and background observer.
+    pub pairing_resource_activity_fn: Option<PairingResourceActivityFn>,
 
     // ---- Canonical device registry + topology ----
     /// Canonical device registry (cross-hub device identity and dedup).
@@ -847,6 +860,7 @@ impl Default for AppState {
             hub_startup_retry: HashMap::new(),
             hub_capabilities: Vec::new(),
             pairing_in_progress: HashSet::new(),
+            pairing_resource_activity_fn: None,
             canonical_registry: CanonicalRegistry::new(),
             topology: RoomTopologyStore::new(),
             topology_group_sync_in_progress: false,

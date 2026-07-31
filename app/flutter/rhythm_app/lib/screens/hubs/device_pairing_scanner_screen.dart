@@ -7,40 +7,48 @@ import '../../services/analytics_service.dart';
 import '../../services/device_pairing_code.dart';
 import '../../widgets/solar_orbit.dart';
 
-enum DevicePairingScannerAction { matter, hueBridge, aidotButton, enterCode }
+enum DevicePairingScannerAction { matter, hueBridge, localBle, enterCode }
 
 class DevicePairingScannerResult {
   const DevicePairingScannerResult._({
     required this.action,
     this.payload,
+    this.localBleSetup,
     this.inputMethod = 'camera',
+    this.journeyId,
   });
 
   const DevicePairingScannerResult.matter(
     String payload, {
     String inputMethod = 'camera',
+    String? journeyId,
   }) : this._(
           action: DevicePairingScannerAction.matter,
           payload: payload,
           inputMethod: inputMethod,
+          journeyId: journeyId,
         );
 
   const DevicePairingScannerResult.hueBridge(
     String serial, {
     String inputMethod = 'camera',
+    String? journeyId,
   }) : this._(
           action: DevicePairingScannerAction.hueBridge,
           payload: serial,
           inputMethod: inputMethod,
+          journeyId: journeyId,
         );
 
-  const DevicePairingScannerResult.aidotButton(
-    String payload, {
+  const DevicePairingScannerResult.localBle(
+    LocalBleSetup setup, {
     String inputMethod = 'camera',
+    String? journeyId,
   }) : this._(
-          action: DevicePairingScannerAction.aidotButton,
-          payload: payload,
+          action: DevicePairingScannerAction.localBle,
+          localBleSetup: setup,
           inputMethod: inputMethod,
+          journeyId: journeyId,
         );
 
   const DevicePairingScannerResult.enterCode()
@@ -48,7 +56,9 @@ class DevicePairingScannerResult {
 
   final DevicePairingScannerAction action;
   final String? payload;
+  final LocalBleSetup? localBleSetup;
   final String inputMethod;
+  final String? journeyId;
 }
 
 typedef DevicePairingCameraBuilder = Widget Function(
@@ -67,7 +77,7 @@ String _pairingCodeAnalyticsKind(DevicePairingCodeKind kind) => switch (kind) {
       DevicePairingCodeKind.matter => 'matter',
       DevicePairingCodeKind.homeKit => 'homekit',
       DevicePairingCodeKind.hue => 'hue',
-      DevicePairingCodeKind.aidotButton => 'aidot_button',
+      DevicePairingCodeKind.localBle => 'local_ble',
       DevicePairingCodeKind.unknown => 'unknown',
     };
 
@@ -76,23 +86,26 @@ class DevicePairingScannerScreen extends StatefulWidget {
     super.key,
     this.showEnterCodeAction = true,
     this.hueBridgeSerialSearchAvailable = false,
-    this.aidotButtonPairingAvailable = false,
+    this.supportedLocalBleProfileIds = const {},
     this.hueBridgeOnly = false,
+    this.journeyId,
     @visibleForTesting this.cameraBuilder,
   });
 
   final bool showEnterCodeAction;
   final bool hueBridgeSerialSearchAvailable;
-  final bool aidotButtonPairingAvailable;
+  final Set<String> supportedLocalBleProfileIds;
   final bool hueBridgeOnly;
+  final String? journeyId;
   final DevicePairingCameraBuilder? cameraBuilder;
 
   static Future<DevicePairingScannerResult?> show(
     BuildContext context, {
     bool showEnterCodeAction = true,
     bool hueBridgeSerialSearchAvailable = false,
-    bool aidotButtonPairingAvailable = false,
+    Set<String> supportedLocalBleProfileIds = const {},
     bool hueBridgeOnly = false,
+    String? journeyId,
   }) {
     return Navigator.of(context).push<DevicePairingScannerResult>(
       PageRouteBuilder<DevicePairingScannerResult>(
@@ -102,8 +115,9 @@ class DevicePairingScannerScreen extends StatefulWidget {
           return DevicePairingScannerScreen(
             showEnterCodeAction: showEnterCodeAction,
             hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
-            aidotButtonPairingAvailable: aidotButtonPairingAvailable,
+            supportedLocalBleProfileIds: supportedLocalBleProfileIds,
             hueBridgeOnly: hueBridgeOnly,
+            journeyId: journeyId,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -164,7 +178,7 @@ class _DevicePairingScannerScreenState
     final decision = processDevicePairingCodes(
       values,
       hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
-      aidotButtonPairingAvailable: widget.aidotButtonPairingAvailable,
+      supportedLocalBleProfileIds: widget.supportedLocalBleProfileIds,
       hueBridgeOnly: widget.hueBridgeOnly,
     );
     if (decision == null) return;
@@ -178,6 +192,9 @@ class _DevicePairingScannerScreenState
             : _pairingCodeAnalyticsKind(code.kind),
         outcome:
             decision.choices.length > 1 ? 'choice_shown' : 'confirmation_shown',
+        journeyId: widget.journeyId,
+        inputMethod: 'camera',
+        profileId: _localBleProfileId(decision),
       );
       HapticFeedback.lightImpact();
       setState(() {
@@ -195,6 +212,9 @@ class _DevicePairingScannerScreenState
     AnalyticsService().logDevicePairingCodeDetected(
       codeKind: _pairingCodeAnalyticsKind(code.kind),
       outcome: 'guidance_shown',
+      journeyId: widget.journeyId,
+      inputMethod: 'camera',
+      profileId: code.localBleSetup?.profileId,
     );
     HapticFeedback.lightImpact();
     setState(() {
@@ -207,17 +227,25 @@ class _DevicePairingScannerScreenState
     AnalyticsService().logDevicePairingCodeDetected(
       codeKind: _pairingCodeAnalyticsKind(code.kind),
       outcome: 'continued_to_pairing',
+      journeyId: widget.journeyId,
+      inputMethod: 'camera',
+      profileId: code.localBleSetup?.profileId,
     );
     HapticFeedback.mediumImpact();
     Navigator.of(context).pop(
       switch (code.kind) {
-        DevicePairingCodeKind.matter =>
-          DevicePairingScannerResult.matter(code.payload),
+        DevicePairingCodeKind.matter => DevicePairingScannerResult.matter(
+            code.payload,
+            journeyId: widget.journeyId,
+          ),
         DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
             normalizeHueBridgeSerial(code.payload)!,
+            journeyId: widget.journeyId,
           ),
-        DevicePairingCodeKind.aidotButton =>
-          DevicePairingScannerResult.aidotButton(code.payload),
+        DevicePairingCodeKind.localBle => DevicePairingScannerResult.localBle(
+            code.localBleSetup!,
+            journeyId: widget.journeyId,
+          ),
         _ => throw StateError('Unsupported pairing-code continuation'),
       },
     );
@@ -450,6 +478,8 @@ class _DevicePairingScannerScreenState
                   AnalyticsService().logDevicePairingCodeDetected(
                     codeKind: 'manual',
                     outcome: 'manual_entry_selected',
+                    journeyId: widget.journeyId,
+                    inputMethod: 'camera',
                   );
                   Navigator.of(context).pop(
                     const DevicePairingScannerResult.enterCode(),
@@ -527,7 +557,7 @@ class _DevicePairingScannerScreenState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            hasMultipleChoices ? 'Choose how to add this light' : '',
+            hasMultipleChoices ? 'Choose how to add this device' : '',
             style: const TextStyle(
               color: CelestialColors.textPrimary,
               fontSize: 16,
@@ -537,8 +567,8 @@ class _DevicePairingScannerScreenState
           const SizedBox(height: 6),
           Text(
             hasMultipleChoices
-                ? 'This scan found both a Matter setup code and a Hue bulb '
-                    'serial. Choose the connection Rhythm should use.'
+                ? 'This scan found more than one supported setup code. Choose '
+                    'the connection Rhythm should use.'
                 : '',
             style: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.9),
@@ -549,22 +579,21 @@ class _DevicePairingScannerScreenState
           const SizedBox(height: 14),
           for (final code in decision.choices) ...[
             FilledButton.icon(
-              key: ValueKey(
-                code.kind == DevicePairingCodeKind.hue
-                    ? 'choose-hue-bridge'
-                    : 'choose-matter',
-              ),
+              key: ValueKey(switch (code.kind) {
+                DevicePairingCodeKind.hue => 'choose-hue-bridge',
+                DevicePairingCodeKind.localBle => 'choose-local-ble',
+                _ => 'choose-matter',
+              }),
               onPressed: () => _continueWithCode(code),
-              icon: Icon(
-                code.kind == DevicePairingCodeKind.hue
-                    ? Icons.hub_rounded
-                    : Icons.hub_rounded,
-              ),
-              label: Text(
-                code.kind == DevicePairingCodeKind.hue
-                    ? 'Search with Hue Bridge'
-                    : 'Pair with Matter',
-              ),
+              icon: Icon(switch (code.kind) {
+                DevicePairingCodeKind.localBle => Icons.bluetooth_rounded,
+                _ => Icons.hub_rounded,
+              }),
+              label: Text(switch (code.kind) {
+                DevicePairingCodeKind.hue => 'Search with Hue Bridge',
+                DevicePairingCodeKind.localBle => 'Pair with Bluetooth',
+                _ => 'Pair with Matter',
+              }),
             ),
             const SizedBox(height: 8),
           ],
@@ -577,6 +606,14 @@ class _DevicePairingScannerScreenState
       ),
     );
   }
+}
+
+String? _localBleProfileId(DevicePairingCodeDecision decision) {
+  for (final choice in decision.choices) {
+    final profileId = choice.localBleSetup?.profileId;
+    if (profileId != null) return profileId;
+  }
+  return decision.code.localBleSetup?.profileId;
 }
 
 class _CornerPainter extends CustomPainter {

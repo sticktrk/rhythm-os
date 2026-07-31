@@ -636,10 +636,16 @@ class AnalyticsService {
   Future<void> logDevicePairingCodeDetected({
     required String codeKind,
     required String outcome,
+    String? journeyId,
+    String? inputMethod,
+    String? profileId,
   }) async {
     await logEvent('device_pairing_code_detected', {
       'code_kind': codeKind,
       'outcome': outcome,
+      if (journeyId != null) 'journey_id': journeyId,
+      if (inputMethod != null) 'input_method': inputMethod,
+      if (profileId != null) 'profile_id': profileId,
     });
   }
 
@@ -715,32 +721,36 @@ class AnalyticsService {
     });
   }
 
-  /// Track an Orein/AiDot QR-bound pairing attempt without retaining QR data.
-  Future<void> logAidotButtonPairingAttempted({
+  /// Track a local-BLE pairing attempt without retaining setup or identity.
+  Future<void> logLocalBlePairingAttempted({
     required String journeyId,
+    required String profileId,
     required String source,
     required String inputMethod,
     required int attemptNumber,
   }) async {
-    await logEvent('aidot_button_pairing_attempted', {
+    await logEvent('local_ble_pairing_attempted', {
       'journey_id': journeyId,
+      'profile_id': profileId,
       'source': source,
       'input_method': inputMethod,
       'attempt_number': attemptNumber,
     });
   }
 
-  /// Track terminal button pairing without QR, Bluetooth, or device identity.
-  Future<void> logAidotButtonPairingCompleted({
+  /// Track terminal local-BLE pairing without setup or device identity.
+  Future<void> logLocalBlePairingCompleted({
     required String journeyId,
+    required String profileId,
     required String source,
     required String inputMethod,
     required int attemptNumber,
     required String outcome,
     String? failureStage,
   }) async {
-    await logEvent('aidot_button_pairing_completed', {
+    await logEvent('local_ble_pairing_completed', {
       'journey_id': journeyId,
+      'profile_id': profileId,
       'source': source,
       'input_method': inputMethod,
       'attempt_number': attemptNumber,

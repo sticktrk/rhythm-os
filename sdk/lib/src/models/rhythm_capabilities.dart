@@ -1,13 +1,39 @@
 import '../json_parsing.dart';
 
+const int _deviceProfileIdMaxLength = 80;
+final RegExp _deviceProfileIdPattern = RegExp(
+  r'^([a-z0-9_-]+(?:\.[a-z0-9_-]+)+)\.v([1-9][0-9]*)$',
+);
+
+class _ParsedDeviceProfileId {
+  const _ParsedDeviceProfileId(this.family, this.version);
+
+  final String family;
+  final int version;
+}
+
+_ParsedDeviceProfileId? _parseDeviceProfileId(String value) {
+  if (value.isEmpty || value.length > _deviceProfileIdMaxLength) return null;
+  final match = _deviceProfileIdPattern.firstMatch(value);
+  if (match == null) return null;
+  final version = int.tryParse(match.group(2)!);
+  if (version == null || version > 0xffffffff) return null;
+  return _ParsedDeviceProfileId(match.group(1)!, version);
+}
+
 /// Stable hub/device onboarding method ids from `/api/state.capabilities.hubs`.
 abstract final class RhythmDeviceOnboardingMethod {
   static const String matterOnNetworkSetupCode = 'matter_on_network_setup_code';
   static const String matterBleWifiCommissioning =
       'matter_ble_wifi_commissioning';
   static const String hueBleNearbyScan = 'hue_ble_nearby_scan';
-  static const String aidotButtonQr = 'aidot_button_qr';
+  static const String localBleQr = 'local_ble_qr';
   static const String hueBridgeSerialSearch = 'hue_bridge_serial_search';
+}
+
+/// Stable local-device profile IDs advertised by a Rhythm appliance.
+abstract final class RhythmDeviceProfileId {
+  static const String oreinOc02001Button = 'orein.oc02001.button.v1';
 }
 
 /// Stable feature IDs advertised by `/api/state.capabilities.features`.
@@ -62,6 +88,8 @@ class RhythmHubCapabilities {
   final List<String> deviceOnboardingMethods;
   final bool supportsUnpairing;
   final bool supportsRoomlessDevices;
+  final bool blocksRoomReadiness;
+  final List<RhythmDeviceProfile> deviceProfiles;
   final RhythmAddDeviceCapabilities addDevice;
 
   const RhythmHubCapabilities({
@@ -70,6 +98,8 @@ class RhythmHubCapabilities {
     this.deviceOnboardingMethods = const [],
     required this.supportsUnpairing,
     required this.supportsRoomlessDevices,
+    this.blocksRoomReadiness = true,
+    this.deviceProfiles = const [],
     this.addDevice = const RhythmAddDeviceCapabilities(),
   });
 
@@ -77,6 +107,10 @@ class RhythmHubCapabilities {
 
   bool supportsDeviceOnboardingMethod(String method) {
     return deviceOnboardingMethods.contains(method);
+  }
+
+  bool supportsDeviceProfile(String profileId) {
+    return deviceProfiles.any((profile) => profile.acceptsProfileId(profileId));
   }
 
   factory RhythmHubCapabilities.fromJson(Map<String, dynamic> json) {
@@ -94,10 +128,72 @@ class RhythmHubCapabilities {
       supportsUnpairing: json['supports_unpairing'] as bool? ?? false,
       supportsRoomlessDevices:
           json['supports_roomless_devices'] as bool? ?? false,
+      blocksRoomReadiness: json['blocks_room_readiness'] as bool? ?? true,
+      deviceProfiles: _parseDeviceProfiles(json['device_profiles']),
       addDevice: RhythmAddDeviceCapabilities.fromJson(
         legacyAddDevice,
         deviceOnboardingMethods: deviceOnboardingMethods,
       ),
+    );
+  }
+}
+
+/// A bounded, non-secret device profile descriptor advertised by a hub.
+class RhythmDeviceProfile {
+  final String id;
+
+  /// Older parser/storage IDs explicitly accepted by this current profile.
+  final List<String> compatibleProfileIds;
+  final String deviceType;
+  final String displayName;
+  final bool inputOnly;
+  final List<String> onboardingMethods;
+
+  const RhythmDeviceProfile({
+    required this.id,
+    this.compatibleProfileIds = const [],
+    required this.deviceType,
+    required this.displayName,
+    required this.inputOnly,
+    this.onboardingMethods = const [],
+  });
+
+  bool supportsOnboardingMethod(String method) {
+    return onboardingMethods.contains(method);
+  }
+
+  bool acceptsProfileId(String profileId) {
+    return id == profileId || compatibleProfileIds.contains(profileId);
+  }
+
+  factory RhythmDeviceProfile.fromJson(Map<String, dynamic> json) {
+    final rawId = json['id'];
+    final id = rawId is String ? rawId : '';
+    final currentId = _parseDeviceProfileId(id);
+    final compatibleProfileIds = <String>[];
+    if (currentId != null) {
+      for (final compatibleId in _parseStringList(
+        json['compatible_profile_ids'],
+      )) {
+        final parsed = _parseDeviceProfileId(compatibleId);
+        if (parsed != null &&
+            parsed.family == currentId.family &&
+            parsed.version < currentId.version &&
+            !compatibleProfileIds.contains(compatibleId)) {
+          compatibleProfileIds.add(compatibleId);
+        }
+      }
+    }
+    return RhythmDeviceProfile(
+      id: id,
+      compatibleProfileIds: compatibleProfileIds,
+      deviceType:
+          json['device_type'] is String ? json['device_type'] as String : '',
+      displayName:
+          json['display_name'] is String ? json['display_name'] as String : '',
+      inputOnly:
+          json['input_only'] is bool ? json['input_only'] as bool : false,
+      onboardingMethods: _parseStringList(json['onboarding_methods']),
     );
   }
 }
@@ -151,8 +247,43 @@ List<String> _parseDeviceOnboardingMethods(
 }
 
 List<String> _parseStringList(Object? value) {
-  return ((value as List<dynamic>?) ?? const <dynamic>[])
+  if (value is! List) return const [];
+  return value
       .whereType<String>()
       .where((value) => value.isNotEmpty)
       .toList(growable: false);
+}
+
+List<RhythmDeviceProfile> _parseDeviceProfiles(Object? value) {
+  if (value is! List) return const [];
+  final profiles = <RhythmDeviceProfile>[];
+  for (final rawProfile in value) {
+    final profileJson = jsonMap(rawProfile);
+    if (profileJson == null ||
+        !_hasSupportedDeviceProfileFieldTypes(profileJson)) {
+      continue;
+    }
+    final profile = RhythmDeviceProfile.fromJson(profileJson);
+    if (_parseDeviceProfileId(profile.id) != null) {
+      profiles.add(profile);
+    }
+  }
+  return profiles;
+}
+
+bool _hasSupportedDeviceProfileFieldTypes(Map<String, dynamic> json) {
+  if (json['id'] is! String) return false;
+  if (!_hasOptionalType<String>(json, 'device_type') ||
+      !_hasOptionalType<String>(json, 'display_name') ||
+      !_hasOptionalType<bool>(json, 'input_only') ||
+      !_hasOptionalType<List>(json, 'compatible_profile_ids') ||
+      !_hasOptionalType<List>(json, 'onboarding_methods')) {
+    return false;
+  }
+  return true;
+}
+
+bool _hasOptionalType<T>(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  return value == null || value is T;
 }

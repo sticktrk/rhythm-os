@@ -1828,7 +1828,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhythm-aidot"
+name = "rhythm-ble"
 version = "0.6.548-beta"
 dependencies = [
  "anyhow",
@@ -1836,11 +1836,13 @@ dependencies = [
  "dbus",
  "futures",
  "log",
+ "rand 0.8.6",
  "rhythm-core",
  "rhythm-os",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1928,6 +1930,7 @@ dependencies = [
  "log",
  "reqwest",
  "reqwest-eventsource",
+ "rhythm-ble",
  "rhythm-core",
  "rhythm-devices",
  "rhythm-os",
@@ -1950,7 +1953,7 @@ dependencies = [
  "dbus",
  "futures",
  "log",
- "rhythm-aidot",
+ "rhythm-ble",
  "rhythm-ha",
  "rhythm-hue",
  "rhythm-matter",
@@ -2059,6 +2062,7 @@ dependencies = [
  "log",
  "mdns-sd",
  "reqwest",
+ "rhythm-ble",
  "rhythm-ha",
  "rhythm-host-recorder",
  "rhythm-hue",
