@@ -127,7 +127,9 @@ fn main() -> Result<()> {
     // rootfs image) install over the running rootfs without an A/B slot
     // switch. Count this start attempt and restore the previous binaries if a
     // crash-looping build exhausts its probation; BusyBox init respawns us.
-    match rhythm_server::self_update::startup_update_health_check() {
+    match rhythm_server::self_update::startup_update_health_check_with_pre_rollback(|| {
+        rhythm_os::storage::scrub_local_ble_rollback_state(std::path::Path::new(&args.data_dir))
+    }) {
         rhythm_server::self_update::StartupUpdateDisposition::NoPendingUpdate => {}
         rhythm_server::self_update::StartupUpdateDisposition::PendingVerification { attempt } => {
             info!(
@@ -155,6 +157,20 @@ fn main() -> Result<()> {
                     "startup",
                     "rolled_back",
                 ),
+            );
+            std::process::exit(1);
+        }
+        rhythm_server::self_update::StartupUpdateDisposition::RollbackBlocked {
+            error,
+            previous_version,
+            target_version,
+        } => {
+            log::error!(
+                target: "sys",
+                "Self-update rollback from {:?} to {:?} is blocked before restoring previous binaries: {}",
+                target_version,
+                previous_version,
+                error
             );
             std::process::exit(1);
         }
@@ -929,7 +945,13 @@ fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHea
             loop {
                 match boot_success_health(&state, &gate_heartbeat) {
                     BootSuccessHealth::Ready => {
-                        run_bootstate_script_action(BOOTSTATE_SCRIPT, "success");
+                        if !run_bootstate_script_action(BOOTSTATE_SCRIPT, "success") {
+                            log::error!(
+                                target: "sys",
+                                "Could not mark OTA boot successful; exiting so the supervisor requests rollback after the server stops"
+                            );
+                            std::process::exit(1);
+                        }
                         return;
                     }
                     BootSuccessHealth::Waiting(reason) => {
@@ -944,12 +966,11 @@ fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHea
                         if started.elapsed() >= std::time::Duration::from_secs(TIMEOUT_SECS) {
                             warn!(
                                 target: "sys",
-                                "OTA boot health did not become ready within {}s; requesting bootstate rollback (last reason: {})",
+                                "OTA boot health did not become ready within {}s; exiting so the supervisor requests rollback after the server stops (last reason: {})",
                                 TIMEOUT_SECS,
                                 reason
                             );
-                            run_bootstate_script_action(BOOTSTATE_SCRIPT, "fail");
-                            return;
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -959,25 +980,32 @@ fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHea
         .expect("Failed to spawn boot-success marker thread");
 }
 
-fn run_bootstate_script_action(script: &str, action: &str) {
+fn run_bootstate_script_action(script: &str, action: &str) -> bool {
     match std::process::Command::new(script).arg(action).status() {
         Ok(status) if status.success() => {
             info!(target: "sys", "OTA bootstate action '{}' succeeded", action);
+            true
         }
-        Ok(status) => warn!(
-            target: "sys",
-            "{} {} exited with {}",
-            script,
-            action,
-            status
-        ),
-        Err(e) => warn!(
-            target: "sys",
-            "Failed to exec {} {}: {}",
-            script,
-            action,
-            e
-        ),
+        Ok(status) => {
+            warn!(
+                target: "sys",
+                "{} {} exited with {}",
+                script,
+                action,
+                status
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                target: "sys",
+                "Failed to exec {} {}: {}",
+                script,
+                action,
+                e
+            );
+            false
+        }
     }
 }
 
@@ -1466,9 +1494,12 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
         let script = script.to_str().unwrap();
 
-        run_bootstate_script_action(script, "success");
-        run_bootstate_script_action(script, "fail");
-        run_bootstate_script_action("/tmp/rhythm-definitely-missing-bootstate", "success");
+        assert!(run_bootstate_script_action(script, "success"));
+        assert!(!run_bootstate_script_action(script, "fail"));
+        assert!(!run_bootstate_script_action(
+            "/tmp/rhythm-definitely-missing-bootstate",
+            "success"
+        ));
 
         std::fs::remove_dir_all(root).ok();
     }

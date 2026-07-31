@@ -2981,6 +2981,37 @@ void main() {
       expect(provider.hasBeenSynced, isTrue);
     });
 
+    test('direct reconnect clears server identity until replacement hello',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitConnectionState(RhythmConnectionState.connected);
+      connection.emitHello(RhythmHello.fromJson({
+        'server_instance_id': 'srv-box-a',
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.connectedServerInstanceId, 'srv-box-a');
+
+      connection.emitConnectionState(RhythmConnectionState.connecting);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.connectedServerInstanceId, isNull);
+
+      connection.emitConnectionState(RhythmConnectionState.connected);
+      connection.emitHello(RhythmHello.fromJson({
+        'server_instance_id': 'srv-box-b',
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.connectedServerInstanceId, 'srv-box-b');
+    });
+
     test('settings_changed without power_save preserves legacy cache',
         () async {
       final provider = ServerSyncProvider(

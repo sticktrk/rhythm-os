@@ -91,6 +91,20 @@ fn main() -> Result<()> {
             );
             std::process::exit(1);
         }
+        rhythm_server::self_update::StartupUpdateDisposition::RollbackBlocked {
+            error,
+            previous_version,
+            target_version,
+        } => {
+            log::error!(
+                target: "sys",
+                "Self-update rollback from {:?} to {:?} is blocked before restoring previous binaries: {}",
+                target_version,
+                previous_version,
+                error
+            );
+            std::process::exit(1);
+        }
     }
 
     // Create storage backend

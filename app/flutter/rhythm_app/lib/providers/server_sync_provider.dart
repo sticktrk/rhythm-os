@@ -3008,12 +3008,18 @@ class ServerSyncProvider extends ChangeNotifier {
     _previousConnectionState = current;
 
     if (current != previous &&
-        (current == RhythmConnectionState.disconnected ||
+        (current == RhythmConnectionState.connecting ||
+            current == RhythmConnectionState.disconnected ||
             current == RhythmConnectionState.reconnecting)) {
-      _stopActivityCloudProvisioningTimer();
       // A hello identity authenticates one connection generation. Never carry
       // it across a reconnect where the locator could now reach another Box.
       _lastServerInstanceId = null;
+    }
+
+    if (current != previous &&
+        (current == RhythmConnectionState.disconnected ||
+            current == RhythmConnectionState.reconnecting)) {
+      _stopActivityCloudProvisioningTimer();
       final clearMetadata = !_hasBeenSynced || _homeEntryRefreshPending;
       debugPrint(
           'ServerSync: Connection lost ($previous → $current) — ${clearMetadata ? 'resetting metadata' : 'keeping synced metadata'} and keeping rooms');

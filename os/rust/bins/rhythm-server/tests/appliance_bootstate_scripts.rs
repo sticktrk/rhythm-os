@@ -76,6 +76,10 @@ fn bootstate_paths(root: &Path) -> (PathBuf, PathBuf) {
     (primary, backup)
 }
 
+fn rollback_required_latch(root: &Path) -> PathBuf {
+    root.join("run/rhythm-rollback-required")
+}
+
 fn write_bootstate(root: &Path, body: &str) {
     let (primary, backup) = bootstate_paths(root);
     bootstate::write_with_backup(&primary, &backup, body).unwrap();
@@ -92,6 +96,24 @@ fn bootstate_value<'a>(body: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|(k, v)| (k == key).then_some(v))
 }
 
+fn assert_pending_rollback_required(root: &Path) -> String {
+    let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
+    assert!(cmdline.contains("root=/dev/mmcblk0p3"));
+    assert!(!cmdline.contains("root=/dev/mmcblk0p2"));
+    let body = read_bootstate(root);
+    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_SLOT"), Some("b"));
+    assert_eq!(
+        bootstate_value(&body, "RHYTHM_PENDING_VERSION"),
+        Some("0.4.2")
+    );
+    assert_eq!(
+        bootstate_value(&body, "RHYTHM_BOOT_STATUS"),
+        Some("rollback_required")
+    );
+    assert!(rollback_required_latch(root).exists());
+    body
+}
+
 fn pending_bootstate_body(status: &str) -> String {
     format!(
         "RHYTHM_ACTIVE_SLOT=a\nRHYTHM_LAST_GOOD_SLOT=a\nRHYTHM_PENDING_SLOT=b\nRHYTHM_PENDING_VERSION=0.4.2\nRHYTHM_ACTIVE_VERSION=0.4.1\nRHYTHM_BOOT_STATUS={status}\nRHYTHM_LAST_UPDATE_EPOCH_MS=1000\nRHYTHM_LAST_ROLLBACK_SLOT=\nRHYTHM_LAST_ROLLBACK_VERSION=\nRHYTHM_LAST_ROLLBACK_EPOCH_MS=\n"
@@ -99,11 +121,20 @@ fn pending_bootstate_body(status: &str) -> String {
 }
 
 fn run_bootstate(root: &Path, action: &str) -> Output {
+    run_bootstate_with_data_dir(root, action, root.join("data"))
+}
+
+fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> Output {
     Command::new("sh")
         .arg(bootstate_script())
         .arg(action)
         .env("RHYTHM_BOOT_MOUNT", root.join("boot"))
         .env("RHYTHM_BOOTSTATE_DATA_DIR", root.join("data/ota"))
+        .env(
+            "RHYTHM_BOOTSTATE_ROLLBACK_REQUIRED_LATCH",
+            root.join("run/rhythm-rollback-required"),
+        )
+        .env("RHYTHM_DATA_DIR", data_dir)
         .env("RHYTHM_SERVER_BIN", root.join("rhythm-server"))
         .env("RHYTHM_CMDLINE_FILE", root.join("boot/cmdline.txt"))
         .env("RHYTHM_PROC_CMDLINE", root.join("proc_cmdline"))
@@ -168,6 +199,45 @@ fn bootstate_start_recovers_from_hashed_backup_when_primary_is_corrupt() {
 }
 
 #[test]
+fn failed_second_boot_rollback_cannot_later_be_marked_successful() {
+    let root = unique_dir("second-boot-rollback-latch");
+    write_fake_server(&root, "0.4.2");
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(&root, &pending_bootstate_body("booting"));
+    fs::create_dir_all(root.join("data/local_ble")).unwrap();
+    fs::write(root.join("data/local_ble/devices.json"), "sensitive").unwrap();
+
+    let start = run_bootstate_with_data_dir(&root, "start", PathBuf::from("relative-data"));
+    assert!(!start.status.success());
+    let rollback_required_body = assert_pending_rollback_required(&root);
+
+    let success = run_bootstate(&root, "success");
+    assert!(!success.status.success());
+    assert!(String::from_utf8_lossy(&success.stderr).contains("rollback is required"));
+    assert_eq!(read_bootstate(&root), rollback_required_body);
+    assert_pending_rollback_required(&root);
+    assert!(root.join("data/local_ble/devices.json").exists());
+
+    assert_success(run_bootstate(&root, "start"));
+    let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
+    assert!(cmdline.contains("root=/dev/mmcblk0p2"));
+    assert!(!cmdline.contains("root=/dev/mmcblk0p3"));
+    let body = read_bootstate(&root);
+    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_SLOT"), Some(""));
+    assert_eq!(bootstate_value(&body, "RHYTHM_BOOT_STATUS"), Some("idle"));
+    assert!(!root.join("data/local_ble").exists());
+}
+
+#[test]
 fn bootstate_success_marks_pending_slot_last_good_and_writes_hashed_backup() {
     let root = unique_dir("success");
     write_fake_server(&root, "0.4.2");
@@ -202,7 +272,7 @@ fn bootstate_success_marks_pending_slot_last_good_and_writes_hashed_backup() {
 }
 
 #[test]
-fn bootstate_success_rolls_back_when_running_version_misses_pending_target() {
+fn bootstate_success_version_mismatch_leaves_pending_rollback_armed() {
     let root = unique_dir("success-version-mismatch");
     write_fake_server(&root, "0.4.1");
     fs::write(
@@ -215,32 +285,20 @@ fn bootstate_success_rolls_back_when_running_version_misses_pending_target() {
         "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
     )
     .unwrap();
-    write_bootstate(&root, &pending_bootstate_body("booting"));
+    let original_body = pending_bootstate_body("booting");
+    write_bootstate(&root, &original_body);
 
-    assert_success(run_bootstate(&root, "success"));
+    let output = run_bootstate(&root, "success");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("leaving rollback armed"));
 
     let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
-    assert!(cmdline.contains("root=/dev/mmcblk0p2"));
-    assert!(!cmdline.contains("root=/dev/mmcblk0p3"));
+    assert!(cmdline.contains("root=/dev/mmcblk0p3"));
+    assert!(!cmdline.contains("root=/dev/mmcblk0p2"));
 
     let body = read_bootstate(&root);
-    assert_eq!(bootstate_value(&body, "RHYTHM_ACTIVE_SLOT"), Some("b"));
-    assert_eq!(bootstate_value(&body, "RHYTHM_LAST_GOOD_SLOT"), Some("a"));
-    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_SLOT"), Some(""));
-    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_VERSION"), Some(""));
-    assert_eq!(
-        bootstate_value(&body, "RHYTHM_ACTIVE_VERSION"),
-        Some("0.4.1")
-    );
-    assert_eq!(bootstate_value(&body, "RHYTHM_BOOT_STATUS"), Some("idle"));
-    assert_eq!(
-        bootstate_value(&body, "RHYTHM_LAST_ROLLBACK_SLOT"),
-        Some("b")
-    );
-    assert_eq!(
-        bootstate_value(&body, "RHYTHM_LAST_ROLLBACK_VERSION"),
-        Some("0.4.2")
-    );
+    assert_eq!(body, original_body);
+    assert!(!root.join("data/ota/bootstate.env").exists());
 }
 
 #[test]
@@ -258,6 +316,29 @@ fn bootstate_fail_rolls_cmdline_back_and_records_failed_version() {
     )
     .unwrap();
     write_bootstate(&root, &pending_bootstate_body("booting"));
+    for directory in ["local_ble", "aidot_ble"] {
+        fs::create_dir_all(root.join("data").join(directory)).unwrap();
+        fs::write(
+            root.join("data").join(directory).join("devices.json"),
+            "sensitive",
+        )
+        .unwrap();
+    }
+    for file in [
+        "pairing_history.json",
+        "pairing_history.json.tmp",
+        "pairing_metadata.json",
+        "pairing_metadata.json.tmp",
+        "server_metadata.json.tmp",
+    ] {
+        fs::write(root.join("data").join(file), "sensitive").unwrap();
+    }
+    fs::write(
+        root.join("data/server_metadata.json"),
+        r#"{"server_instance_id":"srv-stable"}"#,
+    )
+    .unwrap();
+    fs::write(root.join("data/settings.json"), "keep").unwrap();
 
     assert_success(run_bootstate(&root, "fail"));
 
@@ -277,6 +358,73 @@ fn bootstate_fail_rolls_cmdline_back_and_records_failed_version() {
         bootstate_value(&body, "RHYTHM_LAST_ROLLBACK_VERSION"),
         Some("0.4.2")
     );
+    for path in [
+        "local_ble",
+        "aidot_ble",
+        "pairing_history.json",
+        "pairing_history.json.tmp",
+        "pairing_metadata.json",
+        "pairing_metadata.json.tmp",
+        "server_metadata.json.tmp",
+    ] {
+        assert!(
+            !root.join("data").join(path).exists(),
+            "{path} should be scrubbed"
+        );
+    }
+    assert!(root.join("data/server_metadata.json").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("data/settings.json")).unwrap(),
+        "keep"
+    );
+}
+
+#[test]
+fn bootstate_scrub_failure_does_not_switch_slots_or_clear_pending_state() {
+    let root = unique_dir("fail-closed-scrub");
+    write_fake_server(&root, "0.4.2");
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(&root, &pending_bootstate_body("booting"));
+    fs::create_dir_all(root.join("data/local_ble")).unwrap();
+    fs::write(root.join("data/local_ble/devices.json"), "sensitive").unwrap();
+
+    let output = run_bootstate_with_data_dir(&root, "fail", PathBuf::from("relative-data"));
+    assert!(!output.status.success());
+    let rollback_required_body = assert_pending_rollback_required(&root);
+    assert!(root.join("data/local_ble/devices.json").exists());
+
+    let success = run_bootstate(&root, "success");
+    assert!(!success.status.success());
+    assert_eq!(read_bootstate(&root), rollback_required_body);
+    assert_pending_rollback_required(&root);
+
+    // Persistent rollback_required is independently authoritative if the
+    // same-boot latch is lost or cleared unexpectedly.
+    fs::remove_file(rollback_required_latch(&root)).unwrap();
+    let success_without_latch = run_bootstate(&root, "success");
+    assert!(!success_without_latch.status.success());
+    assert_eq!(read_bootstate(&root), rollback_required_body);
+
+    // A later fail invocation retries from rollback_required, recreates the
+    // latch, completes the scrub, and only then switches slots.
+    assert_success(run_bootstate(&root, "fail"));
+    let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
+    assert!(cmdline.contains("root=/dev/mmcblk0p2"));
+    assert!(!cmdline.contains("root=/dev/mmcblk0p3"));
+    let body = read_bootstate(&root);
+    assert_eq!(bootstate_value(&body, "RHYTHM_PENDING_SLOT"), Some(""));
+    assert_eq!(bootstate_value(&body, "RHYTHM_BOOT_STATUS"), Some("idle"));
+    assert!(!root.join("data/local_ble").exists());
+    assert!(rollback_required_latch(&root).exists());
 }
 
 #[test]

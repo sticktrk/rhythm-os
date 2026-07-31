@@ -3141,6 +3141,15 @@ pub enum StartupUpdateDisposition {
         previous_version: Option<String>,
         target_version: Option<String>,
     },
+    /// Rollback was required, but its compatibility scrub failed before any
+    /// previous binary was restored. The caller must exit so the supervisor
+    /// retries the still-installed candidate rather than crossing the unsafe
+    /// persisted-state boundary.
+    RollbackBlocked {
+        error: String,
+        previous_version: Option<String>,
+        target_version: Option<String>,
+    },
 }
 
 fn pending_update_marker_path(install_root: &Path) -> PathBuf {
@@ -3208,13 +3217,36 @@ fn write_pending_marker_file(
 /// the `.old` backups so the supervisor's next restart runs the previous
 /// build instead of crash-looping a broken one forever.
 pub fn startup_update_health_check() -> StartupUpdateDisposition {
+    startup_update_health_check_with_pre_rollback(|| Ok(()))
+}
+
+/// Variant of [`startup_update_health_check`] that runs a fail-closed
+/// compatibility scrub before restoring previous binaries.
+pub fn startup_update_health_check_with_pre_rollback<F>(pre_rollback: F) -> StartupUpdateDisposition
+where
+    F: FnMut() -> anyhow::Result<()>,
+{
     let Ok(install_root) = install_target_executable() else {
         return StartupUpdateDisposition::NoPendingUpdate;
     };
-    startup_update_health_check_at(&pending_update_marker_path(&install_root))
+    startup_update_health_check_with_pre_rollback_at(
+        &pending_update_marker_path(&install_root),
+        pre_rollback,
+    )
 }
 
+#[cfg(test)]
 fn startup_update_health_check_at(marker_path: &Path) -> StartupUpdateDisposition {
+    startup_update_health_check_with_pre_rollback_at(marker_path, || Ok(()))
+}
+
+fn startup_update_health_check_with_pre_rollback_at<F>(
+    marker_path: &Path,
+    mut pre_rollback: F,
+) -> StartupUpdateDisposition
+where
+    F: FnMut() -> anyhow::Result<()>,
+{
     let raw = match fs::read_to_string(marker_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -3248,6 +3280,19 @@ fn startup_update_health_check_at(marker_path: &Path) -> StartupUpdateDispositio
 
     marker.start_attempts = marker.start_attempts.saturating_add(1);
     if marker.start_attempts > MAX_PENDING_START_ATTEMPTS {
+        if let Err(error) = pre_rollback() {
+            let error = format!("{error:#}");
+            log::error!(
+                target: "sys",
+                "Pending-update rollback blocked before binary restore: {}",
+                error
+            );
+            return StartupUpdateDisposition::RollbackBlocked {
+                error,
+                previous_version: marker.previous_version.clone(),
+                target_version: marker.target_version.clone(),
+            };
+        }
         let restored = roll_back_pending_update(&marker);
         record_bundle_rollback_at(
             &bundle_rollback_record_path_for_marker(marker_path),
@@ -5357,6 +5402,61 @@ mod tests {
             StartupUpdateDisposition::NoPendingUpdate,
             "the restored build must boot without a pending marker"
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pending_update_rollback_is_blocked_before_binary_restore_when_scrub_fails() {
+        let dir = unique_test_dir("pending-rollback-scrub-failure");
+        let marker_path = dir.join(PENDING_UPDATE_MARKER_FILE);
+        let destination = dir.join("rhythm-server");
+        let backup_path = dir.join("rhythm-server.old");
+        fs::write(&destination, b"new-server").unwrap();
+        fs::write(&backup_path, b"old-server").unwrap();
+        write_pending_update_marker_at(
+            &marker_path,
+            &[AppliedInstallTarget {
+                destination: destination.clone(),
+                backup_path: backup_path.clone(),
+                previously_existed: true,
+            }],
+            Some(LiveInstallVersions {
+                previous: "0.4.263-beta",
+                target: "0.4.264-beta",
+            }),
+        )
+        .unwrap();
+        for _ in 0..MAX_PENDING_START_ATTEMPTS {
+            let _ = startup_update_health_check_at(&marker_path);
+        }
+
+        let disposition = startup_update_health_check_with_pre_rollback_at(&marker_path, || {
+            assert_eq!(fs::read(&destination).unwrap(), b"new-server");
+            assert!(backup_path.exists());
+            Err(anyhow::anyhow!("data directory fsync failed"))
+        });
+        assert!(matches!(
+            disposition,
+            StartupUpdateDisposition::RollbackBlocked { .. }
+        ));
+        assert_eq!(fs::read(&destination).unwrap(), b"new-server");
+        assert!(
+            backup_path.exists(),
+            "backup must remain available for retry"
+        );
+        assert!(
+            marker_path.exists(),
+            "pending marker must retain rollback intent"
+        );
+
+        let disposition = startup_update_health_check_with_pre_rollback_at(&marker_path, || Ok(()));
+        assert!(matches!(
+            disposition,
+            StartupUpdateDisposition::RolledBack { .. }
+        ));
+        assert_eq!(fs::read(&destination).unwrap(), b"old-server");
+        assert!(!marker_path.exists());
 
         let _ = fs::remove_dir_all(dir);
     }
