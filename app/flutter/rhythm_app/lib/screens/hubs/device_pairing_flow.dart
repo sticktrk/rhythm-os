@@ -379,7 +379,31 @@ Future<void> _startLocalBlePairing(
   );
   if (!context.mounted || result == null) return;
 
-  await syncProvider.connection.reconnect();
+  await continueRecoveredLocalBlePairingFlow(context, result);
+}
+
+/// Continues the normal post-pairing sync and room-assignment flow for a
+/// device recovered from the durable app-shell pairing pointer.
+Future<void> continueRecoveredLocalBlePairingFlow(
+  BuildContext context,
+  RhythmPairedDevice result,
+) async {
+  final syncProvider = context.read<ServerSyncProvider>();
+
+  try {
+    await syncProvider.connection.reconnect();
+  } catch (_) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.name} was added. It will appear in Devices after the '
+          'Rhythm Box reconnects.',
+        ),
+      ),
+    );
+    return;
+  }
   if (!context.mounted) return;
   final resolved = await _resolvePairedDevices(
     context,

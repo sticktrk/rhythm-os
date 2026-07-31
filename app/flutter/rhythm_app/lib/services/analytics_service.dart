@@ -747,8 +747,10 @@ class AnalyticsService {
     required int attemptNumber,
     required String outcome,
     String? failureStage,
+    String? deduplicationId,
   }) async {
     await logEvent('local_ble_pairing_completed', {
+      if (deduplicationId != null) '\$insert_id': deduplicationId,
       'journey_id': journeyId,
       'profile_id': profileId,
       'source': source,

@@ -589,14 +589,14 @@ impl BleDeviceProfile for OreinOc02001ButtonProfile {
         let ("press", [previous], [candidate]) = (stream, previous, candidate) else {
             return ReplayOrder::Stale;
         };
-        if candidate == previous {
-            ReplayOrder::Duplicate
-        } else {
-            // Bench evidence establishes only that a changed byte denotes a
-            // new press. It does not establish signed ordering or a maximum
-            // missed-event window, so every different value (including a
-            // wrap or large gap) is forward evidence for this profile.
-            ReplayOrder::Forward
+        match candidate.wrapping_sub(*previous) {
+            0 => ReplayOrder::Duplicate,
+            // A one-byte serial number has an unambiguous order only within
+            // half its range. This accepts missed presses and 0xff -> 0x00
+            // wraparound while rejecting delayed/replayed values behind the
+            // last durable counter.
+            1..=127 => ReplayOrder::Forward,
+            128..=u8::MAX => ReplayOrder::Stale,
         }
     }
 }
@@ -792,7 +792,48 @@ mod tests {
         );
         assert_eq!(
             profile.replay_order("press", &[0x00], &[0xff]),
+            ReplayOrder::Stale
+        );
+    }
+
+    #[test]
+    fn orein_press_counter_uses_half_range_modulo_ordering() {
+        let profile = &OREIN_OC02001_BUTTON_PROFILE;
+
+        assert_eq!(
+            profile.replay_order("press", &[0x10], &[0x10]),
+            ReplayOrder::Duplicate
+        );
+        assert_eq!(
+            profile.replay_order("press", &[0x10], &[0x11]),
             ReplayOrder::Forward
+        );
+        assert_eq!(
+            profile.replay_order("press", &[0x10], &[0x20]),
+            ReplayOrder::Forward
+        );
+        assert_eq!(
+            profile.replay_order("press", &[0xff], &[0x00]),
+            ReplayOrder::Forward
+        );
+        assert_eq!(
+            profile.replay_order("press", &[0x11], &[0x10]),
+            ReplayOrder::Stale
+        );
+        assert_eq!(
+            profile.replay_order("press", &[0x00], &[0x80]),
+            ReplayOrder::Stale
+        );
+
+        // A -> B -> A must not re-emit A after B has become the durable
+        // replay head. The store persists that head across process restarts.
+        assert_eq!(
+            profile.replay_order("press", &[0x40], &[0x41]),
+            ReplayOrder::Forward
+        );
+        assert_eq!(
+            profile.replay_order("press", &[0x41], &[0x40]),
+            ReplayOrder::Stale
         );
     }
 

@@ -195,15 +195,20 @@ fn main() -> Result<()> {
         s.prepare_hub_device_room_assignment_fn =
             Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
+        s.reconcile_pairing_results_fn = Some(callbacks.reconcile_pairing_results_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
-        s.pairing_resource_activity_fn = Some(Arc::new(|hub_type, slot, active| {
-            if hub_type == rhythm_os::hub::HubType::MATTER && slot == "appliance_bluetooth_adapter"
-            {
-                rhythm_ble::bluez::set_external_adapter_reserved(active)
-            } else {
-                Ok(())
-            }
-        }));
+        #[cfg(target_os = "linux")]
+        {
+            s.pairing_resource_activity_fn = Some(Arc::new(|hub_type, slot, active| {
+                if hub_type == rhythm_os::hub::HubType::MATTER
+                    && slot == "appliance_bluetooth_adapter"
+                {
+                    rhythm_ble::bluez::set_external_adapter_reserved(active)
+                } else {
+                    Ok(())
+                }
+            }));
+        }
         s.run_device_test_fn = Some(callbacks.run_device_test_fn);
         s.save_device_test_report_fn = Some(callbacks.save_device_test_report_fn);
         s.hub_capabilities = callbacks.hub_capabilities.clone();
@@ -376,14 +381,17 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Hue BLE factory-reset quiescence lock poisoned"))? =
             quiescence;
-        if let Err(error) = rhythm_ble::bluez_lifecycle::quiesce_for_factory_reset(state) {
-            warn!(
-                target: "sys",
-                "Local Bluetooth observers did not quiesce cleanly before factory reset: {error:#}; scheduling a recovery reboot"
-            );
-            rhythm_server::self_update::schedule_factory_reset_restart();
-            return Err(error)
-                .context("quiescing local Bluetooth profile observers for factory reset");
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) = rhythm_ble::bluez_lifecycle::quiesce_for_factory_reset(state) {
+                warn!(
+                    target: "sys",
+                    "Local Bluetooth observers did not quiesce cleanly before factory reset: {error:#}; scheduling a recovery reboot"
+                );
+                rhythm_server::self_update::schedule_factory_reset_restart();
+                return Err(error)
+                    .context("quiescing local Bluetooth profile observers for factory reset");
+            }
         }
         Ok(())
     }));
@@ -418,6 +426,7 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
                 handoff.refreshed
             );
         }
+        #[cfg(target_os = "linux")]
         final_shared_ble_quiesce_or_schedule_recovery(
             rhythm_ble::bluez::quiesce_shared_runtime(),
             rhythm_server::self_update::schedule_factory_reset_restart,
@@ -479,6 +488,7 @@ fn final_hue_handoff_or_schedule_recovery(
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn final_shared_ble_quiesce_or_schedule_recovery(
     result: Result<()>,
     schedule_recovery: impl FnOnce(),

@@ -11,6 +11,7 @@ use anyhow::Result;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::pairing::{
+    complete_pairing_result_with_fingerprint, reconcile_committed_pairing_success_with_fingerprint,
     PairedDeviceInfo, PairingSession, PairingStage, PairingStatus, UnpairingCompletionScope,
     UnpairingResult,
 };
@@ -18,7 +19,7 @@ use rhythm_os::state::SharedState;
 
 use crate::discovery::LocalBleDiscovery;
 use crate::profile::profile_by_id;
-use crate::store::{LocalBleDevice, LocalBleDeviceStore};
+use crate::store::{latch_reset_guard, LocalBleDevice, LocalBleDeviceStore};
 use crate::transport::LocalBleTransport;
 use crate::{HUB_ADDRESS, HUB_TYPE};
 
@@ -98,6 +99,67 @@ fn reconcile_orphaned_canonical_projections(
     Ok(())
 }
 
+fn terminal_session_for_device(device: &LocalBleDevice) -> Result<PairingSession> {
+    let projection = profile_by_id(&device.profile_id)
+        .ok_or_else(|| anyhow::anyhow!("activation receipt names an unsupported BLE profile"))?
+        .projection();
+    let info = PairedDeviceInfo {
+        device_id: device.id.clone(),
+        name: projection.display_name.to_string(),
+        device_type: projection.device_type,
+        manufacturer: projection.manufacturer.map(str::to_string),
+        model: projection.model.map(str::to_string),
+    };
+    Ok(PairingSession {
+        hub_type: HUB_TYPE.to_string(),
+        status: PairingStatus::Complete,
+        device: Some(info.clone()),
+        devices: vec![info],
+        error: None,
+        warnings: Vec::new(),
+        details: None,
+    })
+}
+
+/// Drain the activation outbox before consulting BlueZ. A committed device
+/// association is authoritative even when the prior process died before its
+/// HTTP response or pairing-history write.
+fn reconcile_activation_receipts(state: &SharedState, store: &LocalBleDeviceStore) -> Result<()> {
+    store.with_reset_safe_operation(|| {
+        for receipt in store.pending_activation_receipts()? {
+            let device = store
+                .get_by_id(&receipt.device_id)
+                .filter(|device| device.profile_id == receipt.profile_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "local Bluetooth activation receipt has no authoritative device record"
+                    )
+                })?;
+            let session = terminal_session_for_device(&device)?;
+            reconcile_committed_pairing_success_with_fingerprint(
+                state,
+                &receipt.session_id,
+                HUB_TYPE,
+                &receipt.request_fingerprint,
+                &session,
+            )?;
+            store.acknowledge_activation_receipt(
+                &receipt.session_id,
+                &receipt.request_fingerprint,
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// Repair committed activation receipts without consulting BlueZ. Pairing
+/// status polling calls this while the process is live, so transient ledger
+/// failures do not require an OS restart before the app can recover success.
+pub fn reconcile_pending_pairing_results(state: &SharedState) -> Result<()> {
+    let store = LocalBleDeviceStore::load_shared(data_dir(state)?)?;
+    reconcile_activation_receipts(state, &store)
+}
+
 pub fn get_hub_data(state: &SharedState) -> Result<Arc<LocalBleHubData>> {
     let key = hub_key();
     state
@@ -133,6 +195,21 @@ fn connect_with_deadline(
     transport: Arc<dyn LocalBleTransport>,
     deadline: Option<Instant>,
 ) -> Result<(ActiveHub, Receiver<HubEvent>)> {
+    // Store authority and orphan repair are adapter-independent. Reconcile
+    // them even when BlueZ is down so a crash-staged canonical endpoint cannot
+    // remain visible until the radio recovers.
+    let store = LocalBleDeviceStore::load_shared(data_dir(state)?)?;
+    reconcile_activation_receipts(state, &store)?;
+    let active_device_ids = store.with_reset_safe_operation(|| {
+        let active_device_ids = store
+            .all()
+            .into_iter()
+            .map(|device| device.id.clone())
+            .collect::<HashSet<_>>();
+        reconcile_orphaned_canonical_projections(state, &active_device_ids)?;
+        Ok(active_device_ids)
+    })?;
+
     let available = match deadline {
         Some(deadline) => transport.is_available_until(deadline)?,
         None => transport.is_available()?,
@@ -141,13 +218,6 @@ fn connect_with_deadline(
         anyhow::bail!("Bluetooth adapter is unavailable");
     }
 
-    let store = LocalBleDeviceStore::load_shared(data_dir(state)?)?;
-    let active_device_ids = store
-        .all()
-        .into_iter()
-        .map(|device| device.id.clone())
-        .collect::<HashSet<_>>();
-    reconcile_orphaned_canonical_projections(state, &active_device_ids)?;
     let key = hub_key();
     let mut snapshot = state
         .lock()
@@ -242,7 +312,8 @@ pub fn pair(
     state: &SharedState,
     profile_id: &str,
     setup_value: &serde_json::Value,
-    session_id: Option<&str>,
+    session_id: &str,
+    request_fingerprint: &str,
     deadline: Instant,
 ) -> Result<PairingSession> {
     remaining_pairing_budget(deadline, "profile validation")?;
@@ -256,7 +327,7 @@ pub fn pair(
     rhythm_os::pairing::emit_pairing_progress(
         state,
         HUB_TYPE,
-        session_id,
+        Some(session_id),
         PairingStatus::Searching,
         PairingStage::Searching,
         "Looking for the nearby Bluetooth device",
@@ -272,7 +343,7 @@ pub fn pair(
     rhythm_os::pairing::emit_pairing_progress(
         state,
         HUB_TYPE,
-        session_id,
+        Some(session_id),
         PairingStatus::Commissioning,
         PairingStage::Finalizing,
         "Saving the Bluetooth device",
@@ -280,129 +351,165 @@ pub fn pair(
         None,
     );
 
-    let previous = data
-        .store
-        .get_by_identity(profile_id, setup.stable_identity());
-    let mut initial_replay = candidate.initial_replay;
-    if let Some(previous) = previous.as_ref() {
-        for (stream, value) in &previous.replay_state {
-            initial_replay
-                .entry(stream.clone())
-                .or_insert_with(|| value.clone());
+    // Pairing finalization is one reset-safe transaction. If reset closes the
+    // path first, no canonical projection starts. If finalization starts first,
+    // reset waits until both the projection and its durable activation either
+    // commit together or finish rolling back.
+    data.store.with_reset_safe_operation(|| {
+        let previous = data
+            .store
+            .get_by_identity(profile_id, setup.stable_identity());
+        let mut initial_replay = candidate.initial_replay;
+        if let Some(previous) = previous.as_ref() {
+            for (stream, value) in &previous.replay_state {
+                initial_replay
+                    .entry(stream.clone())
+                    .or_insert_with(|| value.clone());
+            }
         }
-    }
-    let mut device = LocalBleDevice::from_setup(
-        profile_id,
-        &setup,
-        candidate.transport_hint,
-        initial_replay,
-        false,
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    );
-    if let Some(previous) = previous.as_ref() {
-        device.id.clone_from(&previous.id);
-    }
+        let mut device = LocalBleDevice::from_setup(
+            profile_id,
+            &setup,
+            candidate.transport_hint,
+            initial_replay,
+            false,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        if let Some(previous) = previous.as_ref() {
+            device.id.clone_from(&previous.id);
+        }
 
-    let existing_room = state.lock().ok().and_then(|state| {
-        state
-            .canonical_registry
-            .find_by_native_id(&hub_key(), &device.id)
-            .and_then(|device| device.room_id.clone())
-    });
-    let projection = profile.projection();
-    let had_canonical_endpoint = state.lock().ok().is_some_and(|state| {
-        state
-            .canonical_registry
-            .find_by_native_id(&hub_key(), &device.id)
-            .is_some()
-    });
-    let project = register_canonical_identity(state, &device).and_then(|canonical_id| {
-        rhythm_os::commands::do_device_set(
-            state,
-            &device.id,
-            existing_room.as_deref(),
-            &device_buttons(&device, &projection),
-            projection.device_type.clone(),
-            &hub_key(),
-            true,
-        )?;
-        rhythm_os::commands::do_canonical_assign_room(
-            state,
-            &canonical_id,
-            existing_room.as_deref(),
-        )
-    });
-    if let Err(project_error) = project {
-        let endpoint_rollback = if !had_canonical_endpoint {
-            rhythm_os::commands::do_device_endpoint_remove(state, &device.id, &hub_key())
-        } else {
-            Ok(())
+        let existing_room = state.lock().ok().and_then(|state| {
+            state
+                .canonical_registry
+                .find_by_native_id(&hub_key(), &device.id)
+                .and_then(|device| device.room_id.clone())
+        });
+        let projection = profile.projection();
+        let had_canonical_endpoint = state.lock().ok().is_some_and(|state| {
+            state
+                .canonical_registry
+                .find_by_native_id(&hub_key(), &device.id)
+                .is_some()
+        });
+        let project = register_canonical_identity(state, &device).and_then(|canonical_id| {
+            rhythm_os::commands::do_device_set(
+                state,
+                &device.id,
+                existing_room.as_deref(),
+                &device_buttons(&device, &projection),
+                projection.device_type.clone(),
+                &hub_key(),
+                true,
+            )?;
+            rhythm_os::commands::do_canonical_assign_room(
+                state,
+                &canonical_id,
+                existing_room.as_deref(),
+            )
+        });
+        if let Err(project_error) = project {
+            let endpoint_rollback = if !had_canonical_endpoint {
+                rhythm_os::commands::do_device_endpoint_remove(state, &device.id, &hub_key())
+            } else {
+                Ok(())
+            };
+            if endpoint_rollback.is_err() {
+                anyhow::bail!(
+                    "local Bluetooth device projection failed and its endpoint rollback was incomplete"
+                );
+            }
+            let _ = project_error;
+            anyhow::bail!("local Bluetooth device projection failed and was rolled back");
+        }
+
+        if let Err(deadline_error) = remaining_pairing_budget(deadline, "activation commit") {
+            if !had_canonical_endpoint
+                && rhythm_os::commands::do_device_endpoint_remove(state, &device.id, &hub_key())
+                    .is_err()
+            {
+                anyhow::bail!(
+                    "local Bluetooth pairing expired and its endpoint rollback was incomplete"
+                );
+            }
+            return Err(deadline_error);
+        }
+        let committed_device = match data.store.upsert_activation_until(
+            device.clone(),
+            session_id,
+            request_fingerprint,
+            deadline,
+        ) {
+            Ok(device) => device,
+            Err(_) => {
+            if !had_canonical_endpoint
+                && rhythm_os::commands::do_device_endpoint_remove(state, &device.id, &hub_key())
+                    .is_err()
+            {
+                anyhow::bail!(
+                    "local Bluetooth activation commit failed and its endpoint rollback was incomplete"
+                );
+            }
+            anyhow::bail!("local Bluetooth association could not be saved and was rolled back");
+            }
         };
-        if endpoint_rollback.is_err() {
-            anyhow::bail!(
-                "local Bluetooth device projection failed and its endpoint rollback was incomplete"
-            );
-        }
-        let _ = project_error;
-        anyhow::bail!("local Bluetooth device projection failed and was rolled back");
-    }
+        let warnings = data
+            .store
+            .durability_degraded()
+            .then(|| {
+                "Bluetooth association was saved, but storage durability acknowledgement is degraded"
+                    .to_string()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
 
-    if let Err(deadline_error) = remaining_pairing_budget(deadline, "activation commit") {
-        if !had_canonical_endpoint
-            && rhythm_os::commands::do_device_endpoint_remove(state, &device.id, &hub_key())
-                .is_err()
-        {
-            anyhow::bail!(
-                "local Bluetooth pairing expired and its endpoint rollback was incomplete"
-            );
-        }
-        return Err(deadline_error);
-    }
-    if data.store.upsert(device.clone()).is_err() {
-        if !had_canonical_endpoint
-            && rhythm_os::commands::do_device_endpoint_remove(state, &device.id, &hub_key())
-                .is_err()
-        {
-            anyhow::bail!(
-                "local Bluetooth activation commit failed and its endpoint rollback was incomplete"
-            );
-        }
-        anyhow::bail!("local Bluetooth association could not be saved and was rolled back");
-    }
-    let warnings = data
-        .store
-        .durability_degraded()
-        .then(|| {
-            "Bluetooth association was saved, but storage durability acknowledgement is degraded"
-                .to_string()
-        })
-        .into_iter()
-        .collect();
+        let _ = data.event_tx.send(HubEvent::DevicePaired {
+            hub_key: None,
+            device_id: committed_device.id.clone(),
+            name: projection.display_name.to_string(),
+            device_type: projection.device_type.clone(),
+        });
+        let mut session = terminal_session_for_device(&committed_device)?;
+        session.details = Some(serde_json::json!({ "profile_id": profile_id }));
+        session.warnings = warnings;
 
-    let _ = data.event_tx.send(HubEvent::DevicePaired {
-        hub_key: None,
-        device_id: device.id.clone(),
-        name: projection.display_name.to_string(),
-        device_type: projection.device_type.clone(),
-    });
-    let info = PairedDeviceInfo {
-        device_id: device.id.clone(),
-        name: projection.display_name.to_string(),
-        device_type: projection.device_type.clone(),
-        manufacturer: projection.manufacturer.map(str::to_string),
-        model: projection.model.map(str::to_string),
-    };
-    Ok(PairingSession {
-        hub_type: HUB_TYPE.to_string(),
-        status: PairingStatus::Complete,
-        device: Some(info.clone()),
-        devices: vec![info],
-        error: None,
-        warnings,
-        details: Some(serde_json::json!({ "profile_id": profile_id })),
+        // The activation receipt is an outbox: acknowledge it only after the
+        // core terminal ledger durably accepts the same fingerprint-bound
+        // success. Failure here cannot turn an authoritative association into
+        // a failed pairing; retain the receipt for startup repair instead.
+        match complete_pairing_result_with_fingerprint(
+            state,
+            session_id,
+            HUB_TYPE,
+            request_fingerprint,
+            &session,
+        ) {
+            Ok(()) => {
+                if let Err(error) = data
+                    .store
+                    .acknowledge_activation_receipt(session_id, request_fingerprint)
+                {
+                    log::warn!(
+                        target: "pair",
+                        "Local Bluetooth activation receipt acknowledgement will retry: {error:#}"
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    target: "pair",
+                    "Local Bluetooth terminal receipt will retry from the activation outbox: {error:#}"
+                );
+                session.warnings.push(
+                    "Bluetooth association was saved; confirmation recovery is still pending"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(session)
     })
 }
 
@@ -482,6 +589,10 @@ pub fn unpair(state: &SharedState, requested_id: &str) -> Result<UnpairingResult
         Ok(data) => data.store.clone(),
         Err(_) => LocalBleDeviceStore::load_shared(data_dir(state)?)?,
     };
+    // Do not let an intentional removal erase the only evidence that a prior
+    // activation succeeded. Flush its outbox first; if terminal persistence is
+    // unavailable, preserve the device and let the user retry removal.
+    reconcile_activation_receipts(state, &store)?;
     let removed = store.remove(&native_id)?;
     let has_active_hub = state
         .lock()
@@ -490,6 +601,11 @@ pub fn unpair(state: &SharedState, requested_id: &str) -> Result<UnpairingResult
         .contains_key(&hub_key());
     if has_active_hub {
         rhythm_os::commands::do_device_remove(state, &native_id, &hub_key())?;
+    } else {
+        // BlueZ and the live hub are not required to remove the canonical
+        // endpoint. The persisted hub-registry snapshot is filtered against
+        // the authoritative store on the next bootstrap.
+        rhythm_os::commands::do_device_endpoint_remove(state, &native_id, &hub_key())?;
     }
     Ok(UnpairingResult {
         hub_type: HUB_TYPE.to_string(),
@@ -510,27 +626,30 @@ pub fn unpair(state: &SharedState, requested_id: &str) -> Result<UnpairingResult
 /// store. This intentionally does not stop the shared adapter: Hue must still
 /// perform its authenticated bond handoff later in the same reset.
 pub fn quiesce_for_factory_reset(state: &SharedState) -> Result<()> {
-    let Ok(data) = get_hub_data(state) else {
-        return Ok(());
-    };
-    if let Ok(slot) = data.monitor_shutdown.lock() {
-        if let Some(shutdown) = slot.as_ref() {
-            shutdown.store(true, Ordering::SeqCst);
+    let data_dir = data_dir(state)?;
+    if let Ok(data) = get_hub_data(state) {
+        if let Ok(slot) = data.monitor_shutdown.lock() {
+            if let Some(shutdown) = slot.as_ref() {
+                shutdown.store(true, Ordering::SeqCst);
+            }
         }
+        data.store.quiesce();
+        if let Some(thread) = data
+            .monitor_thread
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local Bluetooth observer lock poisoned"))?
+            .take()
+        {
+            thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("local Bluetooth observer join failed"))?;
+        }
+        data.transport.quiesce()?;
     }
-    data.store.quiesce();
-    if let Some(thread) = data
-        .monitor_thread
-        .lock()
-        .map_err(|_| anyhow::anyhow!("local Bluetooth observer lock poisoned"))?
-        .take()
-    {
-        thread
-            .join()
-            .map_err(|_| anyhow::anyhow!("local Bluetooth observer join failed"))?;
-    }
-    data.transport.quiesce()?;
-    Ok(())
+    // This path-scoped fence exists independently of ActiveHub. It closes new
+    // store loads, mutations, registry reconciliation, and late hub publication
+    // before waiting for every already-admitted operation to drain.
+    latch_reset_guard(data_dir)
 }
 
 #[cfg(test)]
@@ -543,6 +662,9 @@ mod tests {
     use rhythm_core::runtime::hub_registry::DeviceType;
     use rhythm_os::state::AppState;
     use std::collections::BTreeMap;
+
+    const TEST_PAIRING_HMAC_KEY: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn temporary_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -651,6 +773,21 @@ mod tests {
         let root = temporary_dir("deadline-availability");
         let mut app = AppState::default();
         app.data_dir = root.to_string_lossy().into_owned();
+        let orphan_id = "local-ble-00000000000000000000000000000001";
+        app.canonical_registry.resolve(
+            &DiscoveredIdentity {
+                native_id: orphan_id.to_string(),
+                room_id: None,
+                room_name: None,
+                name: "Orphaned button".to_string(),
+                device_type: DeviceType::Button,
+                hardware_ids: vec![HardwareId::serial(orphan_id)],
+                manufacturer: Some("Synthetic".to_string()),
+                model: Some("TEST".to_string()),
+            },
+            &hub_key(),
+            1,
+        );
         let state = Arc::new(Mutex::new(app));
         let transport = Arc::new(DeadlineAvailabilityProbe {
             deadline_probe_called: AtomicBool::new(false),
@@ -667,6 +804,205 @@ mod tests {
 
         assert!(error.to_string().contains("adapter is unavailable"));
         assert!(transport.deadline_probe_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .find_by_native_id(&hub_key(), orphan_id)
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restart_repairs_an_activation_receipt_before_adapter_availability() {
+        let root = temporary_dir("activation-outbox");
+        let store = LocalBleDeviceStore::load_shared(&root).unwrap();
+        let device = LocalBleDevice::from_setup(
+            OREIN_OC02001_PROFILE_ID,
+            &ValidatedBleSetup {
+                stable_identity: "A1B2C3D4E5F6".to_string(),
+                metadata: BTreeMap::new(),
+            },
+            "02:00:00:00:00:20".to_string(),
+            BTreeMap::new(),
+            false,
+            1,
+        );
+        let session_id = "local-ble-crash-recovery";
+        let fingerprint = rhythm_os::pairing::pairing_request_fingerprint(
+            TEST_PAIRING_HMAC_KEY,
+            HUB_TYPE,
+            &serde_json::json!({
+                "profile_id": OREIN_OC02001_PROFILE_ID,
+                "setup": {"ble_identity": "A1B2C3D4E5F6"}
+            }),
+        )
+        .unwrap();
+        store
+            .upsert_activation_until(
+                device,
+                session_id,
+                &fingerprint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let mut app = AppState::default();
+        app.data_dir = root.to_string_lossy().into_owned();
+        app.storage = Some(Arc::new(
+            rhythm_os::storage::FileStorage::new(root.to_str().unwrap()).unwrap(),
+        ));
+        let state = Arc::new(Mutex::new(app));
+        let transport = Arc::new(DeadlineAvailabilityProbe {
+            deadline_probe_called: AtomicBool::new(false),
+        });
+
+        let error = match connect_until(&state, transport, Instant::now() + Duration::from_secs(1))
+        {
+            Ok(_) => panic!("unavailable transport unexpectedly connected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("adapter is unavailable"));
+
+        let status = rhythm_os::pairing::lookup_pairing_result(&state, session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            status.state,
+            rhythm_os::pairing::PairingResultState::Terminal
+        );
+        assert_eq!(status.result.unwrap().status, PairingStatus::Complete);
+        assert!(store.pending_activation_receipts().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_status_lookup_repairs_a_committed_receipt_before_pending_expiry() {
+        let root = temporary_dir("activation-outbox-live-status");
+        let store = LocalBleDeviceStore::load_shared(&root).unwrap();
+        let session_id = "local-ble-live-recovery";
+        let fingerprint = rhythm_os::pairing::pairing_request_fingerprint(
+            TEST_PAIRING_HMAC_KEY,
+            HUB_TYPE,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        store
+            .upsert_activation_until(
+                LocalBleDevice::from_setup(
+                    OREIN_OC02001_PROFILE_ID,
+                    &ValidatedBleSetup {
+                        stable_identity: "C1B2C3D4E5F6".to_string(),
+                        metadata: BTreeMap::new(),
+                    },
+                    "02:00:00:00:00:22".to_string(),
+                    BTreeMap::new(),
+                    false,
+                    1,
+                ),
+                session_id,
+                &fingerprint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let storage =
+            Arc::new(rhythm_os::storage::FileStorage::new(root.to_str().unwrap()).unwrap());
+        rhythm_os::storage::Storage::save_pairing_history(
+            storage.as_ref(),
+            &rhythm_os::pairing::PairingHistory {
+                schema_version: rhythm_os::pairing::PAIRING_HISTORY_SCHEMA_VERSION,
+                entries: Vec::new(),
+                pairing_results: vec![rhythm_os::pairing::PairingResultRecord {
+                    session_id: session_id.to_string(),
+                    hub_type: HUB_TYPE.to_string(),
+                    request_fingerprint: fingerprint.clone(),
+                    // Deliberately older than the local pending TTL. GET must
+                    // drain the authoritative outbox before it expires this.
+                    updated_at_epoch_ms: 1,
+                    result: None,
+                }],
+            },
+        )
+        .unwrap();
+        let mut app = AppState::default();
+        app.data_dir = root.to_string_lossy().into_owned();
+        app.storage = Some(storage);
+        app.reconcile_pairing_results_fn = Some(Arc::new(|state, _| {
+            reconcile_pending_pairing_results(state)
+        }));
+        let state = Arc::new(Mutex::new(app));
+
+        let response = rhythm_os::handlers::handle_get_pair_device(&state, session_id);
+        assert_eq!(response.status, 200);
+        let status: rhythm_os::pairing::PairingResultStatus =
+            serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            status.result.unwrap().status,
+            rhythm_os::pairing::PairingStatus::Complete
+        );
+        assert!(store.pending_activation_receipts().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activation_outbox_accepts_an_existing_success_with_transient_warnings() {
+        let root = temporary_dir("activation-outbox-warning");
+        let store = LocalBleDeviceStore::load_shared(&root).unwrap();
+        let session_id = "local-ble-warning-recovery";
+        let fingerprint = rhythm_os::pairing::pairing_request_fingerprint(
+            TEST_PAIRING_HMAC_KEY,
+            HUB_TYPE,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let committed = store
+            .upsert_activation_until(
+                LocalBleDevice::from_setup(
+                    OREIN_OC02001_PROFILE_ID,
+                    &ValidatedBleSetup {
+                        stable_identity: "B1B2C3D4E5F6".to_string(),
+                        metadata: BTreeMap::new(),
+                    },
+                    "02:00:00:00:00:21".to_string(),
+                    BTreeMap::new(),
+                    false,
+                    1,
+                ),
+                session_id,
+                &fingerprint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let mut app = AppState::default();
+        app.data_dir = root.to_string_lossy().into_owned();
+        app.storage = Some(Arc::new(
+            rhythm_os::storage::FileStorage::new(root.to_str().unwrap()).unwrap(),
+        ));
+        let state = Arc::new(Mutex::new(app));
+        let mut first_terminal = terminal_session_for_device(&committed).unwrap();
+        first_terminal
+            .warnings
+            .push("Storage acknowledgement was degraded".to_string());
+        complete_pairing_result_with_fingerprint(
+            &state,
+            session_id,
+            HUB_TYPE,
+            &fingerprint,
+            &first_terminal,
+        )
+        .unwrap();
+
+        reconcile_activation_receipts(&state, &store).unwrap();
+
+        assert!(store.pending_activation_receipts().unwrap().is_empty());
+        let persisted = rhythm_os::pairing::lookup_pairing_result(&state, session_id)
+            .unwrap()
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(persisted.warnings, ["Storage acknowledgement was degraded"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -760,7 +1096,27 @@ mod tests {
             .unwrap()
             .canonical_registry
             .find_by_native_id(&hub_key(), &device.id)
-            .is_some());
+            .is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn factory_reset_latches_the_path_fence_without_an_active_hub() {
+        let root = temporary_dir("offline-reset-fence");
+        let mut app = AppState::default();
+        app.data_dir = root.to_string_lossy().into_owned();
+        let state = Arc::new(Mutex::new(app));
+
+        quiesce_for_factory_reset(&state).unwrap();
+
+        assert!(LocalBleDeviceStore::load_shared(&root).is_err());
+        assert!(!root.join(crate::store::STORE_DIRECTORY).exists());
+
+        // Production deliberately retains the fence until reboot. Explicitly
+        // release this unique path so the process-global test registry does not
+        // retain test-only state.
+        crate::store::release_latched_reset_guard(&root);
+        LocalBleDeviceStore::load_shared(&root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

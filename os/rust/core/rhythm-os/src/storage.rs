@@ -21,6 +21,8 @@ use crate::canonical::identity::HubKey;
 use crate::hub::HubCredentials;
 use crate::scenes::{is_native_scene_id, StoredScenes};
 
+const MAX_PAIRING_HISTORY_BYTES: u64 = 1024 * 1024;
+
 /// Namespaced durable state for plan-based light runtimes.
 ///
 /// Shape: runtime id -> node id -> app-defined key -> JSON value.
@@ -219,7 +221,7 @@ pub trait Storage: Send + Sync {
     }
 }
 
-const STORED_SERVER_METADATA_SCHEMA_VERSION: u32 = 1;
+const STORED_SERVER_METADATA_SCHEMA_VERSION: u32 = 2;
 
 fn stored_server_metadata_schema_version() -> u32 {
     STORED_SERVER_METADATA_SCHEMA_VERSION
@@ -231,6 +233,10 @@ pub struct StoredServerMetadata {
     #[serde(default = "stored_server_metadata_schema_version")]
     pub schema_version: u32,
     pub server_instance_id: String,
+    /// Installation-secret HMAC key for privacy-safe pairing idempotency
+    /// bindings. This file is private and excluded from support/backup bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_hmac_key: Option<String>,
 }
 
 /// Generate an opaque stable server-installation identifier.
@@ -244,6 +250,24 @@ pub fn generate_server_instance_id() -> String {
         write!(&mut id, "{byte:02x}").expect("writing to String cannot fail");
     }
     id
+}
+
+/// Generate a 256-bit installation secret encoded as lowercase hex.
+pub fn generate_pairing_hmac_key() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut key = String::with_capacity(64);
+    for byte in bytes {
+        write!(&mut key, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    key
+}
+
+fn valid_pairing_hmac_key(key: &str) -> bool {
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Stored light profile configurations for persistence.
@@ -487,11 +511,19 @@ impl FileStorage {
     /// power loss. Removes any stale `.tmp` left behind by a crashed prior
     /// write before starting.
     fn write_atomic(&self, name: &str, data: &[u8]) -> Result<()> {
-        self.write_atomic_with_mode(name, data, None)
+        self.write_atomic_with_mode(name, data, None, false)
+    }
+
+    fn write_atomic_durable(&self, name: &str, data: &[u8]) -> Result<()> {
+        self.write_atomic_with_mode(name, data, None, true)
     }
 
     fn write_atomic_secret(&self, name: &str, data: &[u8]) -> Result<()> {
-        self.write_atomic_with_mode(name, data, Some(0o600))
+        self.write_atomic_with_mode(name, data, Some(0o600), false)
+    }
+
+    fn write_atomic_secret_durable(&self, name: &str, data: &[u8]) -> Result<()> {
+        self.write_atomic_with_mode(name, data, Some(0o600), true)
     }
 
     fn write_atomic_with_mode(
@@ -499,6 +531,7 @@ impl FileStorage {
         name: &str,
         data: &[u8],
         unix_mode: Option<u32>,
+        require_parent_sync: bool,
     ) -> Result<()> {
         use std::io::Write;
 
@@ -547,7 +580,12 @@ impl FileStorage {
             });
         }
 
-        if let Ok(dir) = std::fs::File::open(&self.dir) {
+        if require_parent_sync {
+            let dir = std::fs::File::open(&self.dir)
+                .with_context(|| format!("Failed to open data dir {}", self.dir.display()))?;
+            dir.sync_all()
+                .with_context(|| format!("Failed to fsync data dir {}", self.dir.display()))?;
+        } else if let Ok(dir) = std::fs::File::open(&self.dir) {
             let _ = dir.sync_all();
         }
 
@@ -568,6 +606,22 @@ impl FileStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => {
                 Err(anyhow::anyhow!(e)).with_context(|| format!("removing {}", path.display()))
+            }
+        }
+    }
+
+    fn remove_if_exists_durable(&self, name: &str) -> Result<()> {
+        let path = self.file_path(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                let dir = std::fs::File::open(&self.dir)
+                    .with_context(|| format!("opening data dir {}", self.dir.display()))?;
+                dir.sync_all()
+                    .with_context(|| format!("fsyncing data dir {}", self.dir.display()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(anyhow::anyhow!(error)).with_context(|| format!("removing {}", path.display()))
             }
         }
     }
@@ -922,8 +976,20 @@ impl Storage for FileStorage {
 
     fn load_pairing_history(&self) -> Result<Option<crate::pairing::PairingHistory>> {
         let path = self.file_path("pairing_history.json");
+        if path.exists()
+            && std::fs::metadata(&path)
+                .with_context(|| format!("Failed to inspect {}", path.display()))?
+                .len()
+                > MAX_PAIRING_HISTORY_BYTES
+        {
+            anyhow::bail!(
+                "pairing history exceeds the {} byte limit at {}",
+                MAX_PAIRING_HISTORY_BYTES,
+                path.display()
+            );
+        }
         match self.read_json::<crate::pairing::PairingHistory>("pairing_history.json") {
-            Ok(history) => Ok(Some(history.normalized())),
+            Ok(history) => Ok(Some(history)),
             Err(e) => {
                 if path.exists() {
                     warn!(
@@ -932,6 +998,12 @@ impl Storage for FileStorage {
                         path.display(),
                         e
                     );
+                    return Err(e).with_context(|| {
+                        format!(
+                            "pairing history exists but is unreadable at {}",
+                            path.display()
+                        )
+                    });
                 }
                 Ok(None)
             }
@@ -940,7 +1012,13 @@ impl Storage for FileStorage {
 
     fn save_pairing_history(&self, history: &crate::pairing::PairingHistory) -> Result<()> {
         let data = serde_json::to_string_pretty(history)?;
-        self.write_atomic("pairing_history.json", data.as_bytes())
+        if data.len() as u64 > MAX_PAIRING_HISTORY_BYTES {
+            anyhow::bail!(
+                "pairing history would exceed the {} byte limit",
+                MAX_PAIRING_HISTORY_BYTES
+            );
+        }
+        self.write_atomic_durable("pairing_history.json", data.as_bytes())
     }
 
     fn load_activity_cloud_config(
@@ -1168,6 +1246,18 @@ impl Storage for FileStorage {
 
     fn load_server_metadata(&self) -> Result<Option<StoredServerMetadata>> {
         let path = self.file_path("server_metadata.json");
+        if path.exists() {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .with_context(|| format!("opening private metadata {}", path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("securing private metadata {}", path.display()))?;
+            }
+        }
         match self.read_json::<StoredServerMetadata>("server_metadata.json") {
             Ok(metadata) => Ok(Some(metadata)),
             Err(e) => {
@@ -1192,11 +1282,14 @@ impl Storage for FileStorage {
 
     fn save_server_metadata(&self, metadata: &StoredServerMetadata) -> Result<()> {
         let json = serde_json::to_string_pretty(metadata)?;
-        self.write_atomic("server_metadata.json", json.as_bytes())
+        // The pairing ledger and activation outbox can survive power loss only
+        // if the HMAC key used to bind them survives too. Require the metadata
+        // rename itself to be durable before session-bound pairing admission.
+        self.write_atomic_secret_durable("server_metadata.json", json.as_bytes())
     }
 
     fn clear_server_metadata(&self) -> Result<()> {
-        self.remove_if_exists("server_metadata.json")
+        self.remove_if_exists_durable("server_metadata.json")
     }
 
     fn load_api_auth(&self) -> Result<Option<crate::auth::StoredApiAuth>> {
@@ -1279,6 +1372,8 @@ impl Storage for FileStorage {
             "motion_timers.json",
             "light_runtime_state.json",
             "activity_history.json",
+            "pairing_history.json",
+            "pairing_history.json.tmp",
             "activity_cloud.json",
             "hub_credentials.json",
             "canonical_registry.json",
@@ -1287,6 +1382,35 @@ impl Storage for FileStorage {
             "auth.json",
         ] {
             self.remove_if_exists(name)?;
+        }
+        // Preserve the server's stable public installation ID while rotating
+        // the confidential pairing HMAC domain across a factory reset.
+        match self.load_server_metadata() {
+            Ok(Some(metadata))
+                if metadata.schema_version > STORED_SERVER_METADATA_SCHEMA_VERSION =>
+            {
+                // A reset must not retain unknown future secrets, and this
+                // binary cannot safely rewrite a forward-owned schema while
+                // preserving only the fields it understands.
+                self.clear_server_metadata()?;
+            }
+            Ok(Some(mut metadata)) => {
+                metadata.schema_version = STORED_SERVER_METADATA_SCHEMA_VERSION;
+                metadata.pairing_hmac_key = None;
+                if let Err(error) = self.save_server_metadata(&metadata) {
+                    // If preserving the public installation ID cannot be made
+                    // durable, fail closed by durably deleting the combined
+                    // metadata file. The next boot rotates both identifiers
+                    // instead of silently retaining the pre-reset HMAC key.
+                    warn!(target: "sys", "Could not preserve public server identity while rotating pairing key: {error:#}");
+                    self.clear_server_metadata()?;
+                }
+            }
+            Ok(None) if self.file_path("server_metadata.json").exists() => {
+                self.clear_server_metadata()?;
+            }
+            Ok(None) => {}
+            Err(_) => self.clear_server_metadata()?,
         }
         self.clear_remote_access_config()?;
         self.clear_hub_registry_files()?;
@@ -1638,43 +1762,80 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
 }
 
 fn ensure_server_instance_id(s: &mut crate::state::AppState) {
-    let loaded_id = s
+    // Production targets install storage before calling this loader. Mark the
+    // key unavailable until either a valid persisted key is loaded or the
+    // generated replacement is durably committed below.
+    s.pairing_hmac_key_durable = s.storage.is_none();
+    let loaded = s
         .storage
         .as_ref()
         .and_then(|storage| match storage.load_server_metadata() {
-            Ok(Some(metadata)) => {
-                let id = metadata.server_instance_id.trim();
-                if id.is_empty() {
-                    None
-                } else {
-                    Some(id.to_string())
-                }
-            }
-            Ok(None) => None,
+            Ok(metadata) => metadata,
             Err(e) => {
                 warn!(target: "sys", "Failed to load server metadata: {}", e);
                 None
             }
         });
 
-    if let Some(id) = loaded_id {
-        s.server_instance_id = id;
-        return;
-    }
-
-    if s.server_instance_id.trim().is_empty() {
+    if let Some(id) = loaded
+        .as_ref()
+        .map(|metadata| metadata.server_instance_id.trim())
+        .filter(|id| !id.is_empty())
+    {
+        s.server_instance_id = id.to_string();
+    } else if s.server_instance_id.trim().is_empty() {
         s.server_instance_id = generate_server_instance_id();
     }
 
+    if let Some(key) = loaded
+        .as_ref()
+        .and_then(|metadata| metadata.pairing_hmac_key.as_deref())
+        .filter(|key| valid_pairing_hmac_key(key))
+    {
+        s.pairing_hmac_key = key.to_string();
+        s.pairing_hmac_key_durable = true;
+    } else if !valid_pairing_hmac_key(&s.pairing_hmac_key) {
+        s.pairing_hmac_key = generate_pairing_hmac_key();
+    }
+
+    // A downgraded binary must not rewrite metadata owned by a newer schema:
+    // doing so would silently discard fields it cannot understand. A valid
+    // key in that document is still durable and can bind the existing ledger;
+    // without one, pairing remains closed until a compatible binary returns.
+    if let Some(metadata) = loaded
+        .as_ref()
+        .filter(|metadata| metadata.schema_version > STORED_SERVER_METADATA_SCHEMA_VERSION)
+    {
+        warn!(
+            target: "sys",
+            "Server metadata schema {} is newer than supported {}; preserving it unchanged",
+            metadata.schema_version,
+            STORED_SERVER_METADATA_SCHEMA_VERSION
+        );
+        return;
+    }
+
+    let metadata_is_current = loaded.as_ref().is_some_and(|metadata| {
+        metadata.schema_version == STORED_SERVER_METADATA_SCHEMA_VERSION
+            && metadata.server_instance_id == s.server_instance_id
+            && metadata.pairing_hmac_key.as_deref() == Some(s.pairing_hmac_key.as_str())
+    });
+    if metadata_is_current {
+        s.pairing_hmac_key_durable = true;
+        return;
+    }
     if let Some(storage) = s.storage.as_ref() {
         let metadata = StoredServerMetadata {
             schema_version: STORED_SERVER_METADATA_SCHEMA_VERSION,
             server_instance_id: s.server_instance_id.clone(),
+            pairing_hmac_key: Some(s.pairing_hmac_key.clone()),
         };
         if let Err(e) = storage.save_server_metadata(&metadata) {
-            warn!(target: "sys", "Failed to persist server metadata: {}", e);
+            s.pairing_hmac_key_durable = false;
+            warn!(target: "sys", "Failed to persist private server metadata: {}", e);
         } else {
-            info!(target: "sys", "Generated server instance metadata");
+            s.pairing_hmac_key_durable = true;
+            info!(target: "sys", "Generated or upgraded private server metadata");
         }
     }
 }
@@ -3055,8 +3216,9 @@ mod tests {
         fn server_metadata_save_load_and_clear_roundtrip() {
             let (storage, path) = temp_storage();
             let metadata = StoredServerMetadata {
-                schema_version: 1,
+                schema_version: STORED_SERVER_METADATA_SCHEMA_VERSION,
                 server_instance_id: "srv-test-instance".into(),
+                pairing_hmac_key: Some("ab".repeat(32)),
             };
 
             storage.save_server_metadata(&metadata).unwrap();
@@ -3065,6 +3227,53 @@ mod tests {
 
             storage.clear_server_metadata().unwrap();
             assert!(storage.load_server_metadata().unwrap().is_none());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn pairing_admission_stays_closed_until_generated_key_is_durable() {
+            let (storage, path) = temp_storage();
+            // Deterministically make the atomic temp path unwritable without
+            // relying on platform permission behavior (or whether CI is root).
+            let blocked_tmp = path.join("server_metadata.json.tmp");
+            std::fs::create_dir(&blocked_tmp).unwrap();
+            let mut app = crate::state::AppState {
+                storage: Some(Arc::new(storage)),
+                ..Default::default()
+            };
+
+            ensure_server_instance_id(&mut app);
+            assert!(!app.pairing_hmac_key_durable);
+            let generated_key = app.pairing_hmac_key.clone();
+            let state = Arc::new(std::sync::Mutex::new(app));
+            assert!(crate::pairing::pairing_request_fingerprint_for_state(
+                &state,
+                "local_ble",
+                &serde_json::json!({})
+            )
+            .is_err());
+
+            std::fs::remove_dir(&blocked_tmp).unwrap();
+            {
+                let mut app = state.lock().unwrap();
+                ensure_server_instance_id(&mut app);
+                assert!(app.pairing_hmac_key_durable);
+                assert_eq!(app.pairing_hmac_key, generated_key);
+            }
+            assert!(crate::pairing::pairing_request_fingerprint_for_state(
+                &state,
+                "local_ble",
+                &serde_json::json!({})
+            )
+            .is_ok());
+
+            let mut restarted = crate::state::AppState {
+                storage: Some(Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap())),
+                ..Default::default()
+            };
+            ensure_server_instance_id(&mut restarted);
+            assert!(restarted.pairing_hmac_key_durable);
+            assert_eq!(restarted.pairing_hmac_key, generated_key);
             cleanup(&path);
         }
 
@@ -3079,13 +3288,20 @@ mod tests {
             load_persisted_state(&mut app);
 
             let generated_id = app.server_instance_id.clone();
+            let generated_pairing_key = app.pairing_hmac_key.clone();
             assert!(generated_id.starts_with("srv-"));
+            assert!(valid_pairing_hmac_key(&generated_pairing_key));
+            assert!(app.pairing_hmac_key_durable);
             let persisted = FileStorage::new(path.to_str().unwrap())
                 .unwrap()
                 .load_server_metadata()
                 .unwrap()
                 .unwrap();
             assert_eq!(persisted.server_instance_id, generated_id);
+            assert_eq!(
+                persisted.pairing_hmac_key.as_deref(),
+                Some(generated_pairing_key.as_str())
+            );
 
             let mut restarted = crate::state::AppState {
                 storage: Some(std::sync::Arc::new(
@@ -3095,7 +3311,63 @@ mod tests {
             };
             load_persisted_state(&mut restarted);
             assert_eq!(restarted.server_instance_id, generated_id);
+            assert_eq!(restarted.pairing_hmac_key, generated_pairing_key);
+            assert!(restarted.pairing_hmac_key_durable);
 
+            cleanup(&path);
+        }
+
+        #[test]
+        fn future_server_metadata_is_preserved_without_downgrade_rewrite() {
+            let (storage, path) = temp_storage();
+            let raw = serde_json::json!({
+                "schema_version": STORED_SERVER_METADATA_SCHEMA_VERSION + 1,
+                "server_instance_id": "srv-future-instance",
+                "pairing_hmac_key": "cd".repeat(32),
+                "future_field": {"must": "survive"},
+            })
+            .to_string();
+            std::fs::write(path.join("server_metadata.json"), &raw).unwrap();
+            let mut app = crate::state::AppState {
+                storage: Some(std::sync::Arc::new(storage)),
+                ..Default::default()
+            };
+
+            ensure_server_instance_id(&mut app);
+
+            assert_eq!(app.server_instance_id, "srv-future-instance");
+            assert_eq!(app.pairing_hmac_key, "cd".repeat(32));
+            assert!(app.pairing_hmac_key_durable);
+            assert_eq!(
+                std::fs::read_to_string(path.join("server_metadata.json")).unwrap(),
+                raw
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn future_server_metadata_without_valid_key_fails_pairing_closed() {
+            let (storage, path) = temp_storage();
+            let raw = serde_json::json!({
+                "schema_version": STORED_SERVER_METADATA_SCHEMA_VERSION + 1,
+                "server_instance_id": "srv-future-without-key",
+                "future_field": true,
+            })
+            .to_string();
+            std::fs::write(path.join("server_metadata.json"), &raw).unwrap();
+            let mut app = crate::state::AppState {
+                storage: Some(std::sync::Arc::new(storage)),
+                ..Default::default()
+            };
+
+            ensure_server_instance_id(&mut app);
+
+            assert_eq!(app.server_instance_id, "srv-future-without-key");
+            assert!(!app.pairing_hmac_key_durable);
+            assert_eq!(
+                std::fs::read_to_string(path.join("server_metadata.json")).unwrap(),
+                raw
+            );
             cleanup(&path);
         }
 
@@ -3292,6 +3564,20 @@ mod tests {
                     updated_at_epoch_ms: 123,
                 })
                 .unwrap();
+            storage
+                .save_server_metadata(&StoredServerMetadata {
+                    schema_version: STORED_SERVER_METADATA_SCHEMA_VERSION,
+                    server_instance_id: "srv-reset-stable".to_string(),
+                    pairing_hmac_key: Some("ab".repeat(32)),
+                })
+                .unwrap();
+            storage
+                .save_pairing_history(&crate::pairing::PairingHistory {
+                    schema_version: crate::pairing::PAIRING_HISTORY_SCHEMA_VERSION,
+                    entries: Vec::new(),
+                    pairing_results: Vec::new(),
+                })
+                .unwrap();
             std::fs::create_dir_all(path.join("cloudflared")).unwrap();
             std::fs::write(path.join("cloudflared").join("connector_token"), "secret").unwrap();
             std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
@@ -3327,6 +3613,7 @@ mod tests {
                 "motion_timers.json",
                 "light_runtime_state.json",
                 "activity_history.json",
+                "pairing_history.json",
                 "hub_credentials.json",
                 "canonical_registry.json",
                 "topology.json",
@@ -3340,6 +3627,9 @@ mod tests {
             ] {
                 assert!(!path.join(name).exists(), "{} should be removed", name);
             }
+            let metadata = storage.load_server_metadata().unwrap().unwrap();
+            assert_eq!(metadata.server_instance_id, "srv-reset-stable");
+            assert_eq!(metadata.pairing_hmac_key, None);
             assert!(
                 !path.join("matter").exists(),
                 "integration runtime state should be removed"
@@ -3357,6 +3647,27 @@ mod tests {
                 "prerelease vendor-shaped BLE metadata should be removed"
             );
 
+            cleanup(&path);
+        }
+
+        #[test]
+        fn factory_reset_deletes_future_server_metadata_instead_of_downgrading_it() {
+            let (storage, path) = temp_storage();
+            std::fs::write(
+                path.join("server_metadata.json"),
+                serde_json::json!({
+                    "schema_version": STORED_SERVER_METADATA_SCHEMA_VERSION + 1,
+                    "server_instance_id": "srv-future-reset",
+                    "pairing_hmac_key": "ef".repeat(32),
+                    "future_secret": "must-not-survive-reset",
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            storage.clear_factory_reset_state().unwrap();
+
+            assert!(!path.join("server_metadata.json").exists());
             cleanup(&path);
         }
 
@@ -3579,6 +3890,23 @@ mod tests {
             storage.clear_api_auth().unwrap();
             storage.clear_api_auth().unwrap();
 
+            cleanup(&path);
+        }
+
+        #[test]
+        fn corrupt_pairing_reconciliation_document_fails_closed() {
+            let (storage, path) = temp_storage();
+            assert!(storage.load_pairing_history().unwrap().is_none());
+            std::fs::write(path.join("pairing_history.json"), "{").unwrap();
+
+            let error = storage.load_pairing_history().unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("pairing history exists but is unreadable"));
+            assert_eq!(
+                std::fs::read_to_string(path.join("pairing_history.json")).unwrap(),
+                "{"
+            );
             cleanup(&path);
         }
 

@@ -29,6 +29,7 @@ import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/remote_access_service.dart';
+import '../services/server_identity.dart';
 import '../services/server_activity_cloud_provisioning_service.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
@@ -377,6 +378,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// The server entry currently selected for the active connection.
   Hub? get connectedServerHub => _serverHub;
+
+  /// Durable appliance identity from the most recent hello on the active
+  /// connection. Null means the current endpoint has not been authenticated by
+  /// a durable hello identity yet.
+  String? get connectedServerInstanceId {
+    final identity = normalizeServerIdentity(_lastServerInstanceId);
+    return serverIdentityKind(identity) == ServerIdentityKind.durable
+        ? identity
+        : null;
+  }
 
   /// Endpoint currently selected for the active SDK connection.
   HubEndpoint? get activeConnectionEndpoint => _activeConnectionEndpoint;
@@ -1811,6 +1822,11 @@ class ServerSyncProvider extends ChangeNotifier {
       if (hubChanged) {
         _hasBeenSynced = false;
         _resetConnectionMetadata();
+      } else {
+        // The Hub record is the same, but its connection target or
+        // credentials changed. Do not expose a hello identity learned from
+        // the previous target while the replacement connection is starting.
+        _lastServerInstanceId = null;
       }
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
       final pendingHub = serverHub;
@@ -1889,6 +1905,9 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
 
+    if (!_sameEndpoint(_activeConnectionEndpoint, endpoint)) {
+      _lastServerInstanceId = null;
+    }
     _activeConnectionEndpoint = endpoint;
     await _connection.connect(
       endpoint.host,
@@ -2992,6 +3011,9 @@ class ServerSyncProvider extends ChangeNotifier {
         (current == RhythmConnectionState.disconnected ||
             current == RhythmConnectionState.reconnecting)) {
       _stopActivityCloudProvisioningTimer();
+      // A hello identity authenticates one connection generation. Never carry
+      // it across a reconnect where the locator could now reach another Box.
+      _lastServerInstanceId = null;
       final clearMetadata = !_hasBeenSynced || _homeEntryRefreshPending;
       debugPrint(
           'ServerSync: Connection lost ($previous → $current) — ${clearMetadata ? 'resetting metadata' : 'keeping synced metadata'} and keeping rooms');

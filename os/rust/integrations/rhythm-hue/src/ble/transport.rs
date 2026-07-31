@@ -7,11 +7,35 @@ use super::types::{
     HueBleCommand, HueBleDevice, HueBlePairingOutcome, HueBlePairingRequest, HueBleState,
 };
 
+/// Result of an opportunistic adapter-health observation.
+///
+/// `Busy` means foreground Hue work currently owns the shared adapter scope;
+/// it is not evidence that the adapter disconnected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HueBleAdapterAvailability {
+    Available,
+    Unavailable,
+    Busy,
+}
+
 /// Operations needed by pairing, discovery, and the standard light controller.
 ///
 /// A concrete transport owns adapter-specific connection and retry behavior.
 pub trait HueBleTransport: Send + Sync {
     fn is_available(&self) -> Result<bool>;
+
+    /// Non-blocking observer probe. Portable transports inherit the ordinary
+    /// boolean check; the shared BlueZ transport overrides this to expose
+    /// admission contention as `Busy` rather than a false disconnect.
+    fn probe_availability(&self) -> Result<HueBleAdapterAvailability> {
+        self.is_available().map(|available| {
+            if available {
+                HueBleAdapterAvailability::Available
+            } else {
+                HueBleAdapterAvailability::Unavailable
+            }
+        })
+    }
 
     /// Permanently reject new adapter work and wait for any operation already
     /// in flight to finish.

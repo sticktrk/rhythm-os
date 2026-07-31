@@ -1,6 +1,6 @@
 //! Linux BlueZ transport client for local-BLE profiles.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use bluer::{Adapter, Device};
 use rhythm_os::hub::HubEvent;
 use rhythm_os::registry::HubDeviceRegistry;
 
-use crate::bluez::{BluezClient, ScanObservation, ScannerHealth};
+use crate::bluez::{BluezClient, BluezDriverId, ScanObservation, ScannerHealth};
 use crate::profile::{
     decode_profile_events, profile_by_id, profiles, BleAdvertisement, BleDeviceProfile,
     BleProfileAdmission, ValidatedBleSetup,
@@ -23,13 +23,12 @@ use crate::transport::{
     LocalBleTransport,
 };
 
+impl crate::bluez::operation_output_sealed::Sealed for LocalBlePairingCandidate {}
+impl crate::bluez::BluezOperationOutput for LocalBlePairingCandidate {}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 const CANDIDATE_CLEANUP_RESERVE: Duration = Duration::from_secs(2);
-const ADDRESS_ROTATION_GRACE: Duration = Duration::from_secs(2);
-const RETIRED_HINT_TTL: Duration = Duration::from_secs(10 * 60);
-const RETIRED_HINT_LIMIT: usize = 8;
-
 pub struct BluezLocalBleTransport {
     client: Arc<BluezClient>,
 }
@@ -37,7 +36,7 @@ pub struct BluezLocalBleTransport {
 impl BluezLocalBleTransport {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            client: Arc::new(BluezClient::new("local_ble")?),
+            client: Arc::new(BluezClient::new(BluezDriverId::LocalProfiles)?),
         })
     }
 
@@ -209,16 +208,6 @@ impl BluezLocalBleTransport {
         shutdown: Arc<AtomicBool>,
     ) -> Result<()> {
         let (mut observations, mut scanner_health) = client.subscribe_broker()?;
-        let mut routes = store
-            .all()
-            .into_iter()
-            .map(|device| {
-                (
-                    identity_route_key(&device.profile_id, &device.stable_identity),
-                    IdentityRoute::new(device.transport_hint),
-                )
-            })
-            .collect::<HashMap<_, _>>();
         let mut connected = false;
         let initial_health = *scanner_health.borrow();
         publish_scanner_health(initial_health, &mut connected, &event_tx);
@@ -259,21 +248,13 @@ impl BluezLocalBleTransport {
                     Some((profile, identity, device))
                 })
                 .collect::<Vec<_>>();
-            for (profile, identity, mut device) in matches {
-                let route = routes
-                    .entry(identity_route_key(profile.descriptor().id, &identity))
-                    .or_insert_with(|| IdentityRoute::new(device.transport_hint.clone()));
-                let observed_hint = observation.address.to_string();
-                if !route.accept(&observed_hint, observation.observed_at) {
+            for (_profile, _identity, device) in matches {
+                // The public advertisement identity is routable metadata, not
+                // authentication. Pairing pins the exact BlueZ address after
+                // GATT admission; another address carrying the same identity
+                // must never be promoted into the trusted route.
+                if !transport_hint_matches(&device.transport_hint, observation.address) {
                     continue;
-                }
-                if !device.transport_hint.eq_ignore_ascii_case(&observed_hint) {
-                    store.update_transport_hint(
-                        profile.descriptor().id,
-                        &identity,
-                        &observed_hint,
-                    )?;
-                    device.transport_hint = observed_hint;
                 }
                 accept_profile_advertisement(
                     advertisement.view(),
@@ -286,6 +267,10 @@ impl BluezLocalBleTransport {
         }
         Ok(())
     }
+}
+
+fn transport_hint_matches(stored_hint: &str, observed_address: bluer::Address) -> bool {
+    stored_hint.eq_ignore_ascii_case(&observed_address.to_string())
 }
 
 fn advertisement_snapshot(observation: &ScanObservation) -> Result<BleAdvertisement> {
@@ -405,93 +390,9 @@ impl LocalBleTransport for BluezLocalBleTransport {
     }
 }
 
-struct IdentityRoute {
-    current: String,
-    last_current_seen: Instant,
-    pending: Option<(String, u8)>,
-    retired: VecDeque<RetiredHint>,
-}
-
-struct RetiredHint {
-    address: String,
-    retired_at: Instant,
-}
-
-impl IdentityRoute {
-    fn new(current: String) -> Self {
-        Self::new_at(current, Instant::now())
-    }
-
-    fn new_at(current: String, now: Instant) -> Self {
-        Self {
-            current,
-            last_current_seen: now,
-            pending: None,
-            retired: VecDeque::new(),
-        }
-    }
-
-    fn accept(&mut self, observed: &str, now: Instant) -> bool {
-        self.prune_retired(now);
-        if self.current.eq_ignore_ascii_case(observed) {
-            self.last_current_seen = now;
-            self.pending = None;
-            return true;
-        }
-        if self
-            .retired
-            .iter()
-            .any(|hint| hint.address.eq_ignore_ascii_case(observed))
-            || now.saturating_duration_since(self.last_current_seen) < ADDRESS_ROTATION_GRACE
-        {
-            return false;
-        }
-        let confirmations = match self.pending.as_mut() {
-            Some((address, confirmations)) if address.eq_ignore_ascii_case(observed) => {
-                *confirmations = confirmations.saturating_add(1);
-                *confirmations
-            }
-            _ => {
-                self.pending = Some((observed.to_string(), 1));
-                1
-            }
-        };
-        if confirmations < 2 {
-            return false;
-        }
-        self.retired.push_back(RetiredHint {
-            address: self.current.clone(),
-            retired_at: now,
-        });
-        while self.retired.len() > RETIRED_HINT_LIMIT {
-            self.retired.pop_front();
-        }
-        self.current = observed.to_string();
-        self.last_current_seen = now;
-        self.pending = None;
-        true
-    }
-
-    fn prune_retired(&mut self, now: Instant) {
-        while self
-            .retired
-            .front()
-            .is_some_and(|hint| now.saturating_duration_since(hint.retired_at) > RETIRED_HINT_TTL)
-        {
-            self.retired.pop_front();
-        }
-    }
-}
-
-fn identity_route_key(profile_id: &str, stable_identity: &str) -> (String, String) {
-    (profile_id.to_string(), stable_identity.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{ValidatedBleSetup, OREIN_OC02001_PROFILE_ID};
-    use std::collections::BTreeMap;
 
     #[test]
     fn scanner_health_drives_connected_state_without_false_startup_success() {
@@ -530,15 +431,16 @@ mod tests {
     }
 
     #[test]
-    fn proven_address_rotation_requires_stability_and_never_flips_to_retired_hint() {
-        let start = Instant::now();
-        let mut route = IdentityRoute::new_at("02:00:00:00:00:01".to_string(), start);
+    fn impersonating_address_cannot_replace_the_pairing_pinned_route() {
+        let paired: bluer::Address = "02:00:00:00:00:01".parse().unwrap();
+        let impersonator: bluer::Address = "02:00:00:00:00:02".parse().unwrap();
 
-        assert!(!route.accept("02:00:00:00:00:02", start + Duration::from_secs(1)));
-        assert!(!route.accept("02:00:00:00:00:02", start + Duration::from_secs(3)));
-        assert!(route.accept("02:00:00:00:00:02", start + Duration::from_secs(4)));
-        assert!(!route.accept("02:00:00:00:00:01", start + Duration::from_secs(7)));
-        assert!(route.accept("02:00:00:00:00:02", start + Duration::from_secs(8)));
+        assert!(transport_hint_matches("02:00:00:00:00:01", paired));
+        for _ in 0..10 {
+            // Repeated public identity frames from another address remain
+            // untrusted; observation count and elapsed time cannot promote it.
+            assert!(!transport_hint_matches("02:00:00:00:00:01", impersonator));
+        }
     }
 
     #[test]
@@ -549,105 +451,5 @@ mod tests {
         let should_disconnect = |was_connected: bool| !was_connected;
         assert!(should_disconnect(false));
         assert!(!should_disconnect(true));
-    }
-
-    #[test]
-    fn alternating_retired_and_rotated_addresses_cannot_replay_counters() {
-        use crate::profile::BleReplayToken;
-        use crate::store::{LocalBleDevice, ReplayDisposition};
-
-        let root = std::env::temp_dir().join(format!(
-            "rhythm-local-ble-address-counter-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = LocalBleDeviceStore::load(&root).unwrap();
-        let device = LocalBleDevice::from_setup(
-            OREIN_OC02001_PROFILE_ID,
-            &ValidatedBleSetup {
-                stable_identity: "A1B2C3D4E5F6".to_string(),
-                metadata: BTreeMap::from([
-                    ("serial".to_string(), "sanitized-s".to_string()),
-                    ("model".to_string(), "sanitized-m".to_string()),
-                ]),
-            },
-            "02:00:00:00:00:01".to_string(),
-            BTreeMap::from([("press".to_string(), vec![7])]),
-            false,
-            1,
-        );
-        store.upsert(device).unwrap();
-        let start = Instant::now();
-        let mut route = IdentityRoute::new_at("02:00:00:00:00:01".to_string(), start);
-
-        assert!(!route.accept("02:00:00:00:00:02", start + Duration::from_secs(3)));
-        assert!(route.accept("02:00:00:00:00:02", start + Duration::from_secs(4)));
-        store
-            .update_transport_hint(
-                OREIN_OC02001_PROFILE_ID,
-                "A1B2C3D4E5F6",
-                "02:00:00:00:00:02",
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .accept_replay(
-                    OREIN_OC02001_PROFILE_ID,
-                    "A1B2C3D4E5F6",
-                    Some(&BleReplayToken {
-                        stream: "press".to_string(),
-                        value: vec![8],
-                    }),
-                )
-                .unwrap(),
-            ReplayDisposition::New
-        );
-        assert!(!route.accept("02:00:00:00:00:01", start + Duration::from_secs(8)));
-        assert_eq!(
-            store
-                .get_by_identity(OREIN_OC02001_PROFILE_ID, "A1B2C3D4E5F6")
-                .unwrap()
-                .replay_state
-                .get("press"),
-            Some(&vec![8])
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn routes_are_scoped_by_profile_even_when_private_identity_strings_collide() {
-        assert_ne!(
-            identity_route_key("example.button.v1", "A1B2"),
-            identity_route_key("example.motion.v1", "A1B2")
-        );
-        assert_ne!(
-            identity_route_key("example.motion.v1", "a1b2"),
-            identity_route_key("example.motion.v1", "A1B2")
-        );
-    }
-
-    #[test]
-    fn retired_address_memory_is_aged_and_bounded() {
-        let start = Instant::now();
-        let mut route = IdentityRoute::new_at("address-01".to_string(), start);
-        let mut now = start;
-        for index in 2..=20 {
-            now += ADDRESS_ROTATION_GRACE + Duration::from_secs(1);
-            let address = format!("address-{index:02}");
-            assert!(!route.accept(&address, now));
-            now += Duration::from_secs(1);
-            assert!(route.accept(&address, now));
-        }
-
-        assert_eq!(route.retired.len(), RETIRED_HINT_LIMIT);
-        assert!(!route.accept(
-            "address-19",
-            now + ADDRESS_ROTATION_GRACE + Duration::from_secs(1)
-        ));
-        route.prune_retired(now + RETIRED_HINT_TTL + Duration::from_secs(1));
-        assert!(route.retired.is_empty());
     }
 }

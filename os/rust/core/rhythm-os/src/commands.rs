@@ -5199,11 +5199,7 @@ pub fn build_factory_default_profile_bundle() -> Result<String> {
 }
 
 fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    if let Some(storage) = s.storage.as_ref() {
-        storage.clear_factory_reset_state()?;
-    }
-    Ok(())
+    crate::pairing::clear_persisted_state_for_factory_reset(state)
 }
 
 fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {

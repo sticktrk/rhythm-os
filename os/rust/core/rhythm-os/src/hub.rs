@@ -625,6 +625,26 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         ))
     }
 
+    /// Start pairing with the request's original monotonic acceptance time.
+    /// Integrations with an absolute end-to-end SLA override this; existing
+    /// integrations inherit the ordinary pairing behavior.
+    fn start_pairing_with_context(
+        &self,
+        state: &SharedState,
+        params: &serde_json::Value,
+        _context: crate::pairing::PairingRequestContext,
+    ) -> Result<crate::pairing::PairingSession> {
+        self.start_pairing(state, params)
+    }
+
+    /// Reconcile integration-owned durable completion receipts with the
+    /// shared pairing ledger. Implementations must not require their transport
+    /// to be available: this hook is used by status polling to repair the
+    /// response after an already-committed device activation.
+    fn reconcile_pairing_results(&self, _state: &SharedState) -> Result<()> {
+        Ok(())
+    }
+
     /// Unpair/decommission a device (Matter fabric removal, Zigbee leave).
     ///
     /// Default returns an error — hub-based integrations (Hue, HA) don't support
@@ -1204,10 +1224,20 @@ pub struct IntegrationCallbacks {
     >,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
-        dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::PairingSession>
+        dyn Fn(
+                &SharedState,
+                &str,
+                &serde_json::Value,
+                crate::pairing::PairingRequestContext,
+            ) -> Result<crate::pairing::PairingSession>
             + Send
             + Sync,
     >,
+    /// Repair durable integration completion receipts before pairing status
+    /// admission or lookup. `Some(hub_type)` targets one integration; `None`
+    /// reconciles all registered integrations.
+    pub reconcile_pairing_results_fn:
+        Arc<dyn Fn(&SharedState, Option<&str>) -> Result<()> + Send + Sync>,
     /// Start a device unpairing session (delegates to integration's `start_unpairing`).
     pub start_unpairing_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::UnpairingResult>
@@ -1312,11 +1342,26 @@ pub fn integration_callbacks(
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
-              params: &serde_json::Value|
+              params: &serde_json::Value,
+              context: crate::pairing::PairingRequestContext|
               -> Result<crate::pairing::PairingSession> {
             let integration = find_integration(integrations, hub_type)
                 .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
-            integration.start_pairing(state, params)
+            integration.start_pairing_with_context(state, params, context)
+        },
+    );
+
+    let reconcile_pairing_results_fn = Arc::new(
+        move |state: &SharedState, hub_type: Option<&str>| -> Result<()> {
+            if let Some(hub_type) = hub_type {
+                let integration = find_integration(integrations, hub_type)
+                    .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+                return integration.reconcile_pairing_results(state);
+            }
+            for integration in integrations {
+                integration.reconcile_pairing_results(state)?;
+            }
+            Ok(())
         },
     );
 
@@ -1360,6 +1405,7 @@ pub fn integration_callbacks(
         sync_topology_groups_fn,
         prepare_hub_device_room_assignment_fn,
         start_pairing_fn,
+        reconcile_pairing_results_fn,
         start_unpairing_fn,
         run_device_test_fn,
         save_device_test_report_fn,
@@ -1934,7 +1980,8 @@ mod tests {
         assert!(string_error((callbacks.start_pairing_fn)(
             &state,
             "unknown",
-            &serde_json::json!({})
+            &serde_json::json!({}),
+            crate::pairing::PairingRequestContext::accepted_now(),
         ))
         .contains("No integration for hub type"));
         assert!(string_error((callbacks.start_unpairing_fn)(

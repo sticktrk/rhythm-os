@@ -189,7 +189,7 @@ pub struct HueBlePairingRequest {
     pub scan_timeout_secs: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HueBlePairingOutcome {
     pub devices: Vec<HueBleDevice>,
     /// Nonfatal per-candidate failures when at least one nearby bulb paired.

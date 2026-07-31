@@ -27,7 +27,8 @@ use crate::hub::{ActiveHub, HubCredentials, HubEvent};
 use crate::light_runtime::{LightRuntimeKind, LightRuntimeRegistry, SharedLightRuntime};
 use crate::remote_access::RemoteAccessController;
 use crate::storage::{
-    generate_server_instance_id, Storage, StoredLightRuntimeState, StoredMotionTimerEntry,
+    generate_pairing_hmac_key, generate_server_instance_id, Storage, StoredLightRuntimeState,
+    StoredMotionTimerEntry,
 };
 use crate::topology::{NodeControlKind, RoomTopologyStore};
 
@@ -677,11 +678,18 @@ pub struct AppState {
                     &SharedState,
                     &str,
                     &serde_json::Value,
+                    crate::pairing::PairingRequestContext,
                 ) -> anyhow::Result<crate::pairing::PairingSession>
                 + Send
                 + Sync,
         >,
     >,
+
+    /// Reconcile integration-owned pairing completion receipts with the
+    /// shared durable status ledger.
+    #[allow(clippy::type_complexity)]
+    pub reconcile_pairing_results_fn:
+        Option<Arc<dyn Fn(&SharedState, Option<&str>) -> anyhow::Result<()> + Send + Sync>>,
 
     /// Start a device unpairing/decommission session (Matter, Zigbee, etc.).
     /// Built from the integration registry by `integration_callbacks`.
@@ -797,6 +805,16 @@ pub struct AppState {
     /// Used by cloud services to recognize the same Rhythm server when
     /// different app installs have different local hub IDs.
     pub server_instance_id: String,
+
+    /// Confidential installation key used only to HMAC pairing request
+    /// bindings. It is persisted in private server metadata and never exposed
+    /// through API snapshots, analytics, backup, or debug bundles.
+    pub pairing_hmac_key: String,
+
+    /// Whether the current pairing HMAC key has been durably committed. A
+    /// newly generated but uncommitted key must never bind durable operation
+    /// records because retries after restart would conflict.
+    pub pairing_hmac_key_durable: bool,
 
     /// Platform type: "desktop" or "appliance".
     pub platform_type: &'static str,
@@ -919,6 +937,7 @@ impl Default for AppState {
             prepare_hub_device_room_assignment_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
+            reconcile_pairing_results_fn: None,
             start_unpairing_fn: None,
             run_device_test_fn: None,
             save_device_test_report_fn: None,
@@ -931,6 +950,11 @@ impl Default for AppState {
             remote_access_controller: None,
             firmware_version: "0.0.0",
             server_instance_id: generate_server_instance_id(),
+            pairing_hmac_key: generate_pairing_hmac_key(),
+            // In-memory/test states remain usable. Production targets install
+            // storage and `load_persisted_state` resets this until metadata is
+            // loaded or durably written.
+            pairing_hmac_key_durable: true,
             platform_type: "desktop",
             platform_context: "server",
             data_dir: String::new(),

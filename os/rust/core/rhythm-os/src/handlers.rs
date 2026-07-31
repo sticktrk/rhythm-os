@@ -268,12 +268,16 @@ pub struct ApiResponse {
 }
 
 impl ApiResponse {
-    pub fn json_ok(body: String) -> Self {
+    pub fn json_status(status: u16, body: String) -> Self {
         Self {
-            status: 200,
+            status,
             body,
             content_type: "application/json",
         }
+    }
+
+    pub fn json_ok(body: String) -> Self {
+        Self::json_status(200, body)
     }
 
     pub fn bad_request(msg: &str) -> Self {
@@ -626,6 +630,17 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
                 .and_then(|state| state.after_factory_reset_fn.clone())
             {
                 if let Err(error) = callback(state) {
+                    // Shared state has already crossed the destructive reset
+                    // barrier.  Never reopen Matter/Hue/local-BLE pairing in
+                    // the reboot grace period, even when platform cleanup
+                    // fails: a new bond or association could recreate state
+                    // that this reset just removed.
+                    if let Some(guard) = bluetooth_reservation.as_mut() {
+                        guard.keep_reserved();
+                    }
+                    if let Some(recover) = post_barrier_recovery.as_ref() {
+                        recover();
+                    }
                     return ApiResponse::server_error(format!(
                         "Factory reset cleared Rhythm state, but platform cleanup failed: {error:#}"
                     ));
@@ -641,7 +656,13 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
             ApiResponse::json_ok(json)
         }
         Err(e) if commands::factory_reset_error_is_post_barrier(&e) => {
-            if let Some(recover) = post_barrier_recovery {
+            // Reset began and may already have removed credentials/state. Keep
+            // the shared adapter slot poisoned until the recovery reboot so a
+            // concurrent pairing request cannot repopulate it.
+            if let Some(guard) = bluetooth_reservation.as_mut() {
+                guard.keep_reserved();
+            }
+            if let Some(recover) = post_barrier_recovery.as_ref() {
                 recover();
             }
             ApiResponse::server_error(format!(
@@ -3177,6 +3198,43 @@ pub fn handle_pair_device(
     state: &SharedState,
     request: &crate::pairing::PairingRequest,
 ) -> ApiResponse {
+    let request_context = crate::pairing::PairingRequestContext::accepted_now();
+    if request.hub_type == crate::hub::HubType::LOCAL_BLE && request.session_id.is_none() {
+        return ApiResponse::bad_request("Local Bluetooth pairing requires a session ID");
+    }
+    if let Some(session_id) = request.session_id.as_deref() {
+        if let Err(error) = crate::pairing::validate_pairing_session_id(session_id) {
+            return ApiResponse::bad_request(error);
+        }
+    }
+
+    let durable_reconciliation = request.hub_type == crate::hub::HubType::LOCAL_BLE;
+    if durable_reconciliation {
+        let reconcile = match state.lock() {
+            Ok(state) => state.reconcile_pairing_results_fn.clone(),
+            Err(_) => return ApiResponse::server_error("lock"),
+        };
+        if let Some(reconcile) = reconcile {
+            if let Err(error) = reconcile(state, Some(&request.hub_type)) {
+                return ApiResponse::server_error(error);
+            }
+        }
+    }
+
+    let request_fingerprint = match (durable_reconciliation, request.session_id.as_deref()) {
+        (true, Some(_)) => {
+            match crate::pairing::pairing_request_fingerprint_for_state(
+                state,
+                &request.hub_type,
+                &request.params,
+            ) {
+                Ok(fingerprint) => Some(fingerprint),
+                Err(error) => return ApiResponse::server_error(error),
+            }
+        }
+        _ => None,
+    };
+
     let start_pairing = {
         let Ok(s) = state.lock() else {
             return ApiResponse::server_error("lock");
@@ -3188,9 +3246,103 @@ pub fn handle_pair_device(
         return ApiResponse::server_error("No pairing support configured");
     };
 
+    let mut pairing_result_lease = None;
+    if durable_reconciliation {
+        let session_id = request
+            .session_id
+            .as_deref()
+            .expect("durable local Bluetooth pairing requires a session ID");
+        let fingerprint = request_fingerprint
+            .as_deref()
+            .expect("session-bound pairing request has a fingerprint");
+        match crate::pairing::begin_pairing_result(
+            state,
+            session_id,
+            &request.hub_type,
+            fingerprint,
+        ) {
+            Ok(crate::pairing::BeginPairingResult::Started(lease)) => {
+                pairing_result_lease = Some(lease);
+            }
+            Ok(crate::pairing::BeginPairingResult::Pending(status)) => {
+                return match serde_json::to_string(&status) {
+                    Ok(json) => ApiResponse::json_status(202, json),
+                    Err(error) => ApiResponse::server_error(error),
+                };
+            }
+            Ok(crate::pairing::BeginPairingResult::Terminal(result)) => {
+                return match serde_json::to_string(&result) {
+                    Ok(json) => ApiResponse::json_ok(json),
+                    Err(error) => ApiResponse::server_error(error),
+                };
+            }
+            Ok(crate::pairing::BeginPairingResult::HubTypeConflict) => {
+                return ApiResponse::conflict(
+                    "Pairing session ID is already used by another hub type",
+                );
+            }
+            Ok(crate::pairing::BeginPairingResult::RequestConflict) => {
+                return ApiResponse::conflict(
+                    "Pairing session ID is already used by another request",
+                );
+            }
+            Ok(crate::pairing::BeginPairingResult::Cancelled) => {
+                return ApiResponse::conflict(
+                    "Pairing session ID was already closed before this request started",
+                );
+            }
+            Err(error) => return ApiResponse::server_error(error),
+        }
+    }
+
     let _pairing_guard = match try_acquire_pairing_guard(state, &request.hub_type) {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(response) => {
+            if let (Some(session_id), Some(fingerprint), Some(_)) = (
+                request.session_id.as_deref(),
+                request_fingerprint.as_deref(),
+                pairing_result_lease.as_ref(),
+            ) {
+                if let Err(error) = crate::pairing::fail_pairing_result_before_start(
+                    state,
+                    session_id,
+                    &request.hub_type,
+                    fingerprint,
+                    &response.body,
+                ) {
+                    log::error!(target: "pair", "Could not close unstarted pairing reservation: {error:#}");
+                    drop(pairing_result_lease.take());
+                    if let Ok(Some(status)) =
+                        crate::pairing::lookup_pairing_result(state, session_id)
+                    {
+                        return match serde_json::to_string(&status) {
+                            Ok(json) => ApiResponse::json_status(202, json),
+                            Err(error) => ApiResponse::server_error(error),
+                        };
+                    }
+                    return ApiResponse::server_error(error);
+                }
+                if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                    drop(pairing_result_lease.take());
+                    return match crate::pairing::lookup_pairing_result(state, session_id) {
+                        Ok(Some(status)) => match status.result {
+                            Some(result) => match serde_json::to_string(&result) {
+                                Ok(json) => ApiResponse::json_ok(json),
+                                Err(error) => ApiResponse::server_error(error),
+                            },
+                            None => ApiResponse::server_error(
+                                "Local Bluetooth pairing admission did not close terminally",
+                            ),
+                        },
+                        Ok(None) => ApiResponse::server_error(
+                            "Local Bluetooth pairing admission result disappeared",
+                        ),
+                        Err(error) => ApiResponse::server_error(error),
+                    };
+                }
+            }
+            return response;
+        }
     };
 
     log::info!(
@@ -3215,9 +3367,16 @@ pub fn handle_pair_device(
     let params = if let Some(session_id) = request.session_id.as_deref() {
         if let Some(object) = request.params.as_object() {
             let mut object = object.clone();
-            object
-                .entry("session_id".to_string())
-                .or_insert_with(|| serde_json::Value::String(session_id.to_string()));
+            object.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.to_string()),
+            );
+            if let Some(request_fingerprint) = request_fingerprint.as_deref() {
+                object.insert(
+                    "request_fingerprint".to_string(),
+                    serde_json::Value::String(request_fingerprint.to_string()),
+                );
+            }
             params_with_session_id = serde_json::Value::Object(object);
             &params_with_session_id
         } else {
@@ -3227,9 +3386,87 @@ pub fn handle_pair_device(
         &request.params
     };
 
-    match start_fn(state, &request.hub_type, params) {
-        Ok(session) => {
+    match start_fn(state, &request.hub_type, params, request_context) {
+        Ok(mut session) => {
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                if !matches!(
+                    session.status,
+                    crate::pairing::PairingStatus::Complete | crate::pairing::PairingStatus::Failed
+                ) {
+                    return ApiResponse::server_error(
+                        "Local Bluetooth pairing returned a non-terminal result",
+                    );
+                }
+                session = match crate::pairing::sanitized_terminal_session_for_delivery(
+                    &session,
+                    &request.hub_type,
+                ) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        log::error!(target: "pair", "Local Bluetooth integration returned an invalid terminal result: {error:#}");
+                        // A successful store activation still owns an outbox;
+                        // the status path can reconstruct a valid result from
+                        // that authority without exposing malformed output.
+                        return ApiResponse::server_error(
+                            "Local Bluetooth pairing returned an invalid final result",
+                        );
+                    }
+                };
+            }
             log::info!(target: "pair", "Pairing result: status={:?} error={:?}", session.status, session.error);
+            if session.status == crate::pairing::PairingStatus::Complete {
+                // Persist canonical registry changes made during pairing
+                if let Ok(s) = state.lock() {
+                    commands::persist_canonical(&s);
+                }
+                // Persist hub registry updates if the integration created any
+                commands::persist_registry(state);
+            }
+            let mut terminal_persistence_error = None;
+            if matches!(
+                session.status,
+                crate::pairing::PairingStatus::Complete | crate::pairing::PairingStatus::Failed
+            ) {
+                if let (Some(session_id), Some(request_fingerprint)) = (
+                    request.session_id.as_deref(),
+                    request_fingerprint.as_deref(),
+                ) {
+                    if let Err(error) = crate::pairing::complete_pairing_result_with_fingerprint(
+                        state,
+                        session_id,
+                        &request.hub_type,
+                        request_fingerprint,
+                        &session,
+                    ) {
+                        log::error!(target: "pair", "Could not persist terminal pairing result: {error:#}");
+                        terminal_persistence_error = Some(error.to_string());
+                        if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                            let warning =
+                                "Pairing finished, but its durable confirmation could not be saved"
+                                    .to_string();
+                            if session.warnings.len() < 32 {
+                                session.warnings.push(warning);
+                            } else if let Some(last) = session.warnings.last_mut() {
+                                *last = warning;
+                            }
+                        }
+                    }
+                }
+            }
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE
+                && session.status == crate::pairing::PairingStatus::Failed
+                && terminal_persistence_error.is_some()
+            {
+                // A successful activation has an integration-owned outbox and
+                // can be repaired by GET. A failed attempt has no device
+                // commit receipt, so never expose an unqueryable terminal SSE
+                // or 200 response. The client treats this 500 as ambiguous and
+                // retains its recovery pointer until the pending ledger ages
+                // into an explicit interrupted failure.
+                return ApiResponse::server_error(
+                    "Pairing stopped, but its final status could not be saved",
+                );
+            }
             crate::pairing::record_pairing_history(
                 state,
                 crate::pairing::pairing_history_entry_for_pair(
@@ -3263,20 +3500,11 @@ pub fn handle_pair_device(
                 session.error.clone(),
             );
             if session.status == crate::pairing::PairingStatus::Complete {
-                // Persist canonical registry changes made during pairing
-                if let Ok(s) = state.lock() {
-                    commands::persist_canonical(&s);
-                }
-                // Persist hub registry updates if the integration created any
-                commands::persist_registry(state);
-                // Notify SSE clients
-                {
-                    commands::emit_triage_changed(state);
-                    crate::state::emit_server_event(
-                        state,
-                        crate::server_event::ServerEvent::NodesChanged,
-                    );
-                }
+                commands::emit_triage_changed(state);
+                crate::state::emit_server_event(
+                    state,
+                    crate::server_event::ServerEvent::NodesChanged,
+                );
             }
             match serde_json::to_string(&session) {
                 Ok(json) => ApiResponse::json_ok(json),
@@ -3284,35 +3512,138 @@ pub fn handle_pair_device(
             }
         }
         Err(e) => {
-            log::error!(target: "pair", "Pairing failed: {}", e);
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                log::error!(target: "pair", "Local Bluetooth pairing failed at a bounded integration stage");
+            } else {
+                log::error!(target: "pair", "Pairing failed: {}", e);
+            }
+            let mut failed_session = crate::pairing::PairingSession {
+                hub_type: request.hub_type.clone(),
+                status: crate::pairing::PairingStatus::Failed,
+                device: None,
+                devices: Vec::new(),
+                error: Some(e.to_string()),
+                warnings: Vec::new(),
+                details: None,
+            };
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                failed_session = match crate::pairing::sanitized_terminal_session_for_delivery(
+                    &failed_session,
+                    &request.hub_type,
+                ) {
+                    Ok(session) => session,
+                    Err(_) => crate::pairing::PairingSession {
+                        hub_type: request.hub_type.clone(),
+                        status: crate::pairing::PairingStatus::Failed,
+                        device: None,
+                        devices: Vec::new(),
+                        error: Some("Local Bluetooth pairing failed".to_string()),
+                        warnings: Vec::new(),
+                        details: None,
+                    },
+                };
+            }
+            let mut terminal_persisted = true;
+            if let (Some(session_id), Some(request_fingerprint)) = (
+                request.session_id.as_deref(),
+                request_fingerprint.as_deref(),
+            ) {
+                if let Err(persist_error) = crate::pairing::complete_pairing_result_with_fingerprint(
+                    state,
+                    session_id,
+                    &request.hub_type,
+                    request_fingerprint,
+                    &failed_session,
+                ) {
+                    log::error!(target: "pair", "Could not persist failed pairing result: {persist_error:#}");
+                    terminal_persisted = false;
+                }
+            }
             crate::pairing::record_pairing_history(
                 state,
                 crate::pairing::pairing_history_entry_for_pair(
                     &request.hub_type,
                     &request.params,
-                    &crate::pairing::PairingSession {
-                        hub_type: request.hub_type.clone(),
-                        status: crate::pairing::PairingStatus::Failed,
-                        device: None,
-                        devices: Vec::new(),
-                        error: Some(e.to_string()),
-                        warnings: Vec::new(),
-                        details: None,
-                    },
+                    &failed_session,
                 ),
             );
-            crate::pairing::emit_pairing_progress(
-                state,
-                &request.hub_type,
-                request.session_id.as_deref(),
-                crate::pairing::PairingStatus::Failed,
-                crate::pairing::PairingStage::Failed,
-                "Pairing failed",
-                None,
-                Some(e.to_string()),
-            );
-            ApiResponse::server_error(e)
+            if request.hub_type != crate::hub::HubType::LOCAL_BLE || terminal_persisted {
+                crate::pairing::emit_pairing_progress(
+                    state,
+                    &request.hub_type,
+                    request.session_id.as_deref(),
+                    crate::pairing::PairingStatus::Failed,
+                    crate::pairing::PairingStage::Failed,
+                    "Pairing failed",
+                    None,
+                    failed_session.error.clone(),
+                );
+            }
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                ApiResponse::server_error("Local Bluetooth pairing failed")
+            } else {
+                ApiResponse::server_error(e)
+            }
         }
+    }
+}
+
+pub fn handle_get_pair_device(state: &SharedState, session_id: &str) -> ApiResponse {
+    if let Err(error) = crate::pairing::validate_pairing_session_id(session_id) {
+        return ApiResponse::bad_request(error);
+    }
+    let reconcile = match state.lock() {
+        Ok(state) => state.reconcile_pairing_results_fn.clone(),
+        Err(_) => return ApiResponse::server_error("lock"),
+    };
+    if let Some(reconcile) = reconcile {
+        if let Err(error) = reconcile(state, None) {
+            return ApiResponse::server_error(error);
+        }
+    }
+    let status = match crate::pairing::lookup_or_tombstone_pairing_result(state, session_id) {
+        Ok(Some(status)) => status,
+        Ok(None) => crate::pairing::PairingResultStatus {
+            session_id: session_id.to_string(),
+            state: crate::pairing::PairingResultState::NotFound,
+            hub_type: None,
+            result: None,
+        },
+        Err(error) => return ApiResponse::server_error(error),
+    };
+    let http_status = if status.state == crate::pairing::PairingResultState::NotFound {
+        404
+    } else {
+        200
+    };
+    match serde_json::to_string(&status) {
+        Ok(json) => ApiResponse::json_status(http_status, json),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+pub fn handle_delete_pair_device(state: &SharedState, session_id: &str) -> ApiResponse {
+    if let Err(error) = crate::pairing::validate_pairing_session_id(session_id) {
+        return ApiResponse::bad_request(error);
+    }
+    let reconcile = match state.lock() {
+        Ok(state) => state.reconcile_pairing_results_fn.clone(),
+        Err(_) => return ApiResponse::server_error("lock"),
+    };
+    if let Some(reconcile) = reconcile {
+        if let Err(error) = reconcile(state, None) {
+            return ApiResponse::server_error(error);
+        }
+    }
+    match crate::pairing::acknowledge_pairing_result(state, session_id) {
+        Ok(crate::pairing::AcknowledgePairingResult::Acknowledged) => ApiResponse::no_content(),
+        Ok(crate::pairing::AcknowledgePairingResult::Pending) => {
+            ApiResponse::conflict("Pairing result is still pending")
+        }
+        Ok(crate::pairing::AcknowledgePairingResult::NotFound) => {
+            ApiResponse::not_found("Pairing result was not found")
+        }
+        Err(error) => ApiResponse::server_error(error),
     }
 }
 
@@ -3647,6 +3978,22 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    fn pairing_test_state(label: &str) -> (SharedState, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-handler-pairing-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut app = AppState::default();
+        app.storage = Some(Arc::new(
+            crate::storage::FileStorage::new(path.to_str().unwrap()).unwrap(),
+        ));
+        (Arc::new(Mutex::new(app)), path)
+    }
+
     // ---- ApiResponse construction ----
 
     #[test]
@@ -3708,7 +4055,7 @@ mod tests {
             let captured_params = captured_params.clone();
             let mut s = state.lock().unwrap();
             s.event_tx = Some(tx);
-            s.start_pairing_fn = Some(Arc::new(move |_, hub_type, params| {
+            s.start_pairing_fn = Some(Arc::new(move |_, hub_type, params, _| {
                 assert_eq!(hub_type, "matter");
                 *captured_params.lock().unwrap() = Some(params.clone());
                 let device = PairedDeviceInfo {
@@ -3787,6 +4134,335 @@ mod tests {
     }
 
     #[test]
+    fn local_ble_pairing_requires_a_reconcilable_session_id() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "local_ble".to_string(),
+                session_id: None,
+                params: json!({"setup": {"secret": "must-not-run"}}),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.body,
+            "Local Bluetooth pairing requires a session ID"
+        );
+    }
+
+    #[test]
+    fn terminal_pairing_post_is_idempotent_and_get_is_restart_safe() {
+        let (state, path) = pairing_test_state("idempotent");
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let calls = calls.clone();
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let device = PairedDeviceInfo {
+                    device_id: "local-ble-opaque".to_string(),
+                    name: "Button".to_string(),
+                    device_type: DeviceType::Button,
+                    manufacturer: Some("Orein".to_string()),
+                    model: Some("OC02001".to_string()),
+                };
+                Ok(PairingSession {
+                    hub_type: "local_ble".to_string(),
+                    status: PairingStatus::Complete,
+                    device: Some(device.clone()),
+                    devices: vec![device],
+                    error: None,
+                    warnings: vec![
+                        "Storage acknowledgement is degraded".to_string(),
+                        "EA:84:C2:50:A8:65 needed a retry".to_string(),
+                    ],
+                    details: Some(json!({"setup_payload": "must-not-persist"})),
+                })
+            }));
+        }
+        let request = PairingRequest {
+            hub_type: "local_ble".to_string(),
+            session_id: Some("local-pair-idempotent".to_string()),
+            params: json!({"setup": {"ble_identity": "0A0B0C0D0E0F"}}),
+        };
+
+        let first_response = handle_pair_device(&state, &request);
+        assert_eq!(first_response.status, 200);
+        assert!(!first_response.body.contains("must-not-persist"));
+        assert!(!first_response.body.contains("EA:84:C2:50:A8:65"));
+        let first_body: serde_json::Value = serde_json::from_str(&first_response.body).unwrap();
+        assert!(first_body.get("details").is_none());
+        assert_eq!(first_body["warnings"][1], "<redacted> needed a retry");
+        assert_eq!(handle_pair_device(&state, &request).status, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let restarted = {
+            let mut app = AppState::default();
+            app.storage = Some(Arc::new(
+                crate::storage::FileStorage::new(path.to_str().unwrap()).unwrap(),
+            ));
+            Arc::new(Mutex::new(app))
+        };
+        let status = handle_get_pair_device(&restarted, "local-pair-idempotent");
+        assert_eq!(status.status, 200);
+        let body: serde_json::Value = serde_json::from_str(&status.body).unwrap();
+        assert_eq!(body["state"], "terminal");
+        assert_eq!(body["result"]["status"], "complete");
+        assert_eq!(
+            body["result"]["warnings"][0],
+            "Storage acknowledgement is degraded"
+        );
+        assert!(body["result"].get("details").is_none());
+
+        let unknown = handle_get_pair_device(&restarted, "unknown-valid-session");
+        assert_eq!(unknown.status, 404);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&unknown.body).unwrap()["state"],
+            "not_found"
+        );
+        assert_eq!(
+            handle_get_pair_device(&restarted, "bad/session").status,
+            400
+        );
+
+        assert_eq!(
+            handle_delete_pair_device(&restarted, "local-pair-idempotent").status,
+            204
+        );
+        assert_eq!(
+            handle_delete_pair_device(&restarted, "local-pair-idempotent").status,
+            204,
+            "terminal acknowledgement is idempotent while its tombstone lives"
+        );
+        assert_eq!(
+            handle_get_pair_device(&restarted, "local-pair-idempotent").status,
+            404
+        );
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn an_overtaking_get_prevents_the_later_post_from_starting_work() {
+        let (state, path) = pairing_test_state("overtaken-get");
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let calls = calls.clone();
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("integration must not run after a causal 404")
+            }));
+        }
+
+        assert_eq!(
+            handle_get_pair_device(&state, "overtaken-local-session").status,
+            404
+        );
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "local_ble".to_string(),
+                session_id: Some("overtaken-local-session".to_string()),
+                params: json!({"profile_id": "orein.oc02001.button.v1"}),
+            },
+        );
+        assert_eq!(response.status, 409);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn acknowledgement_reconciles_authoritative_completion_before_pending_check() {
+        let (state, path) = pairing_test_state("ack-reconcile");
+        let session_id = "local-ack-reconcile";
+        let fingerprint =
+            crate::pairing::pairing_request_fingerprint_for_state(&state, "local_ble", &json!({}))
+                .unwrap();
+        let lease = match crate::pairing::begin_pairing_result(
+            &state,
+            session_id,
+            "local_ble",
+            &fingerprint,
+        )
+        .unwrap()
+        {
+            crate::pairing::BeginPairingResult::Started(lease) => lease,
+            result => panic!("unexpected reservation result: {result:?}"),
+        };
+        let fingerprint_for_reconcile = fingerprint.clone();
+        state.lock().unwrap().reconcile_pairing_results_fn = Some(Arc::new(move |state, _| {
+            let device = PairedDeviceInfo {
+                device_id: "local-ble-ack-reconcile".to_string(),
+                name: "Button".to_string(),
+                device_type: DeviceType::Button,
+                manufacturer: Some("Orein".to_string()),
+                model: Some("OC02001".to_string()),
+            };
+            crate::pairing::complete_pairing_result_with_fingerprint(
+                state,
+                session_id,
+                "local_ble",
+                &fingerprint_for_reconcile,
+                &PairingSession {
+                    hub_type: "local_ble".to_string(),
+                    status: PairingStatus::Complete,
+                    device: Some(device.clone()),
+                    devices: vec![device],
+                    error: None,
+                    warnings: Vec::new(),
+                    details: None,
+                },
+            )
+        }));
+
+        assert_eq!(handle_delete_pair_device(&state, session_id).status, 204);
+        drop(lease);
+        assert!(crate::pairing::lookup_pairing_result(&state, session_id)
+            .unwrap()
+            .is_none());
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn pending_pairing_get_and_duplicate_post_do_not_start_work_twice() {
+        let (state, path) = pairing_test_state("pending");
+        let fingerprint =
+            crate::pairing::pairing_request_fingerprint_for_state(&state, "local_ble", &json!({}))
+                .unwrap();
+        let _lease = match crate::pairing::begin_pairing_result(
+            &state,
+            "local-pair-pending",
+            "local_ble",
+            &fingerprint,
+        )
+        .unwrap()
+        {
+            crate::pairing::BeginPairingResult::Started(lease) => lease,
+            result => panic!("unexpected reservation result: {result:?}"),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let calls = calls.clone();
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("must not run")
+            }));
+        }
+
+        let status = handle_get_pair_device(&state, "local-pair-pending");
+        assert_eq!(status.status, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&status.body).unwrap()["state"],
+            "pending"
+        );
+        let duplicate = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "local_ble".to_string(),
+                session_id: Some("local-pair-pending".to_string()),
+                params: json!({}),
+            },
+        );
+        assert_eq!(duplicate.status, 202);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn simultaneous_duplicate_pairing_post_observes_the_same_pending_operation() {
+        let (state, path) = pairing_test_state("concurrent-duplicate");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        {
+            let calls = calls.clone();
+            let release_rx = release_rx.clone();
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                Ok(PairingSession {
+                    hub_type: "local_ble".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    devices: Vec::new(),
+                    error: Some("fixture complete".to_string()),
+                    warnings: Vec::new(),
+                    details: None,
+                })
+            }));
+        }
+        let request = PairingRequest {
+            hub_type: "local_ble".to_string(),
+            session_id: Some("local-pair-concurrent".to_string()),
+            params: json!({"profile_id": "orein.oc02001.button.v1"}),
+        };
+        let first_state = state.clone();
+        let first_request = request.clone();
+        let first = std::thread::spawn(move || handle_pair_device(&first_state, &first_request));
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first pairing entered integration");
+
+        let duplicate = handle_pair_device(&state, &request);
+        assert_eq!(duplicate.status, 202);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&duplicate.body).unwrap()["state"],
+            "pending"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap().status, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn pairing_session_id_cannot_be_reused_for_different_parameters() {
+        let (state, path) = pairing_test_state("request-conflict");
+        state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+            unreachable!("a conflicting idempotency key must not start integration work")
+        }));
+        let first_params = json!({"profile_id": "orein.oc02001.button.v1"});
+        let fingerprint = crate::pairing::pairing_request_fingerprint_for_state(
+            &state,
+            "local_ble",
+            &first_params,
+        )
+        .unwrap();
+        let _lease = match crate::pairing::begin_pairing_result(
+            &state,
+            "local-pair-request-conflict",
+            "local_ble",
+            &fingerprint,
+        )
+        .unwrap()
+        {
+            crate::pairing::BeginPairingResult::Started(lease) => lease,
+            result => panic!("unexpected reservation result: {result:?}"),
+        };
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "local_ble".to_string(),
+                session_id: Some("local-pair-request-conflict".to_string()),
+                params: json!({"profile_id": "different.profile.v1"}),
+            },
+        );
+        assert_eq!(response.status, 409);
+        assert_eq!(
+            response.body,
+            "Pairing session ID is already used by another request"
+        );
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn pair_device_rejects_concurrent_attempt_for_same_hub_type() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let called = Arc::new(AtomicBool::new(false));
@@ -3795,7 +4471,7 @@ mod tests {
             let called = called.clone();
             let mut s = state.lock().unwrap();
             s.pairing_in_progress.insert("matter".to_string());
-            s.start_pairing_fn = Some(Arc::new(move |_, _, _| {
+            s.start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
                 called.store(true, Ordering::SeqCst);
                 Ok(PairingSession {
                     hub_type: "matter".to_string(),
@@ -3826,7 +4502,7 @@ mod tests {
 
     #[test]
     fn appliance_serializes_every_ble_pairing_on_the_shared_adapter() {
-        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let (state, path) = pairing_test_state("shared-adapter");
         let called = Arc::new(AtomicBool::new(false));
 
         {
@@ -3835,7 +4511,7 @@ mod tests {
             s.platform_type = "appliance";
             s.pairing_in_progress
                 .insert("appliance_bluetooth_adapter".to_string());
-            s.start_pairing_fn = Some(Arc::new(move |_, _, _| {
+            s.start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
                 called.store(true, Ordering::SeqCst);
                 unreachable!("shared adapter guard must reject the integration call")
             }));
@@ -3851,11 +4527,21 @@ mod tests {
                 },
             );
 
-            assert_eq!(response.status, 409);
-            assert_eq!(
-                response.body,
-                "Bluetooth pairing is already in progress on this appliance"
-            );
+            if hub_type == "local_ble" {
+                assert_eq!(response.status, 200);
+                let result: PairingSession = serde_json::from_str(&response.body).unwrap();
+                assert_eq!(result.status, PairingStatus::Failed);
+                assert_eq!(
+                    result.error.as_deref(),
+                    Some("Bluetooth pairing is already in progress on this appliance")
+                );
+            } else {
+                assert_eq!(response.status, 409);
+                assert_eq!(
+                    response.body,
+                    "Bluetooth pairing is already in progress on this appliance"
+                );
+            }
         }
         assert!(!called.load(Ordering::SeqCst));
         assert!(state
@@ -3863,6 +4549,16 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        let status = handle_get_pair_device(&state, "local_ble-busy");
+        assert_eq!(status.status, 200);
+        let status: crate::pairing::PairingResultStatus =
+            serde_json::from_str(&status.body).unwrap();
+        assert_eq!(
+            status.result.unwrap().status,
+            crate::pairing::PairingStatus::Failed,
+            "a request observed as pending must close terminally when adapter admission fails"
+        );
+        fs::remove_dir_all(path).ok();
     }
 
     #[test]
@@ -3883,7 +4579,7 @@ mod tests {
                     ));
                     Ok(())
                 }));
-            state.start_pairing_fn = Some(Arc::new(move |_, _, _| {
+            state.start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
                 assert_eq!(
                     activity_during_pair.lock().unwrap().as_slice(),
                     &[(
@@ -3945,7 +4641,7 @@ mod tests {
                 }
                 Ok(())
             }));
-            state.start_pairing_fn = Some(Arc::new(|_, _, _| {
+            state.start_pairing_fn = Some(Arc::new(|_, _, _, _| {
                 panic!("integration must not start without the adapter reservation")
             }));
         }
@@ -3980,7 +4676,7 @@ mod tests {
                     anyhow::bail!("adapter rollback also failed")
                 }
             }));
-            state.start_pairing_fn = Some(Arc::new(|_, _, _| {
+            state.start_pairing_fn = Some(Arc::new(|_, _, _, _| {
                 panic!("integration must not start without the adapter reservation")
             }));
         }
@@ -4011,7 +4707,7 @@ mod tests {
                 }
                 Ok(())
             }));
-            state.start_pairing_fn = Some(Arc::new(|_, _, _| {
+            state.start_pairing_fn = Some(Arc::new(|_, _, _, _| {
                 Ok(PairingSession {
                     hub_type: "matter".to_string(),
                     status: PairingStatus::Failed,
@@ -4066,7 +4762,7 @@ mod tests {
 
         {
             let call_count = call_count.clone();
-            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _| {
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
                 call_count.fetch_add(1, Ordering::SeqCst);
                 Err(anyhow::anyhow!("commissioning failed"))
             }));
@@ -5981,6 +6677,11 @@ mod tests {
             !follow_up_invoked.load(Ordering::SeqCst),
             "normal platform cleanup must not run after an incomplete shared reset"
         );
+        assert!(state
+            .lock()
+            .unwrap()
+            .pairing_in_progress
+            .contains("appliance_bluetooth_adapter"));
     }
 
     #[test]
@@ -6044,12 +6745,17 @@ mod tests {
     }
 
     #[test]
-    fn appliance_factory_reset_cleanup_failure_releases_adapter_for_retry() {
+    fn appliance_factory_reset_cleanup_failure_retains_adapter_for_reboot() {
         let state = handler_state_with_runtime();
+        let recovery_invoked = Arc::new(AtomicBool::new(false));
         {
             let mut state = state.lock().unwrap();
             state.platform_type = "appliance";
             state.before_factory_reset_fn = Some(Arc::new(|_| Ok(())));
+            state.factory_reset_recovery_fn = Some({
+                let recovery_invoked = recovery_invoked.clone();
+                Arc::new(move || recovery_invoked.store(true, Ordering::SeqCst))
+            });
             state.after_factory_reset_fn = Some(Arc::new(|_| {
                 anyhow::bail!("persistent Bluetooth bond cleanup failed")
             }));
@@ -6059,7 +6765,8 @@ mod tests {
 
         assert_eq!(response.status, 500);
         assert!(response.body.contains("platform cleanup failed"));
-        assert!(!state
+        assert!(recovery_invoked.load(Ordering::SeqCst));
+        assert!(state
             .lock()
             .unwrap()
             .pairing_in_progress

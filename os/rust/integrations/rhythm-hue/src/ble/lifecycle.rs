@@ -21,7 +21,7 @@ use rhythm_os::state::SharedState;
 
 use super::discovery::HueBleDiscovery;
 use super::store::HueBleDeviceStore;
-use super::transport::HueBleTransport;
+use super::transport::{HueBleAdapterAvailability, HueBleTransport};
 use super::types::{HueBleDevice, HueBlePairingOutcome, HueBlePairingRequest};
 use super::{HUB_ADDRESS, HUB_TYPE};
 
@@ -31,6 +31,31 @@ const PAIRING_HANDOFF_FRESHNESS_BUDGET: Duration = Duration::from_secs(10);
 /// Serializes recovery, pairing, and unpairing across duplicate transports so
 /// a stale recovery worker cannot remove a freshly recreated bond.
 static BOND_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdapterConnectionTransition {
+    None,
+    Connected,
+    Disconnected,
+}
+
+fn adapter_connection_transition(
+    connected: bool,
+    observation: HueBleAdapterAvailability,
+) -> (bool, AdapterConnectionTransition) {
+    match observation {
+        HueBleAdapterAvailability::Available if !connected => {
+            (true, AdapterConnectionTransition::Connected)
+        }
+        HueBleAdapterAvailability::Unavailable if connected => {
+            (false, AdapterConnectionTransition::Disconnected)
+        }
+        // Foreground pairing or control work owning admission says nothing
+        // about adapter health. Preserve the last observed connection state.
+        HueBleAdapterAvailability::Busy => (connected, AdapterConnectionTransition::None),
+        _ => (connected, AdapterConnectionTransition::None),
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct HueBleFactoryResetHandoffBatch {
@@ -262,20 +287,28 @@ fn start_observer(
             let mut adapter_connected = true;
 
             while !shutdown.load(Ordering::Relaxed) {
-                let adapter_available = transport.is_available().unwrap_or(false);
-                if adapter_available && !adapter_connected {
-                    if let Ok(_bond_guard) = BOND_LIFECYCLE_LOCK.lock() {
-                        recover_tombstoned_removals(&state, transport.as_ref(), store.as_ref());
+                let availability = transport.probe_availability().unwrap_or_else(|error| {
+                    warn!(target: "evt", "Hue BLE adapter health probe failed: {error:#}");
+                    HueBleAdapterAvailability::Unavailable
+                });
+                let (next_connected, transition) =
+                    adapter_connection_transition(adapter_connected, availability);
+                match transition {
+                    AdapterConnectionTransition::Connected => {
+                        if let Ok(_bond_guard) = BOND_LIFECYCLE_LOCK.lock() {
+                            recover_tombstoned_removals(&state, transport.as_ref(), store.as_ref());
+                        }
+                        let _ = event_tx.send(HubEvent::Connected { hub_key: None });
                     }
-                    let _ = event_tx.send(HubEvent::Connected { hub_key: None });
-                    adapter_connected = true;
-                } else if !adapter_available && adapter_connected {
-                    let _ = event_tx.send(HubEvent::Disconnected {
-                        hub_key: None,
-                        reason: "Bluetooth adapter is unavailable".to_string(),
-                    });
-                    adapter_connected = false;
+                    AdapterConnectionTransition::Disconnected => {
+                        let _ = event_tx.send(HubEvent::Disconnected {
+                            hub_key: None,
+                            reason: "Bluetooth adapter is unavailable".to_string(),
+                        });
+                    }
+                    AdapterConnectionTransition::None => {}
                 }
+                adapter_connected = next_connected;
 
                 let devices = store.all();
                 for device in devices {
@@ -308,7 +341,7 @@ fn start_observer(
                     }
                 }
 
-                if adapter_available {
+                if availability == HueBleAdapterAvailability::Available {
                     let _ = event_tx.send(HubEvent::Heartbeat { hub_key: None });
                 }
 
@@ -1575,6 +1608,26 @@ pub fn force_forget_offline(state: &SharedState, requested_id: &str) -> Result<U
 mod tests {
     use super::*;
     use crate::ble::types::{HueBleCapabilities, HueBleCommand, HueBleState};
+
+    #[test]
+    fn foreground_adapter_contention_preserves_observed_connection_state() {
+        assert_eq!(
+            adapter_connection_transition(true, HueBleAdapterAvailability::Busy),
+            (true, AdapterConnectionTransition::None)
+        );
+        assert_eq!(
+            adapter_connection_transition(false, HueBleAdapterAvailability::Busy),
+            (false, AdapterConnectionTransition::None)
+        );
+        assert_eq!(
+            adapter_connection_transition(true, HueBleAdapterAvailability::Unavailable),
+            (false, AdapterConnectionTransition::Disconnected)
+        );
+        assert_eq!(
+            adapter_connection_transition(false, HueBleAdapterAvailability::Available),
+            (true, AdapterConnectionTransition::Connected)
+        );
+    }
 
     #[derive(Default)]
     struct CapturingTransport {

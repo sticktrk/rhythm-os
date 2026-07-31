@@ -5,29 +5,114 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, RwLockReadGuard, TryLockError, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bluer::{
-    Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, ErrorKind, Session,
+    Adapter, AdapterEvent, Address, DeviceEvent, DeviceProperty, DiscoveryFilter,
+    DiscoveryTransport, ErrorKind, Session,
 };
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::runtime::Runtime;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
+use tokio_stream::StreamMap;
 use uuid::Uuid;
 
 use crate::coordination::{AdapterOperationGate, ClientOperationCoordinator};
+
+/// Closed identities for integrations admitted to the shared BlueZ runtime.
+///
+/// Using a driver ID rather than a caller-selected string guarantees that two
+/// handles for one integration share the same operation coordinator and
+/// cannot create extra lanes by choosing another name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BluezDriverId {
+    LocalProfiles,
+    Hue,
+}
+
+impl BluezDriverId {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalProfiles => "local_ble",
+            Self::Hue => "hue_ble",
+        }
+    }
+}
+
+/// Private implementation boundary for values allowed to leave an admitted
+/// BlueZ operation. Downstream drivers cannot add a wrapper containing a raw
+/// `bluer` handle and mark it safe themselves.
+pub(crate) mod operation_output_sealed {
+    pub trait Sealed {}
+}
+
+/// Sealed marker for values that cannot retain a live BlueZ handle after an
+/// operation releases its admission guards.
+pub trait BluezOperationOutput: operation_output_sealed::Sealed + Send + 'static {}
+
+impl operation_output_sealed::Sealed for () {}
+impl operation_output_sealed::Sealed for bool {}
+impl operation_output_sealed::Sealed for String {}
+impl operation_output_sealed::Sealed for Instant {}
+impl BluezOperationOutput for () {}
+impl BluezOperationOutput for bool {}
+impl BluezOperationOutput for String {}
+impl BluezOperationOutput for Instant {}
+
+impl<T: BluezOperationOutput> operation_output_sealed::Sealed for Option<T> {}
+impl<T: BluezOperationOutput> operation_output_sealed::Sealed for Vec<T> {}
+impl<T: BluezOperationOutput> BluezOperationOutput for Option<T> {}
+impl<T: BluezOperationOutput> BluezOperationOutput for Vec<T> {}
+
+/// Byte-detached operation result for data-transfer objects owned by another
+/// integration crate. Serializing inside the admitted closure and rebuilding
+/// outside it makes retaining a BlueZ session/device/GATT handle structurally
+/// impossible through the return value.
+pub struct DetachedBluezOutput<T> {
+    bytes: Vec<u8>,
+    value_type: PhantomData<fn() -> T>,
+}
+
+impl<T> DetachedBluezOutput<T>
+where
+    T: Serialize,
+{
+    pub fn from_value(value: T) -> Result<Self> {
+        Ok(Self {
+            bytes: serde_json::to_vec(&value).context("detaching BlueZ operation output")?,
+            value_type: PhantomData,
+        })
+    }
+}
+
+impl<T> DetachedBluezOutput<T>
+where
+    T: DeserializeOwned,
+{
+    pub fn into_value(self) -> Result<T> {
+        serde_json::from_slice(&self.bytes).context("rebuilding detached BlueZ operation output")
+    }
+}
+
+impl<T: Send + 'static> operation_output_sealed::Sealed for DetachedBluezOutput<T> {}
+impl<T: Send + 'static> BluezOperationOutput for DetachedBluezOutput<T> {}
 
 const SCAN_CHANNEL_CAPACITY: usize = 512;
 const SCAN_RESTART_MIN_BACKOFF: Duration = Duration::from_millis(250);
 const SCAN_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const OBSERVATION_CACHE_TTL: Duration = Duration::from_secs(120);
 const OBSERVATION_CACHE_LIMIT: usize = 256;
+const DEVICE_SUBSCRIPTION_LIMIT: usize = 256;
+const DEVICE_SUBSCRIPTION_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 const RESERVATION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCOVERY_STOP_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const DISCOVERY_STOP_SAFETY_MARGIN: Duration = Duration::from_millis(250);
@@ -136,6 +221,232 @@ impl InitialKnownDeviceFilter {
     }
 }
 
+/// Avoid `bluer::Adapter::discover_devices_with_changes`, which collapses
+/// every device property change into `DeviceAdded`, including connection and
+/// GATT state. The raw adapter stream plus per-device events preserve which
+/// property changed, so only advertisement evidence refreshes an observation.
+/// RSSI means the device is currently in range; service/manufacturer data are
+/// advertisement payloads.
+fn is_fresh_advertisement_property(property: &DeviceProperty) -> bool {
+    matches!(
+        property,
+        DeviceProperty::Rssi(_)
+            | DeviceProperty::ServiceData(_)
+            | DeviceProperty::ManufacturerData(_)
+    )
+}
+
+#[derive(Clone, Debug)]
+struct DeviceSubscriptionGeneration(Arc<()>);
+
+/// Fence property streams to the lifetime of the BlueZ device object that
+/// created them. Bluer closes a device stream when the object is removed, but
+/// its unbounded receiver may still yield already-queued properties. An opaque
+/// allocation identity avoids both counter wraparound and accepting an old
+/// stream after the same Bluetooth address is re-added.
+struct DeviceSubscriptionGenerations {
+    current: HashMap<Address, DeviceSubscriptionGeneration>,
+    limit: usize,
+}
+
+impl DeviceSubscriptionGenerations {
+    fn new(limit: usize) -> Self {
+        Self {
+            current: HashMap::with_capacity(limit),
+            limit,
+        }
+    }
+
+    fn begin(&mut self, address: Address) -> DeviceSubscriptionAdmission {
+        if self.current.contains_key(&address) {
+            return DeviceSubscriptionAdmission::AlreadySubscribed;
+        }
+        if self.current.len() >= self.limit {
+            return DeviceSubscriptionAdmission::AtCapacity;
+        }
+        let generation = DeviceSubscriptionGeneration(Arc::new(()));
+        self.current.insert(address, generation.clone());
+        DeviceSubscriptionAdmission::Started(generation)
+    }
+
+    fn remove(&mut self, address: Address) {
+        self.current.remove(&address);
+    }
+
+    fn remove_if_current(
+        &mut self,
+        address: Address,
+        generation: &DeviceSubscriptionGeneration,
+    ) -> bool {
+        if !self.is_current(address, generation) {
+            return false;
+        }
+        self.current.remove(&address);
+        true
+    }
+
+    fn invalidate_all(&mut self) {
+        self.current.clear();
+    }
+
+    fn is_current(&self, address: Address, generation: &DeviceSubscriptionGeneration) -> bool {
+        self.current
+            .get(&address)
+            .is_some_and(|current| Arc::ptr_eq(&current.0, &generation.0))
+    }
+}
+
+impl Default for DeviceSubscriptionGenerations {
+    fn default() -> Self {
+        Self::new(DEVICE_SUBSCRIPTION_LIMIT)
+    }
+}
+
+enum DeviceSubscriptionAdmission {
+    AlreadySubscribed,
+    AtCapacity,
+    Started(DeviceSubscriptionGeneration),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeviceSubscriptionOutcome {
+    AlreadySubscribed,
+    AtCapacity,
+    Subscribed,
+}
+
+enum DeviceSubscriptionChange {
+    Event(DeviceSubscriptionGeneration, DeviceEvent),
+    Closed(DeviceSubscriptionGeneration),
+}
+
+type DeviceChangeStream = Pin<Box<dyn Stream<Item = DeviceSubscriptionChange> + Send>>;
+
+/// Removable multiplexing is important here: `SelectAll` cannot prune a
+/// removed device until every queued property has drained. This collection
+/// invalidates the generation first and drops the receiver immediately, so a
+/// later object at the same address cannot receive a stale property.
+struct DeviceSubscriptions {
+    generations: DeviceSubscriptionGenerations,
+    streams: StreamMap<Address, DeviceChangeStream>,
+}
+
+impl DeviceSubscriptions {
+    fn new(limit: usize) -> Self {
+        Self {
+            generations: DeviceSubscriptionGenerations::new(limit),
+            streams: StreamMap::with_capacity(limit),
+        }
+    }
+
+    async fn subscribe(
+        &mut self,
+        adapter: &Adapter,
+        address: Address,
+    ) -> Result<DeviceSubscriptionOutcome> {
+        let generation = match self.generations.begin(address) {
+            DeviceSubscriptionAdmission::AlreadySubscribed => {
+                return Ok(DeviceSubscriptionOutcome::AlreadySubscribed);
+            }
+            DeviceSubscriptionAdmission::AtCapacity => {
+                return Ok(DeviceSubscriptionOutcome::AtCapacity);
+            }
+            DeviceSubscriptionAdmission::Started(generation) => generation,
+        };
+
+        let result = async {
+            let device = adapter
+                .device(address)
+                .with_context(|| format!("opening discovered Bluetooth device {address}"))?;
+            let events = device
+                .events()
+                .await
+                .with_context(|| format!("subscribing to Bluetooth device {address}"))?;
+            let event_generation = generation.clone();
+            let closed_generation = generation.clone();
+            let changes = events
+                .map(move |event| DeviceSubscriptionChange::Event(event_generation.clone(), event))
+                .chain(futures::stream::once(async move {
+                    DeviceSubscriptionChange::Closed(closed_generation)
+                }));
+            Ok::<DeviceChangeStream, anyhow::Error>(Box::pin(changes))
+        }
+        .await;
+
+        let stream = match result {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.generations.remove_if_current(address, &generation);
+                return Err(error);
+            }
+        };
+        let replaced = self.streams.insert(address, stream);
+        debug_assert!(replaced.is_none());
+        debug_assert_eq!(self.streams.len(), self.generations.current.len());
+        Ok(DeviceSubscriptionOutcome::Subscribed)
+    }
+
+    fn remove(&mut self, address: Address) {
+        // Fence first. Even if dropping a receiver wakes another task, no
+        // queued value from it remains authorized after this point.
+        self.generations.remove(address);
+        self.streams.remove(&address);
+    }
+
+    fn close_if_current(&mut self, address: Address, generation: &DeviceSubscriptionGeneration) {
+        if self.generations.remove_if_current(address, generation) {
+            self.streams.remove(&address);
+        }
+    }
+
+    fn invalidate_all(&mut self) {
+        self.generations.invalidate_all();
+        self.streams.clear();
+    }
+}
+
+#[derive(Default)]
+struct DeviceSubscriptionRotation {
+    resume_after: Option<Address>,
+}
+
+struct DeviceSubscriptionWindow {
+    addresses: Vec<Address>,
+    overflowed: bool,
+}
+
+impl DeviceSubscriptionRotation {
+    /// Select consecutive circular windows from a stable address ordering.
+    /// For any finite known-device set, every address is selected within
+    /// `ceil(addresses / limit)` rotations even when the set exceeds the hard
+    /// live-subscription limit.
+    fn next_window(&mut self, known: &[Address], limit: usize) -> DeviceSubscriptionWindow {
+        let mut ordered = known.to_vec();
+        ordered.sort_unstable();
+        ordered.dedup();
+        let overflowed = ordered.len() > limit;
+        if ordered.is_empty() || limit == 0 {
+            return DeviceSubscriptionWindow {
+                addresses: Vec::new(),
+                overflowed,
+            };
+        }
+
+        let start = self
+            .resume_after
+            .and_then(|cursor| ordered.iter().position(|address| *address > cursor))
+            .unwrap_or(0);
+        let addresses = (0..ordered.len().min(limit))
+            .map(|offset| ordered[(start + offset) % ordered.len()])
+            .collect::<Vec<_>>();
+        self.resume_after = addresses.last().copied();
+        DeviceSubscriptionWindow {
+            addresses,
+            overflowed,
+        }
+    }
+}
+
 struct RuntimeCore {
     runtime: Runtime,
     context: tokio::sync::Mutex<Option<BluezContext>>,
@@ -152,7 +463,7 @@ struct RuntimeCore {
     quiescing: AtomicBool,
     operation_barrier: RwLock<()>,
     adapter_operation: AdapterOperationGate,
-    client_operations: Mutex<HashMap<&'static str, Weak<ClientOperationCoordinator>>>,
+    client_operations: Mutex<HashMap<BluezDriverId, Weak<ClientOperationCoordinator>>>,
     external_operation_permit: Mutex<Option<OwnedSemaphorePermit>>,
     next_sequence: AtomicU64,
     supervisor_restarts: AtomicU64,
@@ -197,17 +508,17 @@ impl RuntimeCore {
         }))
     }
 
-    fn client_operations(&self, name: &'static str) -> Result<Arc<ClientOperationCoordinator>> {
+    fn client_operations(&self, driver: BluezDriverId) -> Result<Arc<ClientOperationCoordinator>> {
         let mut clients = self
             .client_operations
             .lock()
             .map_err(|_| anyhow::anyhow!("shared Bluetooth client coordinator map poisoned"))?;
         clients.retain(|_, coordinator| coordinator.strong_count() > 0);
-        if let Some(coordinator) = clients.get(name).and_then(Weak::upgrade) {
+        if let Some(coordinator) = clients.get(&driver).and_then(Weak::upgrade) {
             return Ok(coordinator);
         }
         let coordinator = Arc::new(ClientOperationCoordinator::new());
-        clients.insert(name, Arc::downgrade(&coordinator));
+        clients.insert(driver, Arc::downgrade(&coordinator));
         Ok(coordinator)
     }
 
@@ -337,6 +648,7 @@ impl RuntimeCore {
         let mut backoff = SCAN_RESTART_MIN_BACKOFF;
         let mut reservation_rx = self.reservation_tx.subscribe();
         let mut shutdown_rx = self.scan_shutdown_tx.subscribe();
+        let mut subscription_rotation = DeviceSubscriptionRotation::default();
         'supervisor: while !self.quiescing.load(Ordering::Acquire) {
             while self.external_adapter_reserved.load(Ordering::Acquire)
                 && !self.quiescing.load(Ordering::Acquire)
@@ -352,7 +664,13 @@ impl RuntimeCore {
                     }
                 }
             }
-            let result = self.scan_once(&mut reservation_rx, &mut shutdown_rx).await;
+            let result = self
+                .scan_once(
+                    &mut reservation_rx,
+                    &mut shutdown_rx,
+                    &mut subscription_rotation,
+                )
+                .await;
             if self.quiescing.load(Ordering::Acquire) {
                 break;
             }
@@ -400,6 +718,7 @@ impl RuntimeCore {
         &self,
         reservation_rx: &mut watch::Receiver<bool>,
         shutdown_rx: &mut watch::Receiver<bool>,
+        subscription_rotation: &mut DeviceSubscriptionRotation,
     ) -> Result<()> {
         if !self.begin_scan()? {
             return Ok(());
@@ -434,9 +753,11 @@ impl RuntimeCore {
                 return Err(error).context("snapshotting known Bluetooth devices before discovery");
             }
         };
+        let initial_subscription_window =
+            subscription_rotation.next_window(&known_addresses, DEVICE_SUBSCRIPTION_LIMIT);
         let loop_result = {
             let events = match adapter
-                .discover_devices_with_changes()
+                .discover_devices()
                 .await
                 .context("starting shared LE discovery")
             {
@@ -448,12 +769,25 @@ impl RuntimeCore {
             };
             self.mark_scan_active();
             let mut initial_known = InitialKnownDeviceFilter::new(known_addresses);
+            let selected_initial_addresses = initial_subscription_window
+                .addresses
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let mut subscription_rotation_needed = initial_subscription_window.overflowed;
+            let mut subscriptions = DeviceSubscriptions::new(DEVICE_SUBSCRIPTION_LIMIT);
+            let mut rotation_interval =
+                tokio::time::interval(DEVICE_SUBSCRIPTION_ROTATION_INTERVAL);
+            rotation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Tokio intervals fire immediately once. Consume that tick so an
+            // oversized known-device set gets a useful observation window
+            // before its subscriptions rotate.
+            rotation_interval.tick().await;
 
             if self.scan_interrupted() {
                 Ok(())
             } else {
                 tokio::pin!(events);
-                loop {
+                'scan: loop {
                     tokio::select! {
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
@@ -468,7 +802,17 @@ impl RuntimeCore {
                         event = events.next() => {
                             match event {
                                 Some(AdapterEvent::DeviceAdded(address)) => {
-                                    if !initial_known.accepts(address) {
+                                    let is_fresh = initial_known.accepts(address);
+                                    if is_fresh || selected_initial_addresses.contains(&address) {
+                                        match subscriptions.subscribe(&adapter, address).await {
+                                            Ok(DeviceSubscriptionOutcome::AtCapacity) => {
+                                                subscription_rotation_needed = true;
+                                            }
+                                            Ok(DeviceSubscriptionOutcome::AlreadySubscribed | DeviceSubscriptionOutcome::Subscribed) => {}
+                                            Err(error) => break Err(error),
+                                        }
+                                    }
+                                    if !is_fresh {
                                         continue;
                                     }
                                     if let Some(observation) = self.snapshot(&adapter, address).await {
@@ -478,6 +822,7 @@ impl RuntimeCore {
                                 }
                                 Some(AdapterEvent::DeviceRemoved(address)) => {
                                     initial_known.removed(address);
+                                    subscriptions.remove(address);
                                     if let Ok(mut observations) = self.observations.write() {
                                         observations.remove(&address);
                                     }
@@ -486,12 +831,62 @@ impl RuntimeCore {
                                 None => break Err(anyhow::anyhow!("shared BlueZ discovery stream ended")),
                             }
                         }
+                        change = subscriptions.streams.next(), if !subscriptions.streams.is_empty() => {
+                            let Some((address, change)) = change else {
+                                continue;
+                            };
+                            let (generation, event) = match change {
+                                DeviceSubscriptionChange::Event(generation, event) => (generation, event),
+                                DeviceSubscriptionChange::Closed(generation) => {
+                                    subscriptions.close_if_current(address, &generation);
+                                    continue;
+                                }
+                            };
+                            if !subscriptions.generations.is_current(address, &generation) {
+                                continue;
+                            }
+                            let DeviceEvent::PropertyChanged(property) = event;
+                            if !is_fresh_advertisement_property(&property) {
+                                continue;
+                            }
+                            if let Some(observation) = self.snapshot(&adapter, address).await {
+                                self.cache_observation(observation.clone());
+                                let _ = self.observation_tx.send(observation);
+                            }
+                        }
+                        _ = rotation_interval.tick(), if subscription_rotation_needed => {
+                            let known_addresses = match adapter.device_addresses().await {
+                                Ok(addresses) => addresses,
+                                Err(error) => break Err(error).context(
+                                    "snapshotting known Bluetooth devices for subscription rotation"
+                                ),
+                            };
+                            let window = subscription_rotation
+                                .next_window(&known_addresses, DEVICE_SUBSCRIPTION_LIMIT);
+
+                            // Invalidate before dropping receivers. Any
+                            // already-queued property is unauthorized before
+                            // an address can acquire its next generation.
+                            subscriptions.invalidate_all();
+                            for address in window.addresses {
+                                match subscriptions.subscribe(&adapter, address).await {
+                                    Ok(DeviceSubscriptionOutcome::AlreadySubscribed | DeviceSubscriptionOutcome::Subscribed) => {}
+                                    Ok(DeviceSubscriptionOutcome::AtCapacity) => {
+                                        break 'scan Err(anyhow::anyhow!(
+                                            "bounded Bluetooth subscription window exceeded its limit"
+                                        ));
+                                    }
+                                    Err(error) => break 'scan Err(error),
+                                }
+                            }
+                            subscription_rotation_needed = window.overflowed;
+                        }
                     }
                 }
             }
         };
 
-        // `discover_devices_with_changes` forwards through an internal bluer
+        // `discover_devices` forwards through an internal bluer
         // task which owns the actual discovery token. Dropping our receiver
         // wakes that task asynchronously, so a first SetDiscoveryFilter may
         // legitimately observe DiscoveryActive before StopDiscovery starts.
@@ -776,18 +1171,18 @@ fn shared_runtime() -> Result<Arc<RuntimeCore>> {
 
 /// Per-driver handle into the one shared adapter owner.
 pub struct BluezClient {
-    name: &'static str,
+    driver: BluezDriverId,
     core: Arc<RuntimeCore>,
     operations: Arc<ClientOperationCoordinator>,
     quiescing: AtomicBool,
 }
 
 impl BluezClient {
-    pub fn new(name: &'static str) -> Result<Self> {
+    pub fn new(driver: BluezDriverId) -> Result<Self> {
         let core = shared_runtime()?;
-        let operations = core.client_operations(name)?;
+        let operations = core.client_operations(driver)?;
         Ok(Self {
-            name,
+            driver,
             core,
             operations,
             quiescing: AtomicBool::new(false),
@@ -797,9 +1192,13 @@ impl BluezClient {
     /// Execute one complete adapter/GATT operation while holding this client's
     /// exclusive scope and the shared external-owner gate. Raw handles are
     /// created inside the admitted scope instead of being handed out by an
-    /// independently callable accessor.
+    /// independently callable accessor. The closed set of registered drivers
+    /// is a trusted boundary: operation closures must not clone a handle into
+    /// captured external state. The sealed output contract separately makes
+    /// handle escape through the return value impossible.
     pub fn run_adapter_operation<T, F, Fut>(&self, operation: F) -> Result<T>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -820,6 +1219,7 @@ impl BluezClient {
         operation: F,
     ) -> Result<T>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -835,6 +1235,7 @@ impl BluezClient {
         operation: F,
     ) -> Result<T>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -871,6 +1272,7 @@ impl BluezClient {
         operation: F,
     ) -> Result<T>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -890,6 +1292,7 @@ impl BluezClient {
         operation: F,
     ) -> Result<T>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -928,6 +1331,7 @@ impl BluezClient {
     /// client operation or external owner currently holds the gate.
     pub fn try_run_adapter_operation<T, F, Fut>(&self, operation: F) -> Result<Option<T>>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -943,6 +1347,7 @@ impl BluezClient {
         operation: F,
     ) -> Result<Option<T>>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
@@ -956,10 +1361,18 @@ impl BluezClient {
         operation: F,
     ) -> Result<Option<T>>
     where
+        T: BluezOperationOutput,
         F: FnOnce(Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        self.ensure_active()?;
+        self.ensure_not_quiescing()?;
+        // An opportunistic observer cannot distinguish an adapter reserved by
+        // an out-of-process commissioner from ordinary local contention by
+        // probing BlueZ. Report both as busy (`None`); only shutdown is a hard
+        // error for this non-blocking path.
+        if self.core.external_adapter_reserved.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let Ok(_shared) = self.core.operation_barrier.try_read() else {
             return Ok(None);
         };
@@ -977,7 +1390,13 @@ impl BluezClient {
         let Ok(_permit) = self.core.adapter_operation.try_acquire() else {
             return Ok(None);
         };
-        self.ensure_active()?;
+        // Close the race with a reservation that arrived during admission.
+        // Drop our permit as busy so the external owner can finish draining
+        // without creating a false adapter-health transition.
+        self.ensure_not_quiescing()?;
+        if self.core.external_adapter_reserved.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         self.core.runtime.block_on(async {
             tokio::time::timeout(operation_timeout, async {
                 let (session, adapter) = self.core.session_adapter().await?;
@@ -1022,8 +1441,8 @@ impl BluezClient {
             .block_on(self.operations.drain(CLIENT_QUIESCE_TIMEOUT))
     }
 
-    pub fn name(&self) -> &'static str {
-        self.name
+    pub fn driver(&self) -> BluezDriverId {
+        self.driver
     }
 
     fn ensure_active(&self) -> Result<()> {
@@ -1052,19 +1471,17 @@ pub struct ScanSubscription {
 
 impl ScanSubscription {
     pub async fn recv(&mut self) -> Result<ScanObservation> {
-        loop {
-            match self.receiver.recv().await {
-                Ok(observation) => return Ok(observation),
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    self.lagged_observations
-                        .fetch_add(skipped, Ordering::Relaxed);
-                    anyhow::bail!(
-                        "shared Bluetooth observation subscriber lagged by {skipped} observations"
-                    )
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    anyhow::bail!("shared Bluetooth observation stream closed")
-                }
+        match self.receiver.recv().await {
+            Ok(observation) => Ok(observation),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                self.lagged_observations
+                    .fetch_add(skipped, Ordering::Relaxed);
+                anyhow::bail!(
+                    "shared Bluetooth observation subscriber lagged by {skipped} observations"
+                )
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                anyhow::bail!("shared Bluetooth observation stream closed")
             }
         }
     }
@@ -1271,6 +1688,39 @@ mod tests {
     }
 
     #[test]
+    fn opportunistic_probe_reports_external_reservation_as_busy_but_quiesce_as_error() {
+        let core = RuntimeCore::build().unwrap();
+        let operations = core.client_operations(BluezDriverId::Hue).unwrap();
+        let client = BluezClient {
+            driver: BluezDriverId::Hue,
+            core: core.clone(),
+            operations,
+            quiescing: AtomicBool::new(false),
+        };
+        let probe_called = Arc::new(AtomicBool::new(false));
+        core.external_adapter_reserved
+            .store(true, Ordering::Release);
+
+        let called = probe_called.clone();
+        assert_eq!(
+            client
+                .try_run_adapter_operation(move |_session, _adapter| async move {
+                    called.store(true, Ordering::Release);
+                    Ok(true)
+                })
+                .unwrap(),
+            None
+        );
+        assert!(!probe_called.load(Ordering::Acquire));
+
+        client.quiescing.store(true, Ordering::Release);
+        let error = client
+            .try_run_adapter_operation(|_session, _adapter| async move { Ok(true) })
+            .expect_err("quiesce must remain a hard probe failure");
+        assert!(error.to_string().contains("quiesced"));
+    }
+
+    #[test]
     fn scan_reservation_state_requires_stop_acknowledgement() {
         let mut state = ScanControlState::default();
         assert!(state.begin(false));
@@ -1301,6 +1751,121 @@ mod tests {
         let mut filter = InitialKnownDeviceFilter::new([removed_before_replay]);
         filter.removed(removed_before_replay);
         assert!(filter.accepts(removed_before_replay));
+    }
+
+    #[test]
+    fn only_advertisement_properties_refresh_scan_observations() {
+        assert!(!is_fresh_advertisement_property(
+            &DeviceProperty::Connected(true)
+        ));
+        assert!(!is_fresh_advertisement_property(
+            &DeviceProperty::ServicesResolved(true)
+        ));
+        assert!(!is_fresh_advertisement_property(&DeviceProperty::Paired(
+            true
+        )));
+
+        assert!(is_fresh_advertisement_property(&DeviceProperty::Rssi(-42)));
+        assert!(is_fresh_advertisement_property(
+            &DeviceProperty::ManufacturerData(HashMap::from([(0x1511, vec![1])]))
+        ));
+        assert!(is_fresh_advertisement_property(
+            &DeviceProperty::ServiceData(HashMap::from([(
+                "00001511-0000-1000-8000-00805f9b34fb".parse().unwrap(),
+                vec![1],
+            )]))
+        ));
+    }
+
+    #[test]
+    fn removed_and_readded_address_rejects_queued_old_subscription_events() {
+        let address: Address = "02:00:00:00:00:01".parse().unwrap();
+        let mut generations = DeviceSubscriptionGenerations::default();
+
+        let DeviceSubscriptionAdmission::Started(removed_generation) = generations.begin(address)
+        else {
+            panic!("first subscription must be admitted");
+        };
+        assert!(generations.is_current(address, &removed_generation));
+        assert!(matches!(
+            generations.begin(address),
+            DeviceSubscriptionAdmission::AlreadySubscribed
+        ));
+
+        generations.remove(address);
+        assert!(!generations.is_current(address, &removed_generation));
+
+        let DeviceSubscriptionAdmission::Started(readded_generation) = generations.begin(address)
+        else {
+            panic!("re-added address must receive a new generation");
+        };
+        assert!(!generations.is_current(address, &removed_generation));
+        assert!(generations.is_current(address, &readded_generation));
+    }
+
+    #[test]
+    fn rotating_privacy_addresses_stay_bounded_and_all_receive_a_window() {
+        let known = (1..=5)
+            .map(|suffix| {
+                format!("02:00:00:00:00:{suffix:02X}")
+                    .parse::<Address>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut rotation = DeviceSubscriptionRotation::default();
+        let mut selected = HashSet::new();
+
+        for _ in 0..3 {
+            let window = rotation.next_window(&known, 2);
+            assert!(window.overflowed);
+            assert!(window.addresses.len() <= 2);
+            selected.extend(window.addresses);
+        }
+
+        assert_eq!(selected, known.iter().copied().collect());
+        assert_eq!(rotation.next_window(&known, 2).addresses, known[1..=2]);
+    }
+
+    #[test]
+    fn subscription_prune_fences_queued_events_before_reusing_capacity() {
+        let first: Address = "02:00:00:00:00:01".parse().unwrap();
+        let second: Address = "02:00:00:00:00:02".parse().unwrap();
+        let overflow: Address = "02:00:00:00:00:03".parse().unwrap();
+        let mut generations = DeviceSubscriptionGenerations::new(2);
+
+        let DeviceSubscriptionAdmission::Started(old_generation) = generations.begin(first) else {
+            panic!("first subscription must be admitted");
+        };
+        assert!(matches!(
+            generations.begin(second),
+            DeviceSubscriptionAdmission::Started(_)
+        ));
+        assert!(matches!(
+            generations.begin(overflow),
+            DeviceSubscriptionAdmission::AtCapacity
+        ));
+
+        generations.invalidate_all();
+        assert!(!generations.is_current(first, &old_generation));
+        let DeviceSubscriptionAdmission::Started(new_generation) = generations.begin(first) else {
+            panic!("pruned capacity must be reusable");
+        };
+        assert!(!generations.is_current(first, &old_generation));
+        assert!(generations.is_current(first, &new_generation));
+    }
+
+    #[test]
+    fn equal_driver_ids_share_one_coordinator_scope() {
+        let core = RuntimeCore::build().unwrap();
+        let first = core.client_operations(BluezDriverId::Hue).unwrap();
+        let second = core.client_operations(BluezDriverId::Hue).unwrap();
+        let local_profiles = core
+            .client_operations(BluezDriverId::LocalProfiles)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &local_profiles));
+        assert_eq!(BluezDriverId::Hue.as_str(), "hue_ble");
     }
 
     #[test]
@@ -1345,7 +1910,7 @@ mod tests {
 
         assert_eq!(observations.len(), 1);
         assert!(observations.contains_key(&current.address));
-        assert!(OBSERVATION_CACHE_LIMIT < SCAN_CHANNEL_CAPACITY);
+        const { assert!(OBSERVATION_CACHE_LIMIT < SCAN_CHANNEL_CAPACITY) };
     }
 
     #[test]

@@ -721,6 +721,52 @@ mod tests {
     }
 
     #[test]
+    fn unacknowledged_replay_commit_never_emits_button_event() {
+        let root = temporary_dir();
+        let store = LocalBleDeviceStore::load(&root).unwrap();
+        let device = device(None);
+        store.upsert(device.clone()).unwrap();
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        registry.lock().unwrap().upsert_device(
+            &device.id,
+            Some("test-room"),
+            &[(device.button_id("button-1").unwrap(), 1)],
+            DeviceType::Button,
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let advertisement =
+            BleAdvertisement::try_from_parts([], [], [(OREIN_MANUFACTURER_ID, frame(1).to_vec())])
+                .unwrap();
+
+        store.fail_next_directory_sync();
+        assert_eq!(
+            accept_profile_advertisement(advertisement.view(), &device, &store, &registry, &tx,)
+                .unwrap(),
+            0
+        );
+        assert!(store.durability_degraded());
+        assert!(rx.try_recv().is_err());
+
+        // The logical replay commit remains the at-most-once head. If the
+        // rename survives a restart, observing the same press is a duplicate
+        // and cannot turn the unacknowledged commit into a late event.
+        let restarted = LocalBleDeviceStore::load(&root).unwrap();
+        assert_eq!(
+            accept_profile_advertisement(
+                advertisement.view(),
+                &device,
+                &restarted,
+                &registry,
+                &tx,
+            )
+            .unwrap(),
+            0
+        );
+        assert!(rx.try_recv().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn event_dispatch_uses_the_stored_profile_id_instead_of_an_orein_default() {
         let root = temporary_dir();
         let store = LocalBleDeviceStore::load(&root).unwrap();

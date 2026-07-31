@@ -36,6 +36,7 @@ import 'widgets/hardware_gate_screen.dart';
 import 'widgets/hub_connection_loading_screen.dart';
 import 'widgets/hub_picker_screen.dart';
 import 'widgets/main_bottom_nav.dart';
+import 'widgets/pending_local_ble_pairing_recovery.dart';
 import 'widgets/report_bug_flow.dart';
 import 'widgets/solar_orbit.dart';
 import 'widgets/virtual_experience_banner.dart';
@@ -678,6 +679,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                                     .setLightBreakerEnabled(true),
                               ),
                             ),
+                          if (!isVirtual)
+                            const AppPendingLocalBlePairingRecovery(),
                           Expanded(
                             // The top banner (if any) already consumed the
                             // status-bar inset; the tab screens below use

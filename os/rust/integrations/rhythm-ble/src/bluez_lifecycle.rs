@@ -11,7 +11,7 @@ use rhythm_os::hub::{
     ExternalLightHubIntegration, HubCredentials, HubDeviceProfileCapability, HubEvent,
     HubIntegrationCapability, HubProvider, HubType,
 };
-use rhythm_os::pairing::{PairingSession, UnpairingResult};
+use rhythm_os::pairing::{PairingRequestContext, PairingSession, UnpairingResult};
 use rhythm_os::state::SharedState;
 
 use crate::bluez_profile::BluezLocalBleTransport;
@@ -118,17 +118,32 @@ impl BluezLocalBleIntegration {
             Some(deadline) => lifecycle::connect_until(&state, transport, deadline)?,
             None => lifecycle::connect(&state, transport)?,
         };
-        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let key = hub.hub_key.clone();
-        if state.hubs.contains_key(&key) {
-            drop(state);
-            drop(hub);
+        let store = hub
+            .data::<Arc<lifecycle::LocalBleHubData>>()
+            .map(|data| data.store.clone())
+            .ok_or_else(|| anyhow::anyhow!("local Bluetooth hub data is unavailable"))?;
+        let mut pending_hub = Some(hub);
+        let published = store.with_reset_safe_operation(|| {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            if state.hubs.contains_key(&key) {
+                return Ok(false);
+            }
+            state.hubs.insert(
+                key.clone(),
+                pending_hub
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("local Bluetooth hub was already published"))?,
+            );
+            state.set_hub_connected(&key, false);
+            Ok(true)
+        })?;
+        if !published {
+            drop(pending_hub.take());
             drop(event_rx);
             let (_closed_tx, closed_rx) = std::sync::mpsc::channel();
             return Ok(closed_rx);
         }
-        state.hubs.insert(key.clone(), hub);
-        state.set_hub_connected(&key, false);
         Ok(event_rx)
     }
 }
@@ -213,10 +228,20 @@ impl ExternalLightHubIntegration for BluezLocalBleIntegration {
         state: &SharedState,
         params: &serde_json::Value,
     ) -> Result<PairingSession> {
-        // Start the server budget before runtime/hub setup so no late
-        // completion can activate a device after the client's reconciliation
-        // window has ended.
-        let deadline = Instant::now() + lifecycle::PAIRING_SERVER_SLA;
+        self.start_pairing_with_context(state, params, PairingRequestContext::accepted_now())
+    }
+
+    fn start_pairing_with_context(
+        &self,
+        state: &SharedState,
+        params: &serde_json::Value,
+        context: PairingRequestContext,
+    ) -> Result<PairingSession> {
+        // Include handler validation, adapter admission, and the durable
+        // idempotency write in the same absolute server budget. Starting a new
+        // clock here could otherwise outlive the app's reconciliation window.
+        let deadline = context.deadline_after(lifecycle::PAIRING_SERVER_SLA);
+        ensure_deadline(deadline, "request admission")?;
         let profile_id = params
             .get("profile_id")
             .and_then(serde_json::Value::as_str)
@@ -224,11 +249,20 @@ impl ExternalLightHubIntegration for BluezLocalBleIntegration {
         let setup = params
             .get("setup")
             .ok_or_else(|| anyhow::anyhow!("missing local Bluetooth setup fields"))?;
-        let session_id = params.get("session_id").and_then(serde_json::Value::as_str);
+        let session_id = params
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing local Bluetooth pairing session_id"))?;
+        let request_fingerprint = params
+            .get("request_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing local Bluetooth pairing request fingerprint")
+            })?;
         rhythm_os::pairing::emit_pairing_progress(
             state,
             HUB_TYPE,
-            session_id,
+            Some(session_id),
             rhythm_os::pairing::PairingStatus::Searching,
             rhythm_os::pairing::PairingStage::HubConnecting,
             "Preparing the Bluetooth adapter",
@@ -237,7 +271,18 @@ impl ExternalLightHubIntegration for BluezLocalBleIntegration {
         );
         self.ensure_connected(state, deadline)?;
         ensure_deadline(deadline, "association")?;
-        lifecycle::pair(state, profile_id, setup, session_id, deadline)
+        lifecycle::pair(
+            state,
+            profile_id,
+            setup,
+            session_id,
+            request_fingerprint,
+            deadline,
+        )
+    }
+
+    fn reconcile_pairing_results(&self, state: &SharedState) -> Result<()> {
+        lifecycle::reconcile_pending_pairing_results(state)
     }
 
     fn start_unpairing(
@@ -261,6 +306,22 @@ pub fn quiesce_for_factory_reset(state: &SharedState) -> Result<()> {
 mod tests {
     use super::*;
     use crate::profile::OREIN_OC02001_PROFILE_ID;
+
+    #[test]
+    fn pairing_budget_includes_handler_preamble_time() {
+        let state = Arc::new(std::sync::Mutex::new(rhythm_os::state::AppState::default()));
+        let accepted_at = Instant::now() - lifecycle::PAIRING_SERVER_SLA;
+
+        let error = INTEGRATION
+            .start_pairing_with_context(
+                &state,
+                &serde_json::json!({}),
+                PairingRequestContext::new(accepted_at),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("request admission"));
+    }
 
     #[test]
     fn capability_advertises_registered_profile_without_blocking_room_readiness() {

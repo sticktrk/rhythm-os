@@ -727,6 +727,14 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<RhythmPairingResultStatus?> getPairingResult(String sessionId) {
+    return _delegate.getPairingResult(sessionId);
+  }
+
+  Future<bool> acknowledgePairingResult(String sessionId) {
+    return _delegate.acknowledgePairingResult(sessionId);
+  }
+
   Future<Map<String, dynamic>?> unpairDevice({
     required String hubType,
     required String deviceId,

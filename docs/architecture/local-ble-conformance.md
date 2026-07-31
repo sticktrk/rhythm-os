@@ -111,10 +111,14 @@ fixture inventory.
 
 - Prove identity with the strongest available combination of setup input,
   service/manufacturer data, service UUIDs, and GATT evidence.
-- Rotate the resolvable/private BLE address while keeping durable identity and
-  assert that one canonical device remains.
-- Replay a stale address after rotation and assert that it cannot fork or
-  resurrect the device.
+- When the protocol supplies authenticated address-rotation evidence, rotate
+  the resolvable/private address while keeping durable identity and assert that
+  one canonical device remains. Without such evidence, present the same
+  claimed identity from a second address and assert that the pinned-address
+  association rejects it without forking the device.
+- After an authenticated rotation, replay the stale address and assert that it
+  cannot fork or resurrect the device. For a pinned-address profile, assert
+  that every unproved alternate address remains rejected.
 - Include negative collision fixtures: nearby devices sharing a name, vendor
   prefix, service UUID, or partial payload must not pair or emit events.
 - Reject malformed, truncated, oversized, unsupported-version, and
@@ -127,7 +131,8 @@ fixture inventory.
 - Cover forward gaps without synthesizing missing actions.
 - Cover counter wrap with the protocol's exact width and acceptance window.
 - Reject late frames outside that window, including frames observed through an
-  old address after rotation.
+  old address after an authenticated rotation or an unproved alternate address
+  for a pinned-address profile.
 - Restart between observations and prove durable deduplication has the same
   result as an uninterrupted run.
 
@@ -141,12 +146,14 @@ fixture inventory.
   during scan, connection, service discovery, and final persistence;
   cancellation must release its lease/connection and prevent a late successful
   pair from appearing after the caller reports cancellation.
-- Until a cancel/status endpoint exists, define and test one bounded server
-  SLA instead: the UI is non-dismissible while pairing owns the request, its
-  timeout is not shorter than the server's maximum, and the same correlation
-  ID reconciles the terminal HTTP/SSE success or failure. A client must not
-  abandon the request and later hide a successful pair. Cancellation remains
-  the preferred future contract, not an app-only timer.
+- For the current status/acknowledgement contract, reserve the correlation ID
+  durably before adapter work, make the first terminal result immutable, and
+  repair the activation-commit/result-publication window from an authoritative
+  outbox. Unknown lookup must establish a causal fence before returning
+  not-found, and the client must cache a sanitized terminal result before
+  acknowledging and clearing it. The UI remains non-dismissible while pairing
+  owns the request, and its timeout is not shorter than the server maximum.
+  Cancellation remains the preferred future addition, not an app-only timer.
 - Unpair while BlueZ is unavailable. Local canonical/persisted removal must
   succeed, and a tombstone or equivalent policy must prevent automatic
   resurrection until an explicit new pair.
@@ -155,6 +162,10 @@ fixture inventory.
   task can recreate a file after reset reports success.
 - Crash or terminate the shared scanner/worker and prove supervision restarts
   it with bounded backoff while preserving the last durable identity/state.
+- Bound live per-device property subscriptions independently of the number of
+  observed addresses. Rotate a stable known set fairly and fence removed or
+  reused subscriptions by generation so stale callbacks cannot be relabeled
+  as current evidence.
 
 ### Mixed button and bulb workload
 

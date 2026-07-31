@@ -3,7 +3,7 @@
   "profile_id": "orein.oc02001.button.v1",
   "device_type": "button",
   "fixture_name": "synthetic_pair_and_press_replay",
-  "purpose": "Prove identity admission, normalized presses, changed-token gaps and wraparound, duplicate suppression evidence, and malformed-frame rejection.",
+  "purpose": "Prove identity admission, normalized presses, forward gaps and wraparound, duplicate and stale rollback suppression, and malformed-frame rejection.",
   "provenance": "synthetic",
   "setup": {
     "ble_identity": "0A0B0C0D0E0F",
@@ -24,7 +24,7 @@
     "matching_service_uuid": "00001000-1115-1000-4c44-5341524e4f4f"
   },
   "initial_replay": {
-    "press": "85"
+    "press": "fc"
   },
   "observations": [
     {
@@ -37,7 +37,7 @@
           "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
         },
         "manufacturer_data": {
-          "5393": "85020100000000000000000000000000000000"
+          "5393": "fc020100000000000000000000000000000000"
         }
       },
       "events": [
@@ -49,7 +49,7 @@
           },
           "replay": {
             "stream": "press",
-            "value_hex": "85",
+            "value_hex": "fc",
             "expected_order": "duplicate"
           },
           "expected_emit": false
@@ -66,7 +66,7 @@
           "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
         },
         "manufacturer_data": {
-          "5393": "05020100000000000000000000000000000000"
+          "5393": "fe020100000000000000000000000000000000"
         }
       },
       "events": [
@@ -78,7 +78,7 @@
           },
           "replay": {
             "stream": "press",
-            "value_hex": "05",
+            "value_hex": "fe",
             "expected_order": "forward"
           },
           "expected_emit": true
@@ -95,7 +95,7 @@
           "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
         },
         "manufacturer_data": {
-          "5393": "05020100000000000000000000000000000000"
+          "5393": "fc020100000000000000000000000000000000"
         }
       },
       "events": [
@@ -107,8 +107,8 @@
           },
           "replay": {
             "stream": "press",
-            "value_hex": "05",
-            "expected_order": "duplicate"
+            "value_hex": "fc",
+            "expected_order": "stale"
           },
           "expected_emit": false
         }

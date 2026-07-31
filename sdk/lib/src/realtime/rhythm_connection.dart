@@ -176,6 +176,14 @@ class RhythmConnection {
   /// discard its response.
   int _pollEpoch = 0;
 
+  /// Binds an initial hello to the exact transport attempt that requested it.
+  ///
+  /// Dio's default `close(force: false)` lets an active request finish. Without
+  /// this fence, a delayed hello from appliance A can arrive after [connect]
+  /// has replaced the API client with appliance B, incorrectly authenticating
+  /// A's identity for requests that will be sent to B.
+  int _transportGeneration = 0;
+
   // Optional web base URL (consumer passes Uri.base.toString() on web).
   String? _webBaseUrl;
   String? _authToken;
@@ -355,6 +363,9 @@ class RhythmConnection {
 
   /// Disconnect from the server.
   void disconnect() {
+    // Invalidate an in-flight hello before clearing the client. The old Dio
+    // request may still complete because Dio closes non-forcibly by default.
+    _transportGeneration++;
     _stopPolling();
     _disconnectSse();
     _sseReconnectTimer?.cancel();
@@ -390,10 +401,15 @@ class RhythmConnection {
 
   /// Ping if connected, or attempt immediate reconnect if not.
   Future<void> pingOrReconnect() async {
-    if (_host == null || _dio == null) return;
+    final dio = _dio;
+    if (_host == null || dio == null) return;
 
     if (connected) {
-      final ok = await api.ping();
+      final apiClient = _api;
+      if (apiClient == null) return;
+      final transportGeneration = _transportGeneration;
+      final ok = await apiClient.ping();
+      if (!_isCurrentTransport(transportGeneration, dio)) return;
       if (!ok) {
         _stopPolling();
         _disconnectSse();
@@ -451,7 +467,9 @@ class RhythmConnection {
   // --------------------------------------------------------------------------
 
   Future<void> _connectInternal({bool authoritative = false}) async {
-    if (_dio == null || _host == null) return;
+    final dio = _dio;
+    if (dio == null || _host == null) return;
+    final transportGeneration = ++_transportGeneration;
 
     _sseReconnectTimer?.cancel();
     _sseReconnectTimer = null;
@@ -462,7 +480,11 @@ class RhythmConnection {
         : RhythmConnectionState.connecting);
 
     try {
-      final data = await _getHelloPayload(authoritative: authoritative);
+      final data = await _getHelloPayload(
+        dio,
+        authoritative: authoritative,
+      );
+      if (!_isCurrentTransport(transportGeneration, dio)) return;
       final hello = RhythmHello.fromJson(data);
       _log.fine('hello last_tick_epoch_ms=${hello.lastTickEpochMs}');
       _serverPlatformContext = hello.platformContext;
@@ -520,20 +542,27 @@ class RhythmConnection {
         _connectSse();
       }
     } catch (e) {
+      if (!_isCurrentTransport(transportGeneration, dio)) return;
       _log.severe('Connection failed', e);
       _scheduleReconnect();
     }
   }
 
-  Future<Map<String, dynamic>> _getHelloPayload({
+  Future<Map<String, dynamic>> _getHelloPayload(
+    Dio dio, {
     bool authoritative = false,
   }) async {
-    final response = await _dio!.get(
+    final response = await dio.get(
       'api/state',
       queryParameters: authoritative ? const {'authoritative': 'true'} : null,
     );
     return Map<String, dynamic>.from(response.data as Map<String, dynamic>);
   }
+
+  bool _isCurrentTransport(int generation, Dio dio) =>
+      generation == _transportGeneration &&
+      identical(dio, _dio) &&
+      _host != null;
 
   // --------------------------------------------------------------------------
   // Internal: polling
@@ -557,17 +586,21 @@ class RhythmConnection {
   }
 
   Future<void> _poll() async {
-    if (_dio == null || !connected) return;
+    final dio = _dio;
+    if (dio == null || !connected) return;
 
+    final transportGeneration = _transportGeneration;
     final pollEpoch = _pollEpoch;
     final sseGeneration = _sseApplyGeneration;
     try {
-      final response = await _dio!.get('api/nodes/state');
+      final response = await dio.get('api/nodes/state');
       // Discard stale responses: if SSE applied fresher state or the poller
-      // was stopped while this request was in flight, applying the response
-      // would revert newer state (the poll diffs against the *current* cache,
-      // so an older snapshot registers as a "change").
-      if (pollEpoch != _pollEpoch || sseGeneration != _sseApplyGeneration) {
+      // was stopped or the transport changed while this request was in flight,
+      // applying the response would revert newer state (the poll diffs against
+      // the *current* cache, so an older snapshot registers as a "change").
+      if (!_isCurrentTransport(transportGeneration, dio) ||
+          pollEpoch != _pollEpoch ||
+          sseGeneration != _sseApplyGeneration) {
         return;
       }
       final data = response.data as Map<String, dynamic>;
@@ -713,6 +746,13 @@ class RhythmConnection {
         }
       }
     } catch (e) {
+      // A stopped poll cycle or superseded transport does not get to consume
+      // B's failure budget or initiate a reconnect on B's behalf.
+      if (!_isCurrentTransport(transportGeneration, dio) ||
+          pollEpoch != _pollEpoch ||
+          sseGeneration != _sseApplyGeneration) {
+        return;
+      }
       _consecutivePollFailures++;
       _log.warning(
           'Poll failed ($_consecutivePollFailures/$_maxPollFailures)', e);

@@ -2,15 +2,19 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use log::warn;
 use rand::{rngs::OsRng, RngCore};
 use rhythm_os::hub::is_valid_device_profile_id;
+use rhythm_os::pairing::{
+    validate_pairing_request_fingerprint, validate_pairing_session_id, PAIRING_RESULT_LIMIT,
+};
 use rhythm_os::registry::HubDeviceRegistry;
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +25,142 @@ use crate::profile::{
 const STORE_SCHEMA_VERSION: u32 = 1;
 pub const STORE_DIRECTORY: &str = "local_ble";
 const STORE_FILE: &str = "devices.json";
+const MAX_STORE_BYTES: usize = 1024 * 1024;
+const MAX_STORED_DEVICES: usize = 256;
+const MAX_ACTIVATION_RECEIPTS: usize = PAIRING_RESULT_LIMIT;
 static SHARED_STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<LocalBleDeviceStore>>>> =
     OnceLock::new();
+static STORE_PATH_GATES: OnceLock<Mutex<HashMap<PathBuf, Weak<StorePathGate>>>> = OnceLock::new();
+static LATCHED_RESET_GUARDS: OnceLock<Mutex<HashMap<PathBuf, LocalBleStoreResetGuard>>> =
+    OnceLock::new();
+
+#[derive(Default)]
+struct StorePathGateState {
+    active_operations: usize,
+    reset_active: bool,
+}
+
+#[derive(Default)]
+struct StorePathGate {
+    state: Mutex<StorePathGateState>,
+    drained: Condvar,
+}
+
+impl StorePathGate {
+    fn begin_operation(self: &Arc<Self>) -> Result<StoreOperationGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local Bluetooth store path gate poisoned"))?;
+        if state.reset_active {
+            anyhow::bail!("local Bluetooth store is fenced for appliance reset");
+        }
+        state.active_operations = state.active_operations.saturating_add(1);
+        Ok(StoreOperationGuard { gate: self.clone() })
+    }
+
+    fn begin_reset(self: &Arc<Self>) -> Result<LocalBleStoreResetGuard> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local Bluetooth store path gate poisoned"))?;
+        if state.reset_active {
+            anyhow::bail!("local Bluetooth store reset barrier is already held");
+        }
+        // Close admission before waiting. Every operation that passed admission
+        // owns a guard until its last possible rename or registry publication.
+        state.reset_active = true;
+        while state.active_operations != 0 {
+            state = self
+                .drained
+                .wait(state)
+                .map_err(|_| anyhow::anyhow!("local Bluetooth store path gate poisoned"))?;
+        }
+        Ok(LocalBleStoreResetGuard { gate: self.clone() })
+    }
+}
+
+struct StoreOperationGuard {
+    gate: Arc<StorePathGate>,
+}
+
+impl Drop for StoreOperationGuard {
+    fn drop(&mut self) {
+        let Ok(mut state) = self.gate.state.lock() else {
+            return;
+        };
+        state.active_operations = state.active_operations.saturating_sub(1);
+        if state.active_operations == 0 {
+            self.gate.drained.notify_all();
+        }
+    }
+}
+
+/// Exclusive, path-scoped factory-reset fence for the local-BLE store.
+///
+/// Acquisition closes admission first and then drains every operation that
+/// could still persist or publish a hub. Holding this guard across deletion
+/// prevents both an existing store instance and a late bootstrap instance from
+/// recreating reset state. Production latches the guard until reboot; direct
+/// callers may use the ordinary RAII lifetime for narrower reset transactions.
+pub struct LocalBleStoreResetGuard {
+    gate: Arc<StorePathGate>,
+}
+
+impl Drop for LocalBleStoreResetGuard {
+    fn drop(&mut self) {
+        let Ok(mut state) = self.gate.state.lock() else {
+            return;
+        };
+        state.reset_active = false;
+        self.gate.drained.notify_all();
+    }
+}
+
+fn store_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(STORE_DIRECTORY).join(STORE_FILE)
+}
+
+fn path_gate(path: &Path) -> Result<Arc<StorePathGate>> {
+    let gates = STORE_PATH_GATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gates = gates
+        .lock()
+        .map_err(|_| anyhow::anyhow!("local Bluetooth store path-gate map poisoned"))?;
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+        return Ok(gate);
+    }
+    let gate = Arc::new(StorePathGate::default());
+    gates.insert(path.to_path_buf(), Arc::downgrade(&gate));
+    Ok(gate)
+}
+
+/// Close and drain one data directory's local-BLE store, then retain that
+/// reset fence until process exit. Factory reset uses this form because every
+/// post-barrier outcome schedules a reboot and must remain fail-closed in the
+/// intervening process lifetime.
+pub fn latch_reset_guard(data_dir: impl AsRef<Path>) -> Result<()> {
+    let key = store_path(data_dir.as_ref());
+    let guards = LATCHED_RESET_GUARDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guards = guards
+        .lock()
+        .map_err(|_| anyhow::anyhow!("local Bluetooth reset-guard map poisoned"))?;
+    if guards.contains_key(&key) {
+        return Ok(());
+    }
+    let guard = LocalBleDeviceStore::acquire_reset_guard(data_dir)?;
+    guards.insert(key, guard);
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn release_latched_reset_guard(data_dir: impl AsRef<Path>) {
+    if let Some(guards) = LATCHED_RESET_GUARDS.get() {
+        if let Ok(mut guards) = guards.lock() {
+            guards.remove(&store_path(data_dir.as_ref()));
+        }
+    }
+}
 
 fn store_schema_version() -> u32 {
     STORE_SCHEMA_VERSION
@@ -106,10 +244,30 @@ impl LocalBleDevice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayDisposition {
     New,
+    /// The replay head was logically committed, but the parent-directory
+    /// fsync could not acknowledge crash durability. The caller must suppress
+    /// the event: retrying this token is now a duplicate if the rename
+    /// survives, while a restart can safely reconsider it if the rename does
+    /// not survive.
+    DurabilityUnconfirmed,
     Duplicate,
     Stale,
     Blocked,
     UnknownDevice,
+}
+
+/// Privacy-safe durable evidence that a local-BLE activation committed.
+///
+/// The device record remains the source of the public terminal response. This
+/// receipt intentionally carries only the idempotency binding and opaque
+/// appliance-local projection keys; setup fields, radio addresses, stable
+/// hardware identities, transport hints, and metadata must never enter it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LocalBleActivationReceipt {
+    pub(crate) session_id: String,
+    pub(crate) request_fingerprint: String,
+    pub(crate) device_id: String,
+    pub(crate) profile_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +276,8 @@ struct StoreDocument {
     schema_version: u32,
     #[serde(default)]
     devices: Vec<LocalBleDevice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    activation_receipts: Vec<LocalBleActivationReceipt>,
 }
 
 impl Default for StoreDocument {
@@ -125,18 +285,22 @@ impl Default for StoreDocument {
         Self {
             schema_version: STORE_SCHEMA_VERSION,
             devices: Vec::new(),
+            activation_receipts: Vec::new(),
         }
     }
 }
 
 pub struct LocalBleDeviceStore {
     path: PathBuf,
+    path_gate: Arc<StorePathGate>,
     document: Mutex<StoreDocument>,
     registries: Mutex<Vec<Weak<Mutex<HubDeviceRegistry>>>>,
     quiescing: AtomicBool,
     durability_degraded: AtomicBool,
     #[cfg(test)]
     persist_fault: Mutex<Option<PersistFault>>,
+    #[cfg(test)]
+    before_rename_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +319,7 @@ impl LocalBleDeviceStore {
     /// bootstrap path later writes an older snapshot back to disk.
     pub fn load_shared(data_dir: impl AsRef<Path>) -> Result<Arc<Self>> {
         let data_dir = data_dir.as_ref().to_path_buf();
-        let key = data_dir.join(STORE_DIRECTORY).join(STORE_FILE);
+        let key = store_path(&data_dir);
         let stores = SHARED_STORES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut stores = stores
             .lock()
@@ -179,11 +343,39 @@ impl LocalBleDeviceStore {
         data_dir: impl AsRef<Path>,
         resolve_profile_id: impl Fn(&str) -> Option<String>,
     ) -> Result<Self> {
-        let path = data_dir.as_ref().join(STORE_DIRECTORY).join(STORE_FILE);
+        let path = store_path(data_dir.as_ref());
+        let path_gate = path_gate(&path)?;
+        // Loading repairs permissions and establishes the snapshot used by a
+        // later hub bootstrap, so it participates in the reset barrier too.
+        let _operation = path_gate.begin_operation()?;
         secure_existing_store_permissions(&path)?;
-        let mut document = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<StoreDocument>(&bytes)
-                .with_context(|| format!("parsing {}", path.display()))?,
+        let mut document = match OpenOptions::new().read(true).open(&path) {
+            Ok(file) => {
+                let file_len = file
+                    .metadata()
+                    .with_context(|| format!("reading metadata for {}", path.display()))?
+                    .len();
+                if file_len > MAX_STORE_BYTES as u64 {
+                    anyhow::bail!(
+                        "local Bluetooth store exceeds the {} byte limit",
+                        MAX_STORE_BYTES
+                    );
+                }
+                // Recheck through a bounded reader so a file that grows after
+                // metadata inspection cannot force an unbounded allocation.
+                let mut bytes = Vec::with_capacity(file_len as usize);
+                file.take((MAX_STORE_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                if bytes.len() > MAX_STORE_BYTES {
+                    anyhow::bail!(
+                        "local Bluetooth store exceeds the {} byte limit",
+                        MAX_STORE_BYTES
+                    );
+                }
+                serde_json::from_slice::<StoreDocument>(&bytes)
+                    .with_context(|| format!("parsing {}", path.display()))?
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoreDocument::default(),
             Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
         };
@@ -200,6 +392,18 @@ impl LocalBleDeviceStore {
         {
             anyhow::bail!("local Bluetooth store contains an unsupported device profile");
         }
+        if document.devices.len() > MAX_STORED_DEVICES {
+            anyhow::bail!(
+                "local Bluetooth store exceeds the {} device limit",
+                MAX_STORED_DEVICES
+            );
+        }
+        if document.activation_receipts.len() > MAX_ACTIVATION_RECEIPTS {
+            anyhow::bail!(
+                "local Bluetooth store exceeds the {} activation receipt limit",
+                MAX_ACTIVATION_RECEIPTS
+            );
+        }
         for device in &mut document.devices {
             if let Some(canonical_profile_id) = resolve_profile_id(&device.profile_id) {
                 if !is_valid_device_profile_id(&canonical_profile_id) {
@@ -207,6 +411,34 @@ impl LocalBleDeviceStore {
                 }
                 device.profile_id = canonical_profile_id;
             }
+        }
+        for receipt in &mut document.activation_receipts {
+            if let Some(canonical_profile_id) = resolve_profile_id(&receipt.profile_id) {
+                if !is_valid_device_profile_id(&canonical_profile_id) {
+                    anyhow::bail!("local Bluetooth profile resolver returned an invalid ID");
+                }
+                receipt.profile_id = canonical_profile_id;
+            }
+            if !activation_receipt_is_bounded(receipt) {
+                anyhow::bail!("local Bluetooth store contains an invalid activation receipt");
+            }
+        }
+        let mut receipt_sessions = HashSet::new();
+        if document
+            .activation_receipts
+            .iter()
+            .any(|receipt| !receipt_sessions.insert(receipt.session_id.clone()))
+        {
+            anyhow::bail!("local Bluetooth store contains duplicate activation receipts");
+        }
+        if document.activation_receipts.iter().any(|receipt| {
+            !document.devices.iter().any(|device| {
+                device.id == receipt.device_id && device.profile_id == receipt.profile_id
+            })
+        }) {
+            anyhow::bail!(
+                "local Bluetooth store contains an activation receipt without its device"
+            );
         }
         let mut physical_devices = std::collections::BTreeSet::new();
         if document.devices.iter().any(|device| {
@@ -218,17 +450,34 @@ impl LocalBleDeviceStore {
         }
         Ok(Self {
             path,
+            path_gate,
             document: Mutex::new(document),
             registries: Mutex::new(Vec::new()),
             quiescing: AtomicBool::new(false),
             durability_degraded: AtomicBool::new(false),
             #[cfg(test)]
             persist_fault: Mutex::new(None),
+            #[cfg(test)]
+            before_rename_hook: Mutex::new(None),
         })
+    }
+
+    /// Acquire the exclusive reset fence for this data directory without
+    /// requiring an active hub or even an existing store file.
+    pub fn acquire_reset_guard(data_dir: impl AsRef<Path>) -> Result<LocalBleStoreResetGuard> {
+        path_gate(&store_path(data_dir.as_ref()))?.begin_reset()
     }
 
     pub fn quiesce(&self) {
         self.quiescing.store(true, Ordering::SeqCst);
+    }
+
+    /// Run a publication or other non-file side effect inside the same fence
+    /// as durable mutations. Factory reset either waits for this closure to
+    /// finish or prevents it from starting.
+    pub fn with_reset_safe_operation<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _operation = self.begin_operation()?;
+        operation()
     }
 
     /// True when the last committed rename could not be acknowledged by a
@@ -282,6 +531,7 @@ impl LocalBleDeviceStore {
         &self,
         registry: &Arc<Mutex<HubDeviceRegistry>>,
     ) -> Result<()> {
+        let _operation = self.begin_operation()?;
         let document = self
             .document
             .lock()
@@ -353,8 +603,46 @@ impl LocalBleDeviceStore {
         Ok(())
     }
 
-    pub fn upsert(&self, mut device: LocalBleDevice) -> Result<()> {
-        self.ensure_writable()?;
+    pub fn upsert(&self, device: LocalBleDevice) -> Result<()> {
+        self.upsert_with_deadline(device, None, None).map(drop)
+    }
+
+    /// Upsert a device only if its durable logical commit can occur before the
+    /// caller's absolute deadline.
+    pub fn upsert_until(&self, device: LocalBleDevice, deadline: Instant) -> Result<()> {
+        self.upsert_with_deadline(device, None, Some(deadline))
+            .map(drop)
+    }
+
+    /// Atomically activate a device and append its privacy-safe terminal
+    /// result outbox receipt in the same `devices.json` rename.
+    pub(crate) fn upsert_activation_until(
+        &self,
+        device: LocalBleDevice,
+        session_id: &str,
+        request_fingerprint: &str,
+        deadline: Instant,
+    ) -> Result<LocalBleDevice> {
+        self.upsert_with_deadline(
+            device,
+            Some((session_id, request_fingerprint)),
+            Some(deadline),
+        )
+    }
+
+    fn upsert_with_deadline(
+        &self,
+        mut device: LocalBleDevice,
+        activation: Option<(&str, &str)>,
+        deadline: Option<Instant>,
+    ) -> Result<LocalBleDevice> {
+        if let Some((session_id, request_fingerprint)) = activation {
+            validate_pairing_session_id(session_id).map_err(anyhow::Error::msg)?;
+            validate_pairing_request_fingerprint(request_fingerprint)
+                .map_err(anyhow::Error::msg)?;
+        }
+        let _operation = self.begin_operation()?;
+        ensure_persist_deadline(deadline)?;
         if let Some(profile_id) = canonical_profile_id(&device.profile_id) {
             device.profile_id = profile_id.to_string();
         }
@@ -367,40 +655,140 @@ impl LocalBleDeviceStore {
             .map_err(|_| anyhow::anyhow!("local Bluetooth store lock poisoned"))?;
         self.ensure_writable()?;
         let previous = document.clone();
-        if let Some(existing) = document.devices.iter_mut().find(|existing| {
-            existing.profile_id == device.profile_id
-                && existing.stable_identity == device.stable_identity
-        }) {
-            // Public identity is allocated once per appliance association and
-            // the active record remains authoritative throughout re-pair.
-            // Preserve every already-committed stream under this lock: a
-            // monitor may have advanced it after association took its earlier
-            // snapshot, and letting pairing overwrite that value would rewind
-            // deduplication and replay a consumed event. Association may seed
-            // only streams the active record has never seen.
-            device.id.clone_from(&existing.id);
-            for (stream, value) in &device.replay_state {
-                if !existing.replay_state.contains_key(stream) {
-                    existing.replay_state.insert(stream.clone(), value.clone());
+        let mutation = (|| -> Result<LocalBleDevice> {
+            let committed_device = if let Some(index) =
+                document.devices.iter().position(|existing| {
+                    existing.profile_id == device.profile_id
+                        && existing.stable_identity == device.stable_identity
+                }) {
+                let existing = &mut document.devices[index];
+                // Public identity is allocated once per appliance association
+                // and the active record remains authoritative throughout
+                // re-pair. Preserve every already-committed stream under this
+                // lock: a monitor may have advanced it after association took
+                // its earlier snapshot, and letting pairing overwrite that
+                // value would rewind deduplication and replay a consumed event.
+                // Association may seed only streams the active record has
+                // never seen.
+                device.id.clone_from(&existing.id);
+                for (stream, value) in &device.replay_state {
+                    if !existing.replay_state.contains_key(stream) {
+                        existing.replay_state.insert(stream.clone(), value.clone());
+                    }
+                }
+                device.replay_state.clone_from(&existing.replay_state);
+                *existing = device;
+                existing.clone()
+            } else {
+                if document.devices.len() >= MAX_STORED_DEVICES {
+                    anyhow::bail!(
+                        "local Bluetooth store reached the {} device limit",
+                        MAX_STORED_DEVICES
+                    );
+                }
+                document.devices.push(device);
+                document
+                    .devices
+                    .last()
+                    .expect("device was just appended")
+                    .clone()
+            };
+
+            if let Some((session_id, request_fingerprint)) = activation {
+                let receipt = LocalBleActivationReceipt {
+                    session_id: session_id.to_string(),
+                    request_fingerprint: request_fingerprint.to_string(),
+                    device_id: committed_device.id.clone(),
+                    profile_id: committed_device.profile_id.clone(),
+                };
+                if let Some(existing) = document
+                    .activation_receipts
+                    .iter()
+                    .find(|existing| existing.session_id == session_id)
+                {
+                    if existing != &receipt {
+                        anyhow::bail!(
+                            "local Bluetooth pairing session conflicts with an activation receipt"
+                        );
+                    }
+                } else {
+                    if document.activation_receipts.len() >= MAX_ACTIVATION_RECEIPTS {
+                        anyhow::bail!(
+                            "local Bluetooth store reached the {} activation receipt limit",
+                            MAX_ACTIVATION_RECEIPTS
+                        );
+                    }
+                    document.activation_receipts.push(receipt);
+                    document
+                        .activation_receipts
+                        .sort_by(|left, right| left.session_id.cmp(&right.session_id));
                 }
             }
-            device.replay_state.clone_from(&existing.replay_state);
-            *existing = device;
-        } else {
-            document.devices.push(device);
-        }
-        document
-            .devices
-            .sort_by(|left, right| left.id.cmp(&right.id));
-        if let Err(error) = self.persist_locked(&document) {
+            document
+                .devices
+                .sort_by(|left, right| left.id.cmp(&right.id));
+            Ok(committed_device)
+        })();
+        let committed_device = match mutation {
+            Ok(device) => device,
+            Err(error) => {
+                *document = previous;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.persist_locked(&document, deadline) {
             *document = previous;
             return Err(error);
         }
-        Ok(())
+        Ok(committed_device)
+    }
+
+    pub(crate) fn pending_activation_receipts(&self) -> Result<Vec<LocalBleActivationReceipt>> {
+        let _operation = self.begin_operation()?;
+        Ok(self
+            .document
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local Bluetooth store lock poisoned"))?
+            .activation_receipts
+            .clone())
+    }
+
+    /// Remove a receipt only after the terminal result store has durably
+    /// accepted it. A crash before this second commit merely replays the same
+    /// fingerprint-bound terminal result.
+    pub(crate) fn acknowledge_activation_receipt(
+        &self,
+        session_id: &str,
+        request_fingerprint: &str,
+    ) -> Result<bool> {
+        validate_pairing_session_id(session_id).map_err(anyhow::Error::msg)?;
+        validate_pairing_request_fingerprint(request_fingerprint).map_err(anyhow::Error::msg)?;
+        let _operation = self.begin_operation()?;
+        let mut document = self
+            .document
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local Bluetooth store lock poisoned"))?;
+        self.ensure_writable()?;
+        let Some(index) = document
+            .activation_receipts
+            .iter()
+            .position(|receipt| receipt.session_id == session_id)
+        else {
+            return Ok(false);
+        };
+        if document.activation_receipts[index].request_fingerprint != request_fingerprint {
+            anyhow::bail!("local Bluetooth activation receipt fingerprint conflict");
+        }
+        let receipt = document.activation_receipts.remove(index);
+        if let Err(error) = self.persist_locked(&document, None) {
+            document.activation_receipts.insert(index, receipt);
+            return Err(error);
+        }
+        Ok(true)
     }
 
     pub fn remove(&self, id: &str) -> Result<Option<LocalBleDevice>> {
-        self.ensure_writable()?;
+        let _operation = self.begin_operation()?;
         let mut document = self
             .document
             .lock()
@@ -409,9 +797,16 @@ impl LocalBleDeviceStore {
         let Some(index) = document.devices.iter().position(|device| device.id == id) else {
             return Ok(None);
         };
+        let previous = document.clone();
         let removed = document.devices.remove(index);
-        if let Err(error) = self.persist_locked(&document) {
-            document.devices.insert(index, removed);
+        // Lifecycle flushes activation receipts before an intentional unpair.
+        // Keep this lower-level mutation self-consistent as well so direct
+        // cleanup can never leave a receipt referring to a deleted device.
+        document
+            .activation_receipts
+            .retain(|receipt| receipt.device_id != id);
+        if let Err(error) = self.persist_locked(&document, None) {
+            *document = previous;
             return Err(error);
         }
         self.remove_from_registered_registries(id);
@@ -419,7 +814,7 @@ impl LocalBleDeviceStore {
     }
 
     pub fn activate(&self, id: &str) -> Result<bool> {
-        self.ensure_writable()?;
+        let _operation = self.begin_operation()?;
         let mut document = self
             .document
             .lock()
@@ -431,40 +826,8 @@ impl LocalBleDeviceStore {
             return Ok(true);
         }
         document.devices[index].blocked = false;
-        if let Err(error) = self.persist_locked(&document) {
+        if let Err(error) = self.persist_locked(&document, None) {
             document.devices[index].blocked = true;
-            return Err(error);
-        }
-        Ok(true)
-    }
-
-    pub fn update_transport_hint(
-        &self,
-        profile_id: &str,
-        identity: &str,
-        transport_hint: &str,
-    ) -> Result<bool> {
-        self.ensure_writable()?;
-        let profile_id = canonical_profile_id(profile_id).unwrap_or(profile_id);
-        let mut document = self
-            .document
-            .lock()
-            .map_err(|_| anyhow::anyhow!("local Bluetooth store lock poisoned"))?;
-        let Some(index) = document.devices.iter().position(|device| {
-            device.profile_id == profile_id && device.stable_identity == identity
-        }) else {
-            return Ok(false);
-        };
-        if document.devices[index]
-            .transport_hint
-            .eq_ignore_ascii_case(transport_hint)
-        {
-            return Ok(false);
-        }
-        let previous = document.devices[index].transport_hint.clone();
-        document.devices[index].transport_hint = transport_hint.to_string();
-        if let Err(error) = self.persist_locked(&document) {
-            document.devices[index].transport_hint = previous;
             return Err(error);
         }
         Ok(true)
@@ -479,7 +842,7 @@ impl LocalBleDeviceStore {
         identity: &str,
         replay: Option<&BleReplayToken>,
     ) -> Result<ReplayDisposition> {
-        self.ensure_writable()?;
+        let _operation = self.begin_operation()?;
         let profile_id = canonical_profile_id(profile_id).unwrap_or(profile_id);
         let mut document = self
             .document
@@ -515,7 +878,7 @@ impl LocalBleDeviceStore {
         document.devices[index]
             .replay_state
             .insert(replay.stream.clone(), replay.value.clone());
-        if let Err(error) = self.persist_locked(&document) {
+        if let Err(error) = self.persist_locked(&document, None) {
             match previous {
                 Some(previous) => {
                     document.devices[index]
@@ -528,7 +891,16 @@ impl LocalBleDeviceStore {
             }
             return Err(error);
         }
+        if self.durability_degraded() {
+            return Ok(ReplayDisposition::DurabilityUnconfirmed);
+        }
         Ok(ReplayDisposition::New)
+    }
+
+    fn begin_operation(&self) -> Result<StoreOperationGuard> {
+        let operation = self.path_gate.begin_operation()?;
+        self.ensure_writable()?;
+        Ok(operation)
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -561,7 +933,7 @@ impl LocalBleDeviceStore {
         });
     }
 
-    fn persist_locked(&self, document: &StoreDocument) -> Result<()> {
+    fn persist_locked(&self, document: &StoreDocument, deadline: Option<Instant>) -> Result<()> {
         self.ensure_writable()?;
         let parent = self
             .path
@@ -572,6 +944,13 @@ impl LocalBleDeviceStore {
         let temp_path = self.path.with_extension("json.tmp");
         let precommit = (|| -> Result<()> {
             let bytes = serde_json::to_vec_pretty(document)?;
+            if bytes.len() > MAX_STORE_BYTES {
+                anyhow::bail!(
+                    "local Bluetooth store would exceed the {} byte limit",
+                    MAX_STORE_BYTES
+                );
+            }
+            ensure_persist_deadline(deadline)?;
             self.inject_fault(PersistFault::Write)?;
             let mut options = OpenOptions::new();
             options.create(true).truncate(true).write(true);
@@ -588,7 +967,12 @@ impl LocalBleDeviceStore {
                 .with_context(|| format!("writing {}", temp_path.display()))?;
             file.sync_all()
                 .with_context(|| format!("syncing {}", temp_path.display()))?;
+            self.run_before_rename_hook()?;
             self.inject_fault(PersistFault::Rename)?;
+            // Rename is the logical commit point. This is deliberately the
+            // last check so an expired pairing cannot activate a device after
+            // the API's absolute completion window.
+            ensure_persist_deadline(deadline)?;
             fs::rename(&temp_path, &self.path).with_context(|| {
                 format!(
                     "renaming {} to {}",
@@ -653,6 +1037,41 @@ impl LocalBleDeviceStore {
     fn fail_next_persist_at(&self, fault: PersistFault) {
         *self.persist_fault.lock().unwrap() = Some(fault);
     }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_directory_sync(&self) {
+        self.fail_next_persist_at(PersistFault::DirectorySync);
+    }
+
+    #[cfg(not(test))]
+    fn run_before_rename_hook(&self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn run_before_rename_hook(&self) -> Result<()> {
+        if let Some(hook) = self
+            .before_rename_hook
+            .lock()
+            .map_err(|_| anyhow::anyhow!("local Bluetooth persistence hook lock poisoned"))?
+            .take()
+        {
+            hook();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn set_before_rename_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_rename_hook.lock().unwrap() = Some(Box::new(hook));
+    }
+}
+
+fn ensure_persist_deadline(deadline: Option<Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        anyhow::bail!("local Bluetooth pairing deadline expired before activation commit");
+    }
+    Ok(())
 }
 
 fn secure_existing_store_permissions(path: &Path) -> Result<()> {
@@ -739,6 +1158,13 @@ fn device_is_bounded(device: &LocalBleDevice) -> bool {
                 value: value.clone(),
             })
         })
+}
+
+fn activation_receipt_is_bounded(receipt: &LocalBleActivationReceipt) -> bool {
+    validate_pairing_session_id(&receipt.session_id).is_ok()
+        && validate_pairing_request_fingerprint(&receipt.request_fingerprint).is_ok()
+        && public_id_is_bounded(&receipt.device_id)
+        && is_valid_device_profile_id(&receipt.profile_id)
 }
 
 fn public_id_is_bounded(id: &str) -> bool {
@@ -907,13 +1333,6 @@ mod tests {
 
         assert!(bootstrap_store.all().is_empty());
         assert!(!registry.lock().unwrap().has_device(&public_id));
-        assert!(!bootstrap_store
-            .update_transport_hint(
-                OREIN_OC02001_PROFILE_ID,
-                "0A0B0C0D0E0F",
-                "0A:0B:0C:0D:0E:10",
-            )
-            .unwrap());
         assert_eq!(
             bootstrap_store
                 .accept_replay(OREIN_OC02001_PROFILE_ID, "0A0B0C0D0E0F", Some(&replay(8)),)
@@ -956,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_replay_dedup_accepts_every_changed_orein_token_including_gaps_and_wraparound() {
+    fn opaque_replay_order_persists_modular_forward_progress_and_rejects_stale_tokens() {
         let root = temporary_dir("counter");
         let store = LocalBleDeviceStore::load(&root).unwrap();
         store.upsert(device(Some(0x85), false)).unwrap();
@@ -986,6 +1405,26 @@ mod tests {
                 .accept_replay(
                     OREIN_OC02001_PROFILE_ID,
                     "0A0B0C0D0E0F",
+                    Some(&replay(0x10)),
+                )
+                .unwrap(),
+            ReplayDisposition::Stale
+        );
+        assert_eq!(
+            store
+                .accept_replay(
+                    OREIN_OC02001_PROFILE_ID,
+                    "0A0B0C0D0E0F",
+                    Some(&replay(0xff)),
+                )
+                .unwrap(),
+            ReplayDisposition::New
+        );
+        assert_eq!(
+            store
+                .accept_replay(
+                    OREIN_OC02001_PROFILE_ID,
+                    "0A0B0C0D0E0F",
                     Some(&replay(0x00)),
                 )
                 .unwrap(),
@@ -999,7 +1438,27 @@ mod tests {
                     Some(&replay(0xff)),
                 )
                 .unwrap(),
-            ReplayDisposition::New
+            ReplayDisposition::Stale
+        );
+        drop(store);
+
+        let restarted = LocalBleDeviceStore::load(&root).unwrap();
+        assert_eq!(
+            restarted
+                .get_by_identity(OREIN_OC02001_PROFILE_ID, "0A0B0C0D0E0F")
+                .unwrap()
+                .replay_state,
+            replay_state(Some(0x00))
+        );
+        assert_eq!(
+            restarted
+                .accept_replay(
+                    OREIN_OC02001_PROFILE_ID,
+                    "0A0B0C0D0E0F",
+                    Some(&replay(0xff)),
+                )
+                .unwrap(),
+            ReplayDisposition::Stale
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1080,6 +1539,59 @@ mod tests {
     }
 
     #[test]
+    fn replay_directory_sync_failure_commits_without_authorizing_emission() {
+        let root = temporary_dir("replay-directory-sync-fault");
+        let store = LocalBleDeviceStore::load(&root).unwrap();
+        store.upsert(device(Some(0x10), false)).unwrap();
+        store.fail_next_persist_at(PersistFault::DirectorySync);
+
+        assert_eq!(
+            store
+                .accept_replay(
+                    OREIN_OC02001_PROFILE_ID,
+                    "0A0B0C0D0E0F",
+                    Some(&replay(0x11)),
+                )
+                .unwrap(),
+            ReplayDisposition::DurabilityUnconfirmed
+        );
+        assert!(store.durability_degraded());
+        assert_eq!(
+            store
+                .get_by_identity(OREIN_OC02001_PROFILE_ID, "0A0B0C0D0E0F")
+                .unwrap()
+                .replay_state,
+            replay_state(Some(0x11))
+        );
+
+        let restarted = LocalBleDeviceStore::load(&root).unwrap();
+        assert_eq!(
+            restarted
+                .accept_replay(
+                    OREIN_OC02001_PROFILE_ID,
+                    "0A0B0C0D0E0F",
+                    Some(&replay(0x11)),
+                )
+                .unwrap(),
+            ReplayDisposition::Duplicate
+        );
+
+        // A later forward replay can be acknowledged and emitted normally.
+        assert_eq!(
+            store
+                .accept_replay(
+                    OREIN_OC02001_PROFILE_ID,
+                    "0A0B0C0D0E0F",
+                    Some(&replay(0x12)),
+                )
+                .unwrap(),
+            ReplayDisposition::New
+        );
+        assert!(!store.durability_degraded());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn truncated_and_invalid_records_fail_closed_without_partial_restore() {
         let root = temporary_dir("corrupt");
         let directory = root.join(STORE_DIRECTORY);
@@ -1096,6 +1608,7 @@ mod tests {
             serde_json::to_vec(&StoreDocument {
                 schema_version: STORE_SCHEMA_VERSION,
                 devices: vec![invalid],
+                activation_receipts: Vec::new(),
             })
             .unwrap(),
         )
@@ -1280,5 +1793,162 @@ mod tests {
             .is_err());
         assert!(!root.join(STORE_DIRECTORY).exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn path_reset_guard_closes_admission_and_drains_a_precommit_writer() {
+        let root = temporary_dir("reset-writer-barrier");
+        let store = Arc::new(LocalBleDeviceStore::load(&root).unwrap());
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        store.set_before_rename_hook(move || {
+            reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        let writer = {
+            let store = store.clone();
+            std::thread::spawn(move || store.upsert(device(Some(0x10), false)))
+        };
+        reached_rx.recv().unwrap();
+
+        let (guard_tx, guard_rx) = std::sync::mpsc::channel();
+        let reset_root = root.clone();
+        let reset = std::thread::spawn(move || {
+            guard_tx
+                .send(LocalBleDeviceStore::acquire_reset_guard(reset_root))
+                .unwrap();
+        });
+        assert!(matches!(
+            guard_rx.recv_timeout(std::time::Duration::from_millis(25)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        release_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        let guard = guard_rx.recv().unwrap().unwrap();
+        reset.join().unwrap();
+
+        fs::remove_dir_all(root.join(STORE_DIRECTORY)).unwrap();
+        assert!(store.upsert(device(Some(0x11), false)).is_err());
+        assert!(LocalBleDeviceStore::load(&root).is_err());
+        assert!(!root.join(STORE_DIRECTORY).exists());
+
+        drop(guard);
+        LocalBleDeviceStore::load(&root)
+            .unwrap()
+            .upsert(device(Some(0x12), false))
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_guard_fences_late_registry_and_hub_publication_work() {
+        let root = temporary_dir("reset-publication-fence");
+        let store = LocalBleDeviceStore::load(&root).unwrap();
+        store.upsert(device(Some(0x10), false)).unwrap();
+        let guard = LocalBleDeviceStore::acquire_reset_guard(&root).unwrap();
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+
+        assert!(store.register_registry_and_reconcile(&registry).is_err());
+        assert!(registry.lock().unwrap().snapshot().devices.is_empty());
+        let published = Arc::new(AtomicBool::new(false));
+        let publish_flag = published.clone();
+        assert!(store
+            .with_reset_safe_operation(|| {
+                publish_flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .is_err());
+        assert!(!published.load(Ordering::SeqCst));
+
+        drop(guard);
+        store
+            .with_reset_safe_operation(|| {
+                published.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert!(published.load(Ordering::SeqCst));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pairing_deadline_is_rechecked_at_the_rename_commit_boundary() {
+        let root = temporary_dir("deadline-before-rename");
+        let store = Arc::new(LocalBleDeviceStore::load(&root).unwrap());
+        let deadline = Instant::now() + std::time::Duration::from_millis(40);
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        store.set_before_rename_hook(move || {
+            reached_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        let writer = {
+            let store = store.clone();
+            std::thread::spawn(move || store.upsert_until(device(Some(0x10), false), deadline))
+        };
+        reached_rx.recv().unwrap();
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .saturating_add(std::time::Duration::from_millis(5)),
+        );
+        assert!(root.join(STORE_DIRECTORY).join("devices.json.tmp").exists());
+        release_tx.send(()).unwrap();
+
+        let error = writer.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("deadline expired"));
+        assert!(store.all().is_empty());
+        assert!(!root.join(STORE_DIRECTORY).join(STORE_FILE).exists());
+        assert!(!root.join(STORE_DIRECTORY).join("devices.json.tmp").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn store_rejects_oversized_files_and_device_sets() {
+        let oversized_root = temporary_dir("oversized-bytes");
+        let oversized_directory = oversized_root.join(STORE_DIRECTORY);
+        fs::create_dir_all(&oversized_directory).unwrap();
+        fs::write(
+            oversized_directory.join(STORE_FILE),
+            vec![b' '; MAX_STORE_BYTES + 1],
+        )
+        .unwrap();
+        let oversized_error = match LocalBleDeviceStore::load(&oversized_root) {
+            Ok(_) => panic!("oversized local Bluetooth store unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert!(oversized_error.to_string().contains("byte limit"));
+        fs::remove_dir_all(oversized_root).unwrap();
+
+        let count_root = temporary_dir("oversized-device-count");
+        let count_directory = count_root.join(STORE_DIRECTORY);
+        fs::create_dir_all(&count_directory).unwrap();
+        let devices = (0..=MAX_STORED_DEVICES)
+            .map(|index| {
+                let mut record = device(None, false);
+                record.id = format!("local-ble-{index:032x}");
+                record.stable_identity = format!("SYNTHETIC-{index:04x}");
+                record
+            })
+            .collect();
+        fs::write(
+            count_directory.join(STORE_FILE),
+            serde_json::to_vec(&StoreDocument {
+                schema_version: STORE_SCHEMA_VERSION,
+                devices,
+                activation_receipts: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let count_error = match LocalBleDeviceStore::load(&count_root) {
+            Ok(_) => panic!("oversized local Bluetooth device set unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert!(count_error.to_string().contains("device limit"));
+        fs::remove_dir_all(count_root).unwrap();
     }
 }

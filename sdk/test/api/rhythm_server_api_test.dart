@@ -2100,7 +2100,6 @@ void main() {
         'session_id': 'hue-stale-bond-recovery',
         'params': {
           'replace_stale_bonds': true,
-          'session_id': 'hue-stale-bond-recovery',
         },
       });
     });
@@ -2127,9 +2126,429 @@ void main() {
 
       expect(result, {
         'http_status': 500,
+        'request_delivery': 'accepted_or_unknown',
         'error': 'Selected Hue Bluetooth bulb is no longer quarantined; '
             'refresh the recovery list.',
       });
+    });
+
+    test('classifies connection failure as accepted or unknown', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/devices/pair'),
+        type: DioExceptionType.connectionError,
+      ));
+
+      final result = await api.pairDevice(
+        hubType: 'local_ble',
+        sessionId: 'local-pair-not-sent',
+      );
+
+      expect(result?['request_delivery'], 'accepted_or_unknown');
+    });
+
+    test('classifies receive timeout as accepted or unknown', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/devices/pair'),
+        type: DioExceptionType.receiveTimeout,
+      ));
+
+      final result = await api.pairDevice(
+        hubType: 'local_ble',
+        sessionId: 'local-pair-timeout',
+      );
+
+      expect(result?['request_delivery'], 'accepted_or_unknown');
+    });
+
+    test('marks a structured response on connection failure as ambiguous',
+        () async {
+      final requestOptions = RequestOptions(path: 'api/devices/pair');
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenThrow(DioException(
+        requestOptions: requestOptions,
+        response: Response(
+          requestOptions: requestOptions,
+          data: {
+            'hub_type': 'local_ble',
+            'status': 'complete',
+            'device': {
+              'device_id': 'partial-device',
+              'name': 'Button',
+              'device_type': 'button',
+            },
+          },
+        ),
+        type: DioExceptionType.connectionError,
+      ));
+
+      final result = await api.pairDevice(
+        hubType: 'local_ble',
+        sessionId: 'local-pair-partial-response',
+      );
+
+      expect(result?['status'], 'complete');
+      expect(result?['http_status'], isNull);
+      expect(result?['request_delivery'], 'accepted_or_unknown');
+    });
+  });
+
+  group('getPairingResult', () {
+    test('parses a durable terminal result including warnings', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-1',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-1',
+              'state': 'terminal',
+              'hub_type': 'local_ble',
+              'result': {
+                'hub_type': 'local_ble',
+                'status': 'complete',
+                'device': {
+                  'device_id': 'local-ble-opaque',
+                  'name': 'Button',
+                  'device_type': 'button',
+                },
+                'warnings': ['Durability acknowledgement is degraded'],
+              },
+            },
+          ));
+
+      final status = await api.getPairingResult('local-pair-1');
+
+      expect(status?.state, RhythmPairingResultState.terminal);
+      expect(status?.result?.succeeded, isTrue);
+      expect(
+          status?.result?.completedDevices.single.deviceId, 'local-ble-opaque');
+      expect(
+          status?.result?.warnings, ['Durability acknowledgement is degraded']);
+      verify(() => dio.get(
+            'api/devices/pair/local-pair-1',
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('returns a typed not-found polling state', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/unknown-pair',
+            ),
+            statusCode: 404,
+            data: {
+              'session_id': 'unknown-pair',
+              'state': 'not_found',
+            },
+          ));
+
+      final status = await api.getPairingResult('unknown-pair');
+
+      expect(status?.state, RhythmPairingResultState.notFound);
+      expect(status?.result, isNull);
+    });
+
+    test('rejects a terminal body returned with HTTP 404', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-http-mismatch',
+            ),
+            statusCode: 404,
+            data: {
+              'session_id': 'local-pair-http-mismatch',
+              'state': 'terminal',
+              'hub_type': 'local_ble',
+              'result': {
+                'hub_type': 'local_ble',
+                'status': 'complete',
+                'device': {
+                  'device_id': 'local-ble-opaque',
+                  'name': 'Button',
+                  'device_type': 'button',
+                },
+              },
+            },
+          ));
+
+      expect(
+        await api.getPairingResult('local-pair-http-mismatch'),
+        isNull,
+      );
+    });
+
+    test('rejects a not-found body returned with HTTP 200', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-http-mismatch',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-http-mismatch',
+              'state': 'not_found',
+            },
+          ));
+
+      expect(
+        await api.getPairingResult('local-pair-http-mismatch'),
+        isNull,
+      );
+    });
+
+    test('rejects a response for a different session ID', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-expected',
+            ),
+            statusCode: 404,
+            data: {
+              'session_id': 'local-pair-other',
+              'state': 'not_found',
+            },
+          ));
+
+      expect(await api.getPairingResult('local-pair-expected'), isNull);
+    });
+
+    test('rejects unknown states and nonterminal terminal records', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-malformed',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-malformed',
+              'state': 'terminal',
+              'hub_type': 'local_ble',
+              'result': {
+                'hub_type': 'local_ble',
+                'status': 'searching',
+              },
+            },
+          ));
+
+      expect(await api.getPairingResult('local-pair-malformed'), isNull);
+
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-malformed',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-malformed',
+              'state': 'future_state',
+            },
+          ));
+
+      expect(await api.getPairingResult('local-pair-malformed'), isNull);
+    });
+
+    test('rejects terminal records whose hub or device shape is inconsistent',
+        () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-inconsistent',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-inconsistent',
+              'state': 'terminal',
+              'hub_type': 'local_ble',
+              'result': {
+                'hub_type': 'matter',
+                'status': 'complete',
+                'device': {
+                  'device_id': '',
+                  'name': 'Button',
+                  'device_type': 'button',
+                },
+              },
+            },
+          ));
+
+      expect(await api.getPairingResult('local-pair-inconsistent'), isNull);
+    });
+
+    test('rejects inconsistent singular and list device projections', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-device-mismatch',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-device-mismatch',
+              'state': 'terminal',
+              'hub_type': 'local_ble',
+              'result': {
+                'hub_type': 'local_ble',
+                'status': 'complete',
+                'device': {
+                  'device_id': 'local-ble-first',
+                  'name': 'First button',
+                  'device_type': 'button',
+                },
+                'devices': [
+                  {
+                    'device_id': 'local-ble-other',
+                    'name': 'Other button',
+                    'device_type': 'button',
+                  },
+                ],
+              },
+            },
+          ));
+
+      expect(
+        await api.getPairingResult('local-pair-device-mismatch'),
+        isNull,
+      );
+    });
+
+    test('rejects terminal fields that contradict the terminal status',
+        () async {
+      final invalidResults = <Map<String, dynamic>>[
+        {
+          'hub_type': 'local_ble',
+          'status': 'complete',
+          'device': {
+            'device_id': 'local-ble-complete-with-error',
+            'name': 'Button',
+            'device_type': 'button',
+          },
+          'error': 'contradictory error',
+        },
+        {
+          'hub_type': 'local_ble',
+          'status': 'failed',
+          'device': {
+            'device_id': 'local-ble-failed-with-device',
+            'name': 'Button',
+            'device_type': 'button',
+          },
+          'error': 'failed',
+        },
+        {
+          'hub_type': 'local_ble',
+          'status': 'failed',
+          'error': 'failed',
+          'warnings': ['   '],
+        },
+      ];
+      var responseIndex = 0;
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-state-shape',
+            ),
+            statusCode: 200,
+            data: {
+              'session_id': 'local-pair-state-shape',
+              'state': 'terminal',
+              'hub_type': 'local_ble',
+              'result': invalidResults[responseIndex++],
+            },
+          ));
+
+      for (var index = 0; index < invalidResults.length; index += 1) {
+        expect(
+          await api.getPairingResult('local-pair-state-shape'),
+          isNull,
+        );
+      }
+    });
+  });
+
+  group('acknowledgePairingResult', () {
+    test('returns true only after the server confirms HTTP 204', () async {
+      when(() => dio.delete(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-ack',
+            ),
+            statusCode: 204,
+          ));
+
+      expect(await api.acknowledgePairingResult('local-pair-ack'), isTrue);
+      verify(() => dio.delete(
+            'api/devices/pair/local-pair-ack',
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('returns false when the server does not acknowledge', () async {
+      when(() => dio.delete(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/pair/local-pair-pending',
+            ),
+            statusCode: 409,
+            data: {'error': 'Pairing result is still pending'},
+          ));
+
+      expect(
+        await api.acknowledgePairingResult('local-pair-pending'),
+        isFalse,
+      );
+    });
+
+    test('returns false when acknowledgement transport fails', () async {
+      when(() => dio.delete(
+            any(),
+            options: any(named: 'options'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(
+          path: 'api/devices/pair/local-pair-offline',
+        ),
+        type: DioExceptionType.connectionError,
+      ));
+
+      expect(
+        await api.acknowledgePairingResult('local-pair-offline'),
+        isFalse,
+      );
     });
   });
 
