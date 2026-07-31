@@ -145,6 +145,29 @@ void main() {
       expect(hub.address, '192.168.1.20:443');
     });
 
+    test('retains nested light capabilities on node-state SSE events',
+        () async {
+      sseEventChunks = [
+        'event: node_state\n'
+            'data: {"nodes":[{"id":"room-1","state":"active","rhythm_enabled":true,"time_offset":0.0,"brightness_offset":0.0,"light_capabilities":{"color_temperature":{"min_kelvin":1000,"max_kelvin":20000}}}]}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+
+      final stateFuture = connection.rhythmStateEvents.first.timeout(
+        const Duration(seconds: 2),
+      );
+
+      await connection.connect('127.0.0.1', port: server.port);
+
+      final state = await stateFuture;
+      expect(state.nodeId, 'room-1');
+      expect(state.lightCapabilities?.colorTemperature?.minKelvin, 1000);
+      expect(state.lightCapabilities?.colorTemperature?.maxKelvin, 20000);
+    });
+
     test(
         'parses mode_changed SSE without re-helloing on compatibility settings_changed',
         () async {
@@ -313,7 +336,7 @@ void main() {
         'event: pairing_progress\n'
             'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"commissioning","stage":"commissioning","message":"Commissioning Matter device"}}\n\n',
         'event: pairing_progress\n'
-            'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"complete","stage":"complete","message":"Pairing complete","device":{"device_id":"matter-100","name":"Test Bulb","device_type":"light","manufacturer":"Acme","model":"A19"}}}\n\n',
+            'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"complete","stage":"complete","message":"Pairing complete","device":{"device_id":"matter-100","name":"Test Bulb","device_type":"light","manufacturer":"Acme","model":"A19"},"devices":[{"device_id":"matter-100","name":"Test Bulb","device_type":"light","manufacturer":"Acme","model":"A19"},{"device_id":"matter-101","name":"Second Bulb","device_type":"light","manufacturer":"Acme","model":"A19"}],"warnings":["One candidate was out of range"]}}\n\n',
       ];
       sseCloseDelay = const Duration(milliseconds: 100);
 
@@ -334,6 +357,12 @@ void main() {
       expect(events[1].stage, RhythmPairingStage.complete);
       expect(events[1].device?.deviceId, 'matter-100');
       expect(events[1].device?.name, 'Test Bulb');
+      expect(
+        events[1].devices.map((device) => device.deviceId),
+        ['matter-100', 'matter-101'],
+      );
+      expect(events[1].completedDevices, hasLength(2));
+      expect(events[1].warnings, ['One candidate was out of range']);
     });
 
     test('parses ota_update_progress SSE events with percent', () async {

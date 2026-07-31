@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../utils/app_color_temperature.dart';
 import '../../widgets/header_close_button.dart';
 import '../../widgets/mode_room_behavior_section.dart';
 import '../../widgets/settings_row.dart';
@@ -41,7 +41,8 @@ class AutomationsScreen extends StatelessWidget {
                         const _AutomationSectionHeader(
                           step: 1,
                           title: 'Schedule',
-                          subtitle: 'Trigger Wake / Sleep presets automatically '
+                          subtitle:
+                              'Trigger Wake / Sleep presets automatically '
                               'or with a button.',
                           accent: CelestialColors.accentBlue,
                         ),
@@ -123,8 +124,7 @@ class AutomationsScreen extends StatelessWidget {
     final enabled = sync.modeTransitions.any(
       (t) =>
           ((t.fromMode == RhythmMode.sleep && t.toMode == RhythmMode.day) ||
-              (t.fromMode == RhythmMode.day &&
-                  t.toMode == RhythmMode.sleep)) &&
+              (t.fromMode == RhythmMode.day && t.toMode == RhythmMode.sleep)) &&
           !t.trigger.isManual &&
           t.triggerEnabled,
     );
@@ -253,7 +253,8 @@ class _AutomationSectionHeader extends StatelessWidget {
                 Text(
                   subtitle,
                   style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.85),
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.85),
                     fontSize: 13,
                     height: 1.35,
                   ),
@@ -544,5 +545,5 @@ Color _colorFromProfile(RhythmCurveConfig profile) {
     return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
   }
   final midCct = (profile.minColorTemp + profile.maxColorTemp) ~/ 2;
-  return ColorUtils.cctToColor(midCct);
+  return AppColorTemperature.toColor(midCct);
 }

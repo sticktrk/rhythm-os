@@ -7,7 +7,7 @@ import '../../services/analytics_service.dart';
 import '../../services/device_pairing_code.dart';
 import '../../widgets/solar_orbit.dart';
 
-enum DevicePairingScannerAction { matter, enterCode }
+enum DevicePairingScannerAction { matter, hueBridge, enterCode }
 
 class DevicePairingScannerResult {
   const DevicePairingScannerResult._({
@@ -22,6 +22,15 @@ class DevicePairingScannerResult {
   }) : this._(
           action: DevicePairingScannerAction.matter,
           payload: payload,
+          inputMethod: inputMethod,
+        );
+
+  const DevicePairingScannerResult.hueBridge(
+    String serial, {
+    String inputMethod = 'camera',
+  }) : this._(
+          action: DevicePairingScannerAction.hueBridge,
+          payload: serial,
           inputMethod: inputMethod,
         );
 
@@ -56,15 +65,21 @@ class DevicePairingScannerScreen extends StatefulWidget {
   const DevicePairingScannerScreen({
     super.key,
     this.showEnterCodeAction = true,
+    this.hueBridgeSerialSearchAvailable = false,
+    this.hueBridgeOnly = false,
     @visibleForTesting this.cameraBuilder,
   });
 
   final bool showEnterCodeAction;
+  final bool hueBridgeSerialSearchAvailable;
+  final bool hueBridgeOnly;
   final DevicePairingCameraBuilder? cameraBuilder;
 
   static Future<DevicePairingScannerResult?> show(
     BuildContext context, {
     bool showEnterCodeAction = true,
+    bool hueBridgeSerialSearchAvailable = false,
+    bool hueBridgeOnly = false,
   }) {
     return Navigator.of(context).push<DevicePairingScannerResult>(
       PageRouteBuilder<DevicePairingScannerResult>(
@@ -73,6 +88,8 @@ class DevicePairingScannerScreen extends StatefulWidget {
         pageBuilder: (context, animation, secondaryAnimation) {
           return DevicePairingScannerScreen(
             showEnterCodeAction: showEnterCodeAction,
+            hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+            hueBridgeOnly: hueBridgeOnly,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -98,6 +115,7 @@ class _DevicePairingScannerScreenState
 
   MobileScannerController? _controller;
   DevicePairingGuidance? _guidance;
+  DevicePairingCodeDecision? _pendingDecision;
   bool _handledDetection = false;
 
   @override
@@ -129,20 +147,33 @@ class _DevicePairingScannerScreenState
   void _handleRawValues(Iterable<String> values) {
     if (_handledDetection) return;
 
-    final decision = processDevicePairingCodes(values);
+    final decision = processDevicePairingCodes(
+      values,
+      hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
+      hueBridgeOnly: widget.hueBridgeOnly,
+    );
     if (decision == null) return;
     final code = decision.code;
 
     _handledDetection = true;
-    if (code.kind == DevicePairingCodeKind.matter) {
+    if (decision.requiresChoice) {
       AnalyticsService().logDevicePairingCodeDetected(
-        codeKind: _pairingCodeAnalyticsKind(code.kind),
-        outcome: 'continued_to_pairing',
+        codeKind: decision.choices.length > 1
+            ? 'multiple'
+            : _pairingCodeAnalyticsKind(code.kind),
+        outcome:
+            decision.choices.length > 1 ? 'choice_shown' : 'confirmation_shown',
       );
-      HapticFeedback.mediumImpact();
-      Navigator.of(context).pop(
-        DevicePairingScannerResult.matter(code.payload),
-      );
+      HapticFeedback.lightImpact();
+      setState(() {
+        _guidance = null;
+        _pendingDecision = decision;
+      });
+      return;
+    }
+
+    if (decision.canContinue) {
+      _continueWithCode(code);
       return;
     }
 
@@ -152,14 +183,34 @@ class _DevicePairingScannerScreenState
     );
     HapticFeedback.lightImpact();
     setState(() {
+      _pendingDecision = null;
       _guidance = decision.guidance;
     });
+  }
+
+  void _continueWithCode(DevicePairingCode code) {
+    AnalyticsService().logDevicePairingCodeDetected(
+      codeKind: _pairingCodeAnalyticsKind(code.kind),
+      outcome: 'continued_to_pairing',
+    );
+    HapticFeedback.mediumImpact();
+    Navigator.of(context).pop(
+      switch (code.kind) {
+        DevicePairingCodeKind.matter =>
+          DevicePairingScannerResult.matter(code.payload),
+        DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
+            normalizeHueBridgeSerial(code.payload)!,
+          ),
+        _ => throw StateError('Unsupported pairing-code continuation'),
+      },
+    );
   }
 
   void _scanAgain() {
     HapticFeedback.selectionClick();
     setState(() {
       _guidance = null;
+      _pendingDecision = null;
       _handledDetection = false;
     });
   }
@@ -195,7 +246,8 @@ class _DevicePairingScannerScreenState
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final compact = constraints.maxHeight < 700;
-                final compactGuidance = compact && _guidance != null;
+                final compactGuidance =
+                    compact && (_guidance != null || _pendingDecision != null);
                 return Padding(
                   padding: EdgeInsets.fromLTRB(
                     20,
@@ -212,7 +264,9 @@ class _DevicePairingScannerScreenState
                       ),
                       SizedBox(height: compact ? 14 : 24),
                       Text(
-                        'Scan any device QR code',
+                        widget.hueBridgeOnly
+                            ? 'Scan Hue bulb QR'
+                            : 'Scan any device QR code',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.white,
@@ -223,8 +277,11 @@ class _DevicePairingScannerScreenState
                       if (!compactGuidance) ...[
                         SizedBox(height: compact ? 4 : 8),
                         Text(
-                          'Rhythm will identify the code and continue when it '
-                          'can.',
+                          widget.hueBridgeOnly
+                              ? 'Scan the QR beside the six-character serial '
+                                  'printed on the bulb.'
+                              : 'Rhythm will identify the code and continue '
+                                  'when it can.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.72),
@@ -238,9 +295,11 @@ class _DevicePairingScannerScreenState
                       ),
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 220),
-                        child: _guidance == null
-                            ? _buildScannerActions()
-                            : _buildGuidance(_guidance!),
+                        child: _pendingDecision != null
+                            ? _buildPairingChoice(_pendingDecision!)
+                            : _guidance != null
+                                ? _buildGuidance(_guidance!)
+                                : _buildScannerActions(),
                       ),
                     ],
                   ),
@@ -257,7 +316,9 @@ class _DevicePairingScannerScreenState
     return Row(
       children: [
         IconButton(
-          tooltip: 'Back to Add & Review',
+          tooltip: widget.hueBridgeOnly
+              ? 'Back to Hue Bridge'
+              : 'Back to Add & Review',
           onPressed: () => Navigator.of(context).pop(),
           style: IconButton.styleFrom(
             backgroundColor: Colors.black.withValues(alpha: 0.45),
@@ -266,9 +327,9 @@ class _DevicePairingScannerScreenState
           ),
           icon: const Icon(Icons.arrow_back_rounded),
         ),
-        const Expanded(
+        Expanded(
           child: Text(
-            'Add Device',
+            widget.hueBridgeOnly ? 'Add Hue Bulb' : 'Add Device',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: Colors.white,
@@ -353,7 +414,9 @@ class _DevicePairingScannerScreenState
       child: Column(
         children: [
           Text(
-            'Hold the code steady inside the frame.',
+            widget.hueBridgeOnly
+                ? 'Hold the bulb QR steady inside the frame.'
+                : 'Hold the code steady inside the frame.',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.88),
@@ -376,7 +439,9 @@ class _DevicePairingScannerScreenState
                   );
                 },
                 icon: const Icon(Icons.keyboard_rounded),
-                label: const Text('Enter a Code'),
+                label: Text(
+                  widget.hueBridgeOnly ? 'Enter Bulb Serial' : 'Enter a Code',
+                ),
               ),
             ),
           ],
@@ -416,6 +481,76 @@ class _DevicePairingScannerScreenState
             ),
           ),
           const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: _scanAgain,
+            icon: const Icon(Icons.qr_code_scanner_rounded),
+            label: Text(
+              widget.hueBridgeOnly
+                  ? 'Scan Another Bulb QR'
+                  : 'Scan Another Code',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPairingChoice(DevicePairingCodeDecision decision) {
+    final hasMultipleChoices = decision.choices.length > 1;
+    return Container(
+      key: const ValueKey('device-pairing-code-choice'),
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.96),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _teal.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            hasMultipleChoices ? 'Choose how to add this light' : '',
+            style: const TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            hasMultipleChoices
+                ? 'This scan found both a Matter setup code and a Hue bulb '
+                    'serial. Choose the connection Rhythm should use.'
+                : '',
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.9),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 14),
+          for (final code in decision.choices) ...[
+            FilledButton.icon(
+              key: ValueKey(
+                code.kind == DevicePairingCodeKind.hue
+                    ? 'choose-hue-bridge'
+                    : 'choose-matter',
+              ),
+              onPressed: () => _continueWithCode(code),
+              icon: Icon(
+                code.kind == DevicePairingCodeKind.hue
+                    ? Icons.hub_rounded
+                    : Icons.hub_rounded,
+              ),
+              label: Text(
+                code.kind == DevicePairingCodeKind.hue
+                    ? 'Search with Hue Bridge'
+                    : 'Pair with Matter',
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
           OutlinedButton.icon(
             onPressed: _scanAgain,
             icon: const Icon(Icons.qr_code_scanner_rounded),

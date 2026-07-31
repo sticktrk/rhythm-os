@@ -150,6 +150,44 @@ void main() {
     });
   });
 
+  group('RhythmLightCapabilities', () {
+    test('parses and bounds the LCA013 color-temperature envelope', () {
+      final capabilities = RhythmLightCapabilities.maybeFromJson({
+        'color_temperature': {'min_kelvin': 1000, 'max_kelvin': 20000},
+      });
+
+      final range = capabilities?.colorTemperature;
+      expect(capabilities?.supportsColorTemperature, isTrue);
+      expect(range?.minKelvin, 1000);
+      expect(range?.maxKelvin, 20000);
+      expect(range?.supports(1000), isTrue);
+      expect(range?.supports(20001), isFalse);
+      expect(range?.clamp(25000), 20000);
+    });
+
+    test('does not expose a malformed color-temperature range', () {
+      final capabilities = RhythmLightCapabilities.maybeFromJson({
+        'color_temperature': {'min_kelvin': 6500, 'max_kelvin': 2000},
+      });
+
+      expect(capabilities, isNotNull);
+      expect(capabilities?.supportsColorTemperature, isFalse);
+      expect(capabilities?.colorTemperature, isNull);
+    });
+
+    test('is absent for previous-server payloads', () {
+      expect(RhythmLightCapabilities.maybeFromJson(null), isNull);
+    });
+
+    test('keeps known non-CT as an empty capability object', () {
+      final capabilities = RhythmLightCapabilities.maybeFromJson({});
+
+      expect(capabilities, isNotNull);
+      expect(capabilities?.supportsColorTemperature, isFalse);
+      expect(capabilities?.colorTemperature, isNull);
+    });
+  });
+
   group('RhythmRoom', () {
     group('fromJson', () {
       test('parses all fields with defaults', () {
@@ -169,6 +207,19 @@ void main() {
         expect(room.lightsOn, isNull);
         expect(room.brightness, isNull);
         expect(room.kelvin, isNull);
+        expect(room.lightCapabilities, isNull);
+      });
+
+      test('parses nested light capabilities', () {
+        final room = RhythmRoom.fromJson({
+          'id': 'wide-light',
+          'light_capabilities': {
+            'color_temperature': {'min_kelvin': 1000, 'max_kelvin': 20000},
+          },
+        });
+
+        expect(room.lightCapabilities?.colorTemperature?.minKelvin, 1000);
+        expect(room.lightCapabilities?.colorTemperature?.maxKelvin, 20000);
       });
 
       test('normalizes explicit null pending dispatch constructor value', () {
@@ -718,6 +769,19 @@ void main() {
         expect(state.lightsOn, isNull);
         expect(state.brightness, isNull);
         expect(state.kelvin, isNull);
+        expect(state.lightCapabilities, isNull);
+      });
+
+      test('parses nested light capabilities from state and SSE payloads', () {
+        final state = RhythmRoomState.fromJson({
+          'node_id': 'wide-light',
+          'light_capabilities': {
+            'color_temperature': {'min_kelvin': 1000, 'max_kelvin': 20000},
+          },
+        });
+
+        expect(state.lightCapabilities?.colorTemperature?.minKelvin, 1000);
+        expect(state.lightCapabilities?.colorTemperature?.maxKelvin, 20000);
       });
 
       test('prefers room_id over id when both are present', () {

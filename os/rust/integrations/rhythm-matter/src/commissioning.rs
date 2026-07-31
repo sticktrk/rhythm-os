@@ -157,7 +157,10 @@ pub fn pair_device(
                 hub_type: "matter".to_string(),
                 status: PairingStatus::Failed,
                 device: None,
+                devices: Vec::new(),
                 error: Some(summarize_commissioning_error(&error)),
+                warnings: Vec::new(),
+                details: None,
             })
         }
     }
@@ -359,7 +362,10 @@ fn build_success_session(
             manufacturer: Some(device.vendor_name),
             model: Some(device.product_name),
         }),
+        devices: Vec::new(),
         error: None,
+        warnings: Vec::new(),
+        details: None,
     })
 }
 

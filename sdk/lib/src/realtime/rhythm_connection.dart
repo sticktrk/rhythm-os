@@ -43,6 +43,7 @@ class _CachedNodeState {
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
+  final RhythmLightCapabilities? lightCapabilities;
   final bool? motionActive;
   final bool? motionOwned;
   final int? motionRemaining;
@@ -63,6 +64,7 @@ class _CachedNodeState {
     this.lightsOn,
     this.brightness,
     this.kelvin,
+    this.lightCapabilities,
     this.motionActive,
     this.motionOwned,
     this.motionRemaining,
@@ -481,6 +483,7 @@ class RhythmConnection {
           lightsOn: node.lightsOn,
           brightness: node.brightness,
           kelvin: node.kelvin,
+          lightCapabilities: node.lightCapabilities,
           motionActive: node.motionActive,
           motionOwned: node.motionOwned,
           motionRemaining: node.remainingSecs,
@@ -623,7 +626,8 @@ class RhythmConnection {
             cached.powerFresh != nextPowerFresh ||
             cached.powerSource != nextPowerSource ||
             cached.brightness != nodeState.brightness ||
-            cached.kelvin != nodeState.kelvin;
+            cached.kelvin != nodeState.kelvin ||
+            cached.lightCapabilities != nodeState.lightCapabilities;
 
         final motionChanged = cached == null ||
             cached.motionActive != motionActive ||
@@ -646,6 +650,7 @@ class RhythmConnection {
             lightsOn: nodeState.lightsOn,
             brightness: nodeState.brightness,
             kelvin: nodeState.kelvin,
+            lightCapabilities: nodeState.lightCapabilities,
             motionActive: motionActive,
             motionOwned: motionOwned,
             motionRemaining: motionRemaining,
@@ -701,6 +706,7 @@ class RhythmConnection {
             lightsOn: entry.value.lightsOn,
             brightness: entry.value.brightness,
             kelvin: entry.value.kelvin,
+            lightCapabilities: entry.value.lightCapabilities,
             warningActive: false,
             hasMotionSensor: entry.value.hasMotionSensor,
           );
@@ -814,7 +820,8 @@ class RhythmConnection {
             // Per the SSE spec, strip at most one leading space — trimming
             // corrupts whitespace-significant payloads.
             final value = line.substring(5);
-            dataBuffer.write(value.startsWith(' ') ? value.substring(1) : value);
+            dataBuffer
+                .write(value.startsWith(' ') ? value.substring(1) : value);
           } else if (line.isEmpty && eventType != null) {
             _handleSseEvent(eventType!, dataBuffer.toString());
             eventType = null;
@@ -913,6 +920,7 @@ class RhythmConnection {
               lightsOn: nodeState.lightsOn ?? existing?.lightsOn,
               brightness: nodeState.brightness ?? existing?.brightness,
               kelvin: nodeState.kelvin ?? existing?.kelvin,
+              lightCapabilities: nodeState.lightCapabilities,
               motionActive: nodeState.motionActive ?? existing?.motionActive,
               motionOwned: nodeState.motionOwned ?? existing?.motionOwned,
               motionRemaining:
@@ -966,6 +974,7 @@ class RhythmConnection {
                 lightsOn: cached.lightsOn,
                 brightness: cached.brightness,
                 kelvin: cached.kelvin,
+                lightCapabilities: cached.lightCapabilities,
                 motionActive: motionActive,
                 motionOwned: motionOwned,
                 motionRemaining: remainingSecs,
@@ -1000,6 +1009,7 @@ class RhythmConnection {
                 lightsOn: entry.value.lightsOn,
                 brightness: entry.value.brightness,
                 kelvin: entry.value.kelvin,
+                lightCapabilities: entry.value.lightCapabilities,
                 warningActive: false,
                 hasMotionSensor: entry.value.hasMotionSensor,
               );
@@ -1274,6 +1284,7 @@ class RhythmConnection {
         lightsOn: state.lightsOn ?? existing?.lightsOn,
         brightness: state.brightness ?? existing?.brightness,
         kelvin: state.kelvin ?? existing?.kelvin,
+        lightCapabilities: state.lightCapabilities,
         motionActive: state.motionActive ?? existing?.motionActive,
         motionOwned: state.motionOwned ?? existing?.motionOwned,
         motionRemaining: state.remainingSecs ?? existing?.motionRemaining,

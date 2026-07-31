@@ -6,10 +6,11 @@
 //! a result that the transport layer can format into a response.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Datelike, Timelike};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
@@ -26,7 +27,8 @@ use sha2::{Digest, Sha256};
 use crate::api_types::{
     ActiveProfileDto, ActiveProfileEffectiveDto, ApiCapabilitiesDto, CurveModifierDto,
     HubCapabilityDto, HubDto, HubStartupRetryDto, InputBindingsDto, LightBreakerDto,
-    LightRuntimeDto, LightRuntimeInitialApplyDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
+    LightCapabilitiesDto, LightColorTemperatureCapabilitiesDto, LightRuntimeDto,
+    LightRuntimeInitialApplyDto, LocationDto, ModeLastChangeDto, ModeSettingsDto,
     ModeTransitionsDto, NodeStateDto, NodesPollResponse, ObservedPowerDto, PreferredEndpointDto,
     ProfilesDto, ReviewCountsDto, ReviewEntryDto, ReviewHubDto, ReviewSummaryDto, RoomPollState,
     RoomProfileSettingsDto, RoomRhythmState, RoomsPollResponse, SettingsDto, StateSnapshot,
@@ -46,6 +48,7 @@ use crate::factory_default_config::{
     factory_default_mode_config_map, factory_default_mode_transition_configs,
     factory_default_power_save, factory_default_profile_bundle, factory_default_scene_map,
 };
+use crate::hub::HubType;
 use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::{
     is_native_scene_id, LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput,
@@ -1696,6 +1699,153 @@ fn node_metadata_from_topology(
     )
 }
 
+fn known_light_capabilities_for_device(
+    device: &crate::canonical::identity::CanonicalDevice,
+) -> Option<LightCapabilitiesDto> {
+    if device.is_removed() || device.device_type != DeviceType::Light {
+        return None;
+    }
+
+    if let Some(capabilities) = live_endpoint_light_capabilities(device) {
+        return Some(capabilities);
+    }
+
+    let entry = rhythm_devices::builtin_db()
+        .lookup(device.manufacturer.as_deref()?, device.model.as_deref()?)?;
+    let capabilities = entry.capabilities();
+    if !capabilities.supports_color_temp() {
+        return Some(LightCapabilitiesDto {
+            color_temperature: None,
+        });
+    }
+
+    let min_kelvin = capabilities.min_kelvin?;
+    let max_kelvin = capabilities.max_kelvin?;
+    (min_kelvin > 0 && min_kelvin <= max_kelvin).then_some(LightCapabilitiesDto {
+        color_temperature: Some(LightColorTemperatureCapabilitiesDto {
+            min_kelvin,
+            max_kelvin,
+        }),
+    })
+}
+
+/// Prefer normalized capabilities observed from a live integration endpoint.
+///
+/// Endpoint metadata is namespaced because the reserved `capabilities` value
+/// may also contain integration-native shapes. When multiple endpoints publish
+/// normalized ranges, expose only their safe intersection.
+fn live_endpoint_light_capabilities(
+    device: &crate::canonical::identity::CanonicalDevice,
+) -> Option<LightCapabilitiesDto> {
+    let mut saw_normalized = false;
+    let mut all_support_color_temperature = true;
+    let mut intersection: Option<LightColorTemperatureCapabilitiesDto> = None;
+
+    for endpoint in device.active_endpoints() {
+        let Some(value) = endpoint
+            .capabilities
+            .as_ref()
+            .and_then(|value| value.get("light_capabilities"))
+        else {
+            continue;
+        };
+        let Ok(capabilities) = serde_json::from_value::<LightCapabilitiesDto>(value.clone()) else {
+            continue;
+        };
+        let valid_range = capabilities
+            .color_temperature
+            .filter(|range| range.min_kelvin > 0 && range.min_kelvin <= range.max_kelvin);
+        saw_normalized = true;
+        match valid_range {
+            Some(range) if all_support_color_temperature => {
+                intersection = Some(match intersection {
+                    Some(current) => LightColorTemperatureCapabilitiesDto {
+                        min_kelvin: current.min_kelvin.max(range.min_kelvin),
+                        max_kelvin: current.max_kelvin.min(range.max_kelvin),
+                    },
+                    None => range,
+                });
+            }
+            Some(_) => {}
+            None => {
+                all_support_color_temperature = false;
+                intersection = None;
+            }
+        }
+    }
+
+    if !saw_normalized || !all_support_color_temperature {
+        return saw_normalized.then_some(LightCapabilitiesDto {
+            color_temperature: None,
+        });
+    }
+    let range = intersection?;
+    Some(LightCapabilitiesDto {
+        color_temperature: (range.min_kelvin <= range.max_kelvin).then_some(range),
+    })
+}
+
+fn light_capabilities_for_node(
+    s: &AppState,
+    node_id: &str,
+    kind: LightNodeKind,
+) -> Option<LightCapabilitiesDto> {
+    let color_temperature = match kind {
+        LightNodeKind::LightDevice => {
+            let node = s.topology.get_device_node(node_id)?;
+            let device = s.canonical_registry.get(&node.canonical_device_id)?;
+            return known_light_capabilities_for_device(device);
+        }
+        LightNodeKind::Room => {
+            let room = s.topology.get(node_id)?;
+            let mut intersection: Option<LightColorTemperatureCapabilitiesDto> = None;
+            let mut saw_light = false;
+            let mut all_support_color_temperature = true;
+
+            for member in &room.devices {
+                let device = s.canonical_registry.get(&member.device_id)?;
+                if device.is_removed() || device.device_type != DeviceType::Light {
+                    continue;
+                }
+                saw_light = true;
+                let member_capabilities = known_light_capabilities_for_device(device)?;
+                if let Some(member_range) = member_capabilities.color_temperature {
+                    if all_support_color_temperature {
+                        intersection = Some(match intersection {
+                            Some(current) => LightColorTemperatureCapabilitiesDto {
+                                min_kelvin: current.min_kelvin.max(member_range.min_kelvin),
+                                max_kelvin: current.max_kelvin.min(member_range.max_kelvin),
+                            },
+                            None => member_range,
+                        });
+                    }
+                } else {
+                    all_support_color_temperature = false;
+                    intersection = None;
+                }
+            }
+
+            if !saw_light || !all_support_color_temperature {
+                return saw_light.then_some(LightCapabilitiesDto {
+                    color_temperature: None,
+                });
+            }
+            let range = intersection?;
+            if range.min_kelvin > range.max_kelvin {
+                return Some(LightCapabilitiesDto {
+                    color_temperature: None,
+                });
+            }
+            range
+        }
+        _ => return None,
+    };
+
+    Some(LightCapabilitiesDto {
+        color_temperature: Some(color_temperature),
+    })
+}
+
 struct NodeStateDtoBuildContext<'a> {
     state: &'a AppState,
     light_profile_configs: &'a BTreeMap<String, LightProfileConfig>,
@@ -1941,6 +2091,7 @@ fn build_node_state_dto_from_snapshot_parts(
         hub_types,
         manufacturer,
         model,
+        light_capabilities: light_capabilities_for_node(ctx.state, &snap.id, snap.kind),
         state,
         rhythm_enabled: snap.rhythm_enabled,
         disabled: snap.disabled,
@@ -1990,6 +2141,7 @@ pub fn build_node_state_event(
         kelvin,
         color,
         hub_types,
+        light_capabilities,
         mood_enabled,
         mood_active,
         standby_enabled,
@@ -2026,6 +2178,7 @@ pub fn build_node_state_event(
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let pending_dispatch = node_has_pending_dispatch(&s, &snap.id);
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
+        let light_capabilities = light_capabilities_for_node(&s, &snap.id, snap.kind);
         let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
         let mood_active = room_mood_active(
             s.power_save,
@@ -2071,6 +2224,7 @@ pub fn build_node_state_event(
             kelvin,
             color,
             hub_types,
+            light_capabilities,
             mood_enabled,
             mood_active,
             standby_enabled,
@@ -2082,6 +2236,7 @@ pub fn build_node_state_event(
         snap,
         crate::server_event::NodeStateEventParams {
             hub_types,
+            light_capabilities,
             mode,
             state: room_state,
             lights_on: observed_power.lights_on,
@@ -4949,6 +5104,57 @@ fn backup_hub_credentials_from_state(
     }
 }
 
+/// Hue BLE bonds are adapter-local BlueZ state, so a portable backup must not
+/// resurrect their credentials, endpoints, or device nodes without link keys.
+/// A canonical device that also has another endpoint remains in the backup.
+fn strip_nonportable_hue_ble_nodes(
+    rooms: &mut rhythm_core::RoomManager,
+    topology: &mut crate::topology::RoomTopologyStore,
+    canonical_registry: &mut crate::canonical::registry::CanonicalRegistry,
+) {
+    let endpoints = canonical_registry
+        .devices()
+        .flat_map(|device| {
+            device
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::HUE_BLE)
+                .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut removed_devices = Vec::new();
+    for (hub_key, native_id) in endpoints {
+        if let Some((canonical_id, true)) = canonical_registry.remove_endpoint(&hub_key, &native_id)
+        {
+            removed_devices.push(canonical_id);
+        }
+    }
+    for canonical_id in removed_devices {
+        topology.remove_device_everywhere(&canonical_id);
+        rooms.remove(&canonical_id);
+    }
+}
+
+fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallation) {
+    strip_nonportable_hue_ble_nodes(
+        &mut installation.rooms,
+        &mut installation.topology,
+        &mut installation.canonical_registry,
+    );
+    installation.hub_credentials.retain(|credential| {
+        credential
+            .hub_type
+            .as_ref()
+            .is_none_or(|hub_type| hub_type.as_str() != HubType::HUE_BLE)
+    });
+    installation
+        .hub_registries
+        .retain(|registry| registry.hub_key.hub_type.as_str() != HubType::HUE_BLE);
+    installation
+        .integration_files
+        .retain(|file| !file.path.starts_with("hue_ble/"));
+}
+
 pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -5027,28 +5233,70 @@ fn factory_default_backup_configuration() -> BackupConfiguration {
     }
 }
 
+#[derive(Debug)]
+struct FactoryResetPostBarrierError {
+    source: anyhow::Error,
+}
+
+impl fmt::Display for FactoryResetPostBarrierError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "factory reset failed after the safety barrier completed: {:#}",
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for FactoryResetPostBarrierError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn factory_reset_error_is_post_barrier(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<FactoryResetPostBarrierError>()
+        .is_some()
+}
+
 pub fn do_factory_reset(state: &SharedState) -> Result<String> {
-    do_hub_disconnect(state)?;
-    clear_factory_reset_storage(state)?;
-    clear_factory_reset_ephemeral_state(state)?;
+    if let Some(callback) = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .before_factory_reset_fn
+        .clone()
+    {
+        callback(state).context("preparing platform for factory reset")?;
+    }
+    // The platform safety barrier runs before any shared state is destroyed.
+    // In particular, an appliance may need live hub metadata and credentials
+    // to release peripheral-held Bluetooth trust. A failed barrier therefore
+    // leaves the current installation intact and retryable.
+    (|| {
+        do_hub_disconnect(state)?;
+        clear_factory_reset_storage(state)?;
+        clear_factory_reset_ephemeral_state(state)?;
 
-    let installation = BackupInstallation {
-        location: None,
-        rooms: rhythm_core::RoomManager::new(),
-        topology: crate::topology::RoomTopologyStore::new(),
-        canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
-        hub_credentials: Vec::new(),
-        hub_registries: Vec::new(),
-        integration_files: Vec::new(),
-    };
-    restore_backup_installation_metadata(state, &installation)?;
-    restore_backup_room_manager(state, &installation.rooms)?;
-    restore_backup_location(state, None)?;
+        let installation = BackupInstallation {
+            location: None,
+            rooms: rhythm_core::RoomManager::new(),
+            topology: crate::topology::RoomTopologyStore::new(),
+            canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+            hub_credentials: Vec::new(),
+            hub_registries: Vec::new(),
+            integration_files: Vec::new(),
+        };
+        restore_backup_installation_metadata(state, &installation)?;
+        restore_backup_room_manager(state, &installation.rooms)?;
+        restore_backup_location(state, None)?;
 
-    apply_backup_configuration(state, factory_default_backup_configuration())?;
-    crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+        apply_backup_configuration(state, factory_default_backup_configuration())?;
+        crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
-    build_profile_bundle(state)
+        build_profile_bundle(state)
+    })()
+    .map_err(|source| anyhow::Error::new(FactoryResetPostBarrierError { source }))
 }
 
 pub fn do_profile_bundle_reset(state: &SharedState) -> Result<String> {
@@ -5059,7 +5307,7 @@ pub fn do_profile_bundle_reset(state: &SharedState) -> Result<String> {
 }
 
 pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Result<BackupBundle> {
-    let room_manager = room_manager_for_export(state);
+    let mut room_manager = room_manager_for_export(state);
     let (
         configuration,
         location,
@@ -5071,10 +5319,19 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         integration_files,
     ) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut topology = s.topology.clone();
+        let mut canonical_registry = s.canonical_registry.clone();
+        strip_nonportable_hue_ble_nodes(&mut room_manager, &mut topology, &mut canonical_registry);
         let configuration = backup_configuration_from_parts(&s, &room_manager);
         let mut hub_credentials: Vec<_> = s
             .hub_credentials
             .values()
+            .filter(|creds| {
+                creds
+                    .hub_type
+                    .as_ref()
+                    .is_none_or(|hub_type| hub_type.as_str() != HubType::HUE_BLE)
+            })
             .map(|creds| backup_hub_credentials_from_state(creds, include_secrets))
             .collect();
         hub_credentials.sort_by(|left, right| {
@@ -5088,18 +5345,24 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         let hub_registries: Vec<_> = s
             .hubs
             .iter()
+            .filter(|(hub_key, _)| hub_key.hub_type.as_str() != HubType::HUE_BLE)
             .filter_map(|(hub_key, hub)| {
                 hub.registry
                     .as_ref()
                     .map(|registry| (hub_key.clone(), registry.clone()))
             })
             .collect();
+        let mut integration_files = match s.storage.as_ref() {
+            Some(storage) => storage.load_integration_backup_files(include_secrets)?,
+            None => Vec::new(),
+        };
+        integration_files.retain(|file| !file.path.starts_with("hue_ble/"));
 
         (
             configuration,
             stored_location_from_state(&s),
-            s.topology.clone(),
-            s.canonical_registry.clone(),
+            topology,
+            canonical_registry,
             BackupRuntimeState {
                 active_mode: s.active_mode,
                 last_change_cause: s.last_active_mode_cause,
@@ -5108,10 +5371,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
             },
             hub_credentials,
             hub_registries,
-            match s.storage.as_ref() {
-                Some(storage) => storage.load_integration_backup_files(include_secrets)?,
-                None => Vec::new(),
-            },
+            integration_files,
         )
     };
 
@@ -8541,10 +8801,12 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     }
 
     validate_imported_backup_configuration(&bundle.configuration)?;
+    let mut installation = bundle.installation.clone();
+    sanitize_nonportable_backup_installation(&mut installation);
     let valid_profile_ids = valid_import_profile_ids(&bundle.configuration.profiles);
     let scene_ids =
         valid_scene_ids_from_map(&normalized_scene_map(bundle.configuration.scenes.clone())?);
-    for room in bundle.installation.rooms.iter() {
+    for room in installation.rooms.iter() {
         validate_room_profile_settings(
             &room.id,
             &room.profile_settings,
@@ -8554,17 +8816,17 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     }
 
     do_hub_disconnect(state)?;
-    restore_backup_integration_files(state, &bundle.installation.integration_files)?;
-    save_backup_hub_registries_to_storage(state, &bundle.installation.hub_registries)?;
+    restore_backup_integration_files(state, &installation.integration_files)?;
+    save_backup_hub_registries_to_storage(state, &installation.hub_registries)?;
 
     let mut configuration = bundle.configuration.clone();
     configuration.active_mode = bundle.runtime_state.active_mode;
     apply_backup_configuration(state, configuration)?;
 
-    restore_backup_location(state, bundle.installation.location.clone())?;
-    restore_backup_hub_credentials(state, &bundle.installation.hub_credentials)?;
-    restore_backup_installation_metadata(state, &bundle.installation)?;
-    restore_backup_room_manager(state, &bundle.installation.rooms)?;
+    restore_backup_location(state, installation.location.clone())?;
+    restore_backup_hub_credentials(state, &installation.hub_credentials)?;
+    restore_backup_installation_metadata(state, &installation)?;
+    restore_backup_room_manager(state, &installation.rooms)?;
     restore_backup_runtime_state(state, &bundle.runtime_state)?;
 
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
@@ -9828,6 +10090,82 @@ pub fn do_device_hard_remove(
     Ok(())
 }
 
+/// Remove one hub-native endpoint after a protocol-level unpair.
+///
+/// A physical bulb may simultaneously have Hue Bridge and direct Hue BLE
+/// endpoints. Removing one bond must not delete the other endpoint, its room
+/// assignment, or the canonical device. If this was the final endpoint, this
+/// delegates to the ordinary full removal path.
+pub fn do_device_endpoint_remove(
+    state: &SharedState,
+    device_id: &str,
+    hub_key: &HubKey,
+) -> Result<()> {
+    let (canonical_id, native_id, endpoint_count) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let device = if let Some(device) = s.canonical_registry.get(device_id) {
+            device
+        } else if let Some(device) = s.canonical_registry.find_by_native_id(hub_key, device_id) {
+            device
+        } else {
+            // The integration metadata/bond has already been removed and no
+            // canonical projection remains. Treat the request as idempotent.
+            return Ok(());
+        };
+        let native_id = device
+            .endpoints
+            .iter()
+            .find(|endpoint| {
+                &endpoint.hub_key == hub_key
+                    && (endpoint.native_id == device_id || device.id == device_id)
+            })
+            .map(|endpoint| endpoint.native_id.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Device '{}' has no endpoint on {}", device_id, hub_key)
+            })?;
+        (device.id.clone(), native_id, device.endpoints.len())
+    };
+
+    if endpoint_count <= 1 {
+        return do_device_hard_remove(state, &canonical_id, Some(hub_key));
+    }
+
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    info!(
+        target: "cmd",
+        "device_endpoint_remove: canonical={} endpoint={}/{}",
+        canonical_id,
+        hub_key,
+        native_id
+    );
+    let topology_changed = !s
+        .topology
+        .remove_hub_room_binding_everywhere(hub_key, &native_id)
+        .is_empty();
+    s.canonical_registry
+        .remove_endpoint(hub_key, &native_id)
+        .ok_or_else(|| anyhow::anyhow!("Endpoint disappeared during removal"))?;
+    persist_canonical(&s);
+    if topology_changed {
+        persist_topology(&s);
+    }
+    if let Some(hub) = s.hubs.get(hub_key) {
+        if let Some(registry) = &hub.registry {
+            if let Ok(mut registry) = registry.lock() {
+                registry.remove_room(&native_id);
+                registry.remove_device(&native_id);
+            }
+        }
+    }
+    drop(s);
+
+    persist_registry(state);
+    reconcile_runtime_from_state(state)?;
+    emit_triage_changed(state);
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    Ok(())
+}
+
 /// Soft-remove a device from the canonical registry by its native ID.
 ///
 /// Looks up the canonical device via native ID + hub key, marks it as
@@ -10545,6 +10883,13 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         old_hubs = std::mem::take(&mut s.hubs);
+        // Signal event workers synchronously. ActiveHub::drop also signals,
+        // but the actual drops happen on a helper thread and therefore cannot
+        // be the lifecycle boundary for platform cleanup.
+        for hub in old_hubs.values() {
+            hub.shutdown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         for key in old_hubs.keys() {
             topology_changed |= !s.topology.remove_stale_bindings(key, &[]).is_empty();
         }
@@ -10648,6 +10993,10 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         old_hub = s.hubs.remove(&key);
+        if let Some(hub) = old_hub.as_ref() {
+            hub.shutdown
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         topology_changed = !s.topology.remove_stale_bindings(&key, &[]).is_empty();
         s.clear_hub_connected(&key);
         s.clear_hub_startup_retry(&key);
@@ -15868,6 +16217,34 @@ mod tests {
         }
     }
 
+    fn insert_known_canonical_light(
+        state: &SharedState,
+        hub_key: HubKey,
+        native_id: &str,
+        manufacturer: &str,
+        model: &str,
+    ) -> String {
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: None,
+            room_name: None,
+            name: format!("Test {model}"),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            hardware_ids: vec![crate::canonical::identity::HardwareId::serial(native_id)],
+            manufacturer: Some(manufacturer.to_string()),
+            model: Some(model.to_string()),
+        };
+
+        let mut s = state.lock().unwrap();
+        match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                canonical_id
+            }
+            other => panic!("unexpected resolve result: {:?}", other),
+        }
+    }
+
     fn setup_attached_matter_light_without_group_dispatch(
     ) -> (SharedState, Arc<MockRuntime>, String) {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
@@ -18009,6 +18386,7 @@ mod tests {
         topology: Option<Value>,
         commissioning_wifi: Option<crate::provisioning::WifiCredentials>,
         integration_files: Vec<BackupIntegrationFile>,
+        fail_factory_reset_clear: bool,
     }
 
     impl Storage for TestStorage {
@@ -18151,6 +18529,9 @@ mod tests {
 
         fn clear_factory_reset_state(&self) -> Result<()> {
             let mut inner = self.inner.lock().unwrap();
+            if inner.fail_factory_reset_clear {
+                anyhow::bail!("injected factory-reset storage failure");
+            }
             inner.rooms = rhythm_core::RoomManager::new();
             inner.light_profiles = None;
             inner.location = None;
@@ -19338,6 +19719,51 @@ mod tests {
     }
 
     #[test]
+    fn backup_excludes_adapter_bound_hue_ble_state() {
+        let (state, _runtime) = setup_state(vec![]);
+        let hub_key = HubKey::new(HubType::new(HubType::HUE_BLE), "local");
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "hue-ble-0017880100000001",
+            "Direct Hue",
+            "",
+            "",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&device_id);
+            s.hub_credentials.insert(
+                hub_key,
+                HubCredentials::new(
+                    HubType::HUE_BLE,
+                    "local",
+                    serde_json::json!({ "adapter": "default" }),
+                ),
+            );
+        }
+
+        let bundle = build_backup_bundle_dto(&state, true).unwrap();
+        assert!(bundle
+            .installation
+            .hub_credentials
+            .iter()
+            .all(|credentials| credentials.hub_type.as_ref()
+                != Some(&HubType::new(HubType::HUE_BLE))));
+        assert!(bundle
+            .installation
+            .canonical_registry
+            .get(&device_id)
+            .is_none());
+        assert!(bundle
+            .installation
+            .topology
+            .get_device_node(&device_id)
+            .is_none());
+        assert!(bundle.installation.rooms.get(&device_id).is_none());
+    }
+
+    #[test]
     fn backup_configuration_missing_light_breaker_defaults_disabled() {
         let configuration: BackupConfiguration = serde_json::from_value(serde_json::json!({
             "power_save": false,
@@ -20476,10 +20902,56 @@ mod tests {
     }
 
     #[test]
+    fn factory_reset_safety_barrier_failure_preserves_installation_state() {
+        let (state, _rt) = setup_state(vec![]);
+        let hub_key = HubKey::new(HubType::new("mock"), "still-connected");
+        {
+            let mut state = state.lock().unwrap();
+            state.hub_credentials.insert(
+                hub_key.clone(),
+                HubCredentials::new(
+                    "mock",
+                    "still-connected",
+                    serde_json::json!({"token": "keep-me"}),
+                ),
+            );
+            state.before_factory_reset_fn =
+                Some(Arc::new(|_| anyhow::bail!("one Bluetooth bulb is offline")));
+        }
+
+        let error = do_factory_reset(&state).unwrap_err();
+
+        assert!(format!("{error:#}").contains("one Bluetooth bulb is offline"));
+        assert!(!factory_reset_error_is_post_barrier(&error));
+        assert!(state.lock().unwrap().hub_credentials.contains_key(&hub_key));
+    }
+
+    #[test]
+    fn factory_reset_failure_after_safety_barrier_is_marked_indeterminate() {
+        let (state, _rt) = setup_state(vec![]);
+        let storage = TestStorage::default();
+        storage.inner.lock().unwrap().fail_factory_reset_clear = true;
+        state.lock().unwrap().storage = Some(Arc::new(storage));
+
+        let error = do_factory_reset(&state).unwrap_err();
+
+        assert!(factory_reset_error_is_post_barrier(&error));
+        assert!(format!("{error:#}").contains("injected factory-reset storage failure"));
+    }
+
+    #[test]
     fn factory_reset_clears_installation_state_and_stale_storage() {
         let (state, _rt) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
         let storage = TestStorage::default();
         let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
+        let hub_shutdown = state
+            .lock()
+            .unwrap()
+            .hubs
+            .get(&hub_key)
+            .unwrap()
+            .shutdown
+            .clone();
 
         state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
 
@@ -20572,6 +21044,10 @@ mod tests {
         assert!(s.longitude.is_none());
         assert!(s.timezone_name.is_none());
         assert_eq!(s.utc_offset_hours, 0.0);
+        assert!(
+            hub_shutdown.load(Ordering::SeqCst),
+            "factory reset must signal hub workers before asynchronous hub drop"
+        );
         drop(s);
 
         let inner = storage.inner.lock().unwrap();
@@ -20711,6 +21187,198 @@ mod tests {
             parsed["rooms"][0]["hub_types"],
             serde_json::json!(["matter", "mock"])
         );
+    }
+
+    #[test]
+    fn node_light_capabilities_use_model_range_and_room_intersection() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new("mock"), "mock");
+        let wide_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "wide-lca013",
+            "Signify Netherlands B.V.",
+            "LCA013",
+        );
+        let legacy_id = insert_known_canonical_light(
+            &state,
+            hub_key,
+            "legacy-lct016",
+            "Signify Netherlands B.V.",
+            "LCT016",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology
+                .insert_room(crate::topology::TopologyRoom::new("room1", "Room 1"));
+            assert!(s.topology.attach_device_user_override("room1", &wide_id));
+            assert!(s.topology.attach_device_user_override("room1", &legacy_id));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&wide_id, "room1"),
+            make_light_child_snapshot(&legacy_id, "room1"),
+        ]);
+
+        let wide = build_node_state(&state, &wide_id).unwrap();
+        let wide_range = wide.light_capabilities.unwrap().color_temperature.unwrap();
+        assert_eq!(wide_range.min_kelvin, 1_000);
+        assert_eq!(wide_range.max_kelvin, 20_000);
+
+        let event = build_node_state_event(
+            &state,
+            &runtime
+                .engine_effective_node_snapshot(&wide_id)
+                .expect("wide light snapshot"),
+        );
+        let event_range = event
+            .light_capabilities
+            .expect("SSE carries capabilities")
+            .color_temperature
+            .expect("SSE carries color-temperature range");
+        assert_eq!(event_range.min_kelvin, 1_000);
+        assert_eq!(event_range.max_kelvin, 20_000);
+
+        let room = build_node_state(&state, "room1").unwrap();
+        let room_range = room.light_capabilities.unwrap().color_temperature.unwrap();
+        assert_eq!(room_range.min_kelvin, 2_000);
+        assert_eq!(room_range.max_kelvin, 6_500);
+    }
+
+    #[test]
+    fn node_light_capabilities_prefer_live_endpoint_range_for_future_models() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new("hue_ble"), "local");
+        let device_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "future-hue",
+            "Signify Netherlands B.V.",
+            "FUTURE-HUE",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            let device = s.canonical_registry.get_mut(&device_id).unwrap();
+            device
+                .endpoint_for_hub(&hub_key)
+                .expect("Hue BLE endpoint exists");
+            device
+                .endpoints
+                .iter_mut()
+                .find(|endpoint| endpoint.hub_key == hub_key)
+                .unwrap()
+                .capabilities = Some(serde_json::json!({
+                "light_capabilities": {
+                    "color_temperature": {
+                        "min_kelvin": 900,
+                        "max_kelvin": 18000
+                    }
+                }
+            }));
+            s.topology
+                .insert_room(crate::topology::TopologyRoom::new("room1", "Room 1"));
+            assert!(s.topology.attach_device_user_override("room1", &device_id));
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&device_id, "room1"));
+
+        let range = build_node_state(&state, &device_id)
+            .unwrap()
+            .light_capabilities
+            .expect("live endpoint supplies known capabilities")
+            .color_temperature
+            .expect("live endpoint supplies a CT range");
+        assert_eq!(range.min_kelvin, 900);
+        assert_eq!(range.max_kelvin, 18_000);
+    }
+
+    #[test]
+    fn room_light_capabilities_distinguish_non_ct_from_unknown_members() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("non-ct-room", false, false),
+            make_snapshot("unknown-room", false, false),
+        ]);
+        let hub_key = HubKey::new(HubType::new("mock"), "mock");
+        let wide_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "wide-lca013-non-ct",
+            "Signify Netherlands B.V.",
+            "LCA013",
+        );
+        let wide_unknown_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "wide-lca013-unknown",
+            "Signify Netherlands B.V.",
+            "LCA013",
+        );
+        let dimmable_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "dimmable-lwa003",
+            "Signify Netherlands B.V.",
+            "LWA003",
+        );
+        let unknown_id = insert_known_canonical_light(
+            &state,
+            hub_key,
+            "unknown-model",
+            "Example Manufacturer",
+            "UNKNOWN-1",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.insert_room(crate::topology::TopologyRoom::new(
+                "non-ct-room",
+                "Non CT Room",
+            ));
+            s.topology.insert_room(crate::topology::TopologyRoom::new(
+                "unknown-room",
+                "Unknown Room",
+            ));
+            assert!(s
+                .topology
+                .attach_device_user_override("non-ct-room", &wide_id));
+            assert!(s
+                .topology
+                .attach_device_user_override("non-ct-room", &dimmable_id));
+            assert!(s
+                .topology
+                .attach_device_user_override("unknown-room", &wide_unknown_id));
+            assert!(s
+                .topology
+                .attach_device_user_override("unknown-room", &unknown_id));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&wide_id, "non-ct-room"),
+            make_light_child_snapshot(&wide_unknown_id, "unknown-room"),
+            make_light_child_snapshot(&dimmable_id, "non-ct-room"),
+            make_light_child_snapshot(&unknown_id, "unknown-room"),
+        ]);
+
+        assert!(build_node_state(&state, "non-ct-room")
+            .unwrap()
+            .light_capabilities
+            .expect("all members are known")
+            .color_temperature
+            .is_none());
+        assert!(build_node_state(&state, "unknown-room")
+            .unwrap()
+            .light_capabilities
+            .is_none());
+        assert!(build_node_state(&state, &dimmable_id)
+            .unwrap()
+            .light_capabilities
+            .expect("LWA003 is a known non-CT model")
+            .color_temperature
+            .is_none());
+        assert!(build_node_state(&state, &unknown_id)
+            .unwrap()
+            .light_capabilities
+            .is_none());
     }
 
     #[test]

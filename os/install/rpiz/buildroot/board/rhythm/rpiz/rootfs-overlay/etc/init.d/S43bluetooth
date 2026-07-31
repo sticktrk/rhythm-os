@@ -7,6 +7,9 @@ LOGFILE=
 HCIATTACH="${HCIATTACH:-/usr/bin/hciattach}"
 HCICONFIG="${HCICONFIG:-/usr/bin/hciconfig}"
 BLUETOOTHD_INIT=/etc/init.d/S40bluetoothd
+BLUETOOTH_STATE_SOURCE=/data/bluetooth
+BLUETOOTH_STATE_TARGET=/var/lib/bluetooth
+BLUETOOTH_MIGRATION_MARKER=/data/.bluetooth-state-migrated
 
 resolve_log_dir() {
     if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
@@ -123,10 +126,82 @@ bring_hci_up() {
     fi
 }
 
+migrate_legacy_bluetooth_state() {
+    if [ -e "$BLUETOOTH_MIGRATION_MARKER" ]; then
+        return 0
+    fi
+
+    # Retry the complete merge whenever the durable marker is absent. A prior
+    # boot may have lost power after copying only part of the legacy bond
+    # database; destination non-emptiness is not evidence of completion.
+    if [ -n "$(ls -A "$BLUETOOTH_STATE_TARGET" 2>/dev/null)" ]; then
+        if ! cp -a "$BLUETOOTH_STATE_TARGET"/. "$BLUETOOTH_STATE_SOURCE"/; then
+            log "failed to migrate existing Bluetooth bonds"
+            return 1
+        fi
+        sync
+        log "migrated existing Bluetooth bonds to persistent storage"
+    fi
+
+    if ! touch "$BLUETOOTH_MIGRATION_MARKER"; then
+        log "failed to record Bluetooth bond migration"
+        return 1
+    fi
+    sync
+    return 0
+}
+
+prepare_persistent_bluetooth_state() {
+    if ! grep -qs '[[:space:]]/data[[:space:]]' /proc/mounts 2>/dev/null; then
+        log "/data is not mounted; refusing to relocate Bluetooth bonds"
+        return 1
+    fi
+
+    mkdir -p "$BLUETOOTH_STATE_SOURCE" "$BLUETOOTH_STATE_TARGET"
+    chmod 700 "$BLUETOOTH_STATE_SOURCE" "$BLUETOOTH_STATE_TARGET" 2>/dev/null || true
+
+    if grep -qs "[[:space:]]$BLUETOOTH_STATE_TARGET[[:space:]]" /proc/mounts 2>/dev/null; then
+        # An earlier image may already have established the bind mount before
+        # the one-time marker was introduced.
+        if [ ! -e "$BLUETOOTH_MIGRATION_MARKER" ]; then
+            if ! touch "$BLUETOOTH_MIGRATION_MARKER"; then
+                log "failed to record existing Bluetooth bond migration"
+                return 1
+            fi
+            sync
+        fi
+        log "persistent Bluetooth state already mounted"
+        return 0
+    fi
+
+    # Preserve bonds created on a pre-migration image exactly once. The marker
+    # must live outside BLUETOOTH_STATE_SOURCE: factory reset intentionally
+    # empties that directory, and without a durable marker the underlying
+    # rootfs copy would be imported again on the next boot.
+    migrate_legacy_bluetooth_state || return 1
+
+    if mount --bind "$BLUETOOTH_STATE_SOURCE" "$BLUETOOTH_STATE_TARGET" >>"$LOGFILE" 2>&1; then
+        log "mounted persistent Bluetooth bonds at $BLUETOOTH_STATE_TARGET"
+        return 0
+    fi
+
+    log "failed to bind persistent Bluetooth state"
+    return 1
+}
+
 restart_bluetoothd() {
     if [ -x "$BLUETOOTHD_INIT" ]; then
-        "$BLUETOOTHD_INIT" restart >>"$LOGFILE" 2>&1 || true
+        "$BLUETOOTHD_INIT" stop >>"$LOGFILE" 2>&1 || true
+        if ! prepare_persistent_bluetooth_state; then
+            log "persistent Bluetooth state is unavailable; refusing to start bluetoothd"
+            return 1
+        fi
+        if ! "$BLUETOOTHD_INIT" start >>"$LOGFILE" 2>&1; then
+            log "failed to start bluetoothd"
+            return 1
+        fi
     fi
+    return 0
 }
 
 start() {
@@ -137,7 +212,10 @@ start() {
     attach_controller || true
     sleep 1
     bring_hci_up
-    restart_bluetoothd
+    if ! restart_bluetoothd; then
+        log_kernel_excerpt
+        return 1
+    fi
     log_kernel_excerpt
 }
 

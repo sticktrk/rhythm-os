@@ -2269,6 +2269,181 @@ void main() {
     expect(call.preserveBrightness, isTrue);
   });
 
+  testWidgets('extended-capability bulb control reaches 20000 kelvin',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'bulb-1',
+        name: 'Hue color bulb',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.lightDevice,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'bulb-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      lightsOn: true,
+      brightness: 50,
+      kelvin: 5500,
+    );
+
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'bulb-1',
+            'name': 'Hue color bulb',
+            'kind': 'light_device',
+            'hub_types': ['hue_ble'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'brightness': 50,
+            'kelvin': 5500,
+            'light_capabilities': {
+              'color_temperature': {
+                'min_kelvin': 1000,
+                'max_kelvin': 20000,
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'bulb-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await _tapRoomSegment(tester, 'Color', roomId: 'bulb-1');
+    final slider = tester.widget<Slider>(_cctSlider(roomId: 'bulb-1'));
+    expect(slider.min, 1000);
+    expect(slider.max, 20000);
+
+    slider.onChanged!(20000);
+    await tester.pump();
+    tester.widget<Slider>(_cctSlider(roomId: 'bulb-1')).onChangeEnd!(20000);
+    await tester.pump();
+
+    expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
+    expect(
+      connection.api.nodeCurveColorTemperatureCalls.single.kelvin,
+      20000,
+    );
+  });
+
+  testWidgets('known brightness-only bulb disables color temperature',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'bulb-1',
+        name: 'Hue white bulb',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.lightDevice,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'bulb-1',
+            'name': 'Hue white bulb',
+            'kind': 'light_device',
+            'hub_types': ['hue_ble'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'light_capabilities': <String, dynamic>{},
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'bulb-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final semantics = tester.getSemantics(
+      _colorControl(roomId: 'bulb-1'),
+    );
+    expect(
+      semantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isFalse,
+    );
+    expect(semantics.hint, 'This light supports brightness only');
+  });
+
   testWidgets('active CCT slider uses current curve side without wrapping',
       (tester) async {
     final roomProvider = RoomProvider();

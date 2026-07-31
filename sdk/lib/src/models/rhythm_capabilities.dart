@@ -5,6 +5,8 @@ abstract final class RhythmDeviceOnboardingMethod {
   static const String matterOnNetworkSetupCode = 'matter_on_network_setup_code';
   static const String matterBleWifiCommissioning =
       'matter_ble_wifi_commissioning';
+  static const String hueBleNearbyScan = 'hue_ble_nearby_scan';
+  static const String hueBridgeSerialSearch = 'hue_bridge_serial_search';
 }
 
 /// Stable feature IDs advertised by `/api/state.capabilities.features`.

@@ -10,6 +10,16 @@ import '../models/rhythm_scene.dart';
 import '../models/rhythm_settings.dart';
 import '../models/rhythm_time_info.dart';
 
+String? _plainTextResponseError(Object? value) {
+  if (value is! String) return null;
+  final message = value.trim();
+  if (message.isEmpty) return null;
+  const maxLength = 1024;
+  return message.length <= maxLength
+      ? message
+      : '${message.substring(0, maxLength)}…';
+}
+
 enum RhythmNodeColorScope {
   preview,
   mood,
@@ -1913,7 +1923,8 @@ class RhythmServerApi {
       if (statusCode != null && statusCode != 200) {
         return {
           'http_status': statusCode,
-          'error': 'Pairing request failed with HTTP $statusCode.',
+          'error': _plainTextResponseError(responseData) ??
+              'Pairing request failed with HTTP $statusCode.',
         };
       }
     } catch (e) {
@@ -1929,14 +1940,15 @@ class RhythmServerApi {
         }
 
         final statusCode = e.response?.statusCode;
-        final message = switch (e.type) {
-          DioExceptionType.connectionTimeout ||
-          DioExceptionType.receiveTimeout ||
-          DioExceptionType.sendTimeout =>
-            'Pairing timed out. Please keep the device powered on and try again.',
-          DioExceptionType.connectionError => 'Could not reach the server.',
-          _ => e.message ?? 'Pairing request failed.',
-        };
+        final message = _plainTextResponseError(responseData) ??
+            switch (e.type) {
+              DioExceptionType.connectionTimeout ||
+              DioExceptionType.receiveTimeout ||
+              DioExceptionType.sendTimeout =>
+                'Pairing timed out. Please keep the device powered on and try again.',
+              DioExceptionType.connectionError => 'Could not reach the server.',
+              _ => e.message ?? 'Pairing request failed.',
+            };
 
         return {
           if (statusCode != null) 'http_status': statusCode,
@@ -1957,9 +1969,11 @@ class RhythmServerApi {
   Future<Map<String, dynamic>?> unpairDevice({
     required String hubType,
     required String deviceId,
+    String? hubAddress,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
+    final normalizedHubAddress = hubAddress?.trim();
     try {
       final response = await _dio.post(
         'api/devices/unpair',
@@ -1967,17 +1981,59 @@ class RhythmServerApi {
           'hub_type': hubType,
           'params': {
             'device_id': deviceId,
+            if (normalizedHubAddress != null && normalizedHubAddress.isNotEmpty)
+              'hub_address': normalizedHubAddress,
             'force': force,
           },
         },
         options: Options(
           receiveTimeout: receiveTimeout,
           sendTimeout: receiveTimeout,
+          validateStatus: (_) => true,
         ),
       );
-      return response.data as Map<String, dynamic>?;
+
+      final statusCode = response.statusCode;
+      final responseData = response.data;
+      if (responseData is Map<String, dynamic>) {
+        return {
+          ...responseData,
+          if (statusCode != null && statusCode != 200)
+            'http_status': statusCode,
+        };
+      }
+      if (statusCode != null && statusCode != 200) {
+        return {
+          'http_status': statusCode,
+          'error': 'Unpair request failed with HTTP $statusCode.',
+        };
+      }
     } catch (e) {
       _log.warning('unpairDevice failed', e);
+      if (e is DioException) {
+        final responseData = e.response?.data;
+        if (responseData is Map<String, dynamic>) {
+          return {
+            ...responseData,
+            if (e.response?.statusCode != null)
+              'http_status': e.response!.statusCode,
+          };
+        }
+
+        final statusCode = e.response?.statusCode;
+        final message = switch (e.type) {
+          DioExceptionType.connectionTimeout ||
+          DioExceptionType.receiveTimeout ||
+          DioExceptionType.sendTimeout =>
+            'Unpairing timed out. Keep the device powered on nearby and try again.',
+          DioExceptionType.connectionError => 'Could not reach the server.',
+          _ => e.message ?? 'Unpair request failed.',
+        };
+        return {
+          if (statusCode != null) 'http_status': statusCode,
+          'error': message,
+        };
+      }
     }
     return null;
   }

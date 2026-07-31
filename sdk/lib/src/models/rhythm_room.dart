@@ -557,6 +557,83 @@ class RhythmDevice {
   }
 }
 
+/// Color-temperature range the server has proven safe for a light node.
+class RhythmColorTemperatureCapabilities {
+  final int minKelvin;
+  final int maxKelvin;
+
+  const RhythmColorTemperatureCapabilities({
+    required this.minKelvin,
+    required this.maxKelvin,
+  });
+
+  bool supports(int kelvin) => kelvin >= minKelvin && kelvin <= maxKelvin;
+
+  int clamp(int kelvin) => kelvin.clamp(minKelvin, maxKelvin).toInt();
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RhythmColorTemperatureCapabilities &&
+          minKelvin == other.minKelvin &&
+          maxKelvin == other.maxKelvin;
+
+  @override
+  int get hashCode => Object.hash(minKelvin, maxKelvin);
+
+  static RhythmColorTemperatureCapabilities? maybeFromJson(Object? value) {
+    final json = jsonMap(value);
+    if (json == null) return null;
+
+    final minKelvin = jsonInt(
+      json['min_kelvin'],
+      preferredKeys: const ['min_kelvin'],
+    );
+    final maxKelvin = jsonInt(
+      json['max_kelvin'],
+      preferredKeys: const ['max_kelvin'],
+    );
+    if (minKelvin == null ||
+        maxKelvin == null ||
+        minKelvin <= 0 ||
+        minKelvin > maxKelvin) {
+      return null;
+    }
+    return RhythmColorTemperatureCapabilities(
+      minKelvin: minKelvin,
+      maxKelvin: maxKelvin,
+    );
+  }
+}
+
+/// Extensible, normalized light-control capabilities for a node.
+class RhythmLightCapabilities {
+  final RhythmColorTemperatureCapabilities? colorTemperature;
+
+  const RhythmLightCapabilities({this.colorTemperature});
+
+  bool get supportsColorTemperature => colorTemperature != null;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RhythmLightCapabilities &&
+          colorTemperature == other.colorTemperature;
+
+  @override
+  int get hashCode => colorTemperature.hashCode;
+
+  static RhythmLightCapabilities? maybeFromJson(Object? value) {
+    final json = jsonMap(value);
+    if (json == null) return null;
+    return RhythmLightCapabilities(
+      colorTemperature: RhythmColorTemperatureCapabilities.maybeFromJson(
+        json['color_temperature'],
+      ),
+    );
+  }
+}
+
 /// A topology/control node as reported by the Rhythm server.
 ///
 /// The class name stays `RhythmRoom` for compatibility with existing callers,
@@ -578,6 +655,7 @@ class RhythmRoom {
   final List<String> hubTypes;
   final String? manufacturer;
   final String? model;
+  final RhythmLightCapabilities? lightCapabilities;
   final List<String> deviceIds;
   final List<RhythmDevice> devices;
   final RhythmNodeProfileSettings? profileSettings;
@@ -612,6 +690,7 @@ class RhythmRoom {
     this.hubTypes = const [],
     this.manufacturer,
     this.model,
+    this.lightCapabilities,
     this.deviceIds = const [],
     this.devices = const [],
     RhythmNodeProfileSettings? profileSettings,
@@ -735,6 +814,9 @@ class RhythmRoom {
       hubTypes: hubTypes,
       manufacturer: json['manufacturer'] as String?,
       model: json['model'] as String?,
+      lightCapabilities: RhythmLightCapabilities.maybeFromJson(
+        json['light_capabilities'],
+      ),
       deviceIds: (json['device_ids'] as List<dynamic>?)
               ?.map((e) => e as String)
               .toList() ??
@@ -879,6 +961,7 @@ class RhythmRoomState {
   final List<String> hubTypes;
   final String? manufacturer;
   final String? model;
+  final RhythmLightCapabilities? lightCapabilities;
   final RhythmObservedPower? observedPower;
   final bool? lightsOn;
   final int? brightness;
@@ -912,6 +995,7 @@ class RhythmRoomState {
     this.hubTypes = const [],
     this.manufacturer,
     this.model,
+    this.lightCapabilities,
     this.observedPower,
     this.lightsOn,
     this.brightness,
@@ -990,6 +1074,9 @@ class RhythmRoomState {
       hubTypes: hubTypes,
       manufacturer: json['manufacturer'] as String?,
       model: json['model'] as String?,
+      lightCapabilities: RhythmLightCapabilities.maybeFromJson(
+        json['light_capabilities'],
+      ),
       observedPower: observedPower,
       lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(

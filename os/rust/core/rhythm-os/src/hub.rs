@@ -180,6 +180,7 @@ pub struct HubType(pub String);
 
 impl HubType {
     pub const HUE: &'static str = "hue";
+    pub const HUE_BLE: &'static str = "hue_ble";
     pub const HA: &'static str = "ha";
     pub const MATTER: &'static str = "matter";
 
@@ -214,6 +215,11 @@ pub const DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE: &str =
     "matter_on_network_setup_code";
 pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
     "matter_ble_wifi_commissioning";
+/// Scan for and bond every newly advertising factory-reset Hue BLE bulb.
+pub const DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN: &str = "hue_ble_nearby_scan";
+/// Ask an already connected Hue Bridge to find one Zigbee light by its
+/// six-character printed serial.
+pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";
 
 impl HubIntegrationCapability {
     pub fn new(hub_type: impl Into<String>) -> Self {
@@ -490,9 +496,8 @@ pub trait ExternalLightHubIntegration: Send + Sync {
 
     /// Start a device pairing session (Matter commissioning, Zigbee permit join).
     ///
-    /// Default returns an error — hub-based integrations (Hue, HA) don't support
-    /// pairing individual devices. Direct-connection integrations (Matter, Zigbee)
-    /// override this.
+    /// Default returns an error. Direct integrations and hubs with an explicit
+    /// upstream add/search operation override this.
     fn start_pairing(
         &self,
         _state: &SharedState,

@@ -443,7 +443,8 @@ pub struct AppState {
     pub hub_startup_retry: HashMap<HubKey, HubStartupRetryState>,
     /// API-facing capability metadata for integrations available on this platform.
     pub hub_capabilities: Vec<crate::hub::HubIntegrationCapability>,
-    /// Pairing sessions currently running, keyed by hub type.
+    /// Pairing sessions currently running, keyed by their exclusive resource
+    /// slot (normally hub type; appliance Matter/Hue BLE share the adapter).
     pub pairing_in_progress: HashSet<String>,
 
     // ---- Canonical device registry + topology ----
@@ -740,13 +741,33 @@ pub struct AppState {
         Arc<dyn Fn() -> anyhow::Result<Option<crate::provisioning::WifiCredentials>> + Send + Sync>,
     >,
 
+    /// Optional platform-owned safety barrier for a full factory reset.
+    ///
+    /// Shared reset logic calls this hook before disconnecting integrations or
+    /// deleting persistent Rhythm state. Appliance targets use the still-live
+    /// integration metadata to release peripheral-held trust, then durably
+    /// block orphan adoption and stop BlueZ before adapter-bound keys are
+    /// scrubbed.
+    #[allow(clippy::type_complexity)]
+    pub before_factory_reset_fn:
+        Option<Arc<dyn Fn(&SharedState) -> anyhow::Result<()> + Send + Sync>>,
+
     /// Optional platform-owned follow-up for a full factory reset.
     ///
     /// Shared reset logic clears in-memory and persisted Rhythm state, then
     /// delegates lifecycle/platform cleanup (restart, reboot, Wi-Fi reset) to
     /// the active binary crate through this callback.
     #[allow(clippy::type_complexity)]
-    pub after_factory_reset_fn: Option<Arc<dyn Fn(&SharedState) + Send + Sync>>,
+    pub after_factory_reset_fn:
+        Option<Arc<dyn Fn(&SharedState) -> anyhow::Result<()> + Send + Sync>>,
+
+    /// Platform-owned recovery action for failures after shared factory reset
+    /// has crossed its destructive safety barrier.
+    ///
+    /// At that point returning an HTTP error is not sufficient: the current
+    /// process may retain a partially cleared runtime. Appliance targets use
+    /// this hook to schedule a fail-closed reboot.
+    pub factory_reset_recovery_fn: Option<Arc<dyn Fn() + Send + Sync>>,
 
     /// Platform-owned remote access runtime controller.
     ///
@@ -890,7 +911,9 @@ impl Default for AppState {
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
             commissioning_wifi_credentials_provider: None,
+            before_factory_reset_fn: None,
             after_factory_reset_fn: None,
+            factory_reset_recovery_fn: None,
             remote_access_controller: None,
             firmware_version: "0.0.0",
             server_instance_id: generate_server_instance_id(),
@@ -1276,17 +1299,17 @@ impl AppState {
         self.hub_sync_in_progress.remove(key);
     }
 
-    /// Mark a pairing attempt as running for a hub type.
+    /// Mark a pairing attempt as running for an exclusive resource slot.
     ///
     /// Returns `true` when this call acquired the pairing slot and the caller
     /// should proceed. Returns `false` when another attempt is already running.
-    pub fn begin_pairing(&mut self, hub_type: &str) -> bool {
-        self.pairing_in_progress.insert(hub_type.to_string())
+    pub fn begin_pairing(&mut self, pairing_slot: &str) -> bool {
+        self.pairing_in_progress.insert(pairing_slot.to_string())
     }
 
-    /// Mark a pairing attempt as finished for a hub type.
-    pub fn finish_pairing(&mut self, hub_type: &str) {
-        self.pairing_in_progress.remove(hub_type);
+    /// Mark a pairing attempt as finished for an exclusive resource slot.
+    pub fn finish_pairing(&mut self, pairing_slot: &str) {
+        self.pairing_in_progress.remove(pairing_slot);
     }
 
     /// Get solar noon hour from runtime config.

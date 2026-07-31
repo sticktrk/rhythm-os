@@ -1,11 +1,13 @@
-//! Platform-agnostic Hue integration layer.
+//! Philips Hue integration layer.
 //!
 //! Provides device registry, SSE event parsing, button mapping, light controller,
-//! and transport abstraction for Philips Hue bridges. No target-specific
-//! dependencies — concrete transport implementations live in the platform crate.
+//! and transport abstractions for Philips Hue bridges and direct Hue Bluetooth
+//! lights. Vendor protocol code is portable; the BlueZ transport is compiled
+//! only on Linux.
 
 pub mod api_types;
 pub mod behavior;
+pub mod ble;
 pub mod controller;
 pub mod device_types;
 pub mod discovery;

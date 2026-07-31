@@ -681,6 +681,40 @@ class AnalyticsService {
     });
   }
 
+  /// Track direct Hue BLE pairing without retaining the bulb serial.
+  Future<void> logHueBlePairingAttempted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+  }) async {
+    await logEvent('hue_ble_pairing_attempted', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+    });
+  }
+
+  /// Track a terminal direct Hue BLE pairing outcome without device data.
+  Future<void> logHueBlePairingCompleted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_ble_pairing_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   // ===========================================================================
   // Device Review Events
   // ===========================================================================

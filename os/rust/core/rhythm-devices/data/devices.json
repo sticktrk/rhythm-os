@@ -123,6 +123,20 @@
   },
   {
     "manufacturer": "Signify Netherlands B.V.",
+    "model": "LCA013",
+    "name": "Hue White and Color Ambiance A19/E26 (Bluetooth and Matter)",
+    "light_type": "extended_color",
+    "color_modes": ["xy", "color_temperature"],
+    "min_kelvin": 1000,
+    "max_kelvin": 20000,
+    "zigbee": {
+      "model_id": "LCA013",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
     "model": "LCT024",
     "name": "Hue Play Light Bar",
     "light_type": "extended_color",
@@ -272,6 +286,18 @@
     "color_modes": ["dimmable"],
     "zigbee": {
       "model_id": "LWA001",
+      "mfr_code": "0x100B",
+      "endpoint": 11
+    }
+  },
+  {
+    "manufacturer": "Signify Netherlands B.V.",
+    "model": "LWA003",
+    "name": "Hue White A19/E26 (Bluetooth)",
+    "light_type": "dimmable",
+    "color_modes": ["dimmable"],
+    "zigbee": {
+      "model_id": "LWA003",
       "mfr_code": "0x100B",
       "endpoint": 11
     }

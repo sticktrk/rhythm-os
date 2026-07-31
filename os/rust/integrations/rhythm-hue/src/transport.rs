@@ -4,6 +4,30 @@
 //! to provide HTTP communication with the Hue bridge. The trait methods
 //! mirror the public HTTP operations required by the integration.
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HueBridgeSearchLight {
+    /// Legacy Hue V1 light identifier returned by `/lights/new`.
+    pub legacy_id: String,
+    pub name: String,
+}
+
+pub fn normalize_hue_bridge_serial(raw: &str) -> anyhow::Result<String> {
+    let normalized = raw
+        .trim()
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '-')
+        .flat_map(char::to_uppercase)
+        .collect::<String>();
+    if normalized.len() != 6
+        || !normalized
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        anyhow::bail!("Hue bulb serial must be six hexadecimal characters");
+    }
+    Ok(normalized)
+}
+
 /// Platform-agnostic interface to the Hue bridge HTTP API.
 ///
 /// Implementors provide the actual HTTP/TLS transport. This can be reqwest,
@@ -72,6 +96,31 @@ pub trait HueTransport: Send + Sync {
         resource_type: &str,
     ) -> anyhow::Result<serde_json::Value>;
 
+    /// Ask a connected Hue Bridge to search its Zigbee network for the bulb
+    /// whose six-character serial is printed on the bulb.
+    fn search_new_lights(
+        &self,
+        _username: &str,
+        _serial: &str,
+    ) -> anyhow::Result<Vec<HueBridgeSearchLight>> {
+        anyhow::bail!("Hue Bridge serial search is not supported by this transport")
+    }
+
+    /// Check whether a Hue V2 device is still owned by the bridge.
+    fn device_exists(&self, _username: &str, _v2_device_id: &str) -> anyhow::Result<bool> {
+        anyhow::bail!("Hue Bridge device lookup is not supported by this transport")
+    }
+
+    /// Remove every V1 light belonging to a Hue V2 light device.
+    ///
+    /// Hue exposes light deletion only through its V1 API. Implementations
+    /// therefore resolve the V2 device to its Zigbee MAC, match that MAC
+    /// against V1 `uniqueid` values, delete every exact match, and wait for
+    /// the V2 device projection to disappear.
+    fn remove_light_device(&self, _username: &str, _v2_device_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Hue Bridge light removal is not supported by this transport")
+    }
+
     /// Recall a Hue V2 scene.
     fn recall_scene(
         &self,
@@ -102,4 +151,17 @@ pub trait HueTransport: Send + Sync {
     /// the runtime creates its own transport. Default is a no-op;
     /// custom transports can clear their keep-alive connection.
     fn release_connection(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_serial_is_six_hex_characters() {
+        assert_eq!(normalize_hue_bridge_serial("e277da").unwrap(), "E277DA");
+        assert_eq!(normalize_hue_bridge_serial("e2 77-da").unwrap(), "E277DA");
+        assert!(normalize_hue_bridge_serial("E277D").is_err());
+        assert!(normalize_hue_bridge_serial("E277D!").is_err());
+    }
 }

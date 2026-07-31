@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+
+import '../utils/app_color_temperature.dart';
 import 'solar_orbit.dart';
 
 /// Horizontal timeline bar with CCT gradient and time scrubbing.
@@ -192,10 +194,10 @@ class _GradientBarPainter extends CustomPainter {
       // Default gradient if no data
       final gradient = LinearGradient(
         colors: [
-          ColorUtils.cctToColor(2700),
-          ColorUtils.cctToColor(6500),
-          ColorUtils.cctToColor(6500),
-          ColorUtils.cctToColor(2700),
+          AppColorTemperature.toColor(2700),
+          AppColorTemperature.toColor(6500),
+          AppColorTemperature.toColor(6500),
+          AppColorTemperature.toColor(2700),
         ],
         stops: const [0.0, 0.4, 0.6, 1.0],
       );
@@ -215,7 +217,7 @@ class _GradientBarPainter extends CustomPainter {
       final kelvin = SolarUtils.interpolateValue(
           curveData!.hours, curveData!.kelvin, hour);
 
-      final color = ColorUtils.cctToColor(kelvin.toInt());
+      final color = AppColorTemperature.toColor(kelvin.toInt());
       final opacity = 0.4 + (brightness / 100) * 0.6;
 
       final paint = Paint()..color = color.withValues(alpha: opacity);

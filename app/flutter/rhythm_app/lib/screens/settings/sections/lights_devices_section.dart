@@ -168,9 +168,9 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
       for (final d in raw ?? const <Map<String, dynamic>>[]) {
         final endpoints = d['endpoints'] as List<dynamic>? ?? const [];
         final belongs = endpoints.any((ep) {
-          final hubKey =
-              (ep as Map<String, dynamic>)['hub_key'] as Map<String, dynamic>? ??
-                  const {};
+          final hubKey = (ep as Map<String, dynamic>)['hub_key']
+                  as Map<String, dynamic>? ??
+              const {};
           return hubKey['hub_type']?.toString() == type;
         });
         if (!belongs) continue;
@@ -192,8 +192,8 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
             model: d['model'] as String?,
           ),
           roomId: parentId ?? '',
-          roomName: (parentId != null ? roomNames[parentId] : null) ??
-              'Unassigned',
+          roomName:
+              (parentId != null ? roomNames[parentId] : null) ?? 'Unassigned',
         ));
       }
 
@@ -220,8 +220,8 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
       RhythmDeviceType.motion: 2,
       RhythmDeviceType.contact: 3,
     };
-    entries.sort((a, b) => (order[a.device.type] ?? 3)
-        .compareTo(order[b.device.type] ?? 3));
+    entries.sort((a, b) =>
+        (order[a.device.type] ?? 3).compareTo(order[b.device.type] ?? 3));
   }
 
   Future<void> _openDevice(_DeviceEntry entry) async {
@@ -371,8 +371,8 @@ class _HubAccordionTile extends StatelessWidget {
                   Text(
                     _summary(hub.devices),
                     style: TextStyle(
-                      color: CelestialColors.textSecondary
-                          .withValues(alpha: 0.7),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.7),
                       fontSize: 12.5,
                     ),
                   ),
@@ -436,7 +436,8 @@ class _HubAccordionTile extends StatelessWidget {
           thickness: 0.5,
           color: CelestialColors.orbitRing.withValues(alpha: 0.25),
         ),
-        for (final entry in hub.devices) _DeviceRow(entry: entry, onTap: onDeviceTap),
+        for (final entry in hub.devices)
+          _DeviceRow(entry: entry, onTap: onDeviceTap),
         const SizedBox(height: 6),
       ],
     );
@@ -510,7 +511,8 @@ class _DeviceRow extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.5),
                       fontSize: 11.5,
                     ),
                   ),
@@ -630,6 +632,8 @@ String _hubLabel(String type) {
       return 'Matter';
     case 'hue':
       return 'Philips Hue';
+    case 'hue_ble':
+      return 'Hue Bluetooth';
     case 'home_assistant':
     case 'homeassistant':
     case 'ha':

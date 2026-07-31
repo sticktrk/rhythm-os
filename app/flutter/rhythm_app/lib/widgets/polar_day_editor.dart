@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 
+import '../utils/app_color_temperature.dart';
+
 /// Polar Day Editor - Edit Mode for shaping sunrise/sunset transitions.
 ///
 /// A meditative, clock-like interface where:
@@ -395,7 +397,7 @@ class _PolarDayPainter extends CustomPainter {
           (config.maxBrightness - config.minBrightness);
       final clampedBri = normBri.clamp(0.0, 1.0);
 
-      final cctColor = ColorUtils.curveColorForCCT(kelvin.round());
+      final cctColor = AppColorTemperature.curveColor(kelvin.round());
       final angle = _hourToAngle(hour);
 
       // Glow extends inward from ring - more brightness = longer glow reaching center
@@ -448,7 +450,7 @@ class _PolarDayPainter extends CustomPainter {
           SolarUtils.interpolateValue(data.hours, data.brightness, hour);
       final kelvin = SolarUtils.interpolateValue(data.hours, data.kelvin, hour);
 
-      final cctColor = ColorUtils.curveColorForCCT(kelvin.round());
+      final cctColor = AppColorTemperature.curveColor(kelvin.round());
       // Ring opacity based on brightness (matching SolarOrbit style)
       final opacity = (0.3 + (brightness / 100) * 0.7) * entryValue;
 
@@ -491,7 +493,7 @@ class _PolarDayPainter extends CustomPainter {
 
   void _drawCentralSun(Canvas canvas, Offset center, double maxRadius) {
     // Get CCT color for current time
-    final sunColor = ColorUtils.curveColorForCCT(currentKelvin);
+    final sunColor = AppColorTemperature.curveColor(currentKelvin);
 
     // Size scales with brightness (matching SolarOrbit proportions)
     // SolarOrbit: minSunSize = size * 0.15, maxSunSize = size * 0.35

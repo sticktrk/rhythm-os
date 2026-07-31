@@ -55,6 +55,18 @@ class RhythmWifiChangeResponse {
   bool get accepted => httpStatus == 200 && error == null;
 }
 
+class RhythmFactoryResetResponse {
+  const RhythmFactoryResetResponse({
+    required this.success,
+    this.httpStatus,
+    this.error,
+  });
+
+  final bool success;
+  final int? httpStatus;
+  final String? error;
+}
+
 /// Outcome of asking the device to submit its debug bundle directly.
 class RhythmDebugBundleSubmissionResult {
   const RhythmDebugBundleSubmissionResult({
@@ -311,9 +323,34 @@ class RhythmDiagnosticsApi {
   Future<bool> factoryReset({
     String? platformType,
     String? platformContext,
+  }) async =>
+      (await factoryResetDetailed(
+        platformType: platformType,
+        platformContext: platformContext,
+      ))
+          .success;
+
+  /// Detailed factory-reset result, including a server safety-barrier error.
+  Future<RhythmFactoryResetResponse> factoryResetDetailed({
+    String? platformType,
+    String? platformContext,
   }) async {
     try {
-      await _dio.post('api/factory-reset');
+      final response = await _dio.post(
+        'api/factory-reset',
+        options: Options(validateStatus: (_) => true),
+      );
+      final statusCode = response.statusCode;
+      if (statusCode == null || statusCode < 200 || statusCode >= 300) {
+        return RhythmFactoryResetResponse(
+          success: false,
+          httpStatus: statusCode,
+          error: _responseBodyText(response.data) ??
+              (statusCode == null
+                  ? 'Factory reset request failed.'
+                  : 'Factory reset request failed with HTTP $statusCode.'),
+        );
+      }
       if (_isRpizPlatform(
         platformType: platformType,
         platformContext: platformContext,
@@ -326,10 +363,25 @@ class RhythmDiagnosticsApi {
           _log.warning('factoryReset follow-up wifi reset failed', e);
         }
       }
-      return true;
-    } catch (e) {
-      _log.warning('factoryReset failed', e);
-      return false;
+      return RhythmFactoryResetResponse(
+        success: true,
+        httpStatus: statusCode,
+      );
+    } on DioException catch (error) {
+      _log.warning('factoryReset failed', error);
+      return RhythmFactoryResetResponse(
+        success: false,
+        httpStatus: error.response?.statusCode,
+        error: _responseBodyText(error.response?.data) ??
+            _networkErrorText(error) ??
+            error.message,
+      );
+    } catch (error) {
+      _log.warning('factoryReset failed', error);
+      return RhythmFactoryResetResponse(
+        success: false,
+        error: error.toString(),
+      );
     }
   }
 
@@ -394,7 +446,15 @@ class RhythmDiagnosticsApi {
       final text = utf8.decode(data, allowMalformed: true).trim();
       return text.isEmpty ? null : text;
     }
-    if (data is Map || data is List) {
+    if (data is Map) {
+      final message = data['error'] ?? data['message'];
+      if (message is String && message.trim().isNotEmpty) {
+        return message.trim();
+      }
+      final text = jsonEncode(data);
+      return text.isEmpty ? null : text;
+    }
+    if (data is List) {
       final text = jsonEncode(data);
       return text.isEmpty ? null : text;
     }

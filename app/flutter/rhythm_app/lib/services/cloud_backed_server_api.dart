@@ -717,23 +717,27 @@ class CloudBackedServerApi {
     required String hubType,
     Map<String, dynamic> params = const {},
     Duration receiveTimeout = const Duration(seconds: 45),
+    String? sessionId,
   }) {
     return _delegate.pairDevice(
       hubType: hubType,
       params: params,
       receiveTimeout: receiveTimeout,
+      sessionId: sessionId,
     );
   }
 
   Future<Map<String, dynamic>?> unpairDevice({
     required String hubType,
     required String deviceId,
+    String? hubAddress,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) {
     return _delegate.unpairDevice(
       hubType: hubType,
       deviceId: deviceId,
+      hubAddress: hubAddress,
       force: force,
       receiveTimeout: receiveTimeout,
     );

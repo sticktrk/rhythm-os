@@ -142,6 +142,17 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   bool topologyRenameRoomResult = true;
   int triggerSyncCalls = 0;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
+  final List<
+      ({
+        String hubType,
+        String deviceId,
+        String? hubAddress,
+        bool force,
+      })> unpairCalls = [];
+  Map<String, dynamic>? unpairResult = const {'status': 'complete'};
+  List<Map<String, dynamic>?>? unpairResults;
+  Completer<Map<String, dynamic>?>? unpairCompleter;
+  bool removeCanonicalEndpointOnUnpair = true;
   List<RhythmInputBinding> inputBindings = const [];
   int createDaySleepToggleInputBindingCalls = 0;
   int setInputBindingCalls = 0;
@@ -602,6 +613,58 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   @override
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) async {
     return canonicalDevices[id];
+  }
+
+  @override
+  Future<Map<String, dynamic>?> unpairDevice({
+    required String hubType,
+    required String deviceId,
+    String? hubAddress,
+    bool force = false,
+    Duration receiveTimeout = const Duration(seconds: 90),
+  }) async {
+    unpairCalls.add((
+      hubType: hubType,
+      deviceId: deviceId,
+      hubAddress: hubAddress,
+      force: force,
+    ));
+    final pendingResult = unpairCompleter;
+    final Map<String, dynamic>? result;
+    if (pendingResult != null) {
+      result = await pendingResult.future;
+      if (identical(unpairCompleter, pendingResult)) {
+        unpairCompleter = null;
+      }
+    } else {
+      final queuedResults = unpairResults;
+      result = queuedResults != null && queuedResults.isNotEmpty
+          ? queuedResults.removeAt(0)
+          : unpairResult;
+    }
+    if (result?['status'] == 'complete' && removeCanonicalEndpointOnUnpair) {
+      for (final canonicalId in canonicalDevices.keys.toList()) {
+        final canonical = canonicalDevices[canonicalId];
+        if (canonical == null) continue;
+        final endpoints = canonical['endpoints'] as List<dynamic>? ?? const [];
+        final remaining = [
+          for (final endpoint in endpoints)
+            if (endpoint is! Map<String, dynamic> ||
+                endpoint['native_id']?.toString() != deviceId ||
+                (endpoint['hub_key'] as Map<String, dynamic>?)?['hub_type']
+                        ?.toString() !=
+                    hubType)
+              endpoint,
+        ];
+        if (remaining.length != endpoints.length) {
+          canonicalDevices[canonicalId] = {
+            ...canonical,
+            'endpoints': remaining,
+          };
+        }
+      }
+    }
+    return result;
   }
 }
 
@@ -1763,6 +1826,89 @@ void main() {
       expect(provider.canAddMatterOnNetworkDevice, isFalse);
       expect(provider.canCommissionMatterBleWifi, isFalse);
     });
+
+    test('exposes Hue BLE only for its advertised nearby-scan method',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'rooms': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+          'capabilities': {
+            'hubs': [
+              {
+                'type': 'hue_ble',
+                'configurable': false,
+                'device_onboarding_methods': ['hue_ble_nearby_scan'],
+                'supports_unpairing': true,
+                'supports_roomless_devices': true,
+              },
+            ],
+          },
+        }),
+      );
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(provider.canAddHueBleDevice, isTrue);
+      expect(provider.canUnpairHueBleDevices, isTrue);
+      expect(provider.supportsHueBleRoomlessDevices, isTrue);
+      expect(provider.canScanToAddDevice, isTrue);
+      expect(provider.canAddMatterDevice, isFalse);
+    });
+
+    test('offers Hue serial intake only for an advertised connected bridge',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      RhythmHello hello({required bool connected}) => RhythmHello.fromJson({
+            'rooms': const <Map<String, dynamic>>[],
+            'location': const <String, dynamic>{},
+            'hubs': [
+              {
+                'type': 'hue',
+                'address': '192.168.1.20:443',
+                'connected': connected,
+              },
+            ],
+            'capabilities': {
+              'hubs': [
+                {
+                  'type': 'hue',
+                  'configurable': true,
+                  'device_onboarding_methods': [
+                    'hue_bridge_serial_search',
+                  ],
+                  'supports_unpairing': true,
+                  'supports_roomless_devices': false,
+                },
+              ],
+            },
+          });
+
+      connection.emitHello(hello(connected: false));
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.canAddHueBridgeDeviceBySerial, isFalse);
+      expect(provider.canUnpairHueBridgeDevices, isTrue);
+      expect(provider.canScanToAddDevice, isFalse);
+
+      connection.emitHello(hello(connected: true));
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.canAddHueBridgeDeviceBySerial, isTrue);
+      expect(provider.canUnpairHueBridgeDevices, isTrue);
+      expect(provider.canScanToAddDevice, isTrue);
+    });
   });
 
   group('ServerSyncProvider location reconciliation', () {
@@ -2340,6 +2486,12 @@ void main() {
               'time_offset': 0.0,
               'brightness_offset': 0.0,
               'lights_on': true,
+              'light_capabilities': {
+                'color_temperature': {
+                  'min_kelvin': 1000,
+                  'max_kelvin': 20000,
+                },
+              },
             },
           ],
           'location': const <String, dynamic>{},
@@ -2380,6 +2532,26 @@ void main() {
       expect(room.kelvin, 2100);
       expect(room.profileSettings?.profileId, 'sleep');
       expect(room.profileSettings?.fadeMs, 1500);
+      final colorTemperature =
+          provider.colorTemperatureCapabilitiesForNode('room-1');
+      expect(colorTemperature?.minKelvin, 1000);
+      expect(colorTemperature?.maxKelvin, 20000);
+
+      connection.emitRhythmState(
+        RhythmRoomState.fromJson({
+          'id': 'room-1',
+          'state': 'hard_off',
+          'rhythm_enabled': false,
+          'time_offset': 12.0,
+          'brightness_offset': -8.0,
+          'light_capabilities': <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final knownCapabilities = provider.nodeById('room-1')?.lightCapabilities;
+      expect(knownCapabilities, isNotNull);
+      expect(knownCapabilities?.supportsColorTemperature, isFalse);
     });
 
     test('resolves persisted mood color from server mood profile', () async {
@@ -4612,7 +4784,7 @@ void main() {
               'type': 'hue',
               'configurable': true,
               'device_onboarding_methods': const <String>[],
-              'supports_unpairing': false,
+              'supports_unpairing': true,
               'supports_roomless_devices': false,
             },
           ],
@@ -5050,6 +5222,921 @@ void main() {
 
     final headerText = tester.widget<Text>(find.text(deviceName));
     expect(headerText.textAlign, TextAlign.center);
+  });
+
+  testWidgets('Hue Bluetooth lights expose their removable connection',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Hue white lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': '001788010c765ba7',
+          'preferred': true,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Hue white lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hue Bluetooth'), findsOneWidget);
+    expect(find.text('Remove Device'), findsOneWidget);
+
+    await tester.tap(find.text('Remove Device'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('authenticated Bluetooth release'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('powered on and nearby'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('paired again without a factory reset'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Hue Bluetooth release failure offers retry before local forget',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi()
+      ..unpairResults = [
+        {'status': 'failed', 'error': 'Bulb is offline'},
+        {'status': 'failed', 'error': 'Bulb is still offline'},
+        {
+          'status': 'complete',
+          'completion_scope': 'local_bond_retained',
+          'warning':
+              'Rhythm retained the Bluetooth bond so a nearby scan can restore it.',
+        },
+      ];
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1100));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Hue white lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': 'hue-ble-001788010c765ba7',
+          'preferred': true,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Hue white lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove Device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Couldn’t release the bulb'), findsOneWidget);
+    expect(find.textContaining('Bulb is offline'), findsOneWidget);
+    expect(find.text('Try Again'), findsOneWidget);
+    expect(find.text('Forget Anyway'), findsOneWidget);
+    expect(
+      find.textContaining('can explicitly re-adopt it later'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('may require a factory reset'),
+      findsOneWidget,
+    );
+    expect(
+      api.unpairCalls,
+      [
+        (
+          hubType: 'hue_ble',
+          deviceId: 'hue-ble-001788010c765ba7',
+          hubAddress: null,
+          force: false,
+        ),
+      ],
+    );
+
+    await tester.tap(find.text('Try Again'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Couldn’t release the bulb'), findsOneWidget);
+    expect(find.textContaining('Bulb is still offline'), findsOneWidget);
+    expect(
+      api.unpairCalls.map((call) => call.force),
+      [false, false],
+    );
+
+    await tester.tap(find.text('Forget Anyway'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.unpairCalls.map((call) => call.force),
+      [false, false, true],
+    );
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('Couldn’t release the bulb'), findsNothing);
+    expect(find.textContaining('must be factory reset'), findsNothing);
+    expect(find.textContaining('retained the Bluetooth bond'), findsOneWidget);
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets(
+      'Hue Bluetooth removal keeps its modal open and Done disabled while '
+      'the request is in flight', (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final pendingRemoval = Completer<Map<String, dynamic>?>();
+    final api = _FakeRhythmServerApi()..unpairCompleter = pendingRemoval;
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Hue white lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': 'hue-ble-001788010c765ba7',
+          'preferred': true,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => DeviceDetailSheet.show(
+              context,
+              const RhythmDevice(
+                id: 'light-1',
+                type: RhythmDeviceType.light,
+                name: 'Hue white lamp',
+              ),
+              '',
+            ),
+            child: const Text('Open device'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove Device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Removing...'), findsOneWidget);
+    expect(
+      tester
+          .widget<ElevatedButton>(
+            find.widgetWithText(ElevatedButton, 'DONE'),
+          )
+          .onPressed,
+      isNull,
+    );
+
+    await tester.binding.handlePopRoute();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Removing...'), findsOneWidget);
+
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Removing...'), findsOneWidget);
+
+    await tester.fling(
+      find.byType(DeviceDetailSheet),
+      const Offset(0, 600),
+      1000,
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Removing...'), findsOneWidget);
+
+    pendingRemoval.complete(const {
+      'status': 'complete',
+      'completion_scope': 'local_bond_removed',
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DeviceDetailSheet), findsNothing);
+    expect(find.text('Open device'), findsOneWidget);
+  });
+
+  testWidgets(
+      'merged device enumerates removable endpoints and keeps detail open '
+      'after Hue Bluetooth removal', (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Merged Hue lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': 'hue-ble-001788010c765ba7',
+          'preferred': true,
+        },
+        {
+          'hub_key': {
+            'hub_type': 'matter',
+            'address': 'local',
+          },
+          'native_id': 'matter-42',
+          'preferred': false,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+            {
+              'type': 'matter',
+              'configurable': true,
+              'device_onboarding_methods': [
+                'matter_on_network_setup_code',
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Merged Hue lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Remove Hue Bluetooth Connection'), findsOneWidget);
+    expect(find.text('Remove Matter Connection'), findsOneWidget);
+
+    await tester.tap(find.text('Remove Hue Bluetooth Connection'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Remove Hue Bluetooth Connection?'), findsOneWidget);
+    expect(
+      find.textContaining(
+        'The device will remain in Rhythm through its other connection.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('authenticated Bluetooth release'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('paired again without a factory reset'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.unpairCalls,
+      [
+        (
+          hubType: 'hue_ble',
+          deviceId: 'hue-ble-001788010c765ba7',
+          hubAddress: null,
+          force: false,
+        ),
+      ],
+    );
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('Merged Hue lamp'), findsOneWidget);
+    expect(find.text('DONE'), findsOneWidget);
+    expect(find.text('Hue Bluetooth'), findsNothing);
+    expect(find.text('Matter'), findsOneWidget);
+    expect(find.text('Remove Device'), findsOneWidget);
+    expect(
+      find.text(
+        'Removed Hue Bluetooth connection from Merged Hue lamp',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('merged Hue Bluetooth lifecycle warnings require acknowledgement',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    const lifecycleWarning =
+        'Rhythm retained the Bluetooth bond so a nearby scan can restore it.';
+    final api = _FakeRhythmServerApi()
+      ..unpairResult = const {
+        'status': 'complete',
+        'completion_scope': 'local_bond_retained',
+        'warning': lifecycleWarning,
+      };
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Merged Hue lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': 'hue-ble-001788010c765ba7',
+          'preferred': true,
+        },
+        {
+          'hub_key': {
+            'hub_type': 'matter',
+            'address': 'local',
+          },
+          'native_id': 'matter-42',
+          'preferred': false,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+            },
+            {
+              'type': 'matter',
+              'device_onboarding_methods': [
+                'matter_on_network_setup_code',
+              ],
+              'supports_unpairing': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Merged Hue lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove Hue Bluetooth Connection'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Removed Hue Bluetooth connection'),
+      findsOneWidget,
+    );
+    expect(find.text(lifecycleWarning), findsOneWidget);
+    expect(find.text('Done'), findsOneWidget);
+
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    expect(find.text(lifecycleWarning), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text(lifecycleWarning), findsOneWidget);
+
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(find.text(lifecycleWarning), findsNothing);
+    expect(find.text('Merged Hue lamp'), findsOneWidget);
+    expect(find.text('DONE'), findsOneWidget);
+    expect(find.text('Hue Bluetooth'), findsNothing);
+    expect(find.text('Matter'), findsOneWidget);
+  });
+
+  testWidgets('merged device removal targets the selected Matter endpoint',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Merged Hue lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': 'hue-ble-001788010c765ba7',
+          'preferred': true,
+        },
+        {
+          'hub_key': {
+            'hub_type': 'matter',
+            'address': 'local',
+          },
+          'native_id': 'matter-42',
+          'preferred': false,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+            },
+            {
+              'type': 'matter',
+              'device_onboarding_methods': [
+                'matter_on_network_setup_code',
+              ],
+              'supports_unpairing': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Merged Hue lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove Matter Connection'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.unpairCalls,
+      [
+        (
+          hubType: 'matter',
+          deviceId: 'matter-42',
+          hubAddress: null,
+          force: false,
+        ),
+      ],
+    );
+    expect(find.text('DONE'), findsOneWidget);
+    expect(find.text('Matter'), findsNothing);
+    expect(find.text('Hue Bluetooth'), findsOneWidget);
+    expect(find.text('Remove Device'), findsOneWidget);
+  });
+
+  testWidgets(
+      'merged Hue Bridge removal targets its bridge and preserves Bluetooth',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Dual Hue lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue',
+            'address': '192.168.1.20',
+          },
+          'native_id': 'hue-light-7',
+          'preferred': true,
+        },
+        {
+          'hub_key': {
+            'hub_type': 'hue_ble',
+            'address': 'local',
+          },
+          'native_id': 'hue-ble-001788010c765ba7',
+          'preferred': false,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue',
+              'device_onboarding_methods': ['hue_bridge_serial_search'],
+              'supports_unpairing': true,
+            },
+            {
+              'type': 'hue_ble',
+              'device_onboarding_methods': ['hue_ble_nearby_scan'],
+              'supports_unpairing': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Dual Hue lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Remove Hue Bridge Connection'), findsOneWidget);
+    expect(find.text('Remove Hue Bluetooth Connection'), findsOneWidget);
+
+    await tester.tap(find.text('Remove Hue Bridge Connection'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('ask your Hue Bridge to remove'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(
+        'The device will remain in Rhythm through its other connection.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('factory-reset'), findsNothing);
+
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.unpairCalls,
+      [
+        (
+          hubType: 'hue',
+          deviceId: 'hue-light-7',
+          hubAddress: '192.168.1.20',
+          force: false,
+        ),
+      ],
+    );
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('DONE'), findsOneWidget);
+    expect(find.text('Hue Bridge'), findsNothing);
+    expect(find.text('Hue Bluetooth'), findsOneWidget);
+    expect(find.text('Remove Device'), findsOneWidget);
+  });
+
+  testWidgets('Hue Bridge fallback only finishes after absence confirmation',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi()
+      ..unpairResults = [
+        {'status': 'failed', 'error': 'Hue Bridge unreachable'},
+        {'status': 'complete'},
+      ];
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Bridge lamp',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue',
+            'address': '192.168.1.20',
+          },
+          'native_id': 'hue-light-8',
+          'preferred': true,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue',
+              'device_onboarding_methods': ['hue_bridge_serial_search'],
+              'supports_unpairing': true,
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'light-1',
+            type: RhythmDeviceType.light,
+            name: 'Bridge lamp',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove Device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Removal Not Confirmed'), findsOneWidget);
+    expect(find.textContaining('Hue Bridge unreachable'), findsOneWidget);
+    expect(
+      find.textContaining(
+        'only after the bridge confirms the bulb is absent',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('local-only'), findsNothing);
+    expect(find.textContaining('without asking'), findsNothing);
+
+    await tester.tap(find.text('Check and Finish Removal'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.unpairCalls,
+      [
+        (
+          hubType: 'hue',
+          deviceId: 'hue-light-8',
+          hubAddress: '192.168.1.20',
+          force: false,
+        ),
+        (
+          hubType: 'hue',
+          deviceId: 'hue-light-8',
+          hubAddress: '192.168.1.20',
+          force: true,
+        ),
+      ],
+    );
+    expect(connection.reconnectCalls, 1);
+    expect(find.text('DONE'), findsNothing);
   });
 
   testWidgets(

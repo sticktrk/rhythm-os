@@ -786,6 +786,36 @@ impl CanonicalRegistry {
         }
     }
 
+    /// Remove one integration endpoint without deleting other ways to reach
+    /// the same physical device.
+    ///
+    /// Returns `(canonical_id, removed_whole_device)`. The canonical record is
+    /// deleted only when the removed endpoint was its final endpoint.
+    pub fn remove_endpoint(&mut self, hub_key: &HubKey, native_id: &str) -> Option<(String, bool)> {
+        let native_key = (hub_key.to_string(), native_id.to_string());
+        let canonical_id = self.native_index.remove(&native_key)?;
+        let remove_whole_device = {
+            let device = self.devices.get_mut(&canonical_id)?;
+            device
+                .endpoints
+                .retain(|endpoint| &endpoint.hub_key != hub_key || endpoint.native_id != native_id);
+            if !device.endpoints.is_empty() {
+                let has_preferred = device.endpoints.iter().any(|endpoint| endpoint.preferred);
+                if !has_preferred {
+                    let first = device.endpoints.first_mut().expect("not empty");
+                    first.preferred = true;
+                }
+                false
+            } else {
+                true
+            }
+        };
+        if remove_whole_device {
+            self.remove_device(&canonical_id);
+        }
+        Some((canonical_id, remove_whole_device))
+    }
+
     /// Backfill UnassignedDevice triage entries for existing devices with no room.
     ///
     /// Called on startup after loading the registry to handle devices that
@@ -842,6 +872,48 @@ mod tests {
         let result = reg.resolve(&identity, &hue_key(), 1000);
         assert!(matches!(result, ResolveResult::Created { .. }));
         assert_eq!(reg.device_count(), 1);
+    }
+
+    #[test]
+    fn remove_endpoint_preserves_other_transport_and_reassigns_preference() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity(
+            "hue-light-1",
+            "Kitchen Spot 1",
+            vec![HardwareId::mac("00:17:88:01:09:ab:cd:ef")],
+        );
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {other:?}"),
+        };
+        reg.get_mut(&canonical_id).unwrap().upsert_endpoint(
+            ha_key(),
+            "light.kitchen".to_string(),
+            2000,
+            None,
+        );
+        reg.rebuild_indices();
+
+        assert_eq!(
+            reg.remove_endpoint(&hue_key(), "hue-light-1"),
+            Some((canonical_id.clone(), false))
+        );
+        let remaining = reg.get(&canonical_id).expect("canonical device remains");
+        assert_eq!(remaining.endpoints.len(), 1);
+        assert_eq!(remaining.preferred_endpoint().unwrap().hub_key, ha_key());
+        assert!(reg.find_by_native_id(&hue_key(), "hue-light-1").is_none());
+        assert_eq!(
+            reg.find_by_native_id(&ha_key(), "light.kitchen")
+                .unwrap()
+                .id,
+            canonical_id
+        );
+
+        assert_eq!(
+            reg.remove_endpoint(&ha_key(), "light.kitchen"),
+            Some((canonical_id.clone(), true))
+        );
+        assert!(reg.get(&canonical_id).is_none());
     }
 
     #[test]

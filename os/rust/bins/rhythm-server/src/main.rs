@@ -243,6 +243,7 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
             info!(target: "sys", "Exiting after factory reset so the supervisor can restart Rhythm Server");
             std::process::exit(1);
         });
+        Ok(())
     }));
     Ok(())
 }

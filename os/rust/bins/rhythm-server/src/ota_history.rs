@@ -133,8 +133,14 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        record(&dir, entry(Some("1.0.0"), Some("1.0.1"), "manual", "applied"));
-        record(&dir, entry(Some("1.0.0"), Some("1.0.1"), "startup", "verified"));
+        record(
+            &dir,
+            entry(Some("1.0.0"), Some("1.0.1"), "manual", "applied"),
+        );
+        record(
+            &dir,
+            entry(Some("1.0.0"), Some("1.0.1"), "startup", "verified"),
+        );
         let raw = std::fs::read_to_string(history_path(&dir)).unwrap();
         let history: OtaHistory = serde_json::from_str(&raw).unwrap();
         assert_eq!(history.entries.len(), 2);

@@ -1128,12 +1128,7 @@ async fn do_update(
             .unwrap_or_default();
         crate::ota_history::record(
             &data_dir,
-            crate::ota_history::entry(
-                Some(&previous),
-                Some(&latest),
-                "manual",
-                "applied",
-            ),
+            crate::ota_history::entry(Some(&previous), Some(&latest), "manual", "applied"),
         );
     }
     emit_ota_progress(

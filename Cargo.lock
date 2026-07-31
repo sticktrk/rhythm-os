@@ -1905,6 +1905,8 @@ version = "0.6.546-beta"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bluer",
+ "dbus",
  "futures",
  "log",
  "reqwest",
@@ -1916,6 +1918,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1930,6 +1933,9 @@ dependencies = [
  "dbus",
  "futures",
  "log",
+ "rhythm-ha",
+ "rhythm-hue",
+ "rhythm-matter",
  "rhythm-os",
  "rhythm-os-runtime-modules",
  "rhythm-server",

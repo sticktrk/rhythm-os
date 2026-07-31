@@ -452,9 +452,12 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                     );
                     return Ok(UnpairingResult {
                         hub_type: "matter".to_string(),
+                        hub_address: Some("local".to_string()),
                         status: PairingStatus::Failed,
                         device_id: Some(device_id.to_string()),
                         error: Some(format!("{:#}", error)),
+                        completion_scope: None,
+                        warning: None,
                     });
                 }
             };
@@ -494,9 +497,12 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
+                hub_address: Some("local".to_string()),
                 status: PairingStatus::Complete,
                 device_id: Some(device_id.to_string()),
                 error: None,
+                completion_scope: None,
+                warning: None,
             });
         }
 
@@ -511,21 +517,27 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             );
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
+                hub_address: Some("local".to_string()),
                 status: PairingStatus::Complete,
                 device_id: Some(device_id.to_string()),
                 error: None,
+                completion_scope: None,
+                warning: None,
             });
         }
 
         if !hub_data.begin_decommission(node_id) {
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
+                hub_address: Some("local".to_string()),
                 status: PairingStatus::Failed,
                 device_id: Some(device_id.to_string()),
                 error: Some(format!(
                     "Matter node {} is already being decommissioned",
                     node_id
                 )),
+                completion_scope: None,
+                warning: None,
             });
         }
 
@@ -536,9 +548,12 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
+                    hub_address: Some("local".to_string()),
                     status: PairingStatus::Complete,
                     device_id: Some(device_id.to_string()),
                     error: None,
+                    completion_scope: None,
+                    warning: None,
                 })
             }
             Err(e) => {
@@ -546,9 +561,12 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 hub_data.finish_decommission(node_id, false);
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
+                    hub_address: Some("local".to_string()),
                     status: PairingStatus::Failed,
                     device_id: Some(device_id.to_string()),
                     error: Some(format!("{:#}", e)),
+                    completion_scope: None,
+                    warning: None,
                 })
             }
         }

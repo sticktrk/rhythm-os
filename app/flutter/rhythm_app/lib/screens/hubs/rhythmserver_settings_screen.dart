@@ -30,8 +30,29 @@ import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
 import '../settings/sections/lights_devices_section.dart';
+import 'device_pairing_flow.dart';
 import 'matter_pairing_flow.dart';
 import 'ota_update_overlay.dart';
+
+@visibleForTesting
+String factoryResetFailureMessage({
+  required int? httpStatus,
+  required String? error,
+  required String hubName,
+}) {
+  final normalizedError = error?.trim();
+  final resetStoppedBeforeChanges = httpStatus == 400;
+  return switch ((
+    resetStoppedBeforeChanges,
+    normalizedError?.isNotEmpty == true
+  )) {
+    (true, true) => 'Factory reset stopped safely: $normalizedError',
+    (true, false) =>
+      'Factory reset stopped safely before any settings were erased.',
+    (false, true) => 'Factory reset could not be confirmed: $normalizedError',
+    (false, false) => 'Factory reset could not be confirmed for $hubName.',
+  };
+}
 
 /// Settings screen for a connected server hub (bridge, standalone, HA addon).
 ///
@@ -1726,20 +1747,21 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   static String _hubLabel(String type) => switch (type) {
         'hue' => 'Philips Hue',
+        'hue_ble' => 'Hue Bluetooth',
         'homeassistant' || 'home_assistant' => 'Home Assistant',
         'matter' => 'Matter',
         _ => type,
       };
 
   static Color _hubColor(String type) => switch (type) {
-        'hue' => const Color(0xFFFFB900),
+        'hue' || 'hue_ble' => const Color(0xFFFFB900),
         'homeassistant' || 'home_assistant' => const Color(0xFF42A5F5),
         'matter' => const Color(0xFF26A69A),
         _ => _teal,
       };
 
   static IconData _hubIcon(String type) => switch (type) {
-        'hue' => Icons.lightbulb_outline,
+        'hue' || 'hue_ble' => Icons.lightbulb_outline,
         'homeassistant' || 'home_assistant' => Icons.home_outlined,
         'matter' => Icons.memory_outlined,
         _ => Icons.hub_outlined,
@@ -2050,6 +2072,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             ),
             const SizedBox(height: 16),
             _buildResetBullet('All paired hubs will be removed'),
+            _buildResetBullet(
+              'Keep Hue Bluetooth bulbs powered on nearby so their bonds can '
+              'be released; reset stops safely if one cannot be reached',
+            ),
             _buildResetBullet('Wi-Fi credentials will be cleared'),
             _buildResetBullet('Device returns to BLE setup mode'),
           ],
@@ -2083,19 +2109,26 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     setState(() => _isFactoryResetting = true);
 
     final client = await _diagnosticsClient();
-    final success = await client.factoryReset(
+    final resetResult = await client.factoryResetDetailed(
       platformType: _serverPlatformType,
       platformContext: _serverContext,
     );
     if (!mounted) return;
 
-    if (!success) {
+    if (!resetResult.success) {
       setState(() => _isFactoryResetting = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Failed to reach $hubName for factory reset.'),
+          content: Text(
+            factoryResetFailureMessage(
+              httpStatus: resetResult.httpStatus,
+              error: resetResult.error,
+              hubName: hubName,
+            ),
+          ),
           behavior: SnackBarBehavior.floating,
           backgroundColor: Colors.red.shade400,
+          duration: const Duration(seconds: 8),
         ),
       );
       return;
@@ -2749,6 +2782,7 @@ class RhythmServerHubManagementSection extends StatefulWidget {
     this.showConfigured = true,
     this.showAddOptions = true,
     this.showMatterAddOption = true,
+    this.showHueBleAddOption = true,
     this.addOptionsTitle = 'Add Device',
     this.addOptionsSubtitle,
     this.resyncLabel = 'Re-Sync',
@@ -2768,6 +2802,10 @@ class RhythmServerHubManagementSection extends StatefulWidget {
   /// Render the direct Matter pairing row. Add & Review owns its universal
   /// device-scanning card, while Devices settings keeps the direct option.
   final bool showMatterAddOption;
+
+  /// Render direct Philips Hue Bluetooth pairing when the appliance
+  /// advertises support for it.
+  final bool showHueBleAddOption;
 
   /// Copy used when this section is presented as a hub-sync destination.
   final String addOptionsTitle;
@@ -2947,9 +2985,20 @@ class _RhythmServerHubManagementSectionState
     ServerSyncProvider syncProvider,
     List<Map<String, dynamic>> configuredHubs,
   ) {
-    final matterOptions = widget.showMatterAddOption
-        ? _buildMatterAddOptionRows(syncProvider)
-        : const <Widget>[];
+    final directPairingOptions = <Widget>[
+      if (widget.showHueBleAddOption)
+        ..._buildHueBleAddOptionRows(syncProvider),
+      if (widget.showHueBleAddOption &&
+          widget.showMatterAddOption &&
+          syncProvider.canAddHueBleDevice &&
+          syncProvider.canAddMatterDevice)
+        Divider(
+          height: 1,
+          color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+        ),
+      if (widget.showMatterAddOption)
+        ..._buildMatterAddOptionRows(syncProvider),
+    ];
 
     Widget divider() => Divider(
           height: 1,
@@ -2967,11 +3016,9 @@ class _RhythmServerHubManagementSectionState
           child: Column(children: children),
         );
 
-    // Home Assistant and Hue can't be paired from the app — they're managed on
-    // the hub itself. Surface them as read-only links into the Devices list,
-    // and rely on Re-Sync to pull in whatever bulbs have been paired there.
-    // Matter *can* be added directly, so it sits in its own card below the
-    // read-only group (Re-Sync doesn't apply to it).
+    // Bridge-backed Hue and Home Assistant devices are synced from their hubs.
+    // Direct Hue Bluetooth and Matter pairing sit in a separate capability-
+    // gated card because Re-Sync does not commission either one.
     return _buildSection(
       title: widget.addOptionsTitle,
       subtitle: widget.addOptionsSubtitle,
@@ -2996,9 +3043,9 @@ class _RhythmServerHubManagementSectionState
           divider(),
           _buildResyncRow(),
         ]),
-        if (matterOptions.isNotEmpty) ...[
+        if (directPairingOptions.isNotEmpty) ...[
           const SizedBox(height: 12),
-          card(matterOptions),
+          card(directPairingOptions),
         ],
       ],
     );
@@ -3079,9 +3126,31 @@ class _RhythmServerHubManagementSectionState
     ];
   }
 
+  List<Widget> _buildHueBleAddOptionRows(ServerSyncProvider syncProvider) {
+    if (!syncProvider.canAddHueBleDevice) return const [];
+    return [
+      _buildHubOptionRow(
+        icon: Icons.bluetooth_rounded,
+        label: 'Scan for nearby Hue Bluetooth bulbs',
+        color: const Color(0xFFFFB900),
+        onTap: () => _startHueBleAddFlow(),
+      ),
+    ];
+  }
+
   Future<void> _startMatterAddFlow() async {
     await startMatterPairingFlow(
       context,
+      analyticsSource: 'device_settings',
+    );
+    if (!mounted) return;
+    await _fetchHubSummaries();
+  }
+
+  Future<void> _startHueBleAddFlow() async {
+    await startDevicePairingFlow(
+      context,
+      target: DevicePairingTarget.hueBle,
       analyticsSource: 'device_settings',
     );
     if (!mounted) return;
@@ -4183,6 +4252,10 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
     final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
     final canAddMatter = syncProvider.canAddMatterDevice;
+    final canAddHueBle = syncProvider.canAddHueBleDevice;
+    final canAddHueBridge = connected &&
+        _type == 'hue' &&
+        syncProvider.canAddHueBridgeDeviceBySerial;
     const matterActionLabel = 'Add Matter Device';
 
     return Scaffold(
@@ -4367,7 +4440,42 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                         },
                       ),
                     ],
-                    if (_type != 'matter') ...[
+                    if (_type == 'hue_ble' && canAddHueBle) ...[
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.add_circle_outline,
+                        label: 'Scan for nearby Hue Bluetooth bulbs',
+                        color: const Color(0xFFFFB900),
+                        onTap: () async {
+                          await startDevicePairingFlow(
+                            context,
+                            target: DevicePairingTarget.hueBle,
+                            analyticsSource: 'hue_ble_hub_detail',
+                          );
+                          if (!mounted) return;
+                          await _fetchCanonicalDevices();
+                        },
+                      ),
+                    ],
+                    if (canAddHueBridge) ...[
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.qr_code_scanner_rounded,
+                        label: 'Add bulb by serial / Scan bulb QR',
+                        color: const Color(0xFFFFB900),
+                        onTap: () async {
+                          await startDevicePairingFlow(
+                            context,
+                            target: DevicePairingTarget.hueBridge,
+                            analyticsSource: 'hue_bridge_hub_detail',
+                            hubAddress: hubInfo['address']?.toString(),
+                          );
+                          if (!mounted) return;
+                          await _fetchCanonicalDevices();
+                        },
+                      ),
+                    ],
+                    if (_type != 'matter' && _type != 'hue_ble') ...[
                       const SizedBox(height: 24),
                       // Actions
                       _buildActionButton(

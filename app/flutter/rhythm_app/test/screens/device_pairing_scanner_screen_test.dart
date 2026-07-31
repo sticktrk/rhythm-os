@@ -13,9 +13,14 @@ void main() {
   late ValueChanged<Iterable<String>> detect;
   late CapturingAnalyticsBackend analyticsBackend;
 
-  Widget buildScanner() {
+  Widget buildScanner({
+    bool hueBridgeSerialSearchAvailable = false,
+    bool hueBridgeOnly = false,
+  }) {
     return MaterialApp(
       home: DevicePairingScannerScreen(
+        hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
+        hueBridgeOnly: hueBridgeOnly,
         cameraBuilder: (context, onDetect) {
           detect = onDetect;
           return const ColoredBox(color: Colors.black);
@@ -82,7 +87,7 @@ void main() {
       await tester.pump();
       detect(const ['https://www.philips-hue.com/connectproduct']);
       await tester.pump();
-      expect(find.text('Pair this device in the Hue app'), findsOneWidget);
+      expect(find.text('Use nearby Bluetooth scan'), findsOneWidget);
 
       await tester.tap(find.text('Scan Another Code'));
       await tester.pump();
@@ -143,6 +148,172 @@ void main() {
     );
   });
 
+  testWidgets('returns a Hue serial only for connected bridge search', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await Navigator.of(context)
+                    .push<DevicePairingScannerResult>(
+                  MaterialPageRoute(
+                    builder: (_) => DevicePairingScannerScreen(
+                      hueBridgeSerialSearchAvailable: true,
+                      cameraBuilder: (context, onDetect) {
+                        detect = onDetect;
+                        return const ColoredBox(color: Colors.black);
+                      },
+                    ),
+                  ),
+                );
+              },
+              child: const Text('Open scanner'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+    detect(const [
+      'HUE:Z:0123456789ABCDEF0123456789ABCDEF0123 '
+          'M:0017880109E277DA D:L3B A:1184',
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.hueBridge);
+    expect(result?.payload, 'E277DA');
+    expect(result?.inputMethod, 'camera');
+  });
+
+  testWidgets('bridge scanner is Hue-specific and never routes Matter', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      buildScanner(
+        hueBridgeSerialSearchAvailable: true,
+        hueBridgeOnly: true,
+      ),
+    );
+
+    expect(find.text('Add Hue Bulb'), findsOneWidget);
+    expect(find.text('Scan Hue bulb QR'), findsOneWidget);
+    expect(find.text('Enter Bulb Serial'), findsOneWidget);
+
+    detect(const ['MT:Y.K908OC16750648G00']);
+    await tester.pump();
+
+    expect(find.text('Hue bulb serial not found'), findsOneWidget);
+    expect(find.text('Pair with Matter'), findsNothing);
+  });
+
+  testWidgets(
+    'universal scanner asks when Matter and Hue are in the same frame',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(430, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      DevicePairingScannerResult? result;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  result = await Navigator.of(context)
+                      .push<DevicePairingScannerResult>(
+                    MaterialPageRoute(
+                      builder: (_) => DevicePairingScannerScreen(
+                        hueBridgeSerialSearchAvailable: true,
+                        cameraBuilder: (context, onDetect) {
+                          detect = onDetect;
+                          return const ColoredBox(color: Colors.black);
+                        },
+                      ),
+                    ),
+                  );
+                },
+                child: const Text('Open scanner'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open scanner'));
+      await tester.pumpAndSettle();
+      detect(const ['MT:Y.K908OC16750648G00', 'E277DA']);
+      await tester.pump();
+
+      expect(result, isNull);
+      expect(find.text('Choose how to add this light'), findsOneWidget);
+      expect(find.text('Search with Hue Bridge'), findsOneWidget);
+      expect(find.text('Pair with Matter'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const ValueKey('choose-hue-bridge')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(result?.action, DevicePairingScannerAction.hueBridge);
+      expect(result?.payload, 'E277DA');
+    },
+  );
+
+  testWidgets('Hue serial guides to nearby scan without a connected bridge', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await Navigator.of(context)
+                    .push<DevicePairingScannerResult>(
+                  MaterialPageRoute(
+                    builder: (_) => DevicePairingScannerScreen(
+                      cameraBuilder: (context, onDetect) {
+                        detect = onDetect;
+                        return const ColoredBox(color: Colors.black);
+                      },
+                    ),
+                  ),
+                );
+              },
+              child: const Text('Open scanner'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+
+    detect(const ['E277DA']);
+    await tester.pump();
+
+    expect(result, isNull);
+    expect(find.text('Use nearby Bluetooth scan'), findsOneWidget);
+    expect(find.textContaining('directly'), findsOneWidget);
+  });
+
   testWidgets('manual entry identifies codes through the shared processor',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(430, 900));
@@ -199,5 +370,78 @@ void main() {
     expect(result?.action, DevicePairingScannerAction.matter);
     expect(result?.payload, '3497-011-2332');
     expect(result?.inputMethod, 'manual_code');
+  });
+
+  testWidgets('manual entry routes a Hue serial through the bridge',
+      (tester) async {
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await Navigator.of(context)
+                    .push<DevicePairingScannerResult>(
+                  MaterialPageRoute(
+                    builder: (_) => const DevicePairingCodeEntryScreen(
+                      hueBridgeSerialSearchAvailable: true,
+                    ),
+                  ),
+                );
+              },
+              child: const Text('Enter manually'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Enter manually'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      '27f706',
+    );
+    tester.testTextInput.hide();
+    await tester.ensureVisible(find.text('Identify & Continue'));
+    await tester.pump();
+    await tester.tap(find.text('Identify & Continue'));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.hueBridge);
+    expect(result?.payload, '27F706');
+    expect(result?.inputMethod, 'manual_code');
+  });
+
+  testWidgets('bridge manual entry only accepts a Hue bulb serial',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: DevicePairingCodeEntryScreen(
+          hueBridgeSerialSearchAvailable: true,
+          hueBridgeOnly: true,
+        ),
+      ),
+    );
+
+    expect(find.text('Enter Bulb Serial'), findsOneWidget);
+    expect(find.text('Enter Hue bulb serial'), findsOneWidget);
+    expect(find.text('Search with Hue Bridge'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      '3497-011-2332',
+    );
+    tester.testTextInput.hide();
+    await tester.ensureVisible(find.text('Search with Hue Bridge'));
+    await tester.pump();
+    await tester.tap(find.text('Search with Hue Bridge'));
+    await tester.pump();
+
+    expect(find.text('Hue bulb serial not found'), findsOneWidget);
   });
 }

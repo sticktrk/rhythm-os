@@ -245,6 +245,27 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
+    fn test_lookup_live_hue_ble_models() {
+        use crate::capabilities::LightType;
+
+        let db = DeviceDatabase::builtin();
+        let white = db
+            .lookup("Signify Netherlands B.V.", "LWA003")
+            .expect("live Hue BLE white model should be known");
+        assert_eq!(white.light_type, LightType::Dimmable);
+
+        let color = db
+            .lookup("Signify Netherlands B.V.", "LCA013")
+            .expect("live Hue BLE color model should be known");
+        assert_eq!(color.light_type, LightType::ExtendedColor);
+        assert!(color.capabilities().supports_xy_color());
+        assert!(color.capabilities().supports_color_temp());
+        assert_eq!(color.min_kelvin, Some(1000));
+        assert_eq!(color.max_kelvin, Some(20000));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
     fn test_lookup_unknown() {
         let db = DeviceDatabase::builtin();
         assert!(db.lookup("Unknown Corp", "ZZZZZ").is_none());

@@ -7,7 +7,7 @@ import '../services/analytics_service.dart';
 import '../widgets/room_picker_sheet.dart';
 import '../widgets/settings_row.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
-import 'hubs/matter_pairing_flow.dart';
+import 'hubs/device_pairing_flow.dart';
 import 'hubs/rhythmserver_settings_screen.dart';
 
 enum _TriageFilter { all, devices, rooms }
@@ -258,7 +258,7 @@ class _TriageScreenState extends State<TriageScreen> {
       padding: const EdgeInsets.all(20),
       children: [
         // Adding new hardware is the primary job of this screen.
-        if (serverSync.canAddMatterDevice) ...[
+        if (serverSync.canScanToAddDevice) ...[
           _buildAddDeviceCard(),
           const SizedBox(height: 30),
         ],
@@ -266,6 +266,7 @@ class _TriageScreenState extends State<TriageScreen> {
         RhythmServerHubManagementSection(
           showConfigured: false,
           showMatterAddOption: false,
+          showHueBleAddOption: true,
           addOptionsTitle: 'SYNC FROM A HUB',
           addOptionsSubtitle:
               'Bring in devices already paired with Home Assistant or '
@@ -364,7 +365,7 @@ class _TriageScreenState extends State<TriageScreen> {
       button: true,
       excludeSemantics: true,
       label: 'Scan to Add Device',
-      hint: 'Scan any device QR code to identify and add new hardware',
+      hint: 'Scan a setup code or find nearby Hue Bluetooth bulbs',
       onTap: _scanToAddDevice,
       child: Material(
         color: Colors.transparent,
@@ -433,7 +434,7 @@ class _TriageScreenState extends State<TriageScreen> {
                         ),
                         SizedBox(height: 3),
                         Text(
-                          'Scan to Add Device',
+                          'Add a Device',
                           style: TextStyle(
                             color: CelestialColors.textPrimary,
                             fontSize: 18,
@@ -443,7 +444,7 @@ class _TriageScreenState extends State<TriageScreen> {
                         ),
                         SizedBox(height: 5),
                         Text(
-                          'Scan any device QR code',
+                          'Scan a code or find nearby bulbs',
                           style: TextStyle(
                             color: CelestialColors.textSecondary,
                             fontSize: 13,
@@ -477,7 +478,7 @@ class _TriageScreenState extends State<TriageScreen> {
   }
 
   Future<void> _scanToAddDevice() async {
-    await startMatterPairingFlow(
+    await startDevicePairingFlow(
       context,
       analyticsSource: 'add_review',
     );
@@ -1427,6 +1428,7 @@ class _RoomBindingCard extends StatelessWidget {
     final hubLabel = switch (hubType) {
       'ha' => 'Home Assistant',
       'hue' => 'Hue',
+      'hue_ble' => 'Hue Bluetooth',
       _ => hubType,
     };
     final hubInfo =
