@@ -68,9 +68,9 @@ impl HueSseLiveness {
     /// delivering traffic. One chunk may contain updates for multiple writes.
     ///
     /// Raw traffic satisfies pending writes, but it does not re-arm
-    /// write-triggered recovery after a timeout. Hue heartbeat comments can
-    /// arrive on an otherwise unreliable event subscription, so only a data
-    /// frame is strong enough evidence to leave suppression.
+    /// write-triggered recovery after a timeout. Successful Hue writes do not
+    /// guarantee events for idempotent commands, so activity on a replacement
+    /// stream cannot prove that a later quiet write needs another reconnect.
     pub(crate) fn observe_sse_activity(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.pending.clear();
@@ -78,12 +78,13 @@ impl HueSseLiveness {
         }
     }
 
-    /// A complete SSE data frame proves that the replacement subscription is
-    /// delivering integration events, so write-triggered recovery may resume.
+    /// A complete SSE data frame is stream activity, but it deliberately does
+    /// not re-arm write-triggered recovery after a timeout. The tracker is
+    /// recreated on a real hub/process lifecycle restart, which restores the
+    /// one write-based recovery attempt without allowing recurring churn.
     pub(crate) fn observe_sse_data_activity(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.pending.clear();
-            state.write_expectations_suppressed_until_activity = false;
             state.last_sse_activity_epoch_ms = epoch_ms_now();
         }
     }
@@ -221,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_suppresses_repeat_expectations_until_data_activity() {
+    fn timeout_suppresses_repeat_expectations_for_tracker_lifetime() {
         let liveness = HueSseLiveness::default();
         assert!(liveness.begin_expected_activity().is_some());
 
@@ -251,13 +252,20 @@ mod tests {
         liveness.observe_sse_data_activity();
 
         assert!(
-            liveness.begin_expected_activity().is_some(),
-            "a complete data frame must re-arm write-based liveness detection"
+            liveness.begin_expected_activity().is_none(),
+            "a complete data frame must not re-arm an unreliable write-based probe"
         );
         assert!(
-            !liveness
+            liveness
                 .snapshot()
                 .write_expectations_suppressed_until_activity
+        );
+
+        assert!(
+            HueSseLiveness::default()
+                .begin_expected_activity()
+                .is_some(),
+            "a new hub/process lifecycle must start with one recovery attempt armed"
         );
     }
 }
