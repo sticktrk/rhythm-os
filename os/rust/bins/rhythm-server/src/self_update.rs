@@ -1380,20 +1380,8 @@ fn artifact_staging_path(asset_name: &str) -> PathBuf {
     Path::new(APPLIANCE_OTA_STAGING_DIR).join(format!("{}.download", safe_name))
 }
 
-fn write_image_artifact_to_device(
-    artifact_path: &Path,
-    target_device: &Path,
-    gzip: bool,
-) -> Result<(), String> {
-    let source_file = File::open(artifact_path)
-        .map_err(|e| format!("Failed to open {}: {}", artifact_path.display(), e))?;
-    let mut source: Box<dyn Read> = if gzip {
-        Box::new(GzDecoder::new(source_file))
-    } else {
-        Box::new(source_file)
-    };
-
-    let mut target = File::options()
+fn open_image_target(target_device: &Path) -> Result<File, String> {
+    let target = File::options()
         .write(true)
         .open(target_device)
         .map_err(|e| {
@@ -1411,9 +1399,115 @@ fn write_image_artifact_to_device(
             .set_len(0)
             .map_err(|e| format!("Failed to reset {}: {}", target_device.display(), e))?;
     }
+    Ok(target)
+}
 
-    std::io::copy(&mut source, &mut target)
-        .map_err(|e| format!("Failed to write {}: {}", target_device.display(), e))?;
+struct ProgressHashReader<R, F> {
+    inner: R,
+    hasher: Sha256,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    next_progress_bytes: u64,
+    progress: F,
+}
+
+impl<R, F> ProgressHashReader<R, F>
+where
+    F: Fn(u64, Option<u64>),
+{
+    fn new(inner: R, total_bytes: Option<u64>, progress: F) -> Self {
+        progress(0, total_bytes);
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            downloaded_bytes: 0,
+            total_bytes,
+            next_progress_bytes: 0,
+            progress,
+        }
+    }
+
+    fn finish(self) -> String {
+        (self.progress)(self.downloaded_bytes, self.total_bytes);
+        hex_string(&self.hasher.finalize())
+    }
+}
+
+impl<R, F> Read for ProgressHashReader<R, F>
+where
+    R: Read,
+    F: Fn(u64, Option<u64>),
+{
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read == 0 {
+            return Ok(0);
+        }
+
+        self.hasher.update(&buf[..read]);
+        self.downloaded_bytes = self.downloaded_bytes.saturating_add(read as u64);
+        let reached_total = self.total_bytes == Some(self.downloaded_bytes);
+        if self.downloaded_bytes >= self.next_progress_bytes || reached_total {
+            (self.progress)(self.downloaded_bytes, self.total_bytes);
+            self.next_progress_bytes = self.downloaded_bytes.saturating_add(512 * 1024);
+        }
+        Ok(read)
+    }
+}
+
+fn stream_image_artifact_to_device<F>(
+    client: &reqwest::blocking::Client,
+    download_url: &str,
+    target_device: &Path,
+    gzip: bool,
+    expected_sha256: Option<&str>,
+    progress: F,
+) -> Result<Option<bool>, String>
+where
+    F: Fn(u64, Option<u64>),
+{
+    let response = client
+        .get(download_url)
+        .send()
+        .map_err(|e| format!("Download failed: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("Download returned {}", response.status()));
+    }
+
+    let total_bytes = response.content_length();
+    let source = ProgressHashReader::new(response, total_bytes, progress);
+    let mut target = open_image_target(target_device)?;
+    let actual_sha256 = if gzip {
+        let mut decoder = GzDecoder::new(source);
+        std::io::copy(&mut decoder, &mut target).map_err(|e| {
+            format!(
+                "Failed to stream update image to {}: {}",
+                target_device.display(),
+                e
+            )
+        })?;
+        decoder.into_inner().finish()
+    } else {
+        let mut source = source;
+        std::io::copy(&mut source, &mut target).map_err(|e| {
+            format!(
+                "Failed to stream update image to {}: {}",
+                target_device.display(),
+                e
+            )
+        })?;
+        source.finish()
+    };
+
+    if let Some(expected) = expected_sha256 {
+        if actual_sha256 != expected.to_ascii_lowercase() {
+            return Err(format!(
+                "SHA256 mismatch for update image: expected {}, got {}",
+                expected, actual_sha256
+            ));
+        }
+    }
+
     target
         .flush()
         .map_err(|e| format!("Failed to flush {}: {}", target_device.display(), e))?;
@@ -1423,7 +1517,7 @@ fn write_image_artifact_to_device(
 
     let _ = Command::new("sync").status();
 
-    Ok(())
+    Ok(expected_sha256.map(|_| true))
 }
 
 fn apply_appliance_image_blocking(
@@ -1451,62 +1545,36 @@ fn apply_appliance_image_blocking(
     fs::create_dir_all(APPLIANCE_OTA_STAGING_DIR)
         .map_err(|e| format!("Failed to create {}: {}", APPLIANCE_OTA_STAGING_DIR, e))?;
 
-    let download_path = artifact_staging_path(&image_asset.name);
-    remove_if_exists(&download_path);
-    let download_message = format!("Downloading {}", image_asset.name);
-    progress(UpdateProgress::stage(
-        OtaUpdateStage::Downloading,
-        download_message.clone(),
-    ));
-    download_release_with_progress(
-        &client,
-        &image_asset.url,
-        &download_path,
-        |downloaded, total| {
-            progress(UpdateProgress::downloading(
-                download_message.clone(),
-                downloaded,
-                total,
-            ));
-        },
-    )?;
-
-    let expected_sha256 = image_asset.sha256.as_deref();
-    let checksum_verified = match expected_sha256 {
-        Some(expected) => {
-            progress(UpdateProgress::stage(
-                OtaUpdateStage::Verifying,
-                "Verifying update image checksum",
-            ));
-            let actual = compute_sha256_hex(&download_path)?;
-            if actual != expected.to_ascii_lowercase() {
-                remove_if_exists(&download_path);
-                return Err(format!(
-                    "SHA256 mismatch for {}: expected {}, got {}",
-                    image_asset.name, expected, actual
-                ));
-            }
-            Some(true)
-        }
-        None => None,
-    };
-
     let apply_guard = ApplianceApplyGuard::arm(
         "rootfs slot apply",
         Duration::from_secs(APPLIANCE_ROOTFS_APPLY_GUARD_SECS),
     );
     let apply_result = (|| {
+        // The inactive A/B rootfs slot is already a safe staging target. Stream
+        // the compressed image there directly instead of first consuming
+        // persistent /data capacity with a second full copy. A checksum error
+        // leaves only the inactive slot unusable; the boot switch below is
+        // never armed, so the current slot remains authoritative.
+        cleanup_stale_downloads(Path::new(APPLIANCE_OTA_STAGING_DIR));
+        let download_message = format!("Downloading {}", image_asset.name);
         progress(UpdateProgress::stage(
-            OtaUpdateStage::Installing,
-            format!(
-                "Writing update to inactive rootfs slot {}",
-                target_slot.as_str()
-            ),
+            OtaUpdateStage::Downloading,
+            download_message.clone(),
         ));
-        write_image_artifact_to_device(
-            &download_path,
+        let checksum_verified = stream_image_artifact_to_device(
+            &client,
+            &image_asset.url,
             Path::new(target_slot.root_device()),
             artifact_uses_gzip(image_asset),
+            image_asset.sha256.as_deref(),
+            |downloaded, total| {
+                apply_guard.progress();
+                progress(UpdateProgress::downloading(
+                    download_message.clone(),
+                    downloaded,
+                    total,
+                ));
+            },
         )?;
         progress(UpdateProgress::stage(
             OtaUpdateStage::Finalizing,
@@ -1523,18 +1591,15 @@ fn apply_appliance_image_blocking(
             update_appliance_cmdline_for_slot,
             write_appliance_idle_boot_state,
         )?;
-        Ok::<(Option<bool>, Vec<String>), String>(overlay_result)
+        Ok::<(Option<bool>, Option<bool>, Vec<String>), String>((
+            checksum_verified,
+            overlay_result.0,
+            overlay_result.1,
+        ))
     })();
     apply_guard.disarm();
 
-    let (package_checksum_verified, overlay_targets) = match apply_result {
-        Ok(result) => result,
-        Err(error) => {
-            remove_if_exists(&download_path);
-            return Err(error);
-        }
-    };
-    remove_if_exists(&download_path);
+    let (checksum_verified, package_checksum_verified, overlay_targets) = apply_result?;
 
     let mut installed_targets = vec![format!("rootfs_{}", target_slot.as_str())];
     installed_targets.extend(overlay_targets);
@@ -2352,6 +2417,7 @@ enum ApplianceApplyGuardOutcome {
 
 struct ApplianceApplyGuard {
     completed: Arc<AtomicBool>,
+    progress_tx: std::sync::mpsc::Sender<()>,
     handle: Option<JoinHandle<ApplianceApplyGuardOutcome>>,
 }
 
@@ -2359,17 +2425,32 @@ impl ApplianceApplyGuard {
     fn arm(reason: &'static str, timeout: Duration) -> Self {
         let completed = Arc::new(AtomicBool::new(false));
         let completed_for_thread = completed.clone();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         let handle = std::thread::Builder::new()
             .name("ota-apply-guard".to_string())
             .spawn(move || {
-                std::thread::sleep(timeout);
+                loop {
+                    match progress_rx.recv_timeout(timeout) {
+                        Ok(()) => {
+                            if completed_for_thread.load(Ordering::Acquire) {
+                                return ApplianceApplyGuardOutcome::Completed;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            std::thread::sleep(timeout);
+                            break;
+                        }
+                    }
+                }
+
                 if completed_for_thread.load(Ordering::Acquire) {
                     return ApplianceApplyGuardOutcome::Completed;
                 }
 
                 log::error!(
                     target: "sys",
-                    "Appliance OTA {} still running after {}s before slot switch; forcing reboot back to current slot",
+                    "Appliance OTA {} made no progress for {}s before slot switch; forcing reboot back to current slot",
                     reason,
                     timeout.as_secs()
                 );
@@ -2395,12 +2476,18 @@ impl ApplianceApplyGuard {
 
         Self {
             completed,
+            progress_tx,
             handle: handle.ok(),
         }
     }
 
+    fn progress(&self) {
+        let _ = self.progress_tx.send(());
+    }
+
     fn disarm(&self) {
         self.completed.store(true, Ordering::Release);
+        let _ = self.progress_tx.send(());
     }
 
     #[cfg(test)]
@@ -3929,6 +4016,18 @@ mod tests {
     }
 
     #[test]
+    fn appliance_apply_guard_resets_timeout_when_streaming_progresses() {
+        let guard = ApplianceApplyGuard::arm("test apply", Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(25));
+        guard.progress();
+        std::thread::sleep(Duration::from_millis(25));
+        guard.progress();
+        guard.disarm();
+
+        assert_eq!(guard.join_for_test(), ApplianceApplyGuardOutcome::Completed);
+    }
+
+    #[test]
     fn dry_run_restart_schedulers_return_without_rebooting() {
         schedule_post_update_restart();
         schedule_user_initiated_restart();
@@ -4416,22 +4515,56 @@ mod tests {
     }
 
     #[test]
-    fn write_image_artifact_to_device_handles_gzip() {
-        let dir = unique_test_dir("rootfs-gzip");
-        let artifact = dir.join("rootfs.ext2.gz");
+    fn stream_image_artifact_to_device_uses_inactive_slot_without_data_staging() {
+        let dir = unique_test_dir("rootfs-stream");
         let target = dir.join("rootfs-slot.img");
+        let rootfs = b"fake-rootfs".repeat(4096);
 
-        {
-            let tar_gz = File::create(&artifact).unwrap();
-            let mut encoder = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
-            encoder.write_all(b"fake-rootfs").unwrap();
-            encoder.finish().unwrap();
-        }
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&rootfs).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let expected_sha256 = hex_string(&Sha256::digest(&compressed));
+        let url = spawn_download_fixture(compressed.clone());
+        let progress = Arc::new(Mutex::new(Vec::<(u64, Option<u64>)>::new()));
 
         File::create(&target).unwrap();
-        write_image_artifact_to_device(&artifact, &target, true).unwrap();
+        let verified = stream_image_artifact_to_device(
+            &test_client(),
+            &url,
+            &target,
+            true,
+            Some(&expected_sha256),
+            {
+                let progress = progress.clone();
+                move |downloaded, total| progress.lock().unwrap().push((downloaded, total))
+            },
+        )
+        .unwrap();
 
-        assert_eq!(fs::read(&target).unwrap(), b"fake-rootfs");
+        assert_eq!(verified, Some(true));
+        assert_eq!(fs::read(&target).unwrap(), rootfs);
+        assert!(
+            !dir.join("rootfs.ext2.gz.download").exists(),
+            "rootfs images must stream to the inactive slot, not consume /data staging space"
+        );
+        assert!(progress
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|(downloaded, total)| *downloaded == compressed.len() as u64
+                && *total == Some(compressed.len() as u64)));
+
+        let mismatch_url = spawn_download_fixture(compressed);
+        let error = stream_image_artifact_to_device(
+            &test_client(),
+            &mismatch_url,
+            &target,
+            true,
+            Some("deadbeef"),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(error.starts_with("SHA256 mismatch for update image:"));
 
         let _ = fs::remove_dir_all(dir);
     }
