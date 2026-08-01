@@ -8,7 +8,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, RwLockReadGuard, TryLockError, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -26,7 +26,10 @@ use tokio::task::JoinHandle;
 use tokio_stream::StreamMap;
 use uuid::Uuid;
 
-use crate::coordination::{AdapterOperationGate, ClientOperationCoordinator};
+pub use crate::coordination::BluezOperationDeadlineExceeded;
+use crate::coordination::{
+    run_validated_device_operation_batch, AdapterOperationGate, ClientOperationCoordinator,
+};
 
 /// Closed identities for integrations admitted to the shared BlueZ runtime.
 ///
@@ -463,7 +466,11 @@ struct RuntimeCore {
     quiescing: AtomicBool,
     operation_barrier: RwLock<()>,
     adapter_operation: AdapterOperationGate,
-    client_operations: Mutex<HashMap<BluezDriverId, Weak<ClientOperationCoordinator>>>,
+    // Driver coordinators live for the process lifetime. The driver set is
+    // closed and tiny, while command-uncertainty fences must survive a
+    // controller handle being dropped and recreated around the same BlueZ
+    // session.
+    client_operations: Mutex<HashMap<BluezDriverId, Arc<ClientOperationCoordinator>>>,
     external_operation_permit: Mutex<Option<OwnedSemaphorePermit>>,
     next_sequence: AtomicU64,
     supervisor_restarts: AtomicU64,
@@ -513,12 +520,11 @@ impl RuntimeCore {
             .client_operations
             .lock()
             .map_err(|_| anyhow::anyhow!("shared Bluetooth client coordinator map poisoned"))?;
-        clients.retain(|_, coordinator| coordinator.strong_count() > 0);
-        if let Some(coordinator) = clients.get(&driver).and_then(Weak::upgrade) {
-            return Ok(coordinator);
+        if let Some(coordinator) = clients.get(&driver) {
+            return Ok(Arc::clone(coordinator));
         }
         let coordinator = Arc::new(ClientOperationCoordinator::new());
-        clients.insert(driver, Arc::downgrade(&coordinator));
+        clients.insert(driver, Arc::clone(&coordinator));
         Ok(coordinator)
     }
 
@@ -1282,6 +1288,66 @@ impl BluezClient {
             operation_timeout,
             operation,
         )
+    }
+
+    /// Execute a set of stable-device operations under one absolute deadline.
+    /// The common BlueZ context is validated once, then all device-lane and
+    /// adapter-permit admissions are polled together. Results stay keyed and
+    /// ordered like the input so one failed bulb cannot erase sibling
+    /// outcomes.
+    pub fn run_adapter_operations_for_until<I, T, F, Fut>(
+        &self,
+        deadline: Instant,
+        operations: Vec<(String, I)>,
+        operation: F,
+    ) -> Result<Vec<(String, Result<T>)>>
+    where
+        T: BluezOperationOutput,
+        F: Fn(I, Session, Adapter) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        self.ensure_active()?;
+        let _shared = self.core.admit_operation_barrier(deadline)?;
+        if deadline <= Instant::now() {
+            anyhow::bail!("Bluetooth device batch deadline expired during runtime admission");
+        }
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.core.runtime.block_on(async {
+            let deadline = tokio::time::Instant::from_std(deadline);
+            let operation = &operation;
+            run_validated_device_operation_batch(
+                &self.operations,
+                &self.core.adapter_operation,
+                deadline,
+                || async {
+                    self.ensure_active()?;
+                    self.core.session_adapter().await
+                },
+                operations,
+                move |input, (session, adapter)| async move {
+                    self.ensure_active()?;
+                    operation(input, session, adapter).await
+                },
+            )
+            .await
+        })
+    }
+
+    /// Fence one stable device after an ambiguous daemon-side operation. The
+    /// marker is shared by every same-driver client and must be cleared only
+    /// after a later operation proves the device terminal again.
+    pub fn mark_device_operation_uncertain(&self, lane_key: &str) -> Result<()> {
+        self.operations.mark_device_uncertain(lane_key)
+    }
+
+    pub fn clear_device_operation_uncertain(&self, lane_key: &str) -> Result<()> {
+        self.operations.clear_device_uncertain(lane_key)
+    }
+
+    pub fn device_operation_is_uncertain(&self, lane_key: &str) -> Result<bool> {
+        self.operations.device_is_uncertain(lane_key)
     }
 
     fn run_adapter_operation_inner<T, F, Fut>(

@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,20 @@ const TOMBSTONE_SCHEMA_VERSION: u32 = 4;
 const FACTORY_RESET_BLOCK_FILE: &str = ".hue_ble_factory_reset_pending";
 const FACTORY_RESET_PLAN_FILE: &str = ".hue_ble_factory_reset_plan.json";
 const FACTORY_RESET_PLAN_SCHEMA_VERSION: u32 = 1;
+const STATE_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug)]
+struct TimedStateObservation {
+    state: HueBleState,
+    observed_at: Instant,
+}
+
+#[derive(Default)]
+struct StateObservationCache {
+    states: BTreeMap<String, TimedStateObservation>,
+    generations: BTreeMap<String, u64>,
+    commands_in_flight: BTreeMap<String, usize>,
+}
 
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -105,9 +120,23 @@ pub struct HueBleFactoryResetPlan {
 pub struct HueBleDeviceStore {
     path: PathBuf,
     devices: Mutex<BTreeMap<String, HueBleDevice>>,
+    state_observations: Mutex<StateObservationCache>,
     tombstone_path: PathBuf,
     tombstones: Mutex<TombstoneDocument>,
     factory_reset_blocked: bool,
+}
+
+/// Invalidates every read that began before or during a foreground command.
+/// Dropping the guard makes later physical observations eligible again.
+pub(crate) struct HueBleCommandObservationGuard<'a> {
+    store: &'a HueBleDeviceStore,
+    id: String,
+}
+
+impl Drop for HueBleCommandObservationGuard<'_> {
+    fn drop(&mut self) {
+        self.store.finish_command_observation(&self.id);
+    }
 }
 
 impl HueBleDeviceStore {
@@ -154,6 +183,9 @@ impl HueBleDeviceStore {
         Ok(Self {
             path,
             devices: Mutex::new(devices),
+            // Durable `last_state` is pairing/debug metadata, not proof of a
+            // fresh physical observation after this process started.
+            state_observations: Mutex::new(StateObservationCache::default()),
             tombstone_path,
             tombstones: Mutex::new(tombstones),
             factory_reset_blocked,
@@ -597,6 +629,10 @@ impl HueBleDeviceStore {
     }
 
     pub fn upsert(&self, device: HueBleDevice) -> Result<()> {
+        // Re-pairing or replacing metadata starts a new observation epoch.
+        // Conservatively forget any process-local state even if persistence
+        // later fails.
+        self.invalidate_state_observation(&device.id)?;
         // If this is an explicit recovery, journal that intent before active
         // metadata. A crash can therefore leave either the old quarantine or
         // active metadata plus the transaction marker, but never an
@@ -608,8 +644,19 @@ impl HueBleDeviceStore {
             .map_err(|_| anyhow::anyhow!("Hue BLE device store lock poisoned"))?;
         let mut next = devices.clone();
         next.insert(device.id.clone(), device.clone());
+        let mut observations = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
         self.persist_locked(&next)?;
         *devices = next;
+        // A physical read may have begun against the replaced metadata after
+        // the first invalidation. Advance the epoch again so it cannot land as
+        // a fresh observation after this upsert commits. Keep the device lock
+        // through this final cache bump so readers cannot observe a window
+        // between the metadata replacement and its new observation epoch.
+        Self::invalidate_state_observation_locked(&mut observations, &device.id);
+        drop(observations);
         drop(devices);
         // Commit the association only after devices.json is durable. Recovery
         // finishes this exact step when power fails between the two renames.
@@ -765,25 +812,63 @@ impl HueBleDeviceStore {
     }
 
     pub fn remove(&self, id: &str) -> Result<Option<HueBleDevice>> {
+        self.invalidate_state_observation(id)?;
         let mut devices = self
             .devices
             .lock()
             .map_err(|_| anyhow::anyhow!("Hue BLE device store lock poisoned"))?;
         let mut next = devices.clone();
         let removed = next.remove(id);
+        let mut observations = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
         if removed.is_some() {
             self.persist_locked(&next)?;
             *devices = next;
         }
+        // Close the race with a physical read that began after the first
+        // invalidation but before durable removal completed. Device-to-cache
+        // is the same lock order used by observation commits.
+        Self::invalidate_state_observation_locked(&mut observations, id);
+        drop(observations);
+        drop(devices);
         Ok(removed)
     }
 
-    /// Update the live observation cache without touching durable storage.
+    /// Capture one device incarnation and its observation epoch atomically
+    /// immediately before beginning a physical GATT read. A command or
+    /// metadata replacement advances the epoch, causing overlapping reads to
+    /// be discarded rather than renewed as authoritative state.
+    pub(crate) fn begin_state_observation(&self, id: &str) -> Result<(HueBleDevice, u64)> {
+        let devices = self
+            .devices
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE device store lock poisoned"))?;
+        let device = devices
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown Hue BLE device: {id}"))?;
+        let cache = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
+        let token = cache.generations.get(id).copied().unwrap_or_default();
+        Ok((device, token))
+    }
+
+    /// Record a physical read without touching durable storage. Returns false
+    /// when a command overlapped the read and the observation was discarded.
     ///
     /// Rhythm can change a bulb every few seconds; persisting each observed
     /// brightness/CT value would needlessly wear appliance flash. Bond and
     /// capability metadata remain transactional through `upsert`.
-    pub fn cache_state(&self, id: &str, state: HueBleState) -> Result<()> {
+    pub(crate) fn record_state_observation(
+        &self,
+        id: &str,
+        token: u64,
+        state: HueBleState,
+    ) -> Result<bool> {
         let mut devices = self
             .devices
             .lock()
@@ -791,11 +876,104 @@ impl HueBleDeviceStore {
         let Some(device) = devices.get_mut(id) else {
             anyhow::bail!("Unknown Hue BLE device: {id}");
         };
-        if device.last_state == Some(state) {
-            return Ok(());
+        let mut cache = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
+        let generation = cache.generations.get(id).copied().unwrap_or_default();
+        let command_in_flight = cache
+            .commands_in_flight
+            .get(id)
+            .copied()
+            .unwrap_or_default()
+            > 0;
+        if generation != token || command_in_flight {
+            return Ok(false);
         }
         device.last_state = Some(state);
+        cache.states.insert(
+            id.to_string(),
+            TimedStateObservation {
+                state,
+                observed_at: Instant::now(),
+            },
+        );
+        Ok(true)
+    }
+
+    pub(crate) fn fresh_state_observation(&self, id: &str) -> Result<Option<HueBleState>> {
+        let cache = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
+        if cache
+            .commands_in_flight
+            .get(id)
+            .copied()
+            .unwrap_or_default()
+            > 0
+        {
+            return Ok(None);
+        }
+        Ok(cache.states.get(id).and_then(|observation| {
+            (Instant::now().saturating_duration_since(observation.observed_at)
+                <= STATE_OBSERVATION_MAX_AGE)
+                .then_some(observation.state)
+        }))
+    }
+
+    pub(crate) fn begin_command_observation(
+        &self,
+        id: &str,
+    ) -> Result<HueBleCommandObservationGuard<'_>> {
+        if !self
+            .devices
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE device store lock poisoned"))?
+            .contains_key(id)
+        {
+            anyhow::bail!("Unknown Hue BLE device: {id}");
+        }
+        let mut cache = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
+        *cache.generations.entry(id.to_string()).or_default() += 1;
+        *cache.commands_in_flight.entry(id.to_string()).or_default() += 1;
+        cache.states.remove(id);
+        drop(cache);
+        Ok(HueBleCommandObservationGuard {
+            store: self,
+            id: id.to_string(),
+        })
+    }
+
+    fn finish_command_observation(&self, id: &str) {
+        let Ok(mut cache) = self.state_observations.lock() else {
+            return;
+        };
+        *cache.generations.entry(id.to_string()).or_default() += 1;
+        if let Some(in_flight) = cache.commands_in_flight.get_mut(id) {
+            *in_flight = in_flight.saturating_sub(1);
+            if *in_flight == 0 {
+                cache.commands_in_flight.remove(id);
+            }
+        }
+        cache.states.remove(id);
+    }
+
+    fn invalidate_state_observation(&self, id: &str) -> Result<()> {
+        let mut cache = self
+            .state_observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE observation cache lock poisoned"))?;
+        Self::invalidate_state_observation_locked(&mut cache, id);
         Ok(())
+    }
+
+    fn invalidate_state_observation_locked(cache: &mut StateObservationCache, id: &str) {
+        *cache.generations.entry(id.to_string()).or_default() += 1;
+        cache.states.remove(id);
     }
 
     fn persist_locked(&self, devices: &BTreeMap<String, HueBleDevice>) -> Result<()> {
@@ -1014,6 +1192,7 @@ mod tests {
         let store = HueBleDeviceStore {
             path: blocked_parent.join("devices.json"),
             devices: Mutex::new(BTreeMap::new()),
+            state_observations: Mutex::new(StateObservationCache::default()),
             tombstone_path: blocked_parent.join("unpaired_bonds.json"),
             tombstones: Mutex::new(TombstoneDocument {
                 schema_version: TOMBSTONE_SCHEMA_VERSION,
@@ -1058,10 +1237,142 @@ mod tests {
             color: None,
             effect: None,
         };
-        store.cache_state(&device.id, state).unwrap();
+        let (_, token) = store.begin_state_observation(&device.id).unwrap();
+        assert!(store
+            .record_state_observation(&device.id, token, state)
+            .unwrap());
 
         assert_eq!(store.get(&device.id).unwrap().last_state, Some(state));
+        assert_eq!(
+            store.fresh_state_observation(&device.id).unwrap(),
+            Some(state)
+        );
         assert_eq!(fs::read(&store.path).unwrap(), before);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reloaded_last_state_is_not_a_fresh_observation() {
+        let dir = unique_test_dir("observation-reload");
+        let store = HueBleDeviceStore::load(&dir).unwrap();
+        let mut device = test_device();
+        device.last_state = Some(HueBleState {
+            on: Some(true),
+            ..Default::default()
+        });
+        store.upsert(device.clone()).unwrap();
+
+        let reloaded = HueBleDeviceStore::load(&dir).unwrap();
+
+        assert_eq!(
+            reloaded.get(&device.id).unwrap().last_state,
+            device.last_state
+        );
+        assert_eq!(reloaded.fresh_state_observation(&device.id).unwrap(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn command_epoch_rejects_reads_started_before_or_during_dispatch() {
+        let dir = unique_test_dir("observation-command-epoch");
+        let store = HueBleDeviceStore::load(&dir).unwrap();
+        let device = test_device();
+        store.upsert(device.clone()).unwrap();
+        let (_, before_command) = store.begin_state_observation(&device.id).unwrap();
+
+        let guard = store.begin_command_observation(&device.id).unwrap();
+        let (_, during_command) = store.begin_state_observation(&device.id).unwrap();
+        assert!(!store
+            .record_state_observation(
+                &device.id,
+                before_command,
+                HueBleState {
+                    on: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap());
+        assert!(!store
+            .record_state_observation(
+                &device.id,
+                during_command,
+                HueBleState {
+                    on: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap());
+        drop(guard);
+        assert_eq!(store.fresh_state_observation(&device.id).unwrap(), None);
+
+        let (_, after_command) = store.begin_state_observation(&device.id).unwrap();
+        let observed = HueBleState {
+            on: Some(true),
+            ..Default::default()
+        };
+        assert!(store
+            .record_state_observation(&device.id, after_command, observed)
+            .unwrap());
+        assert_eq!(
+            store.fresh_state_observation(&device.id).unwrap(),
+            Some(observed)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn metadata_replacement_rejects_prior_incarnation_observation() {
+        let dir = unique_test_dir("observation-replacement");
+        let store = HueBleDeviceStore::load(&dir).unwrap();
+        let device = test_device();
+        store.upsert(device.clone()).unwrap();
+        let (stale_device, stale_token) = store.begin_state_observation(&device.id).unwrap();
+        let mut replacement = device.clone();
+        replacement.address = "AA:BB:CC:DD:EE:FF".to_string();
+        store.upsert(replacement.clone()).unwrap();
+
+        assert!(!store
+            .record_state_observation(
+                &stale_device.id,
+                stale_token,
+                HueBleState {
+                    on: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap());
+        assert_eq!(store.get(&device.id).unwrap().address, replacement.address);
+        assert_eq!(store.fresh_state_observation(&device.id).unwrap(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stale_observation_is_not_fresh() {
+        let dir = unique_test_dir("observation-stale");
+        let store = HueBleDeviceStore::load(&dir).unwrap();
+        let device = test_device();
+        store.upsert(device.clone()).unwrap();
+        let (_, token) = store.begin_state_observation(&device.id).unwrap();
+        store
+            .record_state_observation(
+                &device.id,
+                token,
+                HueBleState {
+                    on: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .state_observations
+            .lock()
+            .unwrap()
+            .states
+            .get_mut(&device.id)
+            .unwrap()
+            .observed_at = Instant::now() - STATE_OBSERVATION_MAX_AGE - Duration::from_secs(1);
+
+        assert_eq!(store.fresh_state_observation(&device.id).unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 

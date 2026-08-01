@@ -7,6 +7,17 @@ use super::types::{
     HueBleCommand, HueBleDevice, HueBlePairingOutcome, HueBlePairingRequest, HueBleState,
 };
 
+#[derive(Debug)]
+pub(crate) struct HueBleCommandTimeout;
+
+impl std::fmt::Display for HueBleCommandTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Hue BLE physical command deadline expired")
+    }
+}
+
+impl std::error::Error for HueBleCommandTimeout {}
+
 /// Result of an opportunistic adapter-health observation.
 ///
 /// `Busy` means foreground Hue work currently owns the shared adapter scope;
@@ -60,6 +71,16 @@ pub trait HueBleTransport: Send + Sync {
     ) -> Result<HueBlePairingOutcome>;
 
     fn apply_command(&self, device: &HueBleDevice, command: &HueBleCommand) -> Result<()>;
+
+    /// Apply one logical foreground command to every target before the shared
+    /// physical-command deadline. Implementations must start distinct bulbs
+    /// independently and return one keyed outcome per input; an aggregate
+    /// success/failure would lose partial physical results.
+    fn apply_commands_until(
+        &self,
+        commands: &[(HueBleDevice, HueBleCommand)],
+        deadline: Instant,
+    ) -> Result<Vec<(String, Result<()>)>>;
 
     fn read_state(&self, device: &HueBleDevice) -> Result<HueBleState>;
 
@@ -186,6 +207,20 @@ mod tests {
                 anyhow::bail!("injected write failure");
             }
             Ok(())
+        }
+
+        fn apply_commands_until(
+            &self,
+            commands: &[(HueBleDevice, HueBleCommand)],
+            deadline: Instant,
+        ) -> Result<Vec<(String, Result<()>)>> {
+            if deadline <= Instant::now() {
+                return Err(anyhow::Error::new(HueBleCommandTimeout));
+            }
+            Ok(commands
+                .iter()
+                .map(|(device, command)| (device.id.clone(), self.apply_command(device, command)))
+                .collect())
         }
 
         fn read_state(&self, _device: &HueBleDevice) -> Result<HueBleState> {

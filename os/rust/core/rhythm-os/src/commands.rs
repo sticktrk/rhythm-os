@@ -1474,6 +1474,23 @@ pub(crate) fn update_lights_on_cache_for_runtime_node_with_source(
     }
 }
 
+fn observed_lights_on_for_source(
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    source: ObservedPowerSource,
+) -> Result<bool> {
+    if matches!(
+        source,
+        ObservedPowerSource::Periodic
+            | ObservedPowerSource::LiveSubscription
+            | ObservedPowerSource::AuthoritativeRefresh
+    ) {
+        runtime.any_lights_on_for_periodic(node_id)
+    } else {
+        runtime.any_lights_on(node_id)
+    }
+}
+
 pub(crate) fn update_lights_on_cache_for_native_light_report(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -1515,7 +1532,7 @@ pub(crate) fn update_lights_on_cache_for_native_light_report(
                 source,
             );
         } else {
-            match runtime.any_lights_on(&parent_id) {
+            match observed_lights_on_for_source(runtime, &parent_id, source) {
                 Ok(parent_lights_on) => update_lights_on_cache_for_node_with_source(
                     state,
                     &parent_id,
@@ -1569,7 +1586,7 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
             light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
         };
 
-        match runtime.any_lights_on(&query_id) {
+        match observed_lights_on_for_source(runtime, &query_id, source) {
             Ok(lights_on) => lights_on,
             Err(e) => {
                 warn!(
@@ -1598,7 +1615,7 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
         .as_deref()
         .filter(|parent_id| *parent_id != snap.id)
     {
-        match runtime.any_lights_on(parent_id) {
+        match observed_lights_on_for_source(runtime, parent_id, source) {
             Ok(parent_lights_on) => update_lights_on_cache_for_node_with_source(
                 state,
                 parent_id,
@@ -1653,7 +1670,7 @@ pub(crate) fn refresh_all_lights_on_cache_for_runtime(
             if let Some(lights_on) = query_results.get(&query_id).copied() {
                 lights_on
             } else {
-                match runtime.any_lights_on(&query_id) {
+                match observed_lights_on_for_source(runtime, &query_id, source) {
                     Ok(lights_on) => {
                         query_results.insert(query_id, lights_on);
                         lights_on
@@ -13972,7 +13989,9 @@ mod tests {
         sun_times_updates: Mutex<Vec<Option<rhythm_core::SunTimes>>>,
         light_states: Mutex<HashMap<String, bool>>,
         light_state_queries: AtomicUsize,
+        periodic_light_state_queries: AtomicUsize,
         fail_light_state_queries: AtomicBool,
+        fail_periodic_light_state_queries: AtomicBool,
         current_hour: f32,
     }
 
@@ -13990,13 +14009,20 @@ mod tests {
                 sun_times_updates: Mutex::new(Vec::new()),
                 light_states: Mutex::new(HashMap::new()),
                 light_state_queries: AtomicUsize::new(0),
+                periodic_light_state_queries: AtomicUsize::new(0),
                 fail_light_state_queries: AtomicBool::new(false),
+                fail_periodic_light_state_queries: AtomicBool::new(false),
                 current_hour,
             }
         }
 
         fn fail_light_state_queries(&self) {
             self.fail_light_state_queries.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_periodic_light_state_queries(&self) {
+            self.fail_periodic_light_state_queries
+                .store(true, Ordering::SeqCst);
         }
 
         fn set_light_on(&self, node_id: &str, on: bool) {
@@ -14081,6 +14107,10 @@ mod tests {
 
         fn light_state_query_count(&self) -> usize {
             self.light_state_queries.load(Ordering::SeqCst)
+        }
+
+        fn periodic_light_state_query_count(&self) -> usize {
+            self.periodic_light_state_queries.load(Ordering::SeqCst)
         }
     }
 
@@ -14295,6 +14325,17 @@ mod tests {
             self.light_state_queries.fetch_add(1, Ordering::SeqCst);
             if self.fail_light_state_queries.load(Ordering::SeqCst) {
                 anyhow::bail!("observed power is indeterminate");
+            }
+            Ok(self.any_target_lights_on(room_id))
+        }
+        fn any_lights_on_for_periodic(&self, room_id: &str) -> anyhow::Result<bool> {
+            self.periodic_light_state_queries
+                .fetch_add(1, Ordering::SeqCst);
+            if self
+                .fail_periodic_light_state_queries
+                .load(Ordering::SeqCst)
+            {
+                anyhow::bail!("cached observed power is indeterminate");
             }
             Ok(self.any_target_lights_on(room_id))
         }
@@ -18727,10 +18768,44 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_refresh_uses_non_blocking_observed_state_path() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        runtime.set_light_on("room1", true);
+        runtime.fail_light_state_queries();
+
+        let snapshots = refresh_observed_power_authoritatively(&state).unwrap();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(runtime.light_state_query_count(), 0);
+        assert_eq!(runtime.periodic_light_state_query_count(), 1);
+        let app = state.lock().unwrap();
+        let observed = app.room_observed_power.get("room1").unwrap();
+        assert!(observed.lights_on);
+        assert_eq!(observed.source, ObservedPowerSource::AuthoritativeRefresh);
+    }
+
+    #[test]
+    fn authoritative_refresh_preserves_prior_state_when_cache_is_indeterminate() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        set_observed_lights_on(&state, "room1", true);
+        runtime.fail_periodic_light_state_queries();
+
+        refresh_observed_power_authoritatively(&state).unwrap();
+
+        assert_eq!(runtime.light_state_query_count(), 0);
+        assert_eq!(runtime.periodic_light_state_query_count(), 1);
+        let app = state.lock().unwrap();
+        let observed = app.room_observed_power.get("room1").unwrap();
+        assert!(observed.lights_on);
+        assert_eq!(observed.source, ObservedPowerSource::Command);
+    }
+
+    #[test]
     fn live_off_report_preserves_parent_when_aggregate_query_is_indeterminate() {
         let (state, runtime, device_one_id, _device_two_id) = setup_matter_room_with_two_lights();
         set_observed_lights_on(&state, "room1", true);
         runtime.fail_light_state_queries();
+        runtime.fail_periodic_light_state_queries();
 
         let resolved = update_lights_on_cache_for_native_light_report(
             &state,

@@ -1397,6 +1397,7 @@ impl CompositeController {
             })
             .collect();
 
+        let mut query_errors = Vec::new();
         for (key, label, handle) in handles {
             match await_supervised(handle).await {
                 Ok(true) => return Ok(true),
@@ -1409,8 +1410,15 @@ impl CompositeController {
                         key,
                         e
                     );
+                    query_errors.push(format!("{key} ({label}): {e}"));
                 }
             }
+        }
+        if periodic && !query_errors.is_empty() {
+            return Err(LightControlError::ConnectionError(format!(
+                "Observed power state is indeterminate: {}",
+                query_errors.join("; ")
+            )));
         }
         Ok(false)
     }
@@ -2671,6 +2679,20 @@ mod tests {
             0,
             "periodic checks must not fall back to the interactive hub query"
         );
+    }
+
+    #[test]
+    fn periodic_light_check_preserves_indeterminate_state() {
+        let controller = Arc::new(MockController::new("matter"));
+        controller.set_fail(true);
+        let composite = CompositeController::new();
+        composite.register_controller("matter", controller);
+        composite.update_routing(route(&[("room", "matter", group_target("room"))]));
+
+        let error = block_on(composite.any_lights_on_for_periodic("room")).unwrap_err();
+
+        assert!(matches!(error, LightControlError::ConnectionError(_)));
+        assert!(error.to_string().contains("indeterminate"));
     }
 
     #[test]
