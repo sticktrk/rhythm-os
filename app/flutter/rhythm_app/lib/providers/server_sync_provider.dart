@@ -231,9 +231,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// [_hasBeenSynced], which stays sticky so non-room tabs do not flicker out
   /// during ordinary reconnects.
   bool _roomReadinessRefreshPending = false;
-  bool _unclassifiedHubStartupGraceActive = false;
+  bool _automaticHubStartupGraceActive = false;
+  String? _automaticHubStartupGraceSignature;
   Timer? _roomReadinessGraceTimer;
-  static const Duration _unclassifiedHubStartupGrace = Duration(seconds: 8);
+  static const Duration _automaticHubStartupGrace = Duration(seconds: 8);
 
   /// Explicit gate used when the user enters a Home/server hub from the
   /// chooser. Unlike background reconnects, this must block cached rooms until
@@ -755,14 +756,13 @@ class ServerSyncProvider extends ChangeNotifier {
   /// configured hub after boot/update. Manual failures are allowed through so
   /// the recovery banner can offer a retry action.
   bool get hasPendingAutomaticHubStartup {
+    if (!_automaticHubStartupGraceActive) return false;
     for (final hub in serverHubs) {
       if (hub.connected) continue;
       if (hubCapabilities(hub.type)?.blocksRoomReadiness == false) continue;
       if (hub.startupRetry?.isManualRetryRequired == true) continue;
       if (hub.startupRetry?.isScheduled == true) return true;
-      if (hub.startupRetry == null && _unclassifiedHubStartupGraceActive) {
-        return true;
-      }
+      if (hub.startupRetry == null) return true;
     }
     return false;
   }
@@ -1755,23 +1755,42 @@ class ServerSyncProvider extends ChangeNotifier {
     if (notify) notifyListeners();
   }
 
-  bool get _hasUnclassifiedDisconnectedHub {
+  String? get _blockingAutomaticHubStartupSignature {
+    final keys = <String>[];
     for (final hub in serverHubs) {
-      if (!hub.connected && hub.startupRetry == null) return true;
+      if (hub.connected) continue;
+      if (hubCapabilities(hub.type)?.blocksRoomReadiness == false) continue;
+      if (hub.startupRetry?.isManualRetryRequired == true) continue;
+      if (hub.startupRetry?.isScheduled == true || hub.startupRetry == null) {
+        keys.add('${hub.type}@${hub.address}');
+      }
     }
-    return false;
+    if (keys.isEmpty) return null;
+    keys.sort();
+    return keys.join('|');
   }
 
   void _scheduleRoomReadinessGraceExpiryIfNeeded() {
-    _roomReadinessGraceTimer?.cancel();
-    _roomReadinessGraceTimer = null;
-    if (!_hasUnclassifiedDisconnectedHub || HueServiceLocator.isDemoMode) {
-      _unclassifiedHubStartupGraceActive = false;
+    final signature = _blockingAutomaticHubStartupSignature;
+    if (signature == null || HueServiceLocator.isDemoMode) {
+      _roomReadinessGraceTimer?.cancel();
+      _roomReadinessGraceTimer = null;
+      _automaticHubStartupGraceActive = false;
+      _automaticHubStartupGraceSignature = null;
       return;
     }
-    _unclassifiedHubStartupGraceActive = true;
-    _roomReadinessGraceTimer = Timer(_unclassifiedHubStartupGrace, () {
-      _unclassifiedHubStartupGraceActive = false;
+
+    // Repeated authoritative hellos for the same failed hub set must not
+    // restart this gate forever. Recovery continues in the background and the
+    // hub banner remains available after cached/healthy rooms are revealed.
+    if (_automaticHubStartupGraceSignature == signature) return;
+
+    _roomReadinessGraceTimer?.cancel();
+    _automaticHubStartupGraceSignature = signature;
+    _automaticHubStartupGraceActive = true;
+    _roomReadinessGraceTimer = Timer(_automaticHubStartupGrace, () {
+      _roomReadinessGraceTimer = null;
+      _automaticHubStartupGraceActive = false;
       notifyListeners();
     });
   }
@@ -1843,7 +1862,8 @@ class ServerSyncProvider extends ChangeNotifier {
       _activeConnectionEndpoint = null;
       _hasBeenSynced = false;
       _roomReadinessRefreshPending = false;
-      _unclassifiedHubStartupGraceActive = false;
+      _automaticHubStartupGraceActive = false;
+      _automaticHubStartupGraceSignature = null;
       _roomReadinessGraceTimer?.cancel();
       _roomReadinessGraceTimer = null;
       _resetConnectionMetadata();

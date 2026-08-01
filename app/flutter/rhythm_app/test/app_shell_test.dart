@@ -581,6 +581,87 @@ void main() {
     expect(find.text('Welcome to Rhythm'), findsOneWidget);
   });
 
+  testWidgets('scheduled BLE startup cannot leave the home UI stuck setting up',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connected,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+    );
+
+    final scheduledBleHello = RhythmHello.fromJson({
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'hub_types': ['matter'],
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+        },
+      ],
+      'hubs': [
+        {
+          'type': 'hue_ble',
+          'address': 'local',
+          'connected': false,
+          'startup_retry': {
+            'status': 'scheduled',
+            'attempt_count': 1,
+          },
+        },
+      ],
+      'capabilities': {
+        'hubs': [
+          {
+            'type': 'hue_ble',
+            'configurable': false,
+            'blocks_room_readiness': true,
+          },
+        ],
+      },
+      'mode': {'active': 'day'},
+      'light_breaker': {'enabled': true},
+      'location': const <String, dynamic>{},
+    });
+    connection.emitHello(scheduledBleHello);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Setting up...'), findsOneWidget);
+    expect(find.text('Kitchen'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 8));
+
+    expect(find.text('Setting up...'), findsNothing);
+    expect(find.text('Kitchen'), findsOneWidget);
+
+    connection.emitHello(scheduledBleHello);
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.text('Setting up...'), findsNothing);
+    expect(find.text('Kitchen'), findsOneWidget);
+  });
+
   testWidgets('uses the shared connecting screen during home entry refresh',
       (tester) async {
     final roomProvider = RoomProvider();

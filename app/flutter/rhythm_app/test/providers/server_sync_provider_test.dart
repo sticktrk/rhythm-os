@@ -3913,6 +3913,52 @@ void main() {
       expect(provider.roomsReadyForDisplay, isTrue);
     });
 
+    test('scheduled hub startup cannot gate rooms past the bounded grace', () {
+      fakeAsync((async) {
+        final localRoomProvider = RoomProvider();
+        final localConnection = _HelloRhythmConnection(_FakeRhythmServerApi());
+        final provider = ServerSyncProvider(
+          connection: localConnection,
+          roomProvider: localRoomProvider,
+          homeProvider: _TestHomeProvider(const []),
+        );
+
+        final scheduledHello = RhythmHello.fromJson({
+          'hubs': [
+            {
+              'type': 'hue_ble',
+              'address': 'local',
+              'connected': false,
+              'startup_retry': {
+                'status': 'scheduled',
+                'attempt_count': 1,
+              },
+            },
+          ],
+        });
+        localConnection.emitHello(scheduledHello);
+        async.flushMicrotasks();
+
+        expect(provider.hasPendingAutomaticHubStartup, isTrue);
+        expect(provider.roomsReadyForDisplay, isFalse);
+
+        async.elapse(const Duration(seconds: 8));
+
+        expect(provider.hasPendingAutomaticHubStartup, isFalse);
+        expect(provider.roomsReadyForDisplay, isTrue);
+
+        // Repeated authoritative state for the same failed hub must not restart
+        // the grace window and put the app back on the Setting up screen.
+        localConnection.emitHello(scheduledHello);
+        async.flushMicrotasks();
+        expect(provider.roomsReadyForDisplay, isTrue);
+
+        provider.dispose();
+        localConnection.dispose();
+        localRoomProvider.dispose();
+      });
+    });
+
     test('explicit input-only local BLE startup never gates rooms', () async {
       final helloConnection = _HelloRhythmConnection(api);
       addTearDown(helloConnection.dispose);

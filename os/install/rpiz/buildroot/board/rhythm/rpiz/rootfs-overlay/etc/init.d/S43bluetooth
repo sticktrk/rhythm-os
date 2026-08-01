@@ -6,6 +6,8 @@ LOG_DIR_FALLBACK=/var/log
 LOGFILE=
 HCIATTACH="${HCIATTACH:-/usr/bin/hciattach}"
 HCICONFIG="${HCICONFIG:-/usr/bin/hciconfig}"
+HCI_READY_ATTEMPTS="${HCI_READY_ATTEMPTS:-20}"
+HCI_READY_SLEEP_SECONDS="${HCI_READY_SLEEP_SECONDS:-1}"
 BLUETOOTHD_INIT=/etc/init.d/S40bluetoothd
 BLUETOOTH_STATE_SOURCE=/data/bluetooth
 BLUETOOTH_STATE_TARGET=/var/lib/bluetooth
@@ -120,10 +122,27 @@ attach_controller() {
     fi
 }
 
-bring_hci_up() {
-    if [ -x "$HCICONFIG" ] && "$HCICONFIG" hci0 >/dev/null 2>&1; then
-        "$HCICONFIG" hci0 up >/dev/null 2>&1 || true
+wait_for_hci_ready() {
+    local attempt=1
+
+    if [ ! -x "$HCICONFIG" ]; then
+        log "hciconfig is unavailable; cannot verify Bluetooth controller readiness"
+        return 1
     fi
+
+    while [ "$attempt" -le "$HCI_READY_ATTEMPTS" ]; do
+        if "$HCICONFIG" hci0 >/dev/null 2>&1 \
+            && "$HCICONFIG" hci0 up >>"$LOGFILE" 2>&1 \
+            && "$HCICONFIG" hci0 2>/dev/null | grep -q 'UP RUNNING'; then
+            log "Bluetooth controller hci0 is ready (attempt $attempt)"
+            return 0
+        fi
+        sleep "$HCI_READY_SLEEP_SECONDS"
+        attempt=$((attempt + 1))
+    done
+
+    log "Bluetooth controller hci0 did not become ready after $HCI_READY_ATTEMPTS attempts"
+    return 1
 }
 
 migrate_legacy_bluetooth_state() {
@@ -189,30 +208,41 @@ prepare_persistent_bluetooth_state() {
     return 1
 }
 
-restart_bluetoothd() {
+stop_bluetoothd() {
     if [ -x "$BLUETOOTHD_INIT" ]; then
         "$BLUETOOTHD_INIT" stop >>"$LOGFILE" 2>&1 || true
-        if ! prepare_persistent_bluetooth_state; then
-            log "persistent Bluetooth state is unavailable; refusing to start bluetoothd"
-            return 1
-        fi
-        if ! "$BLUETOOTHD_INIT" start >>"$LOGFILE" 2>&1; then
-            log "failed to start bluetoothd"
-            return 1
-        fi
+    fi
+}
+
+start_bluetoothd() {
+    if ! prepare_persistent_bluetooth_state; then
+        log "persistent Bluetooth state is unavailable; refusing to start bluetoothd"
+        return 1
+    fi
+    if [ -x "$BLUETOOTHD_INIT" ] \
+        && ! "$BLUETOOTHD_INIT" start >>"$LOGFILE" 2>&1; then
+        log "failed to start bluetoothd"
+        return 1
     fi
     return 0
 }
 
 start() {
     log "loading bluetooth modules"
+    # Buildroot starts bluetoothd before this board-specific script. Stop it
+    # before hci0 appears so BlueZ cannot probe a half-initialized UART
+    # controller and leave the adapter absent for the rest of the boot.
+    stop_bluetoothd
     modprobe bluetooth 2>/dev/null || true
     modprobe hci_uart 2>/dev/null || true
     sleep 1
     attach_controller || true
     sleep 1
-    bring_hci_up
-    if ! restart_bluetoothd; then
+    if ! wait_for_hci_ready; then
+        log_kernel_excerpt
+        return 1
+    fi
+    if ! start_bluetoothd; then
         log_kernel_excerpt
         return 1
     fi

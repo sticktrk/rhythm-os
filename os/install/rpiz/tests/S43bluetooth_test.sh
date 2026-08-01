@@ -38,3 +38,38 @@ test -e "$BLUETOOTH_MIGRATION_MARKER"
 printf '%s\n' "stale-rootfs-value" >"$BLUETOOTH_STATE_TARGET/adapter/device-one/info"
 migrate_legacy_bluetooth_state
 grep -qx "device-one-complete" "$BLUETOOTH_STATE_SOURCE/adapter/device-one/info"
+
+# A controller that appears late must be polled until it can be brought fully
+# UP before bluetoothd starts probing it.
+FAKE_HCICONFIG="$TEST_ROOT/hciconfig"
+FAKE_HCI_STATE="$TEST_ROOT/hciconfig-calls"
+export FAKE_HCI_STATE
+cat >"$FAKE_HCICONFIG" <<'EOF'
+#!/bin/sh
+if [ "${2:-}" = "up" ]; then
+    exit 0
+fi
+calls=0
+if [ -f "$FAKE_HCI_STATE" ]; then
+    calls="$(cat "$FAKE_HCI_STATE")"
+fi
+calls=$((calls + 1))
+printf '%s\n' "$calls" >"$FAKE_HCI_STATE"
+if [ "$calls" -lt 3 ]; then
+    exit 1
+fi
+printf '%s\n' 'hci0: Type: Primary  Bus: UART' '        UP RUNNING'
+EOF
+chmod +x "$FAKE_HCICONFIG"
+
+HCICONFIG="$FAKE_HCICONFIG"
+HCI_READY_ATTEMPTS=4
+HCI_READY_SLEEP_SECONDS=0
+wait_for_hci_ready
+test "$(cat "$FAKE_HCI_STATE")" -ge 3
+
+HCICONFIG="$TEST_ROOT/missing-hciconfig"
+if wait_for_hci_ready; then
+    echo "wait_for_hci_ready unexpectedly accepted a missing hciconfig" >&2
+    exit 1
+fi
