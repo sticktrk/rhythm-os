@@ -61,6 +61,26 @@ pub trait HueBleTransport: Send + Sync {
 
     fn apply_command(&self, device: &HueBleDevice, command: &HueBleCommand) -> Result<()>;
 
+    /// Apply one logical controller command to every target while preserving
+    /// transport-level coordination across the batch.
+    ///
+    /// Hue BLE does not expose a native room-broadcast characteristic. The
+    /// portable fallback still visits each bulb, while BlueZ can override this
+    /// method to keep the shared adapter lane for the complete logical group.
+    fn apply_commands(&self, commands: &[(HueBleDevice, HueBleCommand)]) -> Result<()> {
+        let mut errors = Vec::new();
+        for (device, command) in commands {
+            if let Err(error) = self.apply_command(device, command) {
+                errors.push(format!("{}: {error:#}", device.display_name()));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(errors.join("; "))
+        }
+    }
+
     fn read_state(&self, device: &HueBleDevice) -> Result<HueBleState>;
 
     /// Opportunistic observer read. Implementations should avoid initiating a

@@ -27,6 +27,10 @@ const PAIR_TIMEOUT: Duration = Duration::from_secs(35);
 const PASSIVE_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const BOND_REMOVAL_TIMEOUT: Duration = Duration::from_secs(3);
 const ADAPTER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+// The composite dispatcher reports a physical command timed out after 10s.
+// Keep the real BlueZ future inside that boundary so a caller timeout cannot
+// leave a detached GATT operation holding the Hue adapter lane.
+const COMMAND_BATCH_TIMEOUT: Duration = Duration::from_secs(9);
 const DEVICE_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const PAIRING_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -72,6 +76,22 @@ impl BluezHueBleTransport {
             .run_adapter_operation_bounded(
                 ADAPTER_ADMISSION_TIMEOUT,
                 PAIRING_OPERATION_TIMEOUT,
+                move |session, adapter| async move {
+                    DetachedBluezOutput::from_value(operation(session, adapter).await?)
+                },
+            )?
+            .into_value()
+    }
+
+    fn run_command_batch_adapter_operation<T, F, Fut>(&self, operation: F) -> Result<T>
+    where
+        T: Serialize + DeserializeOwned + Send + 'static,
+        F: FnOnce(bluer::Session, Adapter) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        self.client
+            .run_adapter_operation_until(
+                Instant::now() + COMMAND_BATCH_TIMEOUT,
                 move |session, adapter| async move {
                     DetachedBluezOutput::from_value(operation(session, adapter).await?)
                 },
@@ -806,6 +826,30 @@ impl HueBleTransport for BluezHueBleTransport {
             Self::connect(&device).await?;
             let characteristics = Self::characteristics(&device).await?;
             Self::apply_to_characteristics(&characteristics, &command).await
+        })
+    }
+
+    fn apply_commands(&self, commands: &[(HueBleDevice, HueBleCommand)]) -> Result<()> {
+        let commands = commands.to_vec();
+        self.run_command_batch_adapter_operation(move |_session, adapter| async move {
+            let mut errors = Vec::new();
+            for (record, command) in commands {
+                let result: Result<()> = async {
+                    let device = Self::existing_device(&adapter, &record).await?;
+                    Self::connect(&device).await?;
+                    let characteristics = Self::characteristics(&device).await?;
+                    Self::apply_to_characteristics(&characteristics, &command).await
+                }
+                .await;
+                if let Err(error) = result {
+                    errors.push(format!("{}: {error:#}", record.display_name()));
+                }
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                anyhow::bail!(errors.join("; "))
+            }
         })
     }
 
