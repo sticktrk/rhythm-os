@@ -10,13 +10,15 @@ use bluer::agent::{Agent, ReqError};
 use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
 use bluer::gatt::WriteOp;
 use bluer::{Adapter, Address, Device, ErrorKind};
-use rhythm_ble::bluez::{BluezClient, BluezDriverId, DetachedBluezOutput};
+use rhythm_ble::bluez::{
+    BluezClient, BluezDriverId, BluezOperationDeadlineExceeded, DetachedBluezOutput,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
 use super::protocol;
-use super::transport::{HueBleAdapterAvailability, HueBleTransport};
+use super::transport::{HueBleAdapterAvailability, HueBleCommandTimeout, HueBleTransport};
 use super::types::{
     HueBleCapabilities, HueBleColor, HueBleCommand, HueBleDevice, HueBlePairingOutcome,
     HueBlePairingRequest, HueBleState,
@@ -27,10 +29,11 @@ const PAIR_TIMEOUT: Duration = Duration::from_secs(35);
 const PASSIVE_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const BOND_REMOVAL_TIMEOUT: Duration = Duration::from_secs(3);
 const ADAPTER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
-// The composite dispatcher reports a physical command timed out after 10s.
-// Keep the real BlueZ future inside that boundary so a caller timeout cannot
-// leave a detached GATT operation holding the Hue adapter lane.
-const COMMAND_BATCH_TIMEOUT: Duration = Duration::from_secs(9);
+// Reserve part of the controller's nine-second physical-command budget for a
+// bounded Disconnect. BlueZ documents Disconnect as the cancellation path for
+// an outstanding Connect; dropping the Connect future alone can leave the
+// daemon reporting OperationAlreadyInProgress on later commands.
+const COMMAND_CLEANUP_RESERVE: Duration = Duration::from_secs(2);
 const DEVICE_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const PAIRING_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -83,20 +86,35 @@ impl BluezHueBleTransport {
             .into_value()
     }
 
-    fn run_command_batch_adapter_operation<T, F, Fut>(&self, operation: F) -> Result<T>
+    fn run_device_adapter_operations_until<I, T, F, Fut>(
+        &self,
+        deadline: Instant,
+        operations: Vec<(String, I)>,
+        operation: F,
+    ) -> Result<Vec<(String, Result<T>)>>
     where
         T: Serialize + DeserializeOwned + Send + 'static,
-        F: FnOnce(bluer::Session, Adapter) -> Fut,
+        F: Fn(I, bluer::Session, Adapter) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        self.client
-            .run_adapter_operation_until(
-                Instant::now() + COMMAND_BATCH_TIMEOUT,
-                move |session, adapter| async move {
-                    DetachedBluezOutput::from_value(operation(session, adapter).await?)
+        let operation = Arc::new(operation);
+        Ok(self
+            .client
+            .run_adapter_operations_for_until(
+                deadline,
+                operations,
+                move |input, session, adapter| {
+                    let operation = Arc::clone(&operation);
+                    async move {
+                        DetachedBluezOutput::from_value(operation(input, session, adapter).await?)
+                    }
                 },
             )?
-            .into_value()
+            .into_iter()
+            .map(|(device_id, result)| {
+                (device_id, result.and_then(DetachedBluezOutput::into_value))
+            })
+            .collect())
     }
 
     fn run_device_adapter_operation<T, F, Fut>(&self, device_key: &str, operation: F) -> Result<T>
@@ -309,6 +327,82 @@ impl BluezHueBleTransport {
         Ok(())
     }
 
+    async fn cancel_failed_command(device: &Device, deadline: Instant) -> Result<()> {
+        if deadline <= Instant::now() {
+            anyhow::bail!("Hue BLE command cleanup deadline expired before disconnect");
+        }
+        let deadline = tokio::time::Instant::from_std(deadline);
+        match tokio::time::timeout_at(deadline, device.disconnect()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(disconnect_error)) => {
+                let still_connected = tokio::time::timeout_at(deadline, device.is_connected())
+                    .await
+                    .context("Hue BLE cleanup deadline expired while verifying disconnect")?
+                    .unwrap_or(true);
+                Err(disconnect_error).context(format!(
+                    "disconnecting Hue bulb after a failed command was not acknowledged (connected={still_connected})"
+                ))
+            }
+            Err(_) => anyhow::bail!("Hue BLE command cleanup deadline expired during disconnect"),
+        }
+    }
+
+    async fn reconcile_uncertain_command(
+        device: &Device,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        tokio::time::timeout_at(deadline, device.disconnect())
+            .await
+            .map_err(|_| anyhow::Error::new(HueBleCommandTimeout))?
+            .context("reconciling a previously ambiguous Hue BLE command")?;
+        let still_connected = tokio::time::timeout_at(deadline, device.is_connected())
+            .await
+            .map_err(|_| anyhow::Error::new(HueBleCommandTimeout))?
+            .context("verifying Hue BLE command reconciliation")?;
+        if still_connected {
+            anyhow::bail!("Hue bulb remains connected after command reconciliation");
+        }
+        Ok(())
+    }
+
+    fn record_fence_address(record: &HueBleDevice) -> Result<String> {
+        Ok(record
+            .address
+            .parse::<Address>()
+            .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?
+            .to_string())
+    }
+
+    fn record_operation_is_uncertain(client: &BluezClient, record: &HueBleDevice) -> Result<bool> {
+        let address = Self::record_fence_address(record)?;
+        Ok(client.device_operation_is_uncertain(&record.id)?
+            || client.device_operation_is_uncertain(&address)?)
+    }
+
+    fn mark_record_operation_uncertain(client: &BluezClient, record: &HueBleDevice) -> Result<()> {
+        let address = Self::record_fence_address(record)?;
+        client
+            .mark_device_operation_uncertain(&record.id)
+            .with_context(|| format!("fencing stable Hue device {}", record.id))?;
+        // BlueZ Connect is addressed by the D-Bus device locator. Retaining an
+        // address fence as well as the stable EUI-64 fence prevents pairing or
+        // bond-recovery paths (which do not know the EUI-64 yet) from reopening
+        // an operation the daemon may still own.
+        client
+            .mark_device_operation_uncertain(&address)
+            .with_context(|| format!("fencing Hue BlueZ device {address}"))
+    }
+
+    fn clear_record_operation_uncertain(client: &BluezClient, record: &HueBleDevice) -> Result<()> {
+        let address = Self::record_fence_address(record)?;
+        client
+            .clear_device_operation_uncertain(&record.id)
+            .with_context(|| format!("clearing stable Hue device fence {}", record.id))?;
+        client
+            .clear_device_operation_uncertain(&address)
+            .with_context(|| format!("clearing Hue BlueZ device fence {address}"))
+    }
+
     async fn characteristics(device: &Device) -> Result<HashMap<Uuid, Characteristic>> {
         let mut result = HashMap::new();
         for service in device.services().await? {
@@ -360,8 +454,51 @@ impl BluezHueBleTransport {
         Ok(())
     }
 
-    async fn inspect_paired_device(device: &Device) -> Result<HueBleDevice> {
-        Self::connect(device).await?;
+    async fn inspect_paired_device(client: &BluezClient, device: &Device) -> Result<HueBleDevice> {
+        let address = device.address().to_string();
+        if client.device_operation_is_uncertain(&address)? {
+            Self::reconcile_uncertain_command(
+                device,
+                tokio::time::Instant::now() + CONNECT_TIMEOUT,
+            )
+            .await
+            .with_context(|| format!("reconciling ambiguous Hue BlueZ operation for {address}"))?;
+            client.clear_device_operation_uncertain(&address)?;
+        }
+
+        // Mark before Connect so cancellation of this future leaves a fence
+        // visible to every later path, including those that only know the
+        // BlueZ address and have not read the stable EUI-64 yet.
+        client.mark_device_operation_uncertain(&address)?;
+        let inspection = async {
+            Self::connect(device).await?;
+            Self::inspect_connected_device(device).await
+        }
+        .await;
+        match inspection {
+            Ok(record) => {
+                // The caller may still trust and disconnect this same BlueZ
+                // device. Extend the address fence to the stable identity and
+                // let that caller clear both only after its final operation is
+                // acknowledged.
+                Self::mark_record_operation_uncertain(client, &record)?;
+                Ok(record)
+            }
+            Err(inspection_error) => {
+                match Self::cancel_failed_command(device, Instant::now() + CONNECT_TIMEOUT).await {
+                    Ok(()) => {
+                        client.clear_device_operation_uncertain(&address)?;
+                        Err(inspection_error)
+                    }
+                    Err(cleanup_error) => Err(inspection_error.context(format!(
+                        "cancelling failed Hue inspection also failed: {cleanup_error:#}; the BlueZ address remains fenced"
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn inspect_connected_device(device: &Device) -> Result<HueBleDevice> {
         let characteristics = Self::characteristics(device).await?;
         Self::validate_light_characteristic_ids(&characteristics.keys().copied().collect())?;
         let eui64_raw = Self::read_optional(&characteristics, protocol::EUI64_UUID)
@@ -686,6 +823,8 @@ impl HueBleTransport for BluezHueBleTransport {
                 let address: Address = stale_address.parse().with_context(|| {
                     format!("invalid quarantined Hue BLE address {stale_address}")
                 })?;
+                let address_key = address.to_string();
+                client.mark_device_operation_uncertain(&address_key)?;
                 Self::remove_exact_local_bond(&adapter, address, None)
                     .await
                     .with_context(|| {
@@ -693,6 +832,7 @@ impl HueBleTransport for BluezHueBleTransport {
                             "removing stale BlueZ bond for physically reset Hue bulb {stale_address}"
                         )
                     })?;
+                client.clear_device_operation_uncertain(&address_key)?;
             }
             let candidates = Self::discover_candidates(&client, &adapter, &request).await?;
             let _agent = session
@@ -779,10 +919,9 @@ impl HueBleTransport for BluezHueBleTransport {
                         }
                     }
                 }
-                let record = match Self::inspect_paired_device(&device).await {
+                let record = match Self::inspect_paired_device(&client, &device).await {
                     Ok(record) => record,
                     Err(error) => {
-                        let _ = device.disconnect().await;
                         retained_bond_addresses.push(address.to_string());
                         failures.push(format!(
                             "{address}: validating paired Hue bulb failed: {error:#}"
@@ -791,16 +930,29 @@ impl HueBleTransport for BluezHueBleTransport {
                     }
                 };
                 if let Err(error) = device.set_trusted(true).await {
-                    let _ = device.disconnect().await;
+                    let cleanup =
+                        Self::cancel_failed_command(&device, Instant::now() + CONNECT_TIMEOUT).await;
+                    if cleanup.is_ok() {
+                        Self::clear_record_operation_uncertain(&client, &record)?;
+                    }
                     retained_bond_addresses.push(address.to_string());
+                    let cleanup = cleanup
+                        .err()
+                        .map(|cleanup| format!("; disconnect also failed: {cleanup:#}"))
+                        .unwrap_or_default();
                     failures.push(format!(
-                        "{address}: trusting validated Hue bulb failed: {error}"
+                        "{address}: trusting validated Hue bulb failed: {error}{cleanup}"
                     ));
                     continue;
                 }
                 // Free the controller connection slot before interviewing the
                 // next bulb in the batch. Normal control reconnects on demand.
-                let _ = device.disconnect().await;
+                match Self::cancel_failed_command(&device, Instant::now() + CONNECT_TIMEOUT).await {
+                    Ok(()) => Self::clear_record_operation_uncertain(&client, &record)?,
+                    Err(error) => failures.push(format!(
+                        "{address}: paired Hue bulb could not release its controller connection; later control will reconcile it: {error:#}"
+                    )),
+                }
                 paired.push(record);
             }
 
@@ -821,64 +973,209 @@ impl HueBleTransport for BluezHueBleTransport {
         let device_key = record.id.clone();
         let record = record.clone();
         let command = *command;
+        let client = Arc::clone(&self.client);
         self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
+            if Self::record_operation_is_uncertain(&client, &record)? {
+                anyhow::bail!(
+                    "{} is fenced after an ambiguous prior command",
+                    record.display_name()
+                );
+            }
             let device = Self::existing_device(&adapter, &record).await?;
-            Self::connect(&device).await?;
-            let characteristics = Self::characteristics(&device).await?;
-            Self::apply_to_characteristics(&characteristics, &command).await
+            Self::mark_record_operation_uncertain(&client, &record)?;
+            let command_result: Result<()> = async {
+                Self::connect(&device).await?;
+                let characteristics = Self::characteristics(&device).await?;
+                Self::apply_to_characteristics(&characteristics, &command).await
+            }
+            .await;
+            match command_result {
+                Ok(()) => {
+                    Self::clear_record_operation_uncertain(&client, &record)?;
+                    Ok(())
+                }
+                Err(command_error) => {
+                    match Self::cancel_failed_command(
+                        &device,
+                        Instant::now() + COMMAND_CLEANUP_RESERVE,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            Self::clear_record_operation_uncertain(&client, &record)?;
+                            Err(command_error)
+                        }
+                        Err(cleanup_error) => Err(command_error.context(format!(
+                            "cancelling the failed Hue BLE operation also failed: {cleanup_error:#}; the stable device lane remains fenced"
+                        ))),
+                    }
+                }
+            }
         })
     }
 
-    fn apply_commands(&self, commands: &[(HueBleDevice, HueBleCommand)]) -> Result<()> {
-        let commands = commands.to_vec();
-        self.run_command_batch_adapter_operation(move |_session, adapter| async move {
-            let mut errors = Vec::new();
-            for (record, command) in commands {
-                let result: Result<()> = async {
-                    let device = Self::existing_device(&adapter, &record).await?;
+    fn apply_commands_until(
+        &self,
+        commands: &[(HueBleDevice, HueBleCommand)],
+        deadline: Instant,
+    ) -> Result<Vec<(String, Result<()>)>> {
+        let work_deadline = deadline
+            .checked_sub(COMMAND_CLEANUP_RESERVE)
+            .unwrap_or(deadline);
+        let operations = commands
+            .iter()
+            .map(|(record, command)| (record.id.clone(), (record.clone(), *command)))
+            .collect();
+        let client = Arc::clone(&self.client);
+        let result = self.run_device_adapter_operations_until(
+            deadline,
+            operations,
+            move |(record, command), _session, adapter| {
+                let client = Arc::clone(&client);
+                async move {
+                let work_deadline = tokio::time::Instant::from_std(work_deadline);
+                let device = tokio::time::timeout_at(
+                    work_deadline,
+                    Self::existing_device(&adapter, &record),
+                )
+                .await
+                .map_err(|_| anyhow::Error::new(HueBleCommandTimeout))??;
+
+                if Self::record_operation_is_uncertain(&client, &record)? {
+                    Self::reconcile_uncertain_command(&device, work_deadline)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "{} remains fenced after an ambiguous prior command",
+                                record.display_name()
+                            )
+                        })?;
+                    Self::clear_record_operation_uncertain(&client, &record)?;
+                }
+
+                // Connect is cancel-unsafe at the D-Bus boundary. Fence both
+                // identities before starting it so even outer-deadline
+                // cancellation leaves a durable in-process exclusion marker.
+                Self::mark_record_operation_uncertain(&client, &record)?;
+                let command_result = match tokio::time::timeout_at(work_deadline, async {
                     Self::connect(&device).await?;
                     let characteristics = Self::characteristics(&device).await?;
                     Self::apply_to_characteristics(&characteristics, &command).await
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::Error::new(HueBleCommandTimeout)),
+                };
+
+                match command_result {
+                    Ok(()) => {
+                        Self::clear_record_operation_uncertain(&client, &record)?;
+                        Ok(())
+                    }
+                    Err(command_error) => {
+                        match Self::cancel_failed_command(&device, deadline).await {
+                            Ok(()) => {
+                                Self::clear_record_operation_uncertain(&client, &record)?;
+                                Err(command_error)
+                            }
+                            Err(cleanup_error) => {
+                                Err(command_error.context(format!(
+                                    "cancelling the failed Hue BLE operation also failed: {cleanup_error:#}; the stable device lane remains fenced"
+                                )))
+                            }
+                        }
+                    }
                 }
-                .await;
-                if let Err(error) = result {
-                    errors.push(format!("{}: {error:#}", record.display_name()));
                 }
-            }
-            if errors.is_empty() {
-                Ok(())
-            } else {
-                anyhow::bail!(errors.join("; "))
-            }
-        })
+            },
+        );
+        match result {
+            Ok(outcomes) => Ok(outcomes
+                .into_iter()
+                .map(|(device_id, outcome)| {
+                    let outcome = match outcome {
+                        Err(error) if error.is::<BluezOperationDeadlineExceeded>() => {
+                            Err(error.context(HueBleCommandTimeout))
+                        }
+                        outcome => outcome,
+                    };
+                    (device_id, outcome)
+                })
+                .collect()),
+            Err(error) if Instant::now() >= deadline => Err(error.context(HueBleCommandTimeout)),
+            result => result,
+        }
     }
 
     fn read_state(&self, record: &HueBleDevice) -> Result<HueBleState> {
         let device_key = record.id.clone();
         let record = record.clone();
+        let client = Arc::clone(&self.client);
         self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
+            if Self::record_operation_is_uncertain(&client, &record)? {
+                anyhow::bail!(
+                    "{} state is indeterminate after an ambiguous prior command",
+                    record.display_name()
+                );
+            }
             let device = Self::existing_device(&adapter, &record).await?;
-            Self::connect(&device).await?;
-            let characteristics = Self::characteristics(&device).await?;
-            Self::read_state_from_characteristics(&characteristics).await
+            Self::mark_record_operation_uncertain(&client, &record)?;
+            let read_result: Result<HueBleState> = async {
+                Self::connect(&device).await?;
+                let characteristics = Self::characteristics(&device).await?;
+                Self::read_state_from_characteristics(&characteristics).await
+            }
+            .await;
+            match read_result {
+                Ok(state) => {
+                    Self::clear_record_operation_uncertain(&client, &record)?;
+                    Ok(state)
+                }
+                Err(read_error) => {
+                    match Self::cancel_failed_command(
+                        &device,
+                        Instant::now() + COMMAND_CLEANUP_RESERVE,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            Self::clear_record_operation_uncertain(&client, &record)?;
+                            Err(read_error)
+                        }
+                        Err(cleanup_error) => Err(read_error.context(format!(
+                            "cancelling the failed Hue BLE read also failed: {cleanup_error:#}; the stable device lane remains fenced"
+                        ))),
+                    }
+                }
+            }
         })
     }
 
     fn read_state_passive(&self, record: &HueBleDevice) -> Result<Option<HueBleState>> {
         let device_key = record.id.clone();
         let record = record.clone();
+        let client = Arc::clone(&self.client);
         Ok(self
             .try_run_device_adapter_operation(&device_key, move |_session, adapter| async move {
+                if Self::record_operation_is_uncertain(&client, &record)? {
+                    return Ok(None);
+                }
                 let device = Self::existing_device(&adapter, &record).await?;
                 if !device.is_connected().await.unwrap_or(false) {
                     return Ok(None);
                 }
+                // Even a passive ReadValue is a daemon-owned D-Bus operation.
+                // Mark before the bounded future so timeout/cancellation cannot
+                // release this lane and let a foreground Connect overlap it.
+                Self::mark_record_operation_uncertain(&client, &record)?;
                 let state = tokio::time::timeout(PASSIVE_READ_TIMEOUT, async {
                     let characteristics = Self::characteristics(&device).await?;
                     Self::read_state_from_characteristics(&characteristics).await
                 })
                 .await
                 .context("passive Hue state read timed out")??;
+                Self::clear_record_operation_uncertain(&client, &record)?;
                 Ok(Some(state))
             })?
             .flatten())
@@ -949,6 +1246,7 @@ impl HueBleTransport for BluezHueBleTransport {
         let address: Address = address
             .parse()
             .with_context(|| format!("invalid bonded Hue BLE address {address}"))?;
+        let client = Arc::clone(&self.client);
         // This recovery path starts from a locator and learns the stable EUI-64
         // only after opening the bond. Keep it driver-wide so it cannot race a
         // keyed operation for the same physical bulb under a changed address.
@@ -966,9 +1264,16 @@ impl HueBleTransport for BluezHueBleTransport {
             {
                 anyhow::bail!("BlueZ device {address} is no longer paired");
             }
-            Self::inspect_paired_device(&device)
+            let record = Self::inspect_paired_device(&client, &device)
                 .await
-                .with_context(|| format!("reconstructing metadata for bonded Hue bulb {address}"))
+                .with_context(|| {
+                    format!("reconstructing metadata for bonded Hue bulb {address}")
+                })?;
+            // This recovery path performs no follow-up D-Bus teardown. A
+            // completed inspection has no pending Connect, so it can release
+            // the fence immediately.
+            Self::clear_record_operation_uncertain(&client, &record)?;
+            Ok(record)
         })
     }
 
@@ -976,6 +1281,7 @@ impl HueBleTransport for BluezHueBleTransport {
         Self::ensure_persistent_bond_storage()?;
         let device_key = record.id.clone();
         let record = record.clone();
+        let client = Arc::clone(&self.client);
         self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
             let address: Address = record
                 .address
@@ -994,10 +1300,20 @@ impl HueBleTransport for BluezHueBleTransport {
             {
                 anyhow::bail!("The Hue bulb is no longer bonded to this Rhythm Box");
             }
-            Self::connect(&device)
+            if Self::record_operation_is_uncertain(&client, &record)? {
+                Self::reconcile_uncertain_command(
+                    &device,
+                    tokio::time::Instant::now() + CONNECT_TIMEOUT,
+                )
                 .await
-                .context("connecting to Hue bulb to validate pairing handoff")?;
+                .context("reconciling Hue bulb before pairing-handoff validation")?;
+                Self::clear_record_operation_uncertain(&client, &record)?;
+            }
+            Self::mark_record_operation_uncertain(&client, &record)?;
             let validation_result: Result<()> = async {
+                Self::connect(&device)
+                    .await
+                    .context("connecting to Hue bulb to validate pairing handoff")?;
                 let characteristics = Self::characteristics(&device)
                     .await
                     .context("resolving Hue bulb pairing-handoff characteristic")?;
@@ -1018,22 +1334,21 @@ impl HueBleTransport for BluezHueBleTransport {
                 Ok(())
             }
             .await;
-            let disconnect_result: Result<()> = async {
-                if device
-                    .is_connected()
-                    .await
-                    .context("checking Hue bulb connection after handoff validation")?
-                {
-                    device
-                        .disconnect()
-                        .await
-                        .context("disconnecting Hue bulb after handoff validation")?;
+            let disconnect_result =
+                Self::cancel_failed_command(&device, Instant::now() + CONNECT_TIMEOUT).await;
+            match disconnect_result {
+                Ok(()) => {
+                    Self::clear_record_operation_uncertain(&client, &record)?;
+                    validation_result
                 }
-                Ok(())
+                Err(cleanup_error) => match validation_result {
+                    Ok(()) => Err(cleanup_error)
+                        .context("disconnecting Hue bulb after handoff validation"),
+                    Err(validation_error) => Err(validation_error.context(format!(
+                        "pairing-handoff validation cleanup also failed: {cleanup_error:#}; the bulb remains fenced"
+                    ))),
+                },
             }
-            .await;
-            validation_result?;
-            disconnect_result
         })
     }
 
@@ -1041,6 +1356,7 @@ impl HueBleTransport for BluezHueBleTransport {
         Self::ensure_persistent_bond_storage()?;
         let device_key = record.id.clone();
         let record = record.clone();
+        let client = Arc::clone(&self.client);
         self.run_device_instant_adapter_operation(
             &device_key,
             move |_session, adapter| async move {
@@ -1060,10 +1376,20 @@ impl HueBleTransport for BluezHueBleTransport {
                 {
                     anyhow::bail!("The Hue bulb is no longer bonded to this Rhythm Box");
                 }
-                Self::connect(&device)
+                if Self::record_operation_is_uncertain(&client, &record)? {
+                    Self::reconcile_uncertain_command(
+                        &device,
+                        tokio::time::Instant::now() + CONNECT_TIMEOUT,
+                    )
                     .await
-                    .context("connecting to Hue bulb before releasing its bond")?;
+                    .context("reconciling Hue bulb before pairing handoff")?;
+                    Self::clear_record_operation_uncertain(&client, &record)?;
+                }
+                Self::mark_record_operation_uncertain(&client, &record)?;
                 let handoff_result: Result<std::time::Instant> = async {
+                    Self::connect(&device)
+                        .await
+                        .context("connecting to Hue bulb before releasing its bond")?;
                     let characteristics = Self::characteristics(&device)
                         .await
                         .context("resolving Hue bulb pairing-handoff characteristic")?;
@@ -1078,23 +1404,21 @@ impl HueBleTransport for BluezHueBleTransport {
                 // Factory reset refreshes every bulb before deleting any keys.
                 // Release each ACL slot after the authenticated write so a large
                 // installation cannot exhaust the controller before later bulbs.
-                let disconnect_result: Result<()> = async {
-                    if device
-                        .is_connected()
-                        .await
-                        .context("checking the Hue bulb connection after pairing handoff")?
-                    {
-                        device
-                            .disconnect()
-                            .await
-                            .context("disconnecting the Hue bulb after pairing handoff")?;
+                let disconnect_result =
+                    Self::cancel_failed_command(&device, Instant::now() + CONNECT_TIMEOUT).await;
+                match disconnect_result {
+                    Ok(()) => {
+                        Self::clear_record_operation_uncertain(&client, &record)?;
+                        handoff_result
                     }
-                    Ok(())
+                    Err(cleanup_error) => match handoff_result {
+                        Ok(_) => Err(cleanup_error)
+                            .context("disconnecting Hue bulb after pairing handoff"),
+                        Err(handoff_error) => Err(handoff_error.context(format!(
+                            "pairing-handoff cleanup also failed: {cleanup_error:#}; the bulb remains fenced"
+                        ))),
+                    },
                 }
-                .await;
-                let handoff_at = handoff_result?;
-                disconnect_result?;
-                Ok(handoff_at)
             },
         )
     }
@@ -1107,12 +1431,18 @@ impl HueBleTransport for BluezHueBleTransport {
         Self::ensure_persistent_bond_storage()?;
         let device_key = record.id.clone();
         let record = record.clone();
+        let client = Arc::clone(&self.client);
         self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
             let address: Address = record
                 .address
                 .parse()
                 .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
-            Self::remove_exact_local_bond(&adapter, address, handoff_valid_until).await
+            Self::mark_record_operation_uncertain(&client, &record)?;
+            Self::remove_exact_local_bond(&adapter, address, handoff_valid_until).await?;
+            // Exact bond removal is a terminal acknowledgement from BlueZ;
+            // the old stable-ID and locator fences cannot protect anything
+            // after the device object/key is gone.
+            Self::clear_record_operation_uncertain(&client, &record)
         })
     }
 }

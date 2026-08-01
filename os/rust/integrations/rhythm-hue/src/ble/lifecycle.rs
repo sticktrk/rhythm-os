@@ -311,22 +311,38 @@ fn start_observer(
                 adapter_connected = next_connected;
 
                 let devices = store.all();
-                for device in devices {
+                for listed_device in devices {
                     if shutdown.load(Ordering::Relaxed) {
                         break;
                     }
+                    let (device, observation_token) =
+                        match store.begin_state_observation(&listed_device.id) {
+                            Ok(observation) => observation,
+                            Err(error) => {
+                                warn!(
+                                    target: "cmd",
+                                    "Hue BLE could not begin passive state observation for {}: {error:#}",
+                                    listed_device.display_name()
+                                );
+                                continue;
+                            }
+                        };
                     match transport.read_state_passive(&device) {
                         Ok(Some(state)) => {
-                            let _ = store.cache_state(&device.id, state);
-                            if let Some(on) = state.on {
-                                let changed =
-                                    previous_power.insert(device.id.clone(), on) != Some(on);
-                                if changed {
-                                    let _ = event_tx.send(HubEvent::LightPower {
-                                        hub_key: None,
-                                        device_id: device.id,
-                                        lights_on: on,
-                                    });
+                            let accepted = store
+                                .record_state_observation(&device.id, observation_token, state)
+                                .unwrap_or(false);
+                            if accepted {
+                                if let Some(on) = state.on {
+                                    let changed =
+                                        previous_power.insert(device.id.clone(), on) != Some(on);
+                                    if changed {
+                                        let _ = event_tx.send(HubEvent::LightPower {
+                                            hub_key: None,
+                                            device_id: device.id,
+                                            lights_on: on,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1681,6 +1697,20 @@ mod tests {
 
         fn apply_command(&self, _device: &HueBleDevice, _command: &HueBleCommand) -> Result<()> {
             Ok(())
+        }
+
+        fn apply_commands_until(
+            &self,
+            commands: &[(HueBleDevice, HueBleCommand)],
+            deadline: Instant,
+        ) -> Result<Vec<(String, Result<()>)>> {
+            if deadline <= Instant::now() {
+                anyhow::bail!("capturing transport command deadline expired");
+            }
+            Ok(commands
+                .iter()
+                .map(|(device, command)| (device.id.clone(), self.apply_command(device, command)))
+                .collect())
         }
 
         fn read_state(&self, _device: &HueBleDevice) -> Result<HueBleState> {

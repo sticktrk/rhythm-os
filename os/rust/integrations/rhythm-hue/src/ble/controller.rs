@@ -1,6 +1,8 @@
 //! Standard Rhythm light controller backed by Hue's direct BLE protocol.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use log::warn;
@@ -14,8 +16,12 @@ use super::protocol::{
     HUE_DEFAULT_MAX_MIRED, HUE_DEFAULT_MIN_MIRED, HUE_MAX_BRIGHTNESS, HUE_MIN_BRIGHTNESS,
 };
 use super::store::HueBleDeviceStore;
-use super::transport::HueBleTransport;
-use super::types::{HueBleColor, HueBleCommand, HueBleDevice, HueBleState};
+use super::transport::{HueBleCommandTimeout, HueBleTransport};
+use super::types::{HueBleColor, HueBleCommand, HueBleDevice};
+
+// The composite dispatcher gives a physical command ten seconds. Start every
+// target together and keep each real BLE future inside that outer boundary.
+const COMMAND_DISPATCH_TIMEOUT: Duration = Duration::from_secs(9);
 
 pub struct HueBleLightController {
     transport: Arc<dyn HueBleTransport>,
@@ -115,8 +121,13 @@ impl HueBleLightController {
             ));
         }
         let mut errors = Vec::new();
+        let mut timed_out = false;
         let mut commands = Vec::new();
+        let mut seen = HashSet::new();
         for id in ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
             let device = match self.device(id) {
                 Ok(device) => device,
                 Err(error) => {
@@ -128,74 +139,133 @@ impl HueBleLightController {
             commands.push((device, command));
         }
         if !commands.is_empty() {
-            match self.transport.apply_commands(&commands) {
-                Ok(()) => {
-                    for (device, command) in &commands {
-                        let state = Self::state_after_command(device.last_state, command);
-                        if let Err(error) = self.store.cache_state(&device.id, state) {
-                            warn!(
-                                target: "cmd",
-                                "Hue BLE could not cache commanded state for {}: {error:#}",
-                                device.display_name()
-                            );
+            let mut observation_guards = Vec::with_capacity(commands.len());
+            let mut guarded_commands = Vec::with_capacity(commands.len());
+            for (device, command) in commands {
+                let display_name = format!("{} ({})", device.display_name(), device.id);
+                match self.store.begin_command_observation(&device.id) {
+                    Ok(guard) => {
+                        observation_guards.push(guard);
+                        guarded_commands.push((device, command));
+                    }
+                    Err(error) => errors.push(format!(
+                        "{display_name}: observation invalidation failed; command was not dispatched: {error:#}"
+                    )),
+                }
+            }
+            if !guarded_commands.is_empty() {
+                let labels = guarded_commands
+                    .iter()
+                    .map(|(device, _)| {
+                        (
+                            device.id.clone(),
+                            format!("{} ({})", device.display_name(), device.id),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let mut pending = labels.keys().cloned().collect::<HashSet<_>>();
+                let batch_result = self.transport.apply_commands_until(
+                    &guarded_commands,
+                    Instant::now() + COMMAND_DISPATCH_TIMEOUT,
+                );
+                drop(observation_guards);
+
+                match batch_result {
+                    Err(error) => {
+                        timed_out |= error.is::<HueBleCommandTimeout>();
+                        errors.push(format!("Hue BLE dispatch: {error:#}"));
+                    }
+                    Ok(outcomes) => {
+                        for (device_id, outcome) in outcomes {
+                            let Some(display_name) = labels.get(&device_id) else {
+                                errors.push(format!(
+                                    "Hue BLE transport returned an unexpected outcome for {device_id}"
+                                ));
+                                continue;
+                            };
+                            if !pending.remove(&device_id) {
+                                errors.push(format!(
+                                    "Hue BLE transport returned duplicate outcomes for {display_name}"
+                                ));
+                                continue;
+                            }
+                            if let Err(error) = outcome {
+                                timed_out |= error.is::<HueBleCommandTimeout>();
+                                errors.push(format!("{display_name}: {error:#}"));
+                            }
+                        }
+                        for device_id in pending {
+                            errors.push(format!(
+                                "Hue BLE transport omitted an outcome for {}",
+                                labels[&device_id]
+                            ));
                         }
                     }
                 }
-                Err(error) => errors.push(format!("Hue BLE batch: {error:#}")),
             }
         }
         if errors.is_empty() {
             Ok(())
+        } else if timed_out {
+            Err(LightControlError::Timeout(errors.join("; ")))
         } else {
             Err(LightControlError::CommandFailed(errors.join("; ")))
         }
-    }
-
-    fn state_after_command(previous: Option<HueBleState>, command: &HueBleCommand) -> HueBleState {
-        let mut state = previous.unwrap_or_default();
-        if let Some(on) = command.on {
-            state.on = Some(on);
-        }
-        if let Some(brightness) = command.brightness {
-            state.brightness = Some(brightness);
-        }
-        if let Some(color) = command.color {
-            state.color = Some(color);
-        }
-        if let Some(effect) = command.effect {
-            state.effect = Some(effect);
-        }
-        state
     }
 
     fn read_any_on(&self, ids: &[String]) -> LightControlResult<bool> {
-        let mut successful_read = false;
+        let mut observed_off = 0;
         let mut errors = Vec::new();
         for id in ids {
-            let device = self.device(id)?;
-            match self.transport.read_state(&device) {
-                Ok(state) => {
-                    successful_read = true;
-                    let _ = self.store.cache_state(id, state);
-                    if state.on == Some(true) {
-                        return Ok(true);
-                    }
+            let (device, token) = match self.store.begin_state_observation(id) {
+                Ok(observation) => observation,
+                Err(error) => {
+                    errors.push(error.to_string());
+                    continue;
                 }
+            };
+            match self.transport.read_state(&device) {
+                Ok(state) => match self.store.record_state_observation(id, token, state) {
+                    Ok(true) if state.on == Some(true) => return Ok(true),
+                    Ok(true) if state.on == Some(false) => observed_off += 1,
+                    Ok(true) => errors.push(format!(
+                        "{}: physical power state was unavailable",
+                        device.display_name()
+                    )),
+                    Ok(false) => errors.push(format!(
+                        "{}: physical state changed during observation",
+                        device.display_name()
+                    )),
+                    Err(error) => errors.push(format!("{}: {error:#}", device.display_name())),
+                },
                 Err(error) => errors.push(format!("{}: {error:#}", device.display_name())),
             }
         }
-        if successful_read || ids.is_empty() {
+        if ids.is_empty() || observed_off == ids.len() {
             Ok(false)
         } else {
-            Err(LightControlError::CommandFailed(errors.join("; ")))
+            Err(LightControlError::ConnectionError(errors.join("; ")))
         }
     }
 
     fn read_cached_any_on(&self, ids: &[String]) -> LightControlResult<bool> {
         let mut unknown = Vec::new();
         for id in ids {
-            let device = self.device(id)?;
-            match device.last_state.and_then(|state| state.on) {
+            let device = match self.device(id) {
+                Ok(device) => device,
+                Err(error) => {
+                    unknown.push(error.to_string());
+                    continue;
+                }
+            };
+            let observation = match self.store.fresh_state_observation(id) {
+                Ok(observation) => observation,
+                Err(error) => {
+                    unknown.push(format!("{}: {error:#}", device.display_name()));
+                    continue;
+                }
+            };
+            match observation.and_then(|state| state.on) {
                 Some(true) => return Ok(true),
                 Some(false) => {}
                 None => unknown.push(device.display_name()),
@@ -302,17 +372,62 @@ mod tests {
     use crate::ble::types::{
         HueBleCapabilities, HueBlePairingOutcome, HueBlePairingRequest, HueBleState,
     };
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
-    #[derive(Default)]
-    struct RecordingBatchTransport {
-        batches: Mutex<Vec<Vec<(String, HueBleCommand)>>>,
-        single_command_calls: AtomicUsize,
+    static NEXT_TEST_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    struct TestTransport {
+        expected_batch_commands: usize,
+        started_commands: Mutex<Vec<String>>,
+        command_failures: Mutex<HashSet<String>>,
+        command_timeouts: Mutex<HashSet<String>>,
+        live_states: Mutex<HashMap<String, HueBleState>>,
+        live_failures: Mutex<HashSet<String>>,
+        live_read_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
         live_read_calls: AtomicUsize,
     }
 
-    impl HueBleTransport for RecordingBatchTransport {
+    impl TestTransport {
+        fn new(expected_batch_commands: usize) -> Self {
+            Self {
+                expected_batch_commands,
+                started_commands: Mutex::new(Vec::new()),
+                command_failures: Mutex::new(HashSet::new()),
+                command_timeouts: Mutex::new(HashSet::new()),
+                live_states: Mutex::new(HashMap::new()),
+                live_failures: Mutex::new(HashSet::new()),
+                live_read_hook: Mutex::new(None),
+                live_read_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn fail_command_for(&self, id: &str) {
+            self.command_failures.lock().unwrap().insert(id.to_string());
+        }
+
+        fn time_out_command_for(&self, id: &str) {
+            self.command_timeouts.lock().unwrap().insert(id.to_string());
+        }
+
+        fn set_live_state(&self, id: &str, state: HueBleState) {
+            self.live_states
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), state);
+        }
+
+        fn fail_live_read_for(&self, id: &str) {
+            self.live_failures.lock().unwrap().insert(id.to_string());
+        }
+
+        fn set_live_read_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+            *self.live_read_hook.lock().unwrap() = Some(hook);
+        }
+    }
+
+    impl HueBleTransport for TestTransport {
         fn is_available(&self) -> anyhow::Result<bool> {
             Ok(true)
         }
@@ -327,26 +442,69 @@ mod tests {
 
         fn apply_command(
             &self,
-            _device: &HueBleDevice,
+            device: &HueBleDevice,
             _command: &HueBleCommand,
         ) -> anyhow::Result<()> {
-            self.single_command_calls.fetch_add(1, Ordering::SeqCst);
+            self.started_commands
+                .lock()
+                .unwrap()
+                .push(device.id.clone());
+            if self.command_failures.lock().unwrap().contains(&device.id) {
+                anyhow::bail!("injected command failure");
+            }
             Ok(())
         }
 
-        fn apply_commands(&self, commands: &[(HueBleDevice, HueBleCommand)]) -> anyhow::Result<()> {
-            self.batches.lock().unwrap().push(
-                commands
-                    .iter()
-                    .map(|(device, command)| (device.id.clone(), *command))
-                    .collect(),
-            );
-            Ok(())
+        fn apply_commands_until(
+            &self,
+            commands: &[(HueBleDevice, HueBleCommand)],
+            deadline: Instant,
+        ) -> anyhow::Result<Vec<(String, anyhow::Result<()>)>> {
+            if deadline <= Instant::now() {
+                return Err(anyhow::Error::new(HueBleCommandTimeout));
+            }
+            if commands.len() != self.expected_batch_commands {
+                anyhow::bail!(
+                    "received {} commands, expected {}",
+                    commands.len(),
+                    self.expected_batch_commands
+                );
+            }
+            self.started_commands
+                .lock()
+                .unwrap()
+                .extend(commands.iter().map(|(device, _)| device.id.clone()));
+            let command_timeouts = self.command_timeouts.lock().unwrap();
+            let command_failures = self.command_failures.lock().unwrap();
+            Ok(commands
+                .iter()
+                .map(|(device, _)| {
+                    let result = if command_timeouts.contains(&device.id) {
+                        Err(anyhow::Error::new(HueBleCommandTimeout))
+                    } else if command_failures.contains(&device.id) {
+                        Err(anyhow::anyhow!("injected command failure"))
+                    } else {
+                        Ok(())
+                    };
+                    (device.id.clone(), result)
+                })
+                .collect())
         }
 
-        fn read_state(&self, _device: &HueBleDevice) -> anyhow::Result<HueBleState> {
+        fn read_state(&self, device: &HueBleDevice) -> anyhow::Result<HueBleState> {
             self.live_read_calls.fetch_add(1, Ordering::SeqCst);
-            anyhow::bail!("live reads are disabled in this test")
+            if let Some(hook) = self.live_read_hook.lock().unwrap().clone() {
+                hook();
+            }
+            if self.live_failures.lock().unwrap().contains(&device.id) {
+                anyhow::bail!("injected live read failure");
+            }
+            self.live_states
+                .lock()
+                .unwrap()
+                .get(&device.id)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("live read is not configured"))
         }
 
         fn has_local_bond(&self, _device: &HueBleDevice) -> anyhow::Result<bool> {
@@ -420,25 +578,27 @@ mod tests {
 
     fn test_controller(
         devices: &[HueBleDevice],
+        expected_batch_commands: usize,
     ) -> (
         HueBleLightController,
-        Arc<RecordingBatchTransport>,
+        Arc<TestTransport>,
         Arc<HueBleDeviceStore>,
         std::path::PathBuf,
     ) {
         let dir = std::env::temp_dir().join(format!(
-            "rhythm-hue-controller-{}-{}",
+            "rhythm-hue-controller-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed),
         ));
         let store = Arc::new(HueBleDeviceStore::load(&dir).unwrap());
         for device in devices {
             store.upsert(device.clone()).unwrap();
         }
-        let transport = Arc::new(RecordingBatchTransport::default());
+        let transport = Arc::new(TestTransport::new(expected_batch_commands));
         let controller = HueBleLightController::new(
             transport.clone(),
             store.clone(),
@@ -448,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn logical_group_uses_one_transport_batch_and_updates_observed_state() {
+    fn logical_group_preserves_keyed_outcomes_without_promoting_command_state() {
         let devices = vec![
             test_device("bulb-one", false),
             test_device("bulb-two", false),
@@ -457,7 +617,13 @@ mod tests {
             .iter()
             .map(|device| device.id.clone())
             .collect::<Vec<_>>();
-        let (controller, transport, store, dir) = test_controller(&devices);
+        let (controller, transport, store, dir) = test_controller(&devices, 2);
+        for device in &devices {
+            let (_, token) = store.begin_state_observation(&device.id).unwrap();
+            assert!(store
+                .record_state_observation(&device.id, token, device.last_state.unwrap())
+                .unwrap());
+        }
 
         controller
             .apply_to_ids(&ids, |_| HueBleCommand {
@@ -467,22 +633,77 @@ mod tests {
             })
             .unwrap();
 
-        let batches = transport.batches.lock().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 2);
-        assert_eq!(transport.single_command_calls.load(Ordering::SeqCst), 0);
-        drop(batches);
+        let mut started = transport.started_commands.lock().unwrap().clone();
+        started.sort();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(started, expected);
         for id in &ids {
             let state = store.get(id).unwrap().last_state.unwrap();
-            assert_eq!(state.on, Some(true));
-            assert_eq!(state.brightness, Some(127));
+            assert_eq!(state.on, Some(false));
+            assert_eq!(state.brightness, Some(10));
+            assert_eq!(store.fresh_state_observation(id).unwrap(), None);
         }
 
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn background_power_query_uses_passive_cache_without_live_ble_read() {
+    fn partial_failure_still_attempts_every_bulb() {
+        let devices = vec![
+            test_device("bulb-one", false),
+            test_device("bulb-two", false),
+            test_device("bulb-three", false),
+        ];
+        let ids = devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>();
+        let (controller, transport, _store, dir) = test_controller(&devices, 3);
+        transport.fail_command_for("bulb-two");
+
+        let error = controller
+            .apply_to_ids(&ids, |_| HueBleCommand {
+                on: Some(true),
+                ..Default::default()
+            })
+            .unwrap_err();
+
+        let mut started = transport.started_commands.lock().unwrap().clone();
+        started.sort();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(started, expected);
+        assert!(error.to_string().contains("bulb-two"));
+        assert!(error.to_string().contains("injected command failure"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn per_bulb_deadline_surfaces_as_controller_timeout() {
+        let devices = vec![
+            test_device("bulb-one", false),
+            test_device("bulb-two", false),
+        ];
+        let ids = devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>();
+        let (controller, transport, _store, dir) = test_controller(&devices, 2);
+        transport.time_out_command_for("bulb-one");
+
+        let result = controller.apply_to_ids(&ids, |_| HueBleCommand {
+            on: Some(true),
+            ..Default::default()
+        });
+
+        assert!(matches!(result, Err(LightControlError::Timeout(_))));
+        assert_eq!(transport.started_commands.lock().unwrap().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn background_power_query_uses_fresh_physical_cache_without_live_ble_read() {
         let devices = vec![
             test_device("bulb-one", false),
             test_device("bulb-two", true),
@@ -491,7 +712,13 @@ mod tests {
             .iter()
             .map(|device| device.id.clone())
             .collect::<Vec<_>>();
-        let (controller, transport, _store, dir) = test_controller(&devices);
+        let (controller, transport, store, dir) = test_controller(&devices, 0);
+        for device in &devices {
+            let (_, token) = store.begin_state_observation(&device.id).unwrap();
+            assert!(store
+                .record_state_observation(&device.id, token, device.last_state.unwrap())
+                .unwrap());
+        }
 
         let any_on = futures::executor::block_on(
             controller
@@ -501,6 +728,111 @@ mod tests {
 
         assert!(any_on);
         assert_eq!(transport.live_read_calls.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persisted_state_is_not_a_fresh_physical_observation() {
+        let devices = vec![test_device("bulb-one", true)];
+        let ids = vec![devices[0].id.clone()];
+        let (controller, transport, _store, dir) = test_controller(&devices, 0);
+
+        let result = futures::executor::block_on(
+            controller
+                .any_lights_on_target_for_periodic(&HubDispatchTarget::Devices { native_ids: ids }),
+        );
+
+        assert!(matches!(result, Err(LightControlError::ConnectionError(_))));
+        assert_eq!(transport.live_read_calls.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fresh_cached_true_wins_even_when_an_earlier_target_is_unknown() {
+        let devices = vec![test_device("bulb-on", true)];
+        let ids = vec!["missing-bulb".to_string(), "bulb-on".to_string()];
+        let (controller, transport, store, dir) = test_controller(&devices, 0);
+        let (_, token) = store.begin_state_observation("bulb-on").unwrap();
+        assert!(store
+            .record_state_observation("bulb-on", token, devices[0].last_state.unwrap())
+            .unwrap());
+
+        let any_on = futures::executor::block_on(
+            controller
+                .any_lights_on_target_for_periodic(&HubDispatchTarget::Devices { native_ids: ids }),
+        )
+        .unwrap();
+
+        assert!(any_on);
+        assert_eq!(transport.live_read_calls.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_false_plus_failure_is_indeterminate() {
+        let devices = vec![
+            test_device("bulb-one", false),
+            test_device("bulb-two", false),
+        ];
+        let ids = devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>();
+        let (controller, transport, _store, dir) = test_controller(&devices, 0);
+        transport.set_live_state("bulb-one", devices[0].last_state.unwrap());
+        transport.fail_live_read_for("bulb-two");
+
+        let result = futures::executor::block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices { native_ids: ids }),
+        );
+
+        assert!(matches!(result, Err(LightControlError::ConnectionError(_))));
+        assert_eq!(transport.live_read_calls.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_true_wins_over_another_bulbs_failure() {
+        let devices = vec![
+            test_device("bulb-one", false),
+            test_device("bulb-two", true),
+        ];
+        let ids = devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>();
+        let (controller, transport, _store, dir) = test_controller(&devices, 0);
+        transport.fail_live_read_for("bulb-one");
+        transport.set_live_state("bulb-two", devices[1].last_state.unwrap());
+
+        let any_on = futures::executor::block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices { native_ids: ids }),
+        )
+        .unwrap();
+
+        assert!(any_on);
+        assert_eq!(transport.live_read_calls.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_true_overlapping_a_command_is_indeterminate() {
+        let devices = vec![test_device("bulb-one", true)];
+        let ids = vec![devices[0].id.clone()];
+        let (controller, transport, store, dir) = test_controller(&devices, 0);
+        transport.set_live_state("bulb-one", devices[0].last_state.unwrap());
+        let hook_store = Arc::clone(&store);
+        transport.set_live_read_hook(Arc::new(move || {
+            let guard = hook_store.begin_command_observation("bulb-one").unwrap();
+            drop(guard);
+        }));
+
+        let result = futures::executor::block_on(
+            controller.any_lights_on_target(&HubDispatchTarget::Devices { native_ids: ids }),
+        );
+
+        assert!(matches!(result, Err(LightControlError::ConnectionError(_))));
+        assert_eq!(store.fresh_state_observation("bulb-one").unwrap(), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
