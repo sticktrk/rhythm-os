@@ -964,22 +964,29 @@ fn bootstrap_stored_hubs_once<'a>(
     finish_bootstrapped_hubs(state, &newly_connected);
 
     match scan_stored_hub_bootstrap_candidates(state, integrations, clock.now_instant()) {
-        Ok(next_scan) if next_scan.scheduled_supported_count > 0 => BootstrapLoopDecision::Sleep(
-            next_scan
-                .next_retry_after
-                .unwrap_or(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL)
-                .min(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL),
-        ),
-        Ok(next_scan)
-            if !next_scan.due_supported.is_empty()
-                || next_scan.manual_retry_required_count > 0
-                || !next_scan.unsupported_missing.is_empty() =>
-        {
-            BootstrapLoopDecision::Done
-        }
-        Ok(_) => BootstrapLoopDecision::Done,
+        Ok(next_scan) => bootstrap_loop_decision_after_scan(&next_scan),
         Err(_) => BootstrapLoopDecision::Done,
     }
+}
+
+fn bootstrap_loop_decision_after_scan(scan: &StoredHubBootstrapScan<'_>) -> BootstrapLoopDecision {
+    if scan.scheduled_supported_count > 0 {
+        return BootstrapLoopDecision::Sleep(
+            scan.next_retry_after
+                .unwrap_or(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL)
+                .min(STORED_HUB_BOOTSTRAP_WAKE_INTERVAL),
+        );
+    }
+
+    // Successful hubs may take longer to reconcile than another hub's retry
+    // delay. In that case the second scan reports the failed hub as due now.
+    // Continue immediately instead of ending the only bootstrap worker with a
+    // stale `scheduled` retry that can never run.
+    if !scan.due_supported.is_empty() {
+        return BootstrapLoopDecision::Sleep(Duration::ZERO);
+    }
+
+    BootstrapLoopDecision::Done
 }
 
 fn finish_bootstrapped_hubs<'a>(
@@ -2029,6 +2036,28 @@ mod tests {
             .sleeps
             .iter()
             .all(|sleep| *sleep == Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn stored_hub_bootstrap_continues_when_retry_is_already_due_after_sync() {
+        let integration = BootstrapTestIntegration::new(0);
+        let candidate = StoredHubBootstrapCandidate {
+            key: HubKey::new(HubType::new("hue"), "192.168.1.5"),
+            integration: &integration,
+        };
+        let scan = StoredHubBootstrapScan {
+            connectable_credential_count: 1,
+            due_supported: vec![candidate],
+            scheduled_supported_count: 0,
+            manual_retry_required_count: 0,
+            next_retry_after: None,
+            unsupported_missing: Vec::new(),
+        };
+
+        assert!(matches!(
+            bootstrap_loop_decision_after_scan(&scan),
+            BootstrapLoopDecision::Sleep(duration) if duration.is_zero()
+        ));
     }
 
     #[test]
