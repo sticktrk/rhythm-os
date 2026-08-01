@@ -40,6 +40,19 @@ authenticated challenge must be a new explicit strategy rather than an
 implicit GATT side effect. The association deadline covers adapter admission,
 scan, connection, service proof, and cleanup as one budget.
 
+Pairing-mode instructions must follow transport readiness. For a fresh-only
+scanner, the integration emits the correlated `searching` progress stage only
+after its observation subscription is installed and before the first receive;
+the app must not infer listener readiness from request acceptance. A terminal
+failure carries the deepest evidence-backed, privacy-safe stage reached:
+`target_not_observed`, `candidate_open`, `candidate_connect`,
+`candidate_service_discovery`, `candidate_service_mismatch`,
+`candidate_cleanup`, or `transport`. The latest debug-bundle snapshot may add
+bounded counters for these stages, but must never include an address, raw
+advertisement, setup value, stable identity, serial, or profile payload. New
+stages are additive; older readers fall back to `unknown` or their existing
+generic failure without rejecting the complete pairing record.
+
 The profile parser owns identity normalization. The host compares and routes
 the returned identity exactly; it must not case-fold or otherwise reinterpret
 profile-owned values. The public canonical ID is random, persisted on first

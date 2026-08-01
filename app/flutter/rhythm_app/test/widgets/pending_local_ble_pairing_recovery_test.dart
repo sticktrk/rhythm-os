@@ -663,6 +663,7 @@ void main() {
                 hubType: 'local_ble',
                 status: RhythmPairingStatus.failed,
                 error: 'Device stopped advertising.',
+                failureStage: 'candidate_connect',
               ),
             );
           },
@@ -680,6 +681,7 @@ void main() {
     await tester.pumpWidget(buildRecovery());
     await _settleRecovery(tester);
     expect(stored.terminalResult?.status, PendingLocalBleTerminalResult.failed);
+    expect(stored.terminalResult?.failureStage, 'candidate_connect');
     await tester.tap(
       find.byKey(
         const ValueKey('acknowledge-failed-local-ble-recovery'),
@@ -696,5 +698,13 @@ void main() {
     expect(statusRequests, 1,
         reason: 'cached terminal skips GET after restart');
     expect(find.text('Device stopped advertising.'), findsOneWidget);
+    final completions = analytics.events
+        .where((event) => event.name == 'local_ble_pairing_completed')
+        .toList(growable: false);
+    expect(completions, hasLength(2));
+    expect(
+      completions.map((event) => event.properties['failure_stage']).toSet(),
+      {'candidate_connect'},
+    );
   });
 }

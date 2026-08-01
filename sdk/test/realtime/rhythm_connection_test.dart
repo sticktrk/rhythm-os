@@ -646,6 +646,8 @@ void main() {
             'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"commissioning","stage":"commissioning","message":"Commissioning Matter device"}}\n\n',
         'event: pairing_progress\n'
             'data: {"type":"pairing_progress","data":{"hub_type":"matter","session_id":"pair-1","status":"complete","stage":"complete","message":"Pairing complete","device":{"device_id":"matter-100","name":"Test Bulb","device_type":"light","manufacturer":"Acme","model":"A19"},"devices":[{"device_id":"matter-100","name":"Test Bulb","device_type":"light","manufacturer":"Acme","model":"A19"},{"device_id":"matter-101","name":"Second Bulb","device_type":"light","manufacturer":"Acme","model":"A19"}],"warnings":["One candidate was out of range"]}}\n\n',
+        'event: pairing_progress\n'
+            'data: {"type":"pairing_progress","data":{"hub_type":"local_ble","session_id":"pair-2","status":"failed","stage":"failed","message":"Local Bluetooth pairing failed","error":"Local Bluetooth pairing failed","failure_stage":"candidate_connect"}}\n\n',
       ];
       sseCloseDelay = const Duration(milliseconds: 100);
 
@@ -659,7 +661,7 @@ void main() {
       await connection.connect('127.0.0.1', port: server.port);
       await Future<void>.delayed(const Duration(milliseconds: 200));
 
-      expect(events.length, 2);
+      expect(events.length, 3);
       expect(events[0].sessionId, 'pair-1');
       expect(events[0].stage, RhythmPairingStage.commissioning);
       expect(events[0].status, RhythmPairingStatus.commissioning);
@@ -672,6 +674,9 @@ void main() {
       );
       expect(events[1].completedDevices, hasLength(2));
       expect(events[1].warnings, ['One candidate was out of range']);
+      expect(events[2].sessionId, 'pair-2');
+      expect(events[2].status, RhythmPairingStatus.failed);
+      expect(events[2].failureStage, 'candidate_connect');
     });
 
     test('parses ota_update_progress SSE events with percent', () async {

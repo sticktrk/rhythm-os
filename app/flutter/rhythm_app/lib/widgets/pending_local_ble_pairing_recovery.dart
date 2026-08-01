@@ -361,7 +361,10 @@ class _PendingLocalBlePairingRecoveryBannerState
               result.error?.trim().isNotEmpty == true
                   ? result.error!.trim()
                   : 'Bluetooth pairing failed. You can start a new pairing.',
-              failureStage: 'terminal_status',
+              failureStage: localBleFailureStageOrFallback(
+                result.failureStage,
+                fallback: 'terminal_status',
+              ),
               terminalStatus: PendingLocalBleTerminalResult.failed,
             );
             return;
@@ -408,6 +411,7 @@ class _PendingLocalBlePairingRecoveryBannerState
       PendingLocalBleTerminalResult(
         status: terminalStatus,
         error: safeMessage,
+        failureStage: failureStage,
       ),
     );
     final saved = await _saveTerminalPointer(updated);
@@ -509,6 +513,7 @@ class _PendingLocalBlePairingRecoveryBannerState
       pending,
       outcome: 'failed',
       failureStage: failureStage ??
+          terminal.failureStage ??
           (notFound ? 'terminal_status_not_found' : 'terminal_status'),
     );
     setState(() {

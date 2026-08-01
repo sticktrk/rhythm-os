@@ -275,6 +275,75 @@ pub enum PairingStage {
     Failed,
 }
 
+/// Privacy-safe terminal stage for an actionable pairing failure.
+///
+/// This is deliberately evidence-shaped rather than cause-shaped: a transport
+/// can report the deepest stage it reached without claiming why the peripheral
+/// or radio failed. The value is safe for durable pairing history and support
+/// bundles; it never contains an address, setup payload, or device identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingFailureStage {
+    TargetNotObserved,
+    CandidateOpen,
+    CandidateConnect,
+    CandidateServiceDiscovery,
+    CandidateServiceMismatch,
+    CandidateCleanup,
+    Transport,
+    /// A stage added by a newer server. Older readers retain a safe marker
+    /// instead of rejecting the complete durable pairing document.
+    #[serde(other)]
+    Unknown,
+}
+
+impl PairingFailureStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TargetNotObserved => "target_not_observed",
+            Self::CandidateOpen => "candidate_open",
+            Self::CandidateConnect => "candidate_connect",
+            Self::CandidateServiceDiscovery => "candidate_service_discovery",
+            Self::CandidateServiceMismatch => "candidate_service_mismatch",
+            Self::CandidateCleanup => "candidate_cleanup",
+            Self::Transport => "transport",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Typed integration error carrying a bounded public message and safe stage.
+///
+/// Integration-specific causes stay inside their crate. The shared handler can
+/// downcast this marker to persist the stage while preserving its existing
+/// HTTP status and terminal-result behavior.
+#[derive(Debug)]
+pub struct PairingFailure {
+    stage: PairingFailureStage,
+    user_message: &'static str,
+}
+
+impl PairingFailure {
+    pub const fn new(stage: PairingFailureStage, user_message: &'static str) -> Self {
+        Self {
+            stage,
+            user_message,
+        }
+    }
+
+    pub const fn stage(&self) -> PairingFailureStage {
+        self.stage
+    }
+}
+
+impl std::fmt::Display for PairingFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.user_message)
+    }
+}
+
+impl std::error::Error for PairingFailure {}
+
 /// Information about a successfully paired device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairedDeviceInfo {
@@ -311,6 +380,12 @@ pub struct PairingSession {
     /// Error message (populated on failure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Deepest privacy-safe stage reached by a failed attempt.
+    ///
+    /// Optional and additive so clients from before this field continue to
+    /// decode pairing results while newer clients can present targeted help.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<PairingFailureStage>,
     /// Non-fatal candidate failures from a partially successful batch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -446,6 +521,26 @@ pub fn emit_pairing_progress_with_devices(
     warnings: Vec<String>,
     error: Option<String>,
 ) {
+    emit_pairing_progress_with_devices_and_failure(
+        state, hub_type, session_id, status, stage, message, device, devices, warnings, error, None,
+    );
+}
+
+/// Emit pairing progress with an additive privacy-safe terminal failure stage.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_pairing_progress_with_devices_and_failure(
+    state: &crate::state::SharedState,
+    hub_type: &str,
+    session_id: Option<&str>,
+    status: PairingStatus,
+    stage: PairingStage,
+    message: impl Into<String>,
+    device: Option<PairedDeviceInfo>,
+    devices: Vec<PairedDeviceInfo>,
+    warnings: Vec<String>,
+    error: Option<String>,
+    failure_stage: Option<PairingFailureStage>,
+) {
     let device = device.or_else(|| devices.first().cloned());
     crate::state::emit_server_event(
         state,
@@ -459,6 +554,7 @@ pub fn emit_pairing_progress_with_devices(
             devices,
             warnings,
             error,
+            failure_stage,
         },
     );
 }
@@ -563,6 +659,10 @@ pub struct PairingHistoryEntry {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Deepest privacy-safe stage reached by a failed attempt, when the
+    /// integration can distinguish it without inferring an exact cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<PairingFailureStage>,
     /// Paired device summary, e.g. "Leedarson Smart RGBTW Bulb (matter-106)".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
@@ -731,6 +831,9 @@ fn validate_terminal_session_input(session: &PairingSession, hub_type: &str) -> 
             if session.error.is_some() {
                 anyhow::bail!("successful durable pairing result contains an error");
             }
+            if session.failure_stage.is_some() {
+                anyhow::bail!("successful durable pairing result contains a failure stage");
+            }
         }
         PairingStatus::Failed => {
             if session.device.is_some()
@@ -814,6 +917,7 @@ fn expire_stale_pending_results(
             error: Some(
                 "Pairing was interrupted before the appliance recorded a final result".to_string(),
             ),
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         });
@@ -953,6 +1057,7 @@ fn sanitized_terminal_session(session: &PairingSession) -> PairingSession {
             .error
             .clone()
             .map(|error| bounded_pairing_text(error, 512)),
+        failure_stage: session.failure_stage,
         warnings: session
             .warnings
             .iter()
@@ -1219,6 +1324,7 @@ pub fn fail_pairing_result_before_start(
             device: None,
             devices: Vec::new(),
             error: Some(error.to_string()),
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         },
@@ -1385,6 +1491,7 @@ pub fn pairing_history_entry_for_pair(
         network: param_str(params, "network"),
         status: status_label(&session.status),
         error: session.error.clone(),
+        failure_stage: session.failure_stage,
         device: session
             .device
             .as_ref()
@@ -1419,6 +1526,7 @@ pub fn pairing_history_entry_for_unpair(
         network: None,
         status: status_label(status),
         error: error.map(str::to_string),
+        failure_stage: None,
         device: None,
         devices: Vec::new(),
         warnings: Vec::new(),
@@ -1484,6 +1592,38 @@ mod tests {
         assert!(context.deadline_after(Duration::from_millis(10)) <= Instant::now());
     }
 
+    #[test]
+    fn pairing_failure_stage_is_additive_and_future_tolerant() {
+        let without_stage: PairingSession = serde_json::from_value(serde_json::json!({
+            "hub_type": "local_ble",
+            "status": "failed",
+            "error": "Pairing failed"
+        }))
+        .unwrap();
+        assert_eq!(without_stage.failure_stage, None);
+
+        let known: PairingSession = serde_json::from_value(serde_json::json!({
+            "hub_type": "local_ble",
+            "status": "failed",
+            "error": "Pairing failed",
+            "failure_stage": "candidate_connect"
+        }))
+        .unwrap();
+        assert_eq!(
+            known.failure_stage,
+            Some(PairingFailureStage::CandidateConnect)
+        );
+
+        let future: PairingSession = serde_json::from_value(serde_json::json!({
+            "hub_type": "local_ble",
+            "status": "failed",
+            "error": "Pairing failed",
+            "failure_stage": "future_bounded_stage"
+        }))
+        .unwrap();
+        assert_eq!(future.failure_stage, Some(PairingFailureStage::Unknown));
+    }
+
     fn state_with_storage(path: &std::path::Path) -> SharedState {
         let mut app = AppState::default();
         app.storage = Some(Arc::new(
@@ -1521,6 +1661,7 @@ mod tests {
             device: None,
             devices: Vec::new(),
             error: Some("BLE timeout".to_string()),
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         };
@@ -1545,6 +1686,7 @@ mod tests {
             device: None,
             devices: Vec::new(),
             error: Some("identity mismatch".to_string()),
+            failure_stage: Some(PairingFailureStage::CandidateServiceMismatch),
             warnings: Vec::new(),
             details: None,
         };
@@ -1554,6 +1696,10 @@ mod tests {
         });
         let entry = pairing_history_entry_for_pair("local_ble", &params, &session);
         assert_eq!(entry.profile_id.as_deref(), Some("orein.oc02001.button.v1"));
+        assert_eq!(
+            entry.failure_stage,
+            Some(PairingFailureStage::CandidateServiceMismatch)
+        );
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("0A0B0C0D0E0F"));
         assert!(!json.contains("secret"));
@@ -1637,6 +1783,7 @@ mod tests {
             device: Some(first.clone()),
             devices: vec![first.clone(), second],
             error: None,
+            failure_stage: None,
             warnings: vec!["One candidate was out of range".to_string()],
             details: None,
         };
@@ -1750,6 +1897,7 @@ mod tests {
             network: None,
             status: "complete".to_string(),
             error: None,
+            failure_stage: None,
             device: None,
             devices: Vec::new(),
             warnings: Vec::new(),
@@ -1841,6 +1989,7 @@ mod tests {
                     device: None,
                     devices: Vec::new(),
                     error: Some("old failure".to_string()),
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 }),
@@ -1899,6 +2048,7 @@ mod tests {
                     device: None,
                     devices: Vec::new(),
                     error: Some("old failure".to_string()),
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 }),
@@ -1930,6 +2080,7 @@ mod tests {
                 device: Some(device.clone()),
                 devices: vec![device],
                 error: None,
+                failure_stage: None,
                 warnings: Vec::new(),
                 details: None,
             },
@@ -2112,6 +2263,7 @@ mod tests {
                 device: Some(device.clone()),
                 devices: vec![device],
                 error: None,
+                failure_stage: None,
                 warnings: Vec::new(),
                 details: None,
             },
@@ -2156,6 +2308,7 @@ mod tests {
             }),
             devices: Vec::new(),
             error: None,
+            failure_stage: None,
             warnings: vec!["EA:84:C2:50:A8:65 needed a retry".to_string()],
             details: Some(serde_json::json!({
                 "setup_payload": "MT:SECRET",
@@ -2211,6 +2364,7 @@ mod tests {
                 device: Some(device.clone()),
                 devices: vec![device],
                 error: None,
+                failure_stage: None,
                 warnings: Vec::new(),
                 details: None,
             },
@@ -2260,6 +2414,7 @@ mod tests {
             device: Some(device.clone()),
             devices: vec![device.clone(); 65],
             error: None,
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         };
@@ -2276,6 +2431,7 @@ mod tests {
             device: None,
             devices: Vec::new(),
             error: Some("failed".to_string()),
+            failure_stage: None,
             warnings: vec!["warning".to_string(); 33],
             details: None,
         };
@@ -2292,6 +2448,7 @@ mod tests {
             device: Some(device.clone()),
             devices: vec![device.clone()],
             error: Some("inconsistent success".to_string()),
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         };
@@ -2308,6 +2465,7 @@ mod tests {
             device: Some(device.clone()),
             devices: vec![device],
             error: Some("failed".to_string()),
+            failure_stage: None,
             warnings: vec!["partial result".to_string()],
             details: None,
         };
@@ -2406,6 +2564,7 @@ mod tests {
             }),
             devices: Vec::new(),
             error: None,
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         };
@@ -2435,6 +2594,7 @@ mod tests {
             device: None,
             devices: Vec::new(),
             error: Some("late failure".to_string()),
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         };
@@ -2477,6 +2637,7 @@ mod tests {
                         device: None,
                         devices: Vec::new(),
                         error: None,
+                        failure_stage: None,
                         warnings: Vec::new(),
                         details: None,
                     }),
@@ -2500,6 +2661,7 @@ mod tests {
                         device: None,
                         devices: Vec::new(),
                         error: None,
+                        failure_stage: None,
                         warnings: Vec::new(),
                         details: None,
                     }),

@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rhythm_os::hub::HubEvent;
+use rhythm_os::pairing::{PairingFailure, PairingFailureStage};
 use rhythm_os::registry::HubDeviceRegistry;
+use serde::Serialize;
 
 use crate::profile::{
     decode_profile_events, profile_by_id, BleAdvertisementView, BleNormalizedEvent,
@@ -22,6 +24,214 @@ pub struct LocalBlePairingCandidate {
     pub transport_hint: String,
     pub initial_replay: BTreeMap<String, Vec<u8>>,
 }
+
+/// Privacy-bounded evidence from the most recent local-BLE association.
+///
+/// Counts intentionally describe pipeline categories only. They never retain
+/// a Bluetooth address, raw advertisement, setup field, stable identity,
+/// serial, or profile metadata. `u16` plus saturating updates makes every
+/// field bounded even if a scanner produces an unexpectedly high frame rate.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct LocalBleAssociationDiagnostics {
+    pub succeeded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<PairingFailureStage>,
+    pub observations_received: u16,
+    pub observations_with_signal: u16,
+    pub advertisements_decoded: u16,
+    pub identity_matches: u16,
+    pub gatt_proof_attempts: u16,
+    pub candidate_open_failures: u16,
+    pub connect_failures: u16,
+    pub service_discovery_failures: u16,
+    pub service_mismatches: u16,
+    pub cleanup_failures: u16,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+impl LocalBleAssociationDiagnostics {
+    pub(crate) fn increment(counter: &mut u16) {
+        *counter = counter.saturating_add(1);
+    }
+
+    pub(crate) fn failed(mut self, stage: PairingFailureStage) -> Self {
+        self.succeeded = false;
+        self.failure_stage = Some(stage);
+        self
+    }
+
+    pub(crate) fn succeeded(mut self) -> Self {
+        self.succeeded = true;
+        self.failure_stage = None;
+        self
+    }
+}
+
+/// Mutable, operation-local evidence tracker. It keeps only bounded counters
+/// and the deepest stage reached; candidate-specific values never leave the
+/// BlueZ operation.
+#[derive(Debug, Default)]
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+pub(crate) struct LocalBleAssociationEvidence {
+    diagnostics: LocalBleAssociationDiagnostics,
+    deepest_candidate_failure: Option<PairingFailureStage>,
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+impl LocalBleAssociationEvidence {
+    pub(crate) fn observation_received(&mut self) {
+        LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.observations_received);
+    }
+
+    pub(crate) fn observation_with_signal(&mut self) {
+        LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.observations_with_signal);
+    }
+
+    pub(crate) fn advertisement_decoded(&mut self) {
+        LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.advertisements_decoded);
+    }
+
+    pub(crate) fn identity_matched(&mut self) {
+        LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.identity_matches);
+    }
+
+    pub(crate) fn gatt_proof_attempted(&mut self) {
+        LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.gatt_proof_attempts);
+    }
+
+    pub(crate) fn candidate_failed(&mut self, stage: PairingFailureStage) {
+        match stage {
+            PairingFailureStage::CandidateOpen => LocalBleAssociationDiagnostics::increment(
+                &mut self.diagnostics.candidate_open_failures,
+            ),
+            PairingFailureStage::CandidateConnect => {
+                LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.connect_failures)
+            }
+            PairingFailureStage::CandidateServiceDiscovery => {
+                LocalBleAssociationDiagnostics::increment(
+                    &mut self.diagnostics.service_discovery_failures,
+                )
+            }
+            PairingFailureStage::CandidateServiceMismatch => {
+                LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.service_mismatches)
+            }
+            PairingFailureStage::CandidateCleanup => {
+                LocalBleAssociationDiagnostics::increment(&mut self.diagnostics.cleanup_failures)
+            }
+            PairingFailureStage::TargetNotObserved
+            | PairingFailureStage::Transport
+            | PairingFailureStage::Unknown => {}
+        }
+        let stage_rank = candidate_stage_rank(stage);
+        let is_deeper = match self.deepest_candidate_failure {
+            Some(current) => stage_rank > candidate_stage_rank(current),
+            None => stage_rank > 0,
+        };
+        if stage == PairingFailureStage::CandidateCleanup || is_deeper {
+            self.deepest_candidate_failure = Some(stage);
+        }
+    }
+
+    /// Record GATT validation before candidate cleanup starts.
+    ///
+    /// This preserves the validation counter if cleanup also fails; the caller
+    /// can then record cleanup as the terminal/deepest stage.
+    pub(crate) fn record_candidate_validation(
+        &mut self,
+        validation: std::result::Result<(), PairingFailureStage>,
+    ) -> bool {
+        match validation {
+            Ok(()) => true,
+            Err(stage) => {
+                self.candidate_failed(stage);
+                false
+            }
+        }
+    }
+
+    pub(crate) fn failed(self, fallback: PairingFailureStage) -> LocalBleAssociationDiagnostics {
+        let stage = self.deepest_candidate_failure.unwrap_or(fallback);
+        self.diagnostics.failed(stage)
+    }
+
+    pub(crate) fn succeeded(self) -> LocalBleAssociationDiagnostics {
+        self.diagnostics.succeeded()
+    }
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+fn candidate_stage_rank(stage: PairingFailureStage) -> u8 {
+    match stage {
+        PairingFailureStage::CandidateOpen => 1,
+        PairingFailureStage::CandidateConnect => 2,
+        PairingFailureStage::CandidateServiceDiscovery => 3,
+        PairingFailureStage::CandidateServiceMismatch => 4,
+        PairingFailureStage::CandidateCleanup => 5,
+        PairingFailureStage::TargetNotObserved
+        | PairingFailureStage::Transport
+        | PairingFailureStage::Unknown => 0,
+    }
+}
+
+/// Typed association failure retained through the integration boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBleAssociationError {
+    diagnostics: LocalBleAssociationDiagnostics,
+}
+
+impl LocalBleAssociationError {
+    #[cfg(all(target_os = "linux", feature = "bluez"))]
+    pub(crate) fn new(diagnostics: LocalBleAssociationDiagnostics) -> Self {
+        debug_assert!(diagnostics.failure_stage.is_some());
+        Self { diagnostics }
+    }
+
+    pub fn stage(&self) -> PairingFailureStage {
+        self.diagnostics
+            .failure_stage
+            .unwrap_or(PairingFailureStage::Transport)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "bluez"))]
+    pub fn diagnostics(&self) -> &LocalBleAssociationDiagnostics {
+        &self.diagnostics
+    }
+
+    pub fn into_pairing_failure(self) -> PairingFailure {
+        let stage = self.stage();
+        let message = match stage {
+            PairingFailureStage::TargetNotObserved => {
+                "Device not found. Tap Find Device before putting it in pairing mode, keep it close to the Rhythm Box, and try again."
+            }
+            PairingFailureStage::CandidateOpen | PairingFailureStage::CandidateConnect => {
+                "Device found, but the Rhythm Box could not connect. Reset it into pairing mode, keep it close, and try again."
+            }
+            PairingFailureStage::CandidateServiceDiscovery
+            | PairingFailureStage::CandidateServiceMismatch => {
+                "Device found, but its Bluetooth identity could not be verified. Reset it into pairing mode and try again."
+            }
+            PairingFailureStage::CandidateCleanup => {
+                "Bluetooth pairing stopped while releasing the device. Restart the Rhythm Box before trying again."
+            }
+            PairingFailureStage::Transport | PairingFailureStage::Unknown => {
+                "The Rhythm Box Bluetooth service was unavailable. Restart the Rhythm Box and try again."
+            }
+        };
+        PairingFailure::new(stage, message)
+    }
+}
+
+impl std::fmt::Display for LocalBleAssociationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "local Bluetooth association failed at stage={}",
+            self.stage().as_str()
+        )
+    }
+}
+
+impl std::error::Error for LocalBleAssociationError {}
 
 /// One absolute association budget split into proof and cleanup phases.
 ///
@@ -63,6 +273,31 @@ impl LocalBleAssociationDeadline {
 
     pub(crate) fn cleanup_end(self) -> Instant {
         self.cleanup_end
+    }
+
+    /// Deadline for the cleanup I/O itself, leaving a short tail inside the
+    /// complete operation budget to classify and return a cleanup timeout.
+    #[cfg(all(target_os = "linux", feature = "bluez"))]
+    pub(crate) fn cleanup_attempt_end(self, result_margin: Duration) -> Result<Instant> {
+        self.cleanup_attempt_end_at(Instant::now(), result_margin)
+    }
+
+    fn cleanup_attempt_end_at(self, now: Instant, result_margin: Duration) -> Result<Instant> {
+        if result_margin.is_zero() {
+            anyhow::bail!(
+                "local Bluetooth candidate cleanup requires a failure-classification margin"
+            );
+        }
+        let attempt_end = self
+            .cleanup_end
+            .checked_sub(result_margin)
+            .filter(|attempt_end| *attempt_end > self.proof_end && *attempt_end > now)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "local Bluetooth candidate cleanup left no failure-classification margin"
+                )
+            })?;
+        Ok(attempt_end)
     }
 
     #[cfg(all(target_os = "linux", feature = "bluez"))]
@@ -118,6 +353,23 @@ pub trait LocalBleTransport: Send + Sync {
         self.associate(profile_id, setup, timeout)
     }
 
+    /// Associate after notifying the caller that the transport's fresh
+    /// observation listener is installed.
+    ///
+    /// Portable and fake transports retain compatibility through the default
+    /// handoff notification. BlueZ overrides this to notify only after its
+    /// fresh-only broadcast subscription exists and before the first receive.
+    fn associate_until_with_readiness(
+        &self,
+        profile_id: &str,
+        setup: &ValidatedBleSetup,
+        deadline: Instant,
+        on_ready: &mut dyn FnMut(),
+    ) -> Result<LocalBlePairingCandidate> {
+        on_ready();
+        self.associate_until(profile_id, setup, deadline)
+    }
+
     fn start_monitor(
         &self,
         store: Arc<LocalBleDeviceStore>,
@@ -131,6 +383,16 @@ pub trait LocalBleTransport: Send + Sync {
     fn quiesce(&self) -> Result<()> {
         Ok(())
     }
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+pub(crate) fn install_association_listener<T>(
+    install: impl FnOnce() -> Result<T>,
+    on_ready: &mut dyn FnMut(),
+) -> Result<T> {
+    let listener = install()?;
+    on_ready();
+    Ok(listener)
 }
 
 #[cfg(test)]
@@ -175,6 +437,166 @@ mod deadline_tests {
             start,
         )
         .is_err());
+    }
+
+    #[test]
+    fn timeout_without_a_matching_observation_reports_target_not_observed() {
+        let mut evidence = LocalBleAssociationEvidence::default();
+        evidence.observation_received();
+        evidence.observation_with_signal();
+        evidence.advertisement_decoded();
+
+        let diagnostics = evidence.failed(PairingFailureStage::TargetNotObserved);
+
+        assert_eq!(
+            diagnostics.failure_stage,
+            Some(PairingFailureStage::TargetNotObserved)
+        );
+        assert_eq!(diagnostics.observations_received, 1);
+        assert_eq!(diagnostics.identity_matches, 0);
+        assert!(!diagnostics.succeeded);
+    }
+
+    #[test]
+    fn deepest_candidate_proof_failure_survives_later_failures_and_timeout() {
+        let mut evidence = LocalBleAssociationEvidence::default();
+        evidence.identity_matched();
+        evidence.gatt_proof_attempted();
+        evidence.candidate_failed(PairingFailureStage::CandidateServiceMismatch);
+        evidence.identity_matched();
+        evidence.gatt_proof_attempted();
+        evidence.candidate_failed(PairingFailureStage::CandidateConnect);
+
+        let diagnostics = evidence.failed(PairingFailureStage::TargetNotObserved);
+
+        assert_eq!(
+            diagnostics.failure_stage,
+            Some(PairingFailureStage::CandidateServiceMismatch)
+        );
+        assert_eq!(diagnostics.identity_matches, 2);
+        assert_eq!(diagnostics.gatt_proof_attempts, 2);
+        assert_eq!(diagnostics.connect_failures, 1);
+        assert_eq!(diagnostics.service_mismatches, 1);
+    }
+
+    #[test]
+    fn successful_candidate_clears_failure_stage_but_retains_bounded_evidence() {
+        let mut evidence = LocalBleAssociationEvidence::default();
+        evidence.identity_matched();
+        evidence.gatt_proof_attempted();
+        evidence.candidate_failed(PairingFailureStage::CandidateConnect);
+        evidence.identity_matched();
+
+        let diagnostics = evidence.succeeded();
+
+        assert!(diagnostics.succeeded);
+        assert_eq!(diagnostics.failure_stage, None);
+        assert_eq!(diagnostics.identity_matches, 2);
+        assert_eq!(diagnostics.connect_failures, 1);
+    }
+
+    #[test]
+    fn cleanup_failure_has_precedence_over_candidate_proof_evidence() {
+        let mut evidence = LocalBleAssociationEvidence::default();
+        evidence.candidate_failed(PairingFailureStage::CandidateServiceMismatch);
+        evidence.candidate_failed(PairingFailureStage::CandidateCleanup);
+
+        let diagnostics = evidence.failed(PairingFailureStage::Transport);
+
+        assert_eq!(
+            diagnostics.failure_stage,
+            Some(PairingFailureStage::CandidateCleanup)
+        );
+        assert_eq!(diagnostics.service_mismatches, 1);
+        assert_eq!(diagnostics.cleanup_failures, 1);
+    }
+
+    #[test]
+    fn candidate_attempt_retains_validation_failure_when_cleanup_also_fails() {
+        let mut evidence = LocalBleAssociationEvidence::default();
+
+        let validation_succeeded =
+            evidence.record_candidate_validation(Err(PairingFailureStage::CandidateConnect));
+        evidence.candidate_failed(PairingFailureStage::CandidateCleanup);
+        let diagnostics = evidence.failed(PairingFailureStage::Transport);
+
+        assert!(!validation_succeeded);
+        assert_eq!(
+            diagnostics.failure_stage,
+            Some(PairingFailureStage::CandidateCleanup)
+        );
+        assert_eq!(diagnostics.connect_failures, 1);
+        assert_eq!(diagnostics.cleanup_failures, 1);
+    }
+
+    #[test]
+    fn cleanup_attempt_deadline_leaves_a_tail_for_typed_timeout_delivery() {
+        let start = Instant::now();
+        let outer_end = start + Duration::from_secs(60);
+        let budget =
+            LocalBleAssociationDeadline::new_at(outer_end, Duration::from_secs(2), start).unwrap();
+        let result_margin = Duration::from_millis(250);
+
+        let attempt_end = budget
+            .cleanup_attempt_end_at(budget.proof_end(), result_margin)
+            .unwrap();
+
+        assert_eq!(attempt_end, outer_end - result_margin);
+        assert!(attempt_end < budget.cleanup_end());
+        assert!(budget
+            .cleanup_attempt_end_at(attempt_end, result_margin)
+            .is_err());
+    }
+
+    #[test]
+    fn diagnostic_counters_saturate_at_their_public_bound() {
+        let mut diagnostics = LocalBleAssociationDiagnostics {
+            observations_received: u16::MAX,
+            ..LocalBleAssociationDiagnostics::default()
+        };
+
+        LocalBleAssociationDiagnostics::increment(&mut diagnostics.observations_received);
+
+        assert_eq!(diagnostics.observations_received, u16::MAX);
+    }
+
+    #[test]
+    fn readiness_is_emitted_after_listener_install_and_before_observation() {
+        let sequence = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let install_sequence = sequence.clone();
+        let ready_sequence = sequence.clone();
+        let mut on_ready = move || ready_sequence.lock().unwrap().push("ready");
+
+        let listener = install_association_listener(
+            move || {
+                install_sequence.lock().unwrap().push("listener_installed");
+                Ok(())
+            },
+            &mut on_ready,
+        )
+        .unwrap();
+        sequence.lock().unwrap().push("observation_window");
+
+        assert_eq!(listener, ());
+        assert_eq!(
+            *sequence.lock().unwrap(),
+            ["listener_installed", "ready", "observation_window"]
+        );
+    }
+
+    #[test]
+    fn listener_install_failure_does_not_emit_false_readiness() {
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_ready = ready.clone();
+        let mut on_ready = move || callback_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let result = install_association_listener::<()>(
+            || anyhow::bail!("listener unavailable"),
+            &mut on_ready,
+        );
+
+        assert!(result.is_err());
+        assert!(!ready.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 

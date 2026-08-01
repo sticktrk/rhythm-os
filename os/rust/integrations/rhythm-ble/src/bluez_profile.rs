@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use bluer::{Adapter, Device};
 use rhythm_os::hub::HubEvent;
+use rhythm_os::pairing::PairingFailureStage;
 use rhythm_os::registry::HubDeviceRegistry;
 
 use crate::bluez::{BluezClient, BluezDriverId, ScanObservation, ScannerHealth};
@@ -19,16 +20,26 @@ use crate::profile::{
 };
 use crate::store::LocalBleDeviceStore;
 use crate::transport::{
-    accept_profile_advertisement, LocalBleAssociationDeadline, LocalBlePairingCandidate,
-    LocalBleTransport,
+    accept_profile_advertisement, install_association_listener, LocalBleAssociationDeadline,
+    LocalBleAssociationDiagnostics, LocalBleAssociationError, LocalBleAssociationEvidence,
+    LocalBlePairingCandidate, LocalBleTransport,
 };
 
 impl crate::bluez::operation_output_sealed::Sealed for LocalBlePairingCandidate {}
 impl crate::bluez::BluezOperationOutput for LocalBlePairingCandidate {}
 
+struct BluezAssociationOutcome {
+    candidate: LocalBlePairingCandidate,
+    diagnostics: LocalBleAssociationDiagnostics,
+}
+
+impl crate::bluez::operation_output_sealed::Sealed for BluezAssociationOutcome {}
+impl crate::bluez::BluezOperationOutput for BluezAssociationOutcome {}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 const CANDIDATE_CLEANUP_RESERVE: Duration = Duration::from_secs(2);
+const CANDIDATE_CLEANUP_RESULT_MARGIN: Duration = Duration::from_millis(250);
 pub struct BluezLocalBleTransport {
     client: Arc<BluezClient>,
 }
@@ -46,20 +57,38 @@ impl BluezLocalBleTransport {
         profile: &'static dyn BleDeviceProfile,
         setup: ValidatedBleSetup,
         deadline: LocalBleAssociationDeadline,
-    ) -> Result<LocalBlePairingCandidate> {
-        let mut observations = client.subscribe()?;
+        on_ready: &mut dyn FnMut(),
+    ) -> Result<BluezAssociationOutcome> {
+        let mut observations = install_association_listener(|| client.subscribe(), on_ready)?;
         let proof_deadline = tokio::time::Instant::from_std(deadline.proof_end());
+        let mut evidence = LocalBleAssociationEvidence::default();
 
         loop {
-            let observation = tokio::time::timeout_at(proof_deadline, observations.recv())
-                .await
-                .map_err(|_| anyhow::anyhow!("local Bluetooth discovery timed out"))??;
+            let observation =
+                match tokio::time::timeout_at(proof_deadline, observations.recv()).await {
+                    Ok(Ok(observation)) => observation,
+                    Ok(Err(_)) => {
+                        return Err(LocalBleAssociationError::new(
+                            evidence.failed(PairingFailureStage::Transport),
+                        )
+                        .into())
+                    }
+                    Err(_) => {
+                        return Err(LocalBleAssociationError::new(
+                            evidence.failed(PairingFailureStage::TargetNotObserved),
+                        )
+                        .into())
+                    }
+                };
+            evidence.observation_received();
             if observation.rssi.is_none() {
                 continue;
             }
+            evidence.observation_with_signal();
             let Ok(advertisement) = advertisement_snapshot(&observation) else {
                 continue;
             };
+            evidence.advertisement_decoded();
             let Some(identity) = profile.stable_identity_from_advertisement(advertisement.view())
             else {
                 continue;
@@ -67,13 +96,19 @@ impl BluezLocalBleTransport {
             if identity != setup.stable_identity() {
                 continue;
             }
+            evidence.identity_matched();
 
             match profile.admission() {
                 BleProfileAdmission::AdvertisementOnly => {}
                 admission @ BleProfileAdmission::GattServiceProof { .. } => {
-                    let device = adapter.device(observation.address).map_err(|_| {
-                        anyhow::anyhow!("local Bluetooth candidate could not be opened")
-                    })?;
+                    evidence.gatt_proof_attempted();
+                    let device = match adapter.device(observation.address) {
+                        Ok(device) => device,
+                        Err(_) => {
+                            evidence.candidate_failed(PairingFailureStage::CandidateOpen);
+                            continue;
+                        }
+                    };
                     let was_connected = match tokio::time::timeout_at(
                         proof_deadline,
                         device.is_connected(),
@@ -81,33 +116,57 @@ impl BluezLocalBleTransport {
                     .await
                     {
                         Ok(Ok(connected)) => connected,
-                        Ok(Err(_)) => continue,
+                        Ok(Err(_)) => {
+                            evidence.candidate_failed(PairingFailureStage::CandidateOpen);
+                            continue;
+                        }
                         Err(_) => {
-                            anyhow::bail!("local Bluetooth candidate proof timed out")
+                            evidence.candidate_failed(PairingFailureStage::CandidateConnect);
+                            return Err(LocalBleAssociationError::new(
+                                evidence.failed(PairingFailureStage::TargetNotObserved),
+                            )
+                            .into());
                         }
                     };
                     let validation =
                         Self::validate_candidate(admission, &device, was_connected, deadline).await;
-                    if !was_connected {
+                    let validation_succeeded = evidence.record_candidate_validation(validation);
+                    let cleanup_failed =
+                        !was_connected && Self::cleanup_candidate(&device, deadline).await.is_err();
+                    if cleanup_failed {
                         // Once this path attempted a connection, status reads are not
-                        // reliable enough to guard cleanup. Disconnect unconditionally.
-                        Self::cleanup_candidate(&device, deadline).await?;
+                        // reliable enough to guard cleanup. A cleanup failure is
+                        // terminal even when validation had already failed.
+                        evidence.candidate_failed(PairingFailureStage::CandidateCleanup);
+                        return Err(LocalBleAssociationError::new(
+                            evidence.failed(PairingFailureStage::CandidateCleanup),
+                        )
+                        .into());
                     }
-                    if validation.is_err() {
+                    if !validation_succeeded {
                         // Advertisement identity is insufficient when this
                         // profile declares a second GATT proof.
                         continue;
                     }
                 }
             }
-            let initial_replay = decode_profile_events(profile, advertisement.view())?
-                .into_iter()
-                .filter_map(|event| event.replay)
-                .map(|replay| (replay.stream, replay.value))
-                .collect::<BTreeMap<_, _>>();
-            return Ok(LocalBlePairingCandidate {
-                transport_hint: observation.address.to_string(),
-                initial_replay,
+            let initial_replay = match decode_profile_events(profile, advertisement.view()) {
+                Ok(events) => events
+                    .into_iter()
+                    .filter_map(|event| event.replay)
+                    .map(|replay| (replay.stream, replay.value))
+                    .collect::<BTreeMap<_, _>>(),
+                Err(_) => {
+                    evidence.candidate_failed(PairingFailureStage::CandidateServiceMismatch);
+                    continue;
+                }
+            };
+            return Ok(BluezAssociationOutcome {
+                candidate: LocalBlePairingCandidate {
+                    transport_hint: observation.address.to_string(),
+                    initial_replay,
+                },
+                diagnostics: evidence.succeeded(),
             });
         }
     }
@@ -117,37 +176,46 @@ impl BluezLocalBleTransport {
         device: &Device,
         was_connected: bool,
         deadline: LocalBleAssociationDeadline,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), PairingFailureStage> {
         if !was_connected {
-            let connect_deadline =
-                tokio::time::Instant::from_std(deadline.stage_end(CONNECT_TIMEOUT)?);
+            let connect_deadline = tokio::time::Instant::from_std(
+                deadline
+                    .stage_end(CONNECT_TIMEOUT)
+                    .map_err(|_| PairingFailureStage::CandidateConnect)?,
+            );
             tokio::time::timeout_at(connect_deadline, device.connect())
                 .await
-                .map_err(|_| anyhow::anyhow!("local Bluetooth connection timed out"))?
-                .map_err(|_| anyhow::anyhow!("local Bluetooth connection failed"))?;
+                .map_err(|_| PairingFailureStage::CandidateConnect)?
+                .map_err(|_| PairingFailureStage::CandidateConnect)?;
         }
-        let service_deadline = tokio::time::Instant::from_std(deadline.stage_end(SERVICE_TIMEOUT)?);
+        let service_deadline = tokio::time::Instant::from_std(
+            deadline
+                .stage_end(SERVICE_TIMEOUT)
+                .map_err(|_| PairingFailureStage::CandidateServiceDiscovery)?,
+        );
         let services = tokio::time::timeout_at(service_deadline, device.services())
             .await
-            .map_err(|_| anyhow::anyhow!("local Bluetooth service validation timed out"))?
-            .map_err(|_| anyhow::anyhow!("local Bluetooth service validation failed"))?;
+            .map_err(|_| PairingFailureStage::CandidateServiceDiscovery)?
+            .map_err(|_| PairingFailureStage::CandidateServiceDiscovery)?;
         for service in services {
             let id = tokio::time::timeout_at(service_deadline, service.uuid())
                 .await
-                .map_err(|_| anyhow::anyhow!("local Bluetooth service validation timed out"))?
-                .map_err(|_| anyhow::anyhow!("local Bluetooth service validation failed"))?;
+                .map_err(|_| PairingFailureStage::CandidateServiceDiscovery)?
+                .map_err(|_| PairingFailureStage::CandidateServiceDiscovery)?;
             if admission.accepts_gatt_service(&id.to_string()) {
                 return Ok(());
             }
         }
-        anyhow::bail!("local Bluetooth profile evidence did not match")
+        Err(PairingFailureStage::CandidateServiceMismatch)
     }
 
     async fn cleanup_candidate(
         device: &Device,
         deadline: LocalBleAssociationDeadline,
     ) -> Result<()> {
-        let cleanup_deadline = tokio::time::Instant::from_std(deadline.cleanup_end());
+        let cleanup_deadline = tokio::time::Instant::from_std(
+            deadline.cleanup_attempt_end(CANDIDATE_CLEANUP_RESULT_MARGIN)?,
+        );
         match tokio::time::timeout_at(cleanup_deadline, device.disconnect()).await {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(_)) => {}
@@ -350,15 +418,49 @@ impl LocalBleTransport for BluezLocalBleTransport {
         setup: &ValidatedBleSetup,
         deadline: Instant,
     ) -> Result<LocalBlePairingCandidate> {
+        let mut ignore_readiness = || {};
+        self.associate_until_with_readiness(profile_id, setup, deadline, &mut ignore_readiness)
+    }
+
+    fn associate_until_with_readiness(
+        &self,
+        profile_id: &str,
+        setup: &ValidatedBleSetup,
+        deadline: Instant,
+        on_ready: &mut dyn FnMut(),
+    ) -> Result<LocalBlePairingCandidate> {
         let profile = profile_by_id(profile_id)
             .ok_or_else(|| anyhow::anyhow!("unsupported local Bluetooth profile"))?;
         let deadline = LocalBleAssociationDeadline::new(deadline, CANDIDATE_CLEANUP_RESERVE)?;
         let client = self.client.clone();
         let setup = setup.clone();
-        self.client
-            .run_adapter_operation_until(deadline.cleanup_end(), move |_session, adapter| {
-                Self::associate_inner(client, adapter, profile, setup, deadline)
-            })
+        let result = self.client.run_adapter_operation_until(
+            deadline.cleanup_end(),
+            move |_session, adapter| {
+                Self::associate_inner(client, adapter, profile, setup, deadline, on_ready)
+            },
+        );
+        match result {
+            Ok(outcome) => {
+                self.client
+                    .record_local_association(outcome.diagnostics.clone());
+                Ok(outcome.candidate)
+            }
+            Err(error) => {
+                let association_error = error
+                    .downcast_ref::<LocalBleAssociationError>()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        LocalBleAssociationError::new(
+                            LocalBleAssociationEvidence::default()
+                                .failed(PairingFailureStage::Transport),
+                        )
+                    });
+                self.client
+                    .record_local_association(association_error.diagnostics().clone());
+                Err(association_error.into())
+            }
+        }
     }
 
     fn start_monitor(

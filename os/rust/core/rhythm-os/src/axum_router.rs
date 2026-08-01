@@ -795,14 +795,14 @@ async fn put_node_profile_overrides(
 // ---------------------------------------------------------------------------
 
 async fn get_canonical_devices(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_canonical_devices(&state)
+    run_canonical_read(move || handlers::handle_get_canonical_devices(&state)).await
 }
 
 async fn get_canonical_device(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> ApiResponse {
-    handlers::handle_get_canonical_device(&state, &id)
+    run_canonical_read(move || handlers::handle_get_canonical_device(&state, &id)).await
 }
 
 async fn put_canonical_device(
@@ -810,7 +810,7 @@ async fn put_canonical_device(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    handlers::handle_put_canonical_device(&state, &id, &body)
+    run_blocking(move || handlers::handle_put_canonical_device(&state, &id, &body)).await
 }
 
 async fn put_device_room(
@@ -818,7 +818,7 @@ async fn put_device_room(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    handlers::handle_put_device_room(&state, &id, &body)
+    run_blocking(move || handlers::handle_put_device_room(&state, &id, &body)).await
 }
 
 async fn put_device_parent(
@@ -826,7 +826,7 @@ async fn put_device_parent(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    handlers::handle_put_device_parent(&state, &id, &body)
+    run_blocking(move || handlers::handle_put_device_parent(&state, &id, &body)).await
 }
 
 async fn put_device_preferred(
@@ -834,7 +834,7 @@ async fn put_device_preferred(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
-    handlers::handle_put_device_preferred(&state, &id, &body)
+    run_blocking(move || handlers::handle_put_device_preferred(&state, &id, &body)).await
 }
 
 async fn post_device_flash(
@@ -1008,6 +1008,56 @@ async fn put_light_profile(
 // ---------------------------------------------------------------------------
 
 const HTTP_HANDLER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const CANONICAL_READ_CONCURRENCY: usize = 2;
+
+fn canonical_read_permits() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static PERMITS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    PERMITS
+        .get_or_init(|| {
+            std::sync::Arc::new(tokio::sync::Semaphore::new(CANONICAL_READ_CONCURRENCY))
+        })
+        .clone()
+}
+
+/// Keep canonical snapshots off the async executor without creating one large
+/// dedicated OS thread for every client request. The small global bound keeps
+/// a faulty or stale client from turning repeated registry reads into a thread
+/// and memory storm while shared state is contended.
+async fn run_canonical_read<F, R>(f: F) -> ApiResponse
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Into<ApiResponse> + Send + 'static,
+{
+    run_bounded_canonical_read(canonical_read_permits(), f).await
+}
+
+async fn run_bounded_canonical_read<F, R>(
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    f: F,
+) -> ApiResponse
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Into<ApiResponse> + Send + 'static,
+{
+    let permit = match permits.acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => return ApiResponse::server_error("Canonical read queue is unavailable"),
+    };
+    match tokio::task::spawn_blocking(move || {
+        // The permit must remain owned by the blocking operation. If a client
+        // disconnects and its async request future is dropped, the underlying
+        // snapshot may still be running and must continue to count toward the
+        // global concurrency bound.
+        let _permit = permit;
+        f()
+    })
+    .await
+    {
+        Ok(result) => result.into(),
+        Err(_) => ApiResponse::server_error("Canonical read worker panicked"),
+    }
+}
 
 /// Run a closure on a dedicated std::thread, returning the result via oneshot.
 async fn run_blocking<F, R>(f: F) -> ApiResponse
@@ -1195,6 +1245,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use axum::body::{to_bytes, Body};
     use axum::http::{Method as HttpMethod, Request, StatusCode};
@@ -1231,6 +1282,7 @@ mod tests {
             devices: Vec::new(),
             warnings: Vec::new(),
             error: None,
+            failure_stage: None,
         };
         assert_eq!(server_event_name(&pairing), "pairing_progress");
 
@@ -1438,6 +1490,83 @@ mod tests {
             .body(Body::from(body.to_string()))
             .unwrap();
         app.oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn canonical_get_keeps_the_async_executor_responsive_while_state_is_locked() {
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let blocker_state = state.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let blocker = std::thread::spawn(move || {
+            let _guard = blocker_state.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            // The timeout is only a deadlock failsafe for the regression's
+            // deliberately broken/direct-handler case.
+            let _ = release_rx.recv_timeout(Duration::from_secs(1));
+        });
+        locked_rx.recv().unwrap();
+
+        let request = Request::builder()
+            .method(HttpMethod::GET)
+            .uri("/api/devices/canonical")
+            .body(Body::empty())
+            .unwrap();
+        let response = api_routes().with_state(state).oneshot(request);
+        tokio::pin!(response);
+
+        tokio::select! {
+            biased;
+            result = &mut response => panic!(
+                "canonical request unexpectedly completed while state was locked: {:?}",
+                result.map(|response| response.status()),
+            ),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+
+        release_tx.send(()).unwrap();
+        assert_eq!(response.await.unwrap().status(), StatusCode::OK);
+        blocker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_canonical_request_keeps_its_blocking_permit_until_work_finishes() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (first_release_tx, first_release_rx) = std::sync::mpsc::sync_channel(1);
+        let (first_finished_tx, first_finished_rx) = tokio::sync::oneshot::channel();
+
+        let first = tokio::spawn(run_bounded_canonical_read(permits.clone(), move || {
+            let _ = first_started_tx.send(());
+            let _ = first_release_rx.recv_timeout(Duration::from_secs(5));
+            let _ = first_finished_tx.send(());
+            ApiResponse::no_content()
+        }));
+        first_started_rx.await.unwrap();
+        first.abort();
+
+        let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(run_bounded_canonical_read(permits, move || {
+            let _ = second_started_tx.send(());
+            ApiResponse::no_content()
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second_started_rx)
+                .await
+                .is_err(),
+            "cancelling the request released its permit before blocking work ended",
+        );
+
+        first_release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), first_finished_rx)
+            .await
+            .expect("first blocking read did not finish")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut second_started_rx)
+            .await
+            .expect("second read did not acquire the released permit")
+            .unwrap();
+        assert_eq!(second.await.unwrap().status, 204);
     }
 
     fn light_profile_config_hash_cases() -> serde_json::Value {

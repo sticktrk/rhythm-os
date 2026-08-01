@@ -887,6 +887,7 @@ fn stale_bond_recovery_session(store: &HueBleDeviceStore) -> PairingSession {
         device: None,
         devices: Vec::new(),
         error: None,
+        failure_stage: None,
         warnings: Vec::new(),
         details: Some(serde_json::json!({
             "recovery_candidates": candidates,
@@ -1222,6 +1223,7 @@ fn complete_session(devices: Vec<HueBleDevice>, warnings: Vec<String>) -> Pairin
         device: paired_devices.first().cloned(),
         devices: paired_devices,
         error: None,
+        failure_stage: None,
         warnings,
         details: None,
     }

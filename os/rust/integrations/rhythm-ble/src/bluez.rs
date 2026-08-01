@@ -30,6 +30,7 @@ pub use crate::coordination::BluezOperationDeadlineExceeded;
 use crate::coordination::{
     run_validated_device_operation_batch, AdapterOperationGate, ClientOperationCoordinator,
 };
+use crate::transport::LocalBleAssociationDiagnostics;
 
 /// Closed identities for integrations admitted to the shared BlueZ runtime.
 ///
@@ -476,6 +477,7 @@ struct RuntimeCore {
     supervisor_restarts: AtomicU64,
     subscriber_lagged_observations: Arc<AtomicU64>,
     last_failure_stage: Mutex<Option<&'static str>>,
+    last_local_association: Mutex<Option<LocalBleAssociationDiagnostics>>,
 }
 
 impl RuntimeCore {
@@ -512,6 +514,7 @@ impl RuntimeCore {
             supervisor_restarts: AtomicU64::new(0),
             subscriber_lagged_observations: Arc::new(AtomicU64::new(0)),
             last_failure_stage: Mutex::new(None),
+            last_local_association: Mutex::new(None),
         }))
     }
 
@@ -1014,6 +1017,11 @@ impl RuntimeCore {
                 .unwrap_or_default(),
             scanner_health: self.scanner_health_tx.borrow().as_str(),
             last_failure_stage: self.last_failure_stage.lock().ok().and_then(|stage| *stage),
+            last_local_association: self
+                .last_local_association
+                .lock()
+                .ok()
+                .and_then(|diagnostics| diagnostics.clone()),
         }
     }
 
@@ -1193,6 +1201,15 @@ impl BluezClient {
             operations,
             quiescing: AtomicBool::new(false),
         })
+    }
+
+    /// Replace the bounded local-profile association snapshot used by support
+    /// bundles. Only the local-profile driver writes this slot.
+    pub(crate) fn record_local_association(&self, diagnostics: LocalBleAssociationDiagnostics) {
+        debug_assert_eq!(self.driver, BluezDriverId::LocalProfiles);
+        if let Ok(mut latest) = self.core.last_local_association.lock() {
+            *latest = Some(diagnostics);
+        }
     }
 
     /// Execute one complete adapter/GATT operation while holding this client's
@@ -1563,6 +1580,8 @@ pub struct SharedBluezDiagnostics {
     pub cached_observations: usize,
     pub scanner_health: &'static str,
     pub last_failure_stage: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_local_association: Option<LocalBleAssociationDiagnostics>,
 }
 
 pub fn diagnostics() -> Result<SharedBluezDiagnostics> {

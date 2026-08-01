@@ -2825,15 +2825,22 @@ class RhythmServerHubManagementSection extends StatefulWidget {
 
 class _RhythmServerHubManagementSectionState
     extends State<RhythmServerHubManagementSection> {
-  bool _isFetchingSummaries = false;
-  bool _hubSummariesLoaded = false;
   bool _isResyncing = false;
   Map<String, String> _hubSummaries = {};
+  final Set<String> _hubSummaryFailures = {};
+  String? _requestedHubSummaryScope;
+  int _hubSummaryRequestGeneration = 0;
 
   @override
-  void initState() {
-    super.initState();
-    unawaited(_fetchHubSummaries());
+  void didUpdateWidget(RhythmServerHubManagementSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.showConfigured != widget.showConfigured) {
+      // Invalidate a queued/in-flight visible-section request when the section
+      // is hidden. Re-enabling it gets one fresh request for the current hub
+      // configuration instead of reusing a hidden result.
+      _hubSummaryRequestGeneration += 1;
+      _requestedHubSummaryScope = null;
+    }
   }
 
   @override
@@ -2842,20 +2849,7 @@ class _RhythmServerHubManagementSectionState
     final configuredHubs = syncProvider.serverHubInfos
         .where((h) => h['type'] != null && h['type'] != 'none')
         .toList();
-    final shouldRefreshSummaries =
-        syncProvider.connectionState == RhythmConnectionState.connected &&
-            configuredHubs.any((hub) {
-              final type = hub['type'] as String?;
-              return type != null && !_hubSummaries.containsKey(type);
-            });
-
-    if (shouldRefreshSummaries && !_isFetchingSummaries) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          unawaited(_fetchHubSummaries());
-        }
-      });
-    }
+    _scheduleHubSummaryRefresh(syncProvider, configuredHubs);
 
     final sections = <Widget>[];
     if (widget.showConfigured) {
@@ -2884,16 +2878,78 @@ class _RhythmServerHubManagementSectionState
     );
   }
 
-  Future<void> _fetchHubSummaries() async {
-    if (_isFetchingSummaries) return;
-    _isFetchingSummaries = true;
+  void _scheduleHubSummaryRefresh(
+    ServerSyncProvider syncProvider,
+    List<Map<String, dynamic>> configuredHubs,
+  ) {
+    if (!widget.showConfigured) return;
+
+    final scope = _hubSummaryScope(configuredHubs);
+    if (configuredHubs.isEmpty) {
+      // Empty is a real configuration generation. Remembering it ensures a
+      // later first hub (including an empty local-BLE hub) gets exactly one
+      // request even if an identical hub existed earlier in this widget.
+      if (_requestedHubSummaryScope != scope) {
+        _requestedHubSummaryScope = scope;
+        _hubSummaryRequestGeneration += 1;
+      }
+      return;
+    }
+    if (syncProvider.connectionState != RhythmConnectionState.connected ||
+        _requestedHubSummaryScope == scope) {
+      return;
+    }
+
+    _requestedHubSummaryScope = scope;
+    final generation = ++_hubSummaryRequestGeneration;
+    final hubs = configuredHubs
+        .map((hub) => Map<String, dynamic>.from(hub))
+        .toList(growable: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !widget.showConfigured ||
+          generation != _hubSummaryRequestGeneration) {
+        return;
+      }
+      unawaited(_fetchHubSummaries(hubs, generation: generation));
+    });
+  }
+
+  String _hubSummaryScope(List<Map<String, dynamic>> configuredHubs) {
+    final identities = configuredHubs.map((hub) {
+      final type = hub['type']?.toString() ?? '';
+      final address = hub['address']?.toString() ?? '';
+      return '${type.length}:$type|${address.length}:$address';
+    }).toList(growable: false)
+      ..sort();
+    return identities.join(';');
+  }
+
+  Future<void> _fetchHubSummaries(
+    List<Map<String, dynamic>> configuredHubs, {
+    int? generation,
+  }) async {
+    if (!widget.showConfigured || configuredHubs.isEmpty) return;
+    final requestGeneration = generation ?? ++_hubSummaryRequestGeneration;
+    if (generation == null) {
+      _requestedHubSummaryScope = _hubSummaryScope(configuredHubs);
+    }
+    final configuredTypes = configuredHubs
+        .map((hub) => hub['type']?.toString())
+        .nonNulls
+        .where((type) => type.isNotEmpty)
+        .toSet();
     try {
       final http = context.read<RhythmConnection>();
       final devices = await http.api.getCanonicalDevices();
-      if (!mounted) return;
+      if (!mounted ||
+          !widget.showConfigured ||
+          requestGeneration != _hubSummaryRequestGeneration) {
+        return;
+      }
 
       if (devices == null) {
-        setState(() => _hubSummariesLoaded = true);
+        setState(() => _hubSummaryFailures.addAll(configuredTypes));
         return;
       }
 
@@ -2921,7 +2977,9 @@ class _RhythmServerHubManagementSectionState
         }
       }
 
-      final summaries = <String, String>{};
+      final summaries = <String, String>{
+        for (final type in configuredTypes) type: 'No devices',
+      };
       for (final entry in counts.entries) {
         final countsForHub = entry.value;
         final parts = <String>[];
@@ -2942,11 +3000,30 @@ class _RhythmServerHubManagementSectionState
 
       setState(() {
         _hubSummaries = summaries;
-        _hubSummariesLoaded = true;
+        _hubSummaryFailures.removeAll(configuredTypes);
       });
-    } finally {
-      _isFetchingSummaries = false;
+    } catch (error, stackTrace) {
+      if (!mounted ||
+          !widget.showConfigured ||
+          requestGeneration != _hubSummaryRequestGeneration) {
+        return;
+      }
+      debugPrint(
+        'RhythmServerHubManagementSection: summary refresh failed: '
+        '$error\n$stackTrace',
+      );
+      setState(() => _hubSummaryFailures.addAll(configuredTypes));
     }
+  }
+
+  Future<void> _refreshHubSummaries() async {
+    if (!widget.showConfigured) return;
+    final syncProvider = context.read<ServerSyncProvider>();
+    final configuredHubs = syncProvider.serverHubInfos
+        .where((hub) => hub['type'] != null && hub['type'] != 'none')
+        .map((hub) => Map<String, dynamic>.from(hub))
+        .toList(growable: false);
+    await _fetchHubSummaries(configuredHubs);
   }
 
   Widget? _buildConfiguredHubsSection(
@@ -3104,7 +3181,7 @@ class _RhythmServerHubManagementSectionState
     try {
       await syncProvider.api.triggerSync();
       await syncProvider.fullRefresh();
-      await _fetchHubSummaries();
+      await _refreshHubSummaries();
       widget.onResynced?.call();
     } catch (e, st) {
       debugPrint('RhythmServerHubManagementSection: resync failed: $e\n$st');
@@ -3144,7 +3221,7 @@ class _RhythmServerHubManagementSectionState
       analyticsSource: 'device_settings',
     );
     if (!mounted) return;
-    await _fetchHubSummaries();
+    await _refreshHubSummaries();
   }
 
   Future<void> _startHueBleAddFlow() async {
@@ -3154,7 +3231,7 @@ class _RhythmServerHubManagementSectionState
       analyticsSource: 'device_settings',
     );
     if (!mounted) return;
-    await _fetchHubSummaries();
+    await _refreshHubSummaries();
   }
 
   Widget _buildHubRow(Map<String, dynamic> hubInfo) {
@@ -3165,8 +3242,8 @@ class _RhythmServerHubManagementSectionState
     final statusColor =
         _RhythmServerSettingsScreenState._hubConnectionColor(hubInfo);
     final deviceSummary = _hubSummaries[type] ??
-        (_hubSummariesLoaded
-            ? (connected ? 'Connected · no devices' : 'No devices')
+        (_hubSummaryFailures.contains(type)
+            ? 'Devices unavailable'
             : 'Loading...');
     final subtitle = _RhythmServerSettingsScreenState._hubRowSubtitle(
         hubInfo, deviceSummary);

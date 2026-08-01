@@ -10,7 +10,7 @@ use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, Rgb, RhythmMode, 
 use crate::api_types::{
     LightBreakerDto, LightCapabilitiesDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto,
 };
-use crate::pairing::{PairedDeviceInfo, PairingStage, PairingStatus};
+use crate::pairing::{PairedDeviceInfo, PairingFailureStage, PairingStage, PairingStatus};
 use crate::state::MotionSnapshot;
 
 /// User-visible stage of an OTA update flow.
@@ -143,6 +143,9 @@ pub enum ServerEvent {
         /// Error text, populated on failure.
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Deepest privacy-safe stage reached by a failed attempt.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_stage: Option<PairingFailureStage>,
     },
     /// OTA update progress changed.
     OtaUpdateProgress {
@@ -586,6 +589,7 @@ mod tests {
             devices: Vec::new(),
             warnings: Vec::new(),
             error: None,
+            failure_stage: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"pairing_progress\""));
@@ -621,6 +625,7 @@ mod tests {
             devices: vec![first, second],
             warnings: vec!["One nearby bulb rejected pairing".into()],
             error: None,
+            failure_stage: None,
         };
 
         let value = serde_json::to_value(event).unwrap();
@@ -629,6 +634,25 @@ mod tests {
         assert_eq!(data["devices"].as_array().unwrap().len(), 2);
         assert_eq!(data["devices"][1]["device_id"], "hue-ble-second");
         assert_eq!(data["warnings"][0], "One nearby bulb rejected pairing");
+    }
+
+    #[test]
+    fn terminal_pairing_failure_serializes_privacy_safe_stage() {
+        let event = ServerEvent::PairingProgress {
+            hub_type: "local_ble".into(),
+            session_id: Some("local-pair-stage".into()),
+            status: PairingStatus::Failed,
+            stage: PairingStage::Failed,
+            message: "Pairing failed".into(),
+            device: None,
+            devices: Vec::new(),
+            warnings: Vec::new(),
+            error: Some("Device found, but could not connect".into()),
+            failure_stage: Some(PairingFailureStage::CandidateConnect),
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["data"]["failure_stage"], "candidate_connect");
     }
 
     #[test]

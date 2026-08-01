@@ -159,6 +159,7 @@ pub fn pair_device(
                 device: None,
                 devices: Vec::new(),
                 error: Some(summarize_commissioning_error(&error)),
+                failure_stage: None,
                 warnings: Vec::new(),
                 details: None,
             })
@@ -364,6 +365,7 @@ fn build_success_session(
         }),
         devices: Vec::new(),
         error: None,
+        failure_stage: None,
         warnings: Vec::new(),
         details: None,
     })
