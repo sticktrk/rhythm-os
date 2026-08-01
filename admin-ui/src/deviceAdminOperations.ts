@@ -702,6 +702,23 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     timeoutSeconds: 60
   },
   {
+    id: 'device-pair-result',
+    category: 'Devices & Topology',
+    label: 'Read pairing result',
+    description: 'Fetch a durable pairing result by session ID.',
+    method: 'GET',
+    path: 'api/devices/pair/{session_id}'
+  },
+  {
+    id: 'device-pair-result-acknowledge',
+    category: 'Devices & Topology',
+    label: 'Acknowledge pairing result',
+    description: 'Mark a durable pairing result as consumed.',
+    method: 'DELETE',
+    path: 'api/devices/pair/{session_id}',
+    danger: true
+  },
+  {
     id: 'device-unpair',
     category: 'Devices & Topology',
     label: 'Unpair device',

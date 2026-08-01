@@ -107,6 +107,7 @@ else
             sdk/*)
                 sdk=true
                 admin_api=true
+                admin_ui=true
                 ;;
         esac
         case "$path" in
