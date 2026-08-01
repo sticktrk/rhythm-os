@@ -22,7 +22,9 @@ use super::gatt_runtime::{
     HueBleGattRuntime,
 };
 use super::protocol;
-use super::transport::{HueBleAdapterAvailability, HueBleCommandTimeout, HueBleTransport};
+use super::transport::{
+    HueBleAdapterAvailability, HueBleCommandNotDispatched, HueBleCommandTimeout, HueBleTransport,
+};
 use super::types::{
     HueBleCapabilities, HueBleColor, HueBleCommand, HueBleDevice, HueBlePairingOutcome,
     HueBlePairingRequest, HueBleState,
@@ -577,7 +579,7 @@ impl BluezHueBleTransport {
                     error = %error,
                     "Hue BLE GATT command failed before acknowledgement"
                 );
-                return Err(error);
+                return Err(error.context(HueBleCommandNotDispatched));
             }
         };
         let connect_ms = connect_started.elapsed().as_millis() as u64;
@@ -628,7 +630,7 @@ impl BluezHueBleTransport {
                         error = %error,
                         "Hue BLE GATT command failed before acknowledgement"
                     );
-                    return Err(error);
+                    return Err(error.context(HueBleCommandNotDispatched));
                 }
             };
             resolve_ms = resolve_ms.saturating_add(lookup_started.elapsed().as_millis() as u64);
