@@ -7598,11 +7598,25 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             continue;
         }
 
+        // Activating a mode makes its explicit Active room defaults
+        // authoritative even when persisted semantic state already says
+        // Active. That mismatch is legitimate after restart (persisted room
+        // state outranks mode defaults), but observed-off filtering must not
+        // then swallow the next configured Sleep -> Day wake-up. Rooms that
+        // are merely Active and absent from the target mode defaults retain
+        // the ordinary "do not turn on known-off lights" behavior.
+        let explicitly_activated_by_mode_change = previous_mode != target_mode
+            && room_state == RoomModeState::Active
+            && mode_config_for_mode(&mode_configs, target_mode).is_some_and(|mode_config| {
+                mode_config.room_defaults.iter().any(|room_default| {
+                    room_default.room_id == snap.id && room_default.state == RoomModeState::Active
+                })
+            });
         let is_visible = match room_state {
             RoomModeState::Mood | RoomModeState::Standby => true,
             RoomModeState::HardOff => false,
             RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning
-                if force_observed_off_outputs =>
+                if force_observed_off_outputs || explicitly_activated_by_mode_change =>
             {
                 true
             }
@@ -23614,6 +23628,52 @@ mod tests {
             .unwrap()
             .room_mode_transitions
             .contains_key("r1"));
+    }
+
+    #[test]
+    fn scheduled_mode_change_turns_on_explicit_active_default_after_state_drift() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("scheduled-on", false, false),
+            make_snapshot("unconfigured-off", false, false),
+        ]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            set_observed_lights_on_in_app(&mut s, "scheduled-on", false);
+            set_observed_lights_on_in_app(&mut s, "unconfigured-off", false);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "scheduled-on".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+            s.set_mode_transition_configs(vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Sleep,
+                RhythmMode::Day,
+                4_000,
+            )
+            .with_trigger(ModeTransitionTrigger::Sunrise)]);
+        }
+
+        do_set_active_mode_with_trigger(&state, RhythmMode::Day, ModeTransitionTrigger::Sunrise)
+            .unwrap();
+
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "scheduled-on");
+        assert_eq!(applied[0].1.transition_ms, Some(4_000));
+        let state = state.lock().unwrap();
+        assert_eq!(observed_lights_on(&state, "scheduled-on"), Some(true));
+        assert_eq!(
+            observed_lights_on(&state, "unconfigured-off"),
+            Some(false),
+            "mode activation must not turn on known-off rooms without an explicit target default"
+        );
     }
 
     #[test]
