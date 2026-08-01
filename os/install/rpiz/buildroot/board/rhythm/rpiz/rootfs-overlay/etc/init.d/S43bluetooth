@@ -127,7 +127,7 @@ wait_for_hci_ready() {
 
     if [ ! -x "$HCICONFIG" ]; then
         log "hciconfig is unavailable; cannot verify Bluetooth controller readiness"
-        return 1
+        return 2
     fi
 
     while [ "$attempt" -le "$HCI_READY_ATTEMPTS" ]; do
@@ -228,6 +228,8 @@ start_bluetoothd() {
 }
 
 start() {
+    local readiness_status=0
+
     log "loading bluetooth modules"
     # Buildroot starts bluetoothd before this board-specific script. Stop it
     # before hci0 appears so BlueZ cannot probe a half-initialized UART
@@ -238,9 +240,17 @@ start() {
     sleep 1
     attach_controller || true
     sleep 1
-    if ! wait_for_hci_ready; then
+    wait_for_hci_ready || readiness_status=$?
+    if [ "$readiness_status" -ne 0 ]; then
         log_kernel_excerpt
-        return 1
+        if [ "$readiness_status" -ne 2 ]; then
+            return 1
+        fi
+        # A packaging regression must not leave bluetoothd stopped for the
+        # entire boot. The image normally includes hciconfig for the active
+        # readiness check; without it, preserve the legacy best-effort startup
+        # and keep the degraded verification visible in bluetooth.log.
+        log "starting bluetoothd without active controller readiness verification"
     fi
     if ! start_bluetoothd; then
         log_kernel_excerpt

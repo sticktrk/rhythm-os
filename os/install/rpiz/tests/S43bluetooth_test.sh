@@ -3,6 +3,7 @@ set -eu
 
 TEST_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd)"
 INIT_SCRIPT="$TEST_DIR/../buildroot/board/rhythm/rpiz/rootfs-overlay/etc/init.d/S43bluetooth"
+DEFCONFIG="$TEST_DIR/../buildroot/configs/rhythm_rpiz_defconfig"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-bluetooth-migration.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT HUP INT TERM
 
@@ -39,6 +40,11 @@ printf '%s\n' "stale-rootfs-value" >"$BLUETOOTH_STATE_TARGET/adapter/device-one/
 migrate_legacy_bluetooth_state
 grep -qx "device-one-complete" "$BLUETOOTH_STATE_SOURCE/adapter/device-one/info"
 
+# Buildroot only installs deprecated hciconfig when its tools package is also
+# selected. The init script's active readiness check depends on that binary.
+grep -qx 'BR2_PACKAGE_BLUEZ5_UTILS_TOOLS=y' "$DEFCONFIG"
+grep -qx 'BR2_PACKAGE_BLUEZ5_UTILS_DEPRECATED=y' "$DEFCONFIG"
+
 # A controller that appears late must be polled until it can be brought fully
 # UP before bluetoothd starts probing it.
 FAKE_HCICONFIG="$TEST_ROOT/hciconfig"
@@ -72,4 +78,32 @@ HCICONFIG="$TEST_ROOT/missing-hciconfig"
 if wait_for_hci_ready; then
     echo "wait_for_hci_ready unexpectedly accepted a missing hciconfig" >&2
     exit 1
+else
+    test "$?" -eq 2
 fi
+
+# Even if a future image loses the verifier, the board startup must still
+# restart bluetoothd instead of leaving all BLE integrations permanently down.
+START_EVENTS="$TEST_ROOT/start-events"
+stop_bluetoothd() {
+    printf '%s\n' stop >>"$START_EVENTS"
+}
+modprobe() {
+    :
+}
+sleep() {
+    :
+}
+attach_controller() {
+    :
+}
+log_kernel_excerpt() {
+    :
+}
+start_bluetoothd() {
+    printf '%s\n' start >>"$START_EVENTS"
+}
+
+start
+test "$(sed -n '1p' "$START_EVENTS")" = stop
+test "$(sed -n '2p' "$START_EVENTS")" = start
