@@ -98,6 +98,15 @@ pub trait HueBleTransport: Send + Sync {
         deadline: Instant,
     ) -> Result<Vec<(String, Result<()>)>>;
 
+    /// Best-effort startup preparation for a paired bulb.
+    ///
+    /// Implementations may connect and cache read-only GATT metadata, but must
+    /// not write to the bulb or publish a physical state observation. `false`
+    /// means the work yielded to foreground or shared-adapter contention.
+    fn prewarm(&self, _device: &HueBleDevice) -> Result<bool> {
+        Ok(false)
+    }
+
     fn read_state(&self, device: &HueBleDevice) -> Result<HueBleState>;
 
     /// Opportunistic observer read. Implementations should avoid initiating a

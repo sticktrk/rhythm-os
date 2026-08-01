@@ -33,6 +33,10 @@ use super::types::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const PAIR_TIMEOUT: Duration = Duration::from_secs(35);
 const PASSIVE_READ_TIMEOUT: Duration = Duration::from_secs(2);
+// Field measurements put a healthy cold Connect + GATT discovery at 3-7s.
+// Bound speculative work below the foreground command budget and retain time
+// for an explicit Disconnect if BlueZ leaves an operation ambiguous.
+const PREWARM_WORK_TIMEOUT: Duration = Duration::from_secs(10);
 const BOND_REMOVAL_TIMEOUT: Duration = Duration::from_secs(3);
 const ADAPTER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 // Reserve part of the controller's nine-second physical-command budget for a
@@ -1423,6 +1427,122 @@ impl HueBleTransport for BluezHueBleTransport {
             Err(error) if Instant::now() >= deadline => Err(error.context(HueBleCommandTimeout)),
             result => result,
         }
+    }
+
+    fn prewarm(&self, record: &HueBleDevice) -> Result<bool> {
+        let device_key = record.id.clone();
+        if self.gatt.foreground_pending(&device_key)? {
+            return Ok(false);
+        }
+
+        let record = record.clone();
+        let client = Arc::clone(&self.client);
+        let gatt = Arc::clone(&self.gatt);
+        Ok(self
+            .try_run_device_adapter_operation(&device_key, move |_session, adapter| async move {
+                if gatt.foreground_pending(&record.id)?
+                    || Self::record_operation_is_uncertain(&client, &record)?
+                {
+                    return Ok(false);
+                }
+
+                let total_started = Instant::now();
+                let device = Self::existing_device(&adapter, &record).await?;
+                // Connect is cancellation-unsafe at the D-Bus boundary. Fence
+                // both device identities until success or explicit cleanup.
+                Self::mark_record_operation_uncertain(&client, &record)?;
+                let warm_result: Result<bool> = match tokio::time::timeout(
+                    PREWARM_WORK_TIMEOUT,
+                    async {
+                        let connect_started = Instant::now();
+                        let connected_at_start = Self::connect(&device).await?;
+                        let connect_ms = connect_started.elapsed().as_millis() as u64;
+                        if !connected_at_start {
+                            gatt.invalidate_catalog(&record.id)?;
+                        }
+
+                        // A real command registered while Connect was in
+                        // flight. Leave the now-safe connection open, release
+                        // the lane, and let that command own GATT discovery.
+                        if gatt.foreground_pending(&record.id)? {
+                            tracing::info!(
+                                target: "cmd",
+                                event = "hue_ble_prewarm",
+                                device_id = %record.id,
+                                connected_at_start,
+                                connect_ms,
+                                total_ms = total_started.elapsed().as_millis() as u64,
+                                outcome = "yielded",
+                                "Hue BLE startup prewarm yielded after connecting"
+                            );
+                            return Ok(false);
+                        }
+
+                        let resolve_started = Instant::now();
+                        let catalog = Self::light_control_characteristics(
+                            &gatt,
+                            &device,
+                            &record.id,
+                            CatalogResolution::Required,
+                        )
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("required Hue BLE GATT lookup returned no catalog"))?;
+                        let resolve_ms = resolve_started.elapsed().as_millis() as u64;
+                        tracing::info!(
+                            target: "cmd",
+                            event = "hue_ble_prewarm",
+                            device_id = %record.id,
+                            connected_at_start,
+                            catalog_cache_hit = catalog.cache_hit,
+                            connect_ms,
+                            resolve_ms,
+                            total_ms = total_started.elapsed().as_millis() as u64,
+                            outcome = "warmed",
+                            "Hue BLE startup prewarm completed"
+                        );
+                        Ok(true)
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => anyhow::bail!("Hue BLE startup prewarm timed out"),
+                };
+
+                match warm_result {
+                    Ok(warmed) => {
+                        Self::clear_record_operation_uncertain(&client, &record)?;
+                        Ok(warmed)
+                    }
+                    Err(warm_error) => {
+                        gatt.invalidate_catalog(&record.id)?;
+                        tracing::warn!(
+                            target: "cmd",
+                            event = "hue_ble_prewarm",
+                            device_id = %record.id,
+                            total_ms = total_started.elapsed().as_millis() as u64,
+                            outcome = "error",
+                            error = %warm_error,
+                            "Hue BLE startup prewarm failed"
+                        );
+                        match Self::cancel_failed_command(
+                            &device,
+                            Instant::now() + COMMAND_CLEANUP_RESERVE,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                Self::clear_record_operation_uncertain(&client, &record)?;
+                                Err(warm_error)
+                            }
+                            Err(cleanup_error) => Err(warm_error.context(format!(
+                                "cancelling the failed Hue BLE prewarm also failed: {cleanup_error:#}; the stable device lane remains fenced"
+                            ))),
+                        }
+                    }
+                }
+            })?
+            .unwrap_or(false))
     }
 
     fn read_state(&self, record: &HueBleDevice) -> Result<HueBleState> {

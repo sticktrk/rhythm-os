@@ -283,6 +283,7 @@ fn start_observer(
         .name("hue-ble-state".to_string())
         .spawn(move || {
             let _ = event_tx.send(HubEvent::Connected { hub_key: None });
+            prewarm_known_devices(transport.as_ref(), store.as_ref(), shutdown.as_ref());
             let mut previous_power = HashMap::<String, bool>::new();
             let mut adapter_connected = true;
 
@@ -367,6 +368,36 @@ fn start_observer(
             }
         })
         .context("spawning Hue BLE state observer")
+}
+
+fn prewarm_known_devices(
+    transport: &dyn HueBleTransport,
+    store: &HueBleDeviceStore,
+    shutdown: &AtomicBool,
+) {
+    for device in store.all() {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        match transport.prewarm(&device) {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                target: "cmd",
+                event = "hue_ble_prewarm",
+                device_id = %device.id,
+                outcome = "skipped",
+                "Hue BLE startup prewarm skipped busy work"
+            ),
+            Err(error) => tracing::warn!(
+                target: "cmd",
+                event = "hue_ble_prewarm",
+                device_id = %device.id,
+                outcome = "error",
+                error = %error,
+                "Hue BLE startup prewarm could not prepare bulb"
+            ),
+        }
+    }
 }
 
 fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) -> bool {
@@ -1653,6 +1684,8 @@ mod tests {
         pairing_outcome: Mutex<Option<HueBlePairingOutcome>>,
         bond_intent_address: Option<String>,
         available: bool,
+        prewarmed: Mutex<Vec<String>>,
+        prewarm_error_device: Option<String>,
         lifecycle_events: Mutex<Vec<String>>,
         validated: Mutex<Vec<String>>,
         prepared: Mutex<Vec<String>>,
@@ -1713,6 +1746,14 @@ mod tests {
                 .iter()
                 .map(|(device, command)| (device.id.clone(), self.apply_command(device, command)))
                 .collect())
+        }
+
+        fn prewarm(&self, device: &HueBleDevice) -> Result<bool> {
+            self.prewarmed.lock().unwrap().push(device.id.clone());
+            if self.prewarm_error_device.as_deref() == Some(device.id.as_str()) {
+                anyhow::bail!("selected bulb prewarm failed");
+            }
+            Ok(true)
         }
 
         fn read_state(&self, _device: &HueBleDevice) -> Result<HueBleState> {
@@ -1836,6 +1877,59 @@ mod tests {
             paired_at_epoch_secs: 1,
             last_state: None,
         }
+    }
+
+    #[test]
+    fn startup_prewarm_is_best_effort_across_every_known_bulb() {
+        let unique = format!(
+            "rhythm-hue-ble-prewarm-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(unique);
+        let store = HueBleDeviceStore::load(&data_dir).unwrap();
+        let first = stored_device("000001", "AA:00:00:00:00:01");
+        let second = stored_device("000002", "AA:00:00:00:00:02");
+        store.upsert(first.clone()).unwrap();
+        store.upsert(second.clone()).unwrap();
+        let transport = CapturingTransport {
+            prewarm_error_device: Some(first.id.clone()),
+            ..Default::default()
+        };
+
+        prewarm_known_devices(&transport, &store, &AtomicBool::new(false));
+
+        assert_eq!(
+            *transport.prewarmed.lock().unwrap(),
+            vec![first.id, second.id]
+        );
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn startup_prewarm_honors_shutdown_before_touching_a_bulb() {
+        let unique = format!(
+            "rhythm-hue-ble-prewarm-shutdown-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(unique);
+        let store = HueBleDeviceStore::load(&data_dir).unwrap();
+        store
+            .upsert(stored_device("000001", "AA:00:00:00:00:01"))
+            .unwrap();
+        let transport = CapturingTransport::default();
+
+        prewarm_known_devices(&transport, &store, &AtomicBool::new(true));
+
+        assert!(transport.prewarmed.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(data_dir).unwrap();
     }
 
     fn factory_reset_plan(
