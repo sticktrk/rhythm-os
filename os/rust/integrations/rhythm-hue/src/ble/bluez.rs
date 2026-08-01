@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use bluer::agent::{Agent, ReqError};
-use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
+use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest, Service};
 use bluer::gatt::WriteOp;
 use bluer::{Adapter, Address, Device, ErrorKind};
 use rhythm_ble::bluez::{
@@ -47,6 +47,108 @@ struct PairCandidate {
 /// Hue protocol client of rhythm-ble's process-wide BlueZ owner.
 pub struct BluezHueBleTransport {
     client: Arc<BluezClient>,
+}
+
+trait GattCatalogCharacteristic {
+    async fn catalog_uuid(&self) -> Result<Uuid>;
+}
+
+impl GattCatalogCharacteristic for Characteristic {
+    async fn catalog_uuid(&self) -> Result<Uuid> {
+        Ok(self.uuid().await?)
+    }
+}
+
+trait GattCatalogService {
+    type Characteristic: GattCatalogCharacteristic;
+
+    async fn catalog_uuid(&self) -> Result<Uuid>;
+    async fn catalog_characteristics(&self) -> Result<Vec<Self::Characteristic>>;
+}
+
+impl GattCatalogService for Service {
+    type Characteristic = Characteristic;
+
+    async fn catalog_uuid(&self) -> Result<Uuid> {
+        Ok(self.uuid().await?)
+    }
+
+    async fn catalog_characteristics(&self) -> Result<Vec<Self::Characteristic>> {
+        Ok(self.characteristics().await?)
+    }
+}
+
+trait GattCatalogDevice {
+    type Service: GattCatalogService;
+
+    async fn catalog_services(&self) -> Result<Vec<Self::Service>>;
+}
+
+impl GattCatalogDevice for Device {
+    type Service = Service;
+
+    async fn catalog_services(&self) -> Result<Vec<Self::Service>> {
+        Ok(self.services().await?)
+    }
+}
+
+async fn resolve_light_control_catalog<D>(
+    device: &D,
+) -> Result<(
+    usize,
+    HashMap<Uuid, <D::Service as GattCatalogService>::Characteristic>,
+)>
+where
+    D: GattCatalogDevice,
+{
+    let services = device.catalog_services().await?;
+    let mut service_uuids = Vec::with_capacity(services.len());
+    for service in &services {
+        service_uuids.push(service.catalog_uuid().await?);
+    }
+    let service = &services[light_control_service_index(&service_uuids)?];
+    let characteristics = service.catalog_characteristics().await?;
+    let mut result = HashMap::new();
+    for characteristic in characteristics {
+        let characteristic_uuid = characteristic.catalog_uuid().await?;
+        if result.insert(characteristic_uuid, characteristic).is_some() {
+            anyhow::bail!(
+                "Hue bulb exposes duplicate light-control characteristic {characteristic_uuid}"
+            );
+        }
+    }
+    Ok((services.len(), result))
+}
+
+async fn disconnect_and_confirm<D, DFut, C, CFut, T>(
+    deadline: tokio::time::Instant,
+    disconnect: D,
+    is_connected: C,
+    timeout_error: T,
+) -> Result<()>
+where
+    D: FnOnce() -> DFut,
+    DFut: Future<Output = Result<()>>,
+    C: FnOnce() -> CFut,
+    CFut: Future<Output = Result<bool>>,
+    T: Fn(&'static str) -> anyhow::Error,
+{
+    let disconnect_result = match tokio::time::timeout_at(deadline, disconnect()).await {
+        Ok(result) => result,
+        Err(_) => return Err(timeout_error("during disconnect")),
+    };
+    let still_connected = match tokio::time::timeout_at(deadline, is_connected()).await {
+        Ok(result) => result.context("verifying Hue BLE disconnect state")?,
+        Err(_) => return Err(timeout_error("while verifying disconnect")),
+    };
+    if !still_connected {
+        return Ok(());
+    }
+    match disconnect_result {
+        Ok(()) => anyhow::bail!("Hue bulb remains connected after an acknowledged disconnect"),
+        Err(disconnect_error) => Err(disconnect_error)
+            .context("disconnecting Hue bulb was not acknowledged and it remains connected"),
+    }
 }
 
 impl BluezHueBleTransport {
@@ -313,18 +415,15 @@ impl BluezHueBleTransport {
                 .any(|address| address.eq_ignore_ascii_case(stale_address))
     }
 
-    async fn connect(device: &Device) -> Result<()> {
-        if !device.is_connected().await.unwrap_or(false) {
+    async fn connect(device: &Device) -> Result<bool> {
+        let connected_at_start = device.is_connected().await.unwrap_or(false);
+        if !connected_at_start {
             tokio::time::timeout(CONNECT_TIMEOUT, device.connect())
                 .await
                 .context("timed out connecting to Hue bulb")?
                 .context("connecting to Hue bulb")?;
         }
-        tokio::time::timeout(CONNECT_TIMEOUT, device.services())
-            .await
-            .context("timed out resolving Hue GATT services")?
-            .context("resolving Hue GATT services")?;
-        Ok(())
+        Ok(connected_at_start)
     }
 
     async fn cancel_failed_command(device: &Device, deadline: Instant) -> Result<()> {
@@ -332,37 +431,46 @@ impl BluezHueBleTransport {
             anyhow::bail!("Hue BLE command cleanup deadline expired before disconnect");
         }
         let deadline = tokio::time::Instant::from_std(deadline);
-        match tokio::time::timeout_at(deadline, device.disconnect()).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(disconnect_error)) => {
-                let still_connected = tokio::time::timeout_at(deadline, device.is_connected())
+        disconnect_and_confirm(
+            deadline,
+            || async {
+                device
+                    .disconnect()
                     .await
-                    .context("Hue BLE cleanup deadline expired while verifying disconnect")?
-                    .unwrap_or(true);
-                Err(disconnect_error).context(format!(
-                    "disconnecting Hue bulb after a failed command was not acknowledged (connected={still_connected})"
-                ))
-            }
-            Err(_) => anyhow::bail!("Hue BLE command cleanup deadline expired during disconnect"),
-        }
+                    .context("disconnecting Hue bulb after a failed operation")
+            },
+            || async {
+                device
+                    .is_connected()
+                    .await
+                    .context("checking Hue bulb connection after failed-operation cleanup")
+            },
+            |stage| anyhow::anyhow!("Hue BLE command cleanup deadline expired {stage}"),
+        )
+        .await
     }
 
     async fn reconcile_uncertain_command(
         device: &Device,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        tokio::time::timeout_at(deadline, device.disconnect())
-            .await
-            .map_err(|_| anyhow::Error::new(HueBleCommandTimeout))?
-            .context("reconciling a previously ambiguous Hue BLE command")?;
-        let still_connected = tokio::time::timeout_at(deadline, device.is_connected())
-            .await
-            .map_err(|_| anyhow::Error::new(HueBleCommandTimeout))?
-            .context("verifying Hue BLE command reconciliation")?;
-        if still_connected {
-            anyhow::bail!("Hue bulb remains connected after command reconciliation");
-        }
-        Ok(())
+        disconnect_and_confirm(
+            deadline,
+            || async {
+                device
+                    .disconnect()
+                    .await
+                    .context("reconciling a previously ambiguous Hue BLE command")
+            },
+            || async {
+                device
+                    .is_connected()
+                    .await
+                    .context("verifying Hue BLE command reconciliation")
+            },
+            |stage| anyhow::Error::new(HueBleCommandTimeout).context(stage),
+        )
+        .await
     }
 
     fn record_fence_address(record: &HueBleDevice) -> Result<String> {
@@ -413,6 +521,12 @@ impl BluezHueBleTransport {
         Ok(result)
     }
 
+    async fn light_control_characteristics(
+        device: &Device,
+    ) -> Result<(usize, HashMap<Uuid, Characteristic>)> {
+        resolve_light_control_catalog(device).await
+    }
+
     async fn read_optional(
         characteristics: &HashMap<Uuid, Characteristic>,
         id: &str,
@@ -443,6 +557,93 @@ impl BluezHueBleTransport {
             )
             .await
             .with_context(|| format!("writing Hue characteristic {id}"))
+    }
+
+    async fn apply_light_command(
+        device: &Device,
+        device_id: &str,
+        command: &HueBleCommand,
+    ) -> Result<()> {
+        let total_started = Instant::now();
+        let connect_started = Instant::now();
+        let connected_at_start = match Self::connect(device).await {
+            Ok(connected) => connected,
+            Err(error) => {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "hue_ble_device_command",
+                    device_id,
+                    failed_stage = "connect",
+                    connect_ms = connect_started.elapsed().as_millis() as u64,
+                    total_ms = total_started.elapsed().as_millis() as u64,
+                    outcome = "error",
+                    error = %error,
+                    "Hue BLE GATT command failed before acknowledgement"
+                );
+                return Err(error);
+            }
+        };
+        let connect_ms = connect_started.elapsed().as_millis() as u64;
+
+        let lookup_started = Instant::now();
+        let (service_count, characteristics) =
+            match Self::light_control_characteristics(device).await {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "cmd",
+                        event = "hue_ble_device_command",
+                        device_id,
+                        connected_at_start,
+                        failed_stage = "resolve",
+                        connect_ms,
+                        resolve_ms = lookup_started.elapsed().as_millis() as u64,
+                        total_ms = total_started.elapsed().as_millis() as u64,
+                        outcome = "error",
+                        error = %error,
+                        "Hue BLE GATT command failed before acknowledgement"
+                    );
+                    return Err(error);
+                }
+            };
+        let resolve_ms = lookup_started.elapsed().as_millis() as u64;
+
+        let write_started = Instant::now();
+        let result = Self::apply_to_characteristics(&characteristics, command).await;
+        let write_ms = write_started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(()) => tracing::info!(
+                target: "cmd",
+                event = "hue_ble_device_command",
+                device_id,
+                connected_at_start,
+                service_count,
+                characteristic_count = characteristics.len(),
+                connect_ms,
+                resolve_ms,
+                write_ms,
+                total_ms = total_started.elapsed().as_millis() as u64,
+                outcome = "acknowledged",
+                "Hue BLE GATT command acknowledged"
+            ),
+            Err(error) => tracing::warn!(
+                target: "cmd",
+                event = "hue_ble_device_command",
+                device_id,
+                connected_at_start,
+                service_count,
+                characteristic_count = characteristics.len(),
+                failed_stage = "write",
+                connect_ms,
+                resolve_ms,
+                write_ms,
+                total_ms = total_started.elapsed().as_millis() as u64,
+                outcome = "error",
+                error = %error,
+                "Hue BLE GATT command failed before acknowledgement"
+            ),
+        }
+        result
     }
 
     fn validate_light_characteristic_ids(characteristic_ids: &HashSet<Uuid>) -> Result<()> {
@@ -984,9 +1185,7 @@ impl HueBleTransport for BluezHueBleTransport {
             let device = Self::existing_device(&adapter, &record).await?;
             Self::mark_record_operation_uncertain(&client, &record)?;
             let command_result: Result<()> = async {
-                Self::connect(&device).await?;
-                let characteristics = Self::characteristics(&device).await?;
-                Self::apply_to_characteristics(&characteristics, &command).await
+                Self::apply_light_command(&device, &record.id, &command).await
             }
             .await;
             match command_result {
@@ -1057,15 +1256,25 @@ impl HueBleTransport for BluezHueBleTransport {
                 // identities before starting it so even outer-deadline
                 // cancellation leaves a durable in-process exclusion marker.
                 Self::mark_record_operation_uncertain(&client, &record)?;
+                let command_started = Instant::now();
                 let command_result = match tokio::time::timeout_at(work_deadline, async {
-                    Self::connect(&device).await?;
-                    let characteristics = Self::characteristics(&device).await?;
-                    Self::apply_to_characteristics(&characteristics, &command).await
+                    Self::apply_light_command(&device, &record.id, &command).await
                 })
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => Err(anyhow::Error::new(HueBleCommandTimeout)),
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "cmd",
+                            event = "hue_ble_device_command",
+                            device_id = %record.id,
+                            failed_stage = "deadline",
+                            total_ms = command_started.elapsed().as_millis() as u64,
+                            outcome = "timeout",
+                            "Hue BLE GATT command did not acknowledge before its deadline"
+                        );
+                        Err(anyhow::Error::new(HueBleCommandTimeout))
+                    }
                 };
 
                 match command_result {
@@ -1123,7 +1332,7 @@ impl HueBleTransport for BluezHueBleTransport {
             Self::mark_record_operation_uncertain(&client, &record)?;
             let read_result: Result<HueBleState> = async {
                 Self::connect(&device).await?;
-                let characteristics = Self::characteristics(&device).await?;
+                let (_, characteristics) = Self::light_control_characteristics(&device).await?;
                 Self::read_state_from_characteristics(&characteristics).await
             }
             .await;
@@ -1169,14 +1378,35 @@ impl HueBleTransport for BluezHueBleTransport {
                 // Mark before the bounded future so timeout/cancellation cannot
                 // release this lane and let a foreground Connect overlap it.
                 Self::mark_record_operation_uncertain(&client, &record)?;
-                let state = tokio::time::timeout(PASSIVE_READ_TIMEOUT, async {
-                    let characteristics = Self::characteristics(&device).await?;
+                let read_result = tokio::time::timeout(PASSIVE_READ_TIMEOUT, async {
+                    let (_, characteristics) = Self::light_control_characteristics(&device).await?;
                     Self::read_state_from_characteristics(&characteristics).await
                 })
                 .await
-                .context("passive Hue state read timed out")??;
-                Self::clear_record_operation_uncertain(&client, &record)?;
-                Ok(Some(state))
+                .context("passive Hue state read timed out")
+                .and_then(|result| result);
+                match read_result {
+                    Ok(state) => {
+                        Self::clear_record_operation_uncertain(&client, &record)?;
+                        Ok(Some(state))
+                    }
+                    Err(read_error) => {
+                        match Self::cancel_failed_command(
+                            &device,
+                            Instant::now() + COMMAND_CLEANUP_RESERVE,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                Self::clear_record_operation_uncertain(&client, &record)?;
+                                Err(read_error)
+                            }
+                            Err(cleanup_error) => Err(read_error.context(format!(
+                                "cancelling the failed passive Hue BLE read also failed: {cleanup_error:#}; the stable device lane remains fenced"
+                            ))),
+                        }
+                    }
+                }
             })?
             .flatten())
     }
@@ -1451,6 +1681,21 @@ fn uuid(value: &str) -> Uuid {
     value.parse().expect("Hue BLE UUID constants are valid")
 }
 
+fn light_control_service_index(service_uuids: &[Uuid]) -> Result<usize> {
+    let wanted = uuid(protocol::LIGHT_CONTROL_SERVICE_UUID);
+    let mut matches = service_uuids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, service_uuid)| (*service_uuid == wanted).then_some(index));
+    let Some(index) = matches.next() else {
+        anyhow::bail!("Hue bulb is missing its light-control GATT service");
+    };
+    if matches.next().is_some() {
+        anyhow::bail!("Hue bulb exposes duplicate light-control GATT services");
+    }
+    Ok(index)
+}
+
 fn classify_adapter_probe(observed: Option<bool>) -> HueBleAdapterAvailability {
     match observed {
         Some(true) => HueBleAdapterAvailability::Available,
@@ -1468,6 +1713,52 @@ fn local_bond_removal_complete(paired: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct FakeCharacteristic {
+        uuid: Uuid,
+    }
+
+    impl GattCatalogCharacteristic for FakeCharacteristic {
+        async fn catalog_uuid(&self) -> Result<Uuid> {
+            Ok(self.uuid)
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeService {
+        uuid: Uuid,
+        characteristics: Vec<FakeCharacteristic>,
+        enumeration_count: Arc<AtomicUsize>,
+    }
+
+    impl GattCatalogService for FakeService {
+        type Characteristic = FakeCharacteristic;
+
+        async fn catalog_uuid(&self) -> Result<Uuid> {
+            Ok(self.uuid)
+        }
+
+        async fn catalog_characteristics(&self) -> Result<Vec<Self::Characteristic>> {
+            self.enumeration_count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.characteristics.clone())
+        }
+    }
+
+    struct FakeDevice {
+        services: Vec<FakeService>,
+        enumeration_count: Arc<AtomicUsize>,
+    }
+
+    impl GattCatalogDevice for FakeDevice {
+        type Service = FakeService;
+
+        async fn catalog_services(&self) -> Result<Vec<Self::Service>> {
+            self.enumeration_count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.services.clone())
+        }
+    }
 
     #[test]
     fn opportunistic_adapter_contention_is_busy_not_disconnected() {
@@ -1500,6 +1791,155 @@ mod tests {
             uuid(protocol::BRIGHTNESS_UUID),
         ]);
         BluezHueBleTransport::validate_light_characteristic_ids(&bulb_characteristics).unwrap();
+    }
+
+    #[test]
+    fn runtime_control_selects_only_one_exact_hue_light_service() {
+        let service_uuids = [
+            uuid(protocol::HUE_DISCOVERY_SERVICE_UUID),
+            uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
+            uuid(protocol::DEVICE_INFORMATION_SERVICE_UUID),
+        ];
+        assert_eq!(light_control_service_index(&service_uuids).unwrap(), 1);
+
+        assert!(light_control_service_index(&service_uuids[..1]).is_err());
+        assert!(light_control_service_index(&[
+            uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
+            uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
+        ])
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_catalog_enumerates_only_the_selected_light_service_once() {
+        let device_enumerations = Arc::new(AtomicUsize::new(0));
+        let discovery_enumerations = Arc::new(AtomicUsize::new(0));
+        let control_enumerations = Arc::new(AtomicUsize::new(0));
+        let information_enumerations = Arc::new(AtomicUsize::new(0));
+        let service = |uuid, characteristics, enumeration_count| FakeService {
+            uuid,
+            characteristics,
+            enumeration_count,
+        };
+        let device = FakeDevice {
+            services: vec![
+                service(
+                    uuid(protocol::HUE_DISCOVERY_SERVICE_UUID),
+                    Vec::new(),
+                    Arc::clone(&discovery_enumerations),
+                ),
+                service(
+                    uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
+                    vec![
+                        FakeCharacteristic {
+                            uuid: uuid(protocol::POWER_UUID),
+                        },
+                        FakeCharacteristic {
+                            uuid: uuid(protocol::COMBINED_CONTROL_UUID),
+                        },
+                    ],
+                    Arc::clone(&control_enumerations),
+                ),
+                service(
+                    uuid(protocol::DEVICE_INFORMATION_SERVICE_UUID),
+                    Vec::new(),
+                    Arc::clone(&information_enumerations),
+                ),
+            ],
+            enumeration_count: Arc::clone(&device_enumerations),
+        };
+
+        let (service_count, characteristics) =
+            resolve_light_control_catalog(&device).await.unwrap();
+
+        assert_eq!(service_count, 3);
+        assert_eq!(characteristics.len(), 2);
+        assert_eq!(device_enumerations.load(Ordering::SeqCst), 1);
+        assert_eq!(control_enumerations.load(Ordering::SeqCst), 1);
+        assert_eq!(discovery_enumerations.load(Ordering::SeqCst), 0);
+        assert_eq!(information_enumerations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_catalog_rejects_duplicate_control_characteristics() {
+        let device = FakeDevice {
+            services: vec![FakeService {
+                uuid: uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
+                characteristics: vec![
+                    FakeCharacteristic {
+                        uuid: uuid(protocol::POWER_UUID),
+                    },
+                    FakeCharacteristic {
+                        uuid: uuid(protocol::POWER_UUID),
+                    },
+                ],
+                enumeration_count: Arc::new(AtomicUsize::new(0)),
+            }],
+            enumeration_count: Arc::new(AtomicUsize::new(0)),
+        };
+
+        assert!(resolve_light_control_catalog(&device).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_confirmation_accepts_only_proven_terminal_state() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let timeout = |_| anyhow::anyhow!("test deadline expired");
+
+        disconnect_and_confirm(
+            deadline,
+            || async { Ok(()) },
+            || async { Ok(false) },
+            timeout,
+        )
+        .await
+        .unwrap();
+        disconnect_and_confirm(
+            deadline,
+            || async { Err(anyhow::anyhow!("already disconnected")) },
+            || async { Ok(false) },
+            timeout,
+        )
+        .await
+        .unwrap();
+        assert!(disconnect_and_confirm(
+            deadline,
+            || async { Ok(()) },
+            || async { Ok(true) },
+            timeout,
+        )
+        .await
+        .is_err());
+        assert!(disconnect_and_confirm(
+            deadline,
+            || async { Err(anyhow::anyhow!("disconnect rejected")) },
+            || async { Ok(true) },
+            timeout,
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_confirmation_rejects_unknown_or_expired_state() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert!(disconnect_and_confirm(
+            deadline,
+            || async { Ok(()) },
+            || async { Err(anyhow::anyhow!("connection state unavailable")) },
+            |_| anyhow::anyhow!("test deadline expired"),
+        )
+        .await
+        .is_err());
+
+        assert!(disconnect_and_confirm(
+            tokio::time::Instant::now(),
+            || futures::future::pending::<Result<()>>(),
+            || async { Ok(false) },
+            |_| anyhow::anyhow!("test deadline expired"),
+        )
+        .await
+        .is_err());
     }
 
     #[test]

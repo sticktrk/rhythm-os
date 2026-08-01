@@ -11,6 +11,8 @@ use super::types::{HueBleColor, HueBleCommand, HueBleState};
 
 pub const HUE_DISCOVERY_SERVICE_UUID: &str = "0000fe0f-0000-1000-8000-00805f9b34fb";
 pub const DEVICE_INFORMATION_SERVICE_UUID: &str = "0000180a-0000-1000-8000-00805f9b34fb";
+/// Signify's vendor service containing Hue light-state and control characteristics.
+pub const LIGHT_CONTROL_SERVICE_UUID: &str = "932c32bd-0000-47a2-835a-a8d455b859dd";
 pub const MANUFACTURER_NAME_UUID: &str = "00002a29-0000-1000-8000-00805f9b34fb";
 pub const MODEL_NUMBER_UUID: &str = "00002a24-0000-1000-8000-00805f9b34fb";
 pub const FIRMWARE_REVISION_UUID: &str = "00002a28-0000-1000-8000-00805f9b34fb";
