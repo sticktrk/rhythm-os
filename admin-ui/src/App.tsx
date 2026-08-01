@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Session } from '@supabase/supabase-js';
-import { AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 
 import { AppRoutes } from './router';
 import { ConfirmProvider } from './components/ui/ConfirmDialog';
@@ -145,9 +145,6 @@ function AuthScreen({
   return (
     <main className="centeredScreen">
       <form className="authPanel" onSubmit={onSubmit}>
-        <div className="panelIcon">
-          <ShieldCheck size={24} />
-        </div>
         <h1>Rhythm Admin</h1>
         <label>
           <span>Email</span>
@@ -171,7 +168,7 @@ function AuthScreen({
         </label>
         {error ? <div className="notice error">{error}</div> : null}
         <button className="primaryButton" type="submit" disabled={busy}>
-          {busy ? <Loader2 className="spin" size={18} /> : <ShieldCheck size={18} />}
+          {busy ? <Loader2 className="spin" size={18} /> : null}
           <span>Sign in</span>
         </button>
       </form>
