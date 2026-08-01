@@ -17,6 +17,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::gatt_runtime::{
+    CatalogResolution, GattCatalogCharacteristic, GattCatalogDevice, GattCatalogService,
+    HueBleGattRuntime,
+};
 use super::protocol;
 use super::transport::{HueBleAdapterAvailability, HueBleCommandTimeout, HueBleTransport};
 use super::types::{
@@ -47,41 +51,33 @@ struct PairCandidate {
 /// Hue protocol client of rhythm-ble's process-wide BlueZ owner.
 pub struct BluezHueBleTransport {
     client: Arc<BluezClient>,
-}
-
-trait GattCatalogCharacteristic {
-    async fn catalog_uuid(&self) -> Result<Uuid>;
+    gatt: Arc<HueBleGattRuntime>,
 }
 
 impl GattCatalogCharacteristic for Characteristic {
-    async fn catalog_uuid(&self) -> Result<Uuid> {
-        Ok(self.uuid().await?)
+    fn catalog_id(&self) -> u16 {
+        self.id()
     }
-}
 
-trait GattCatalogService {
-    type Characteristic: GattCatalogCharacteristic;
-
-    async fn catalog_uuid(&self) -> Result<Uuid>;
-    async fn catalog_characteristics(&self) -> Result<Vec<Self::Characteristic>>;
+    async fn catalog_uuid(&self) -> Result<String> {
+        Ok(self.uuid().await?.to_string())
+    }
 }
 
 impl GattCatalogService for Service {
     type Characteristic = Characteristic;
 
-    async fn catalog_uuid(&self) -> Result<Uuid> {
-        Ok(self.uuid().await?)
+    fn catalog_id(&self) -> u16 {
+        self.id()
+    }
+
+    async fn catalog_uuid(&self) -> Result<String> {
+        Ok(self.uuid().await?.to_string())
     }
 
     async fn catalog_characteristics(&self) -> Result<Vec<Self::Characteristic>> {
         Ok(self.characteristics().await?)
     }
-}
-
-trait GattCatalogDevice {
-    type Service: GattCatalogService;
-
-    async fn catalog_services(&self) -> Result<Vec<Self::Service>>;
 }
 
 impl GattCatalogDevice for Device {
@@ -92,32 +88,10 @@ impl GattCatalogDevice for Device {
     }
 }
 
-async fn resolve_light_control_catalog<D>(
-    device: &D,
-) -> Result<(
-    usize,
-    HashMap<Uuid, <D::Service as GattCatalogService>::Characteristic>,
-)>
-where
-    D: GattCatalogDevice,
-{
-    let services = device.catalog_services().await?;
-    let mut service_uuids = Vec::with_capacity(services.len());
-    for service in &services {
-        service_uuids.push(service.catalog_uuid().await?);
-    }
-    let service = &services[light_control_service_index(&service_uuids)?];
-    let characteristics = service.catalog_characteristics().await?;
-    let mut result = HashMap::new();
-    for characteristic in characteristics {
-        let characteristic_uuid = characteristic.catalog_uuid().await?;
-        if result.insert(characteristic_uuid, characteristic).is_some() {
-            anyhow::bail!(
-                "Hue bulb exposes duplicate light-control characteristic {characteristic_uuid}"
-            );
-        }
-    }
-    Ok((services.len(), result))
+struct MaterializedLightControlCatalog {
+    service_count: usize,
+    cache_hit: bool,
+    characteristics: HashMap<Uuid, Characteristic>,
 }
 
 async fn disconnect_and_confirm<D, DFut, C, CFut, T>(
@@ -155,6 +129,7 @@ impl BluezHueBleTransport {
     pub fn new() -> Result<Self> {
         Ok(Self {
             client: Arc::new(BluezClient::new(BluezDriverId::Hue)?),
+            gatt: Arc::new(HueBleGattRuntime::default()),
         })
     }
 
@@ -522,9 +497,30 @@ impl BluezHueBleTransport {
     }
 
     async fn light_control_characteristics(
+        gatt: &HueBleGattRuntime,
         device: &Device,
-    ) -> Result<(usize, HashMap<Uuid, Characteristic>)> {
-        resolve_light_control_catalog(device).await
+        device_id: &str,
+        resolution: CatalogResolution,
+    ) -> Result<Option<MaterializedLightControlCatalog>> {
+        let Some(access) = gatt
+            .catalog_for_device(device_id, device, resolution)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let service = device.service(access.catalog.service_id).await?;
+        let mut characteristics = HashMap::new();
+        for (characteristic_uuid, characteristic_id) in &access.catalog.characteristic_ids {
+            characteristics.insert(
+                uuid(characteristic_uuid),
+                service.characteristic(*characteristic_id).await?,
+            );
+        }
+        Ok(Some(MaterializedLightControlCatalog {
+            service_count: access.catalog.service_count,
+            cache_hit: access.cache_hit,
+            characteristics,
+        }))
     }
 
     async fn read_optional(
@@ -560,6 +556,7 @@ impl BluezHueBleTransport {
     }
 
     async fn apply_light_command(
+        gatt: &HueBleGattRuntime,
         device: &Device,
         device_id: &str,
         command: &HueBleCommand,
@@ -584,20 +581,48 @@ impl BluezHueBleTransport {
             }
         };
         let connect_ms = connect_started.elapsed().as_millis() as u64;
+        if !connected_at_start {
+            // Bluer documents GATT object IDs as connection-scoped. Never
+            // carry an ID catalog across a reconnect without rediscovery.
+            gatt.invalidate_catalog(device_id)?;
+        }
 
-        let lookup_started = Instant::now();
-        let (service_count, characteristics) =
-            match Self::light_control_characteristics(device).await {
-                Ok(catalog) => catalog,
+        let mut resolve_ms = 0u64;
+        let mut write_ms = 0u64;
+        let mut catalog_cache_hit = false;
+        let mut catalog_refreshes = 0u8;
+        let mut first_lookup = true;
+        loop {
+            let lookup_started = Instant::now();
+            let catalog = match Self::light_control_characteristics(
+                gatt,
+                device,
+                device_id,
+                CatalogResolution::Required,
+            )
+            .await
+            {
+                Ok(Some(catalog)) => catalog,
+                Ok(None) => unreachable!("required Hue BLE GATT lookup returned no catalog"),
                 Err(error) => {
+                    resolve_ms =
+                        resolve_ms.saturating_add(lookup_started.elapsed().as_millis() as u64);
+                    let failed_stage = if catalog_refreshes == 0 {
+                        "resolve"
+                    } else {
+                        "refresh"
+                    };
                     tracing::warn!(
                         target: "cmd",
                         event = "hue_ble_device_command",
                         device_id,
                         connected_at_start,
-                        failed_stage = "resolve",
+                        failed_stage,
+                        catalog_cache_hit,
+                        catalog_refreshes,
                         connect_ms,
-                        resolve_ms = lookup_started.elapsed().as_millis() as u64,
+                        resolve_ms,
+                        write_ms,
                         total_ms = total_started.elapsed().as_millis() as u64,
                         outcome = "error",
                         error = %error,
@@ -606,44 +631,78 @@ impl BluezHueBleTransport {
                     return Err(error);
                 }
             };
-        let resolve_ms = lookup_started.elapsed().as_millis() as u64;
+            resolve_ms = resolve_ms.saturating_add(lookup_started.elapsed().as_millis() as u64);
+            if first_lookup {
+                catalog_cache_hit = catalog.cache_hit;
+                first_lookup = false;
+            }
 
-        let write_started = Instant::now();
-        let result = Self::apply_to_characteristics(&characteristics, command).await;
-        let write_ms = write_started.elapsed().as_millis() as u64;
-        match &result {
-            Ok(()) => tracing::info!(
-                target: "cmd",
-                event = "hue_ble_device_command",
-                device_id,
-                connected_at_start,
-                service_count,
-                characteristic_count = characteristics.len(),
-                connect_ms,
-                resolve_ms,
-                write_ms,
-                total_ms = total_started.elapsed().as_millis() as u64,
-                outcome = "acknowledged",
-                "Hue BLE GATT command acknowledged"
-            ),
-            Err(error) => tracing::warn!(
-                target: "cmd",
-                event = "hue_ble_device_command",
-                device_id,
-                connected_at_start,
-                service_count,
-                characteristic_count = characteristics.len(),
-                failed_stage = "write",
-                connect_ms,
-                resolve_ms,
-                write_ms,
-                total_ms = total_started.elapsed().as_millis() as u64,
-                outcome = "error",
-                error = %error,
-                "Hue BLE GATT command failed before acknowledgement"
-            ),
+            let write_started = Instant::now();
+            let result = Self::apply_to_characteristics(&catalog.characteristics, command).await;
+            write_ms = write_ms.saturating_add(write_started.elapsed().as_millis() as u64);
+            if result
+                .as_ref()
+                .is_err_and(|error| catalog.cache_hit && Self::is_stale_gatt_catalog_error(error))
+                && catalog_refreshes == 0
+            {
+                // Hue commands set absolute values. If BlueZ proves that a
+                // cached object path disappeared, refreshing and replaying
+                // once is idempotent even when an earlier write in a compound
+                // command was already acknowledged.
+                gatt.invalidate_catalog(device_id)?;
+                catalog_refreshes = 1;
+                continue;
+            }
+
+            match &result {
+                Ok(()) => tracing::info!(
+                    target: "cmd",
+                    event = "hue_ble_device_command",
+                    device_id,
+                    connected_at_start,
+                    service_count = catalog.service_count,
+                    characteristic_count = catalog.characteristics.len(),
+                    catalog_cache_hit,
+                    catalog_refreshes,
+                    connect_ms,
+                    resolve_ms,
+                    write_ms,
+                    total_ms = total_started.elapsed().as_millis() as u64,
+                    outcome = "acknowledged",
+                    "Hue BLE GATT command acknowledged"
+                ),
+                Err(error) => tracing::warn!(
+                    target: "cmd",
+                    event = "hue_ble_device_command",
+                    device_id,
+                    connected_at_start,
+                    service_count = catalog.service_count,
+                    characteristic_count = catalog.characteristics.len(),
+                    failed_stage = "write",
+                    catalog_cache_hit,
+                    catalog_refreshes,
+                    connect_ms,
+                    resolve_ms,
+                    write_ms,
+                    total_ms = total_started.elapsed().as_millis() as u64,
+                    outcome = "error",
+                    error = %error,
+                    "Hue BLE GATT command failed before acknowledgement"
+                ),
+            }
+            return result;
         }
-        result
+    }
+
+    fn is_stale_gatt_catalog_error(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause.downcast_ref::<bluer::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind,
+                    ErrorKind::DoesNotExist | ErrorKind::NotFound | ErrorKind::ServicesUnresolved
+                )
+            })
+        })
     }
 
     fn validate_light_characteristic_ids(characteristic_ids: &HashSet<Uuid>) -> Result<()> {
@@ -841,6 +900,43 @@ impl BluezHueBleTransport {
             color_temperature.as_deref(),
             xy.as_deref(),
         )
+    }
+
+    async fn read_power_state_from_characteristics(
+        characteristics: &HashMap<Uuid, Characteristic>,
+    ) -> Result<HueBleState> {
+        let power = Self::read_optional(characteristics, protocol::POWER_UUID).await?;
+        protocol::state_from_values(power.as_deref(), None, None, None)
+    }
+
+    async fn read_state_with_catalog(
+        gatt: &HueBleGattRuntime,
+        device: &Device,
+        device_id: &str,
+    ) -> Result<HueBleState> {
+        let mut refreshed = false;
+        loop {
+            let catalog = Self::light_control_characteristics(
+                gatt,
+                device,
+                device_id,
+                CatalogResolution::Required,
+            )
+            .await?
+            .expect("required Hue BLE GATT lookup returns a catalog");
+            let result = Self::read_state_from_characteristics(&catalog.characteristics).await;
+            if !refreshed
+                && catalog.cache_hit
+                && result
+                    .as_ref()
+                    .is_err_and(Self::is_stale_gatt_catalog_error)
+            {
+                gatt.invalidate_catalog(device_id)?;
+                refreshed = true;
+                continue;
+            }
+            return result;
+        }
     }
 
     async fn apply_to_characteristics(
@@ -1172,9 +1268,11 @@ impl HueBleTransport for BluezHueBleTransport {
 
     fn apply_command(&self, record: &HueBleDevice, command: &HueBleCommand) -> Result<()> {
         let device_key = record.id.clone();
+        let _foreground = self.gatt.begin_foreground([device_key.clone()])?;
         let record = record.clone();
         let command = *command;
         let client = Arc::clone(&self.client);
+        let gatt = Arc::clone(&self.gatt);
         self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
             if Self::record_operation_is_uncertain(&client, &record)? {
                 anyhow::bail!(
@@ -1185,7 +1283,7 @@ impl HueBleTransport for BluezHueBleTransport {
             let device = Self::existing_device(&adapter, &record).await?;
             Self::mark_record_operation_uncertain(&client, &record)?;
             let command_result: Result<()> = async {
-                Self::apply_light_command(&device, &record.id, &command).await
+                Self::apply_light_command(&gatt, &device, &record.id, &command).await
             }
             .await;
             match command_result {
@@ -1194,6 +1292,7 @@ impl HueBleTransport for BluezHueBleTransport {
                     Ok(())
                 }
                 Err(command_error) => {
+                    gatt.invalidate_catalog(&record.id)?;
                     match Self::cancel_failed_command(
                         &device,
                         Instant::now() + COMMAND_CLEANUP_RESERVE,
@@ -1218,6 +1317,9 @@ impl HueBleTransport for BluezHueBleTransport {
         commands: &[(HueBleDevice, HueBleCommand)],
         deadline: Instant,
     ) -> Result<Vec<(String, Result<()>)>> {
+        let _foreground = self
+            .gatt
+            .begin_foreground(commands.iter().map(|(record, _)| record.id.clone()))?;
         let work_deadline = deadline
             .checked_sub(COMMAND_CLEANUP_RESERVE)
             .unwrap_or(deadline);
@@ -1226,11 +1328,13 @@ impl HueBleTransport for BluezHueBleTransport {
             .map(|(record, command)| (record.id.clone(), (record.clone(), *command)))
             .collect();
         let client = Arc::clone(&self.client);
+        let gatt = Arc::clone(&self.gatt);
         let result = self.run_device_adapter_operations_until(
             deadline,
             operations,
             move |(record, command), _session, adapter| {
                 let client = Arc::clone(&client);
+                let gatt = Arc::clone(&gatt);
                 async move {
                 let work_deadline = tokio::time::Instant::from_std(work_deadline);
                 let device = tokio::time::timeout_at(
@@ -1241,6 +1345,7 @@ impl HueBleTransport for BluezHueBleTransport {
                 .map_err(|_| anyhow::Error::new(HueBleCommandTimeout))??;
 
                 if Self::record_operation_is_uncertain(&client, &record)? {
+                    gatt.invalidate_catalog(&record.id)?;
                     Self::reconcile_uncertain_command(&device, work_deadline)
                         .await
                         .with_context(|| {
@@ -1258,7 +1363,7 @@ impl HueBleTransport for BluezHueBleTransport {
                 Self::mark_record_operation_uncertain(&client, &record)?;
                 let command_started = Instant::now();
                 let command_result = match tokio::time::timeout_at(work_deadline, async {
-                    Self::apply_light_command(&device, &record.id, &command).await
+                    Self::apply_light_command(&gatt, &device, &record.id, &command).await
                 })
                 .await
                 {
@@ -1283,6 +1388,7 @@ impl HueBleTransport for BluezHueBleTransport {
                         Ok(())
                     }
                     Err(command_error) => {
+                        gatt.invalidate_catalog(&record.id)?;
                         match Self::cancel_failed_command(&device, deadline).await {
                             Ok(()) => {
                                 Self::clear_record_operation_uncertain(&client, &record)?;
@@ -1319,8 +1425,10 @@ impl HueBleTransport for BluezHueBleTransport {
 
     fn read_state(&self, record: &HueBleDevice) -> Result<HueBleState> {
         let device_key = record.id.clone();
+        let _foreground = self.gatt.begin_foreground([device_key.clone()])?;
         let record = record.clone();
         let client = Arc::clone(&self.client);
+        let gatt = Arc::clone(&self.gatt);
         self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
             if Self::record_operation_is_uncertain(&client, &record)? {
                 anyhow::bail!(
@@ -1331,9 +1439,10 @@ impl HueBleTransport for BluezHueBleTransport {
             let device = Self::existing_device(&adapter, &record).await?;
             Self::mark_record_operation_uncertain(&client, &record)?;
             let read_result: Result<HueBleState> = async {
-                Self::connect(&device).await?;
-                let (_, characteristics) = Self::light_control_characteristics(&device).await?;
-                Self::read_state_from_characteristics(&characteristics).await
+                if !Self::connect(&device).await? {
+                    gatt.invalidate_catalog(&record.id)?;
+                }
+                Self::read_state_with_catalog(&gatt, &device, &record.id).await
             }
             .await;
             match read_result {
@@ -1342,6 +1451,7 @@ impl HueBleTransport for BluezHueBleTransport {
                     Ok(state)
                 }
                 Err(read_error) => {
+                    gatt.invalidate_catalog(&record.id)?;
                     match Self::cancel_failed_command(
                         &device,
                         Instant::now() + COMMAND_CLEANUP_RESERVE,
@@ -1363,10 +1473,17 @@ impl HueBleTransport for BluezHueBleTransport {
 
     fn read_state_passive(&self, record: &HueBleDevice) -> Result<Option<HueBleState>> {
         let device_key = record.id.clone();
+        if self.gatt.foreground_pending(&device_key)? {
+            return Ok(None);
+        }
         let record = record.clone();
         let client = Arc::clone(&self.client);
+        let gatt = Arc::clone(&self.gatt);
         Ok(self
             .try_run_device_adapter_operation(&device_key, move |_session, adapter| async move {
+                if gatt.foreground_pending(&record.id)? {
+                    return Ok(None);
+                }
                 if Self::record_operation_is_uncertain(&client, &record)? {
                     return Ok(None);
                 }
@@ -1374,13 +1491,28 @@ impl HueBleTransport for BluezHueBleTransport {
                 if !device.is_connected().await.unwrap_or(false) {
                     return Ok(None);
                 }
+                let Some(catalog) = Self::light_control_characteristics(
+                    &gatt,
+                    &device,
+                    &record.id,
+                    CatalogResolution::CacheOnly,
+                )
+                .await?
+                else {
+                    return Ok(None);
+                };
+                // Close the race with a foreground request that arrived while
+                // the connected-state property was being read. Once the one
+                // power ReadValue starts it remains bounded and fenced.
+                if gatt.foreground_pending(&record.id)? {
+                    return Ok(None);
+                }
                 // Even a passive ReadValue is a daemon-owned D-Bus operation.
                 // Mark before the bounded future so timeout/cancellation cannot
                 // release this lane and let a foreground Connect overlap it.
                 Self::mark_record_operation_uncertain(&client, &record)?;
                 let read_result = tokio::time::timeout(PASSIVE_READ_TIMEOUT, async {
-                    let (_, characteristics) = Self::light_control_characteristics(&device).await?;
-                    Self::read_state_from_characteristics(&characteristics).await
+                    Self::read_power_state_from_characteristics(&catalog.characteristics).await
                 })
                 .await
                 .context("passive Hue state read timed out")
@@ -1391,6 +1523,7 @@ impl HueBleTransport for BluezHueBleTransport {
                         Ok(Some(state))
                     }
                     Err(read_error) => {
+                        gatt.invalidate_catalog(&record.id)?;
                         match Self::cancel_failed_command(
                             &device,
                             Instant::now() + COMMAND_CLEANUP_RESERVE,
@@ -1662,38 +1795,27 @@ impl HueBleTransport for BluezHueBleTransport {
         let device_key = record.id.clone();
         let record = record.clone();
         let client = Arc::clone(&self.client);
-        self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
-            let address: Address = record
-                .address
-                .parse()
-                .with_context(|| format!("invalid stored Hue BLE address {}", record.address))?;
-            Self::mark_record_operation_uncertain(&client, &record)?;
-            Self::remove_exact_local_bond(&adapter, address, handoff_valid_until).await?;
-            // Exact bond removal is a terminal acknowledgement from BlueZ;
-            // the old stable-ID and locator fences cannot protect anything
-            // after the device object/key is gone.
-            Self::clear_record_operation_uncertain(&client, &record)
-        })
+        let result =
+            self.run_device_adapter_operation(&device_key, move |_session, adapter| async move {
+                let address: Address = record.address.parse().with_context(|| {
+                    format!("invalid stored Hue BLE address {}", record.address)
+                })?;
+                Self::mark_record_operation_uncertain(&client, &record)?;
+                Self::remove_exact_local_bond(&adapter, address, handoff_valid_until).await?;
+                // Exact bond removal is a terminal acknowledgement from BlueZ;
+                // the old stable-ID and locator fences cannot protect anything
+                // after the device object/key is gone.
+                Self::clear_record_operation_uncertain(&client, &record)
+            });
+        if result.is_ok() {
+            self.gatt.invalidate_catalog(&device_key)?;
+        }
+        result
     }
 }
 
 fn uuid(value: &str) -> Uuid {
     value.parse().expect("Hue BLE UUID constants are valid")
-}
-
-fn light_control_service_index(service_uuids: &[Uuid]) -> Result<usize> {
-    let wanted = uuid(protocol::LIGHT_CONTROL_SERVICE_UUID);
-    let mut matches = service_uuids
-        .iter()
-        .enumerate()
-        .filter_map(|(index, service_uuid)| (*service_uuid == wanted).then_some(index));
-    let Some(index) = matches.next() else {
-        anyhow::bail!("Hue bulb is missing its light-control GATT service");
-    };
-    if matches.next().is_some() {
-        anyhow::bail!("Hue bulb exposes duplicate light-control GATT services");
-    }
-    Ok(index)
 }
 
 fn classify_adapter_probe(observed: Option<bool>) -> HueBleAdapterAvailability {
@@ -1713,52 +1835,6 @@ fn local_bond_removal_complete(paired: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Clone)]
-    struct FakeCharacteristic {
-        uuid: Uuid,
-    }
-
-    impl GattCatalogCharacteristic for FakeCharacteristic {
-        async fn catalog_uuid(&self) -> Result<Uuid> {
-            Ok(self.uuid)
-        }
-    }
-
-    #[derive(Clone)]
-    struct FakeService {
-        uuid: Uuid,
-        characteristics: Vec<FakeCharacteristic>,
-        enumeration_count: Arc<AtomicUsize>,
-    }
-
-    impl GattCatalogService for FakeService {
-        type Characteristic = FakeCharacteristic;
-
-        async fn catalog_uuid(&self) -> Result<Uuid> {
-            Ok(self.uuid)
-        }
-
-        async fn catalog_characteristics(&self) -> Result<Vec<Self::Characteristic>> {
-            self.enumeration_count.fetch_add(1, Ordering::SeqCst);
-            Ok(self.characteristics.clone())
-        }
-    }
-
-    struct FakeDevice {
-        services: Vec<FakeService>,
-        enumeration_count: Arc<AtomicUsize>,
-    }
-
-    impl GattCatalogDevice for FakeDevice {
-        type Service = FakeService;
-
-        async fn catalog_services(&self) -> Result<Vec<Self::Service>> {
-            self.enumeration_count.fetch_add(1, Ordering::SeqCst);
-            Ok(self.services.clone())
-        }
-    }
 
     #[test]
     fn opportunistic_adapter_contention_is_busy_not_disconnected() {
@@ -1777,6 +1853,25 @@ mod tests {
     }
 
     #[test]
+    fn catalog_retry_is_limited_to_definitive_bluez_object_loss() {
+        let stale = anyhow::Error::new(bluer::Error {
+            kind: ErrorKind::NotFound,
+            message: String::new(),
+        })
+        .context("writing cached Hue characteristic");
+        assert!(BluezHueBleTransport::is_stale_gatt_catalog_error(&stale));
+
+        let transient = anyhow::Error::new(bluer::Error {
+            kind: ErrorKind::NotAvailable,
+            message: String::new(),
+        })
+        .context("writing live Hue characteristic");
+        assert!(!BluezHueBleTransport::is_stale_gatt_catalog_error(
+            &transient
+        ));
+    }
+
+    #[test]
     fn pairing_validation_rejects_hue_accessories_without_light_power_control() {
         let accessory_characteristics =
             HashSet::from([uuid(protocol::EUI64_UUID), uuid(protocol::DEVICE_NAME_UUID)]);
@@ -1791,94 +1886,6 @@ mod tests {
             uuid(protocol::BRIGHTNESS_UUID),
         ]);
         BluezHueBleTransport::validate_light_characteristic_ids(&bulb_characteristics).unwrap();
-    }
-
-    #[test]
-    fn runtime_control_selects_only_one_exact_hue_light_service() {
-        let service_uuids = [
-            uuid(protocol::HUE_DISCOVERY_SERVICE_UUID),
-            uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
-            uuid(protocol::DEVICE_INFORMATION_SERVICE_UUID),
-        ];
-        assert_eq!(light_control_service_index(&service_uuids).unwrap(), 1);
-
-        assert!(light_control_service_index(&service_uuids[..1]).is_err());
-        assert!(light_control_service_index(&[
-            uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
-            uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
-        ])
-        .is_err());
-    }
-
-    #[tokio::test]
-    async fn runtime_catalog_enumerates_only_the_selected_light_service_once() {
-        let device_enumerations = Arc::new(AtomicUsize::new(0));
-        let discovery_enumerations = Arc::new(AtomicUsize::new(0));
-        let control_enumerations = Arc::new(AtomicUsize::new(0));
-        let information_enumerations = Arc::new(AtomicUsize::new(0));
-        let service = |uuid, characteristics, enumeration_count| FakeService {
-            uuid,
-            characteristics,
-            enumeration_count,
-        };
-        let device = FakeDevice {
-            services: vec![
-                service(
-                    uuid(protocol::HUE_DISCOVERY_SERVICE_UUID),
-                    Vec::new(),
-                    Arc::clone(&discovery_enumerations),
-                ),
-                service(
-                    uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
-                    vec![
-                        FakeCharacteristic {
-                            uuid: uuid(protocol::POWER_UUID),
-                        },
-                        FakeCharacteristic {
-                            uuid: uuid(protocol::COMBINED_CONTROL_UUID),
-                        },
-                    ],
-                    Arc::clone(&control_enumerations),
-                ),
-                service(
-                    uuid(protocol::DEVICE_INFORMATION_SERVICE_UUID),
-                    Vec::new(),
-                    Arc::clone(&information_enumerations),
-                ),
-            ],
-            enumeration_count: Arc::clone(&device_enumerations),
-        };
-
-        let (service_count, characteristics) =
-            resolve_light_control_catalog(&device).await.unwrap();
-
-        assert_eq!(service_count, 3);
-        assert_eq!(characteristics.len(), 2);
-        assert_eq!(device_enumerations.load(Ordering::SeqCst), 1);
-        assert_eq!(control_enumerations.load(Ordering::SeqCst), 1);
-        assert_eq!(discovery_enumerations.load(Ordering::SeqCst), 0);
-        assert_eq!(information_enumerations.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn runtime_catalog_rejects_duplicate_control_characteristics() {
-        let device = FakeDevice {
-            services: vec![FakeService {
-                uuid: uuid(protocol::LIGHT_CONTROL_SERVICE_UUID),
-                characteristics: vec![
-                    FakeCharacteristic {
-                        uuid: uuid(protocol::POWER_UUID),
-                    },
-                    FakeCharacteristic {
-                        uuid: uuid(protocol::POWER_UUID),
-                    },
-                ],
-                enumeration_count: Arc::new(AtomicUsize::new(0)),
-            }],
-            enumeration_count: Arc::new(AtomicUsize::new(0)),
-        };
-
-        assert!(resolve_light_control_catalog(&device).await.is_err());
     }
 
     #[tokio::test]
