@@ -792,13 +792,21 @@ void main() {
       );
       final grants = <Hub>[];
       final saved = <Hub>[];
+      final remoteApi = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+        statuses: [_remoteStatus(registeredConnections: 1)],
+      );
       final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) {
+          return remoteApi;
+        },
         authApiFactory: ({required String baseUrl}) {
           throw StateError('claim should not be called');
         },
         supportGrant: (hub) async {
           grants.add(hub);
         },
+        canUseRemoteAccessOverride: true,
       );
 
       await service.autoEnableForHubForTesting(
@@ -817,6 +825,7 @@ void main() {
       );
 
       expect(saved, isEmpty);
+      expect(remoteApi.statusCalls, 1);
       expect(grants, hasLength(1));
       expect(grants.single.id, 'hub-1');
       expect(grants.single.token, 'owner-token');
